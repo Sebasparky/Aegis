@@ -104,6 +104,36 @@ export async function routeRoutes(server: FastifyInstance) {
   );
 
   /**
+   * PATCH /api/routes/:routeId
+   *
+   * Updates workflow_name and/or workflow_description only.
+   * Route steps, trust_tier, permissions, and verification data are immutable via this endpoint.
+   */
+  server.patch<{ Params: { routeId: string }; Body: { workflow_name?: string; workflow_description?: string } }>(
+    "/api/routes/:routeId",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      const { workflow_name, workflow_description } = req.body ?? {};
+
+      if (workflow_name !== undefined) {
+        if (typeof workflow_name !== "string" || !workflow_name.trim()) {
+          return sendError(reply, 400, "VALIDATION_ERROR", "workflow_name must be a non-empty string.");
+        }
+        route.workflow_name = workflow_name.trim();
+      }
+      if (workflow_description !== undefined && typeof workflow_description === "string") {
+        route.workflow_description = workflow_description;
+      }
+
+      routes.set(route.route_id, route);
+      schedulePersist();
+      return { ok: true, data: route };
+    }
+  );
+
+  /**
    * DELETE /api/routes/:routeId
    */
   server.delete<{ Params: { routeId: string } }>(

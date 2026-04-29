@@ -199,6 +199,8 @@ export const queryRoutes = (body: { domain: string; min_trust_tier?: string }) =
   });
 export const verifyRoute = (routeId: string) =>
   request<RouteVerificationReport>(`/api/routes/${routeId}/verify`, { method: "POST", body: JSON.stringify({}) });
+export const patchRoute = (routeId: string, body: { workflow_name?: string; workflow_description?: string }) =>
+  request<AegisRoute>(`/api/routes/${routeId}`, { method: "PATCH", body: JSON.stringify(body) });
 
 // Action API
 export const requestAction = (body: ActionRequest) =>

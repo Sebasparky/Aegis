@@ -372,6 +372,15 @@ export interface ApprovalGate {
   approval_context: string;
 }
 
+export interface RouteVariable {
+  name: string;           // snake_case identifier, e.g. "month_select"
+  label: string;          // Human-readable display label, e.g. "Month select"
+  type: 'select' | 'text';
+  default_value: string;  // Value captured during recording
+  allowed_values?: string[];
+  step_id: string;        // Step this variable binds to
+}
+
 export interface RouteStep {
   step_id: string;
   order: number;
@@ -380,6 +389,7 @@ export interface RouteStep {
   description: string;
   target: ElementTarget;
   value_policy?: ValuePolicy;
+  variable_binding?: string; // References RouteVariable.name; overrides value_policy.value at replay
   approval_required: boolean;
   confidence_required: number;
 }
@@ -401,6 +411,7 @@ export interface AegisRoute {
   approval_gates: ApprovalGate[];
   confidence_threshold: number;
   steps: RouteStep[];
+  variables?: RouteVariable[];
   run_count: number;
   success_rate: number;
   incident_count: number;
@@ -449,6 +460,7 @@ export interface SemanticRecordingEvent {
   visible_text?: string;
   nearby_text?: string;
   section_heading?: string;
+  options?: string[];    // Captured <option> labels for select elements
 }
 
 export interface RecordingPayload {

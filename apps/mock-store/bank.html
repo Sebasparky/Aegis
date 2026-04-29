@@ -157,6 +157,68 @@
     }
     #submit-result.success { background: #064e3b; color: #6ee7b7; }
     #submit-result.error { background: #450a0a; color: #fca5a5; }
+
+    /* ── Aegis Preview Panel ── */
+    #preview-panel {
+      position: fixed; bottom: 20px; left: 20px;
+      width: 340px; background: #111827; color: #f9fafb;
+      border-radius: 12px; font-size: 0.8rem; z-index: 9999; overflow: hidden;
+      max-height: calc(100vh - 40px);
+      border: 2px solid #4f46e5;
+      box-shadow: 0 8px 32px rgba(79,70,229,.25);
+    }
+    #preview-panel[hidden] { display: none; }
+    #preview-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: #1f2937; border-bottom: 1px solid #374151;
+    }
+    #preview-header h3 { font-size: 0.85rem; font-weight: 600; color: #f9fafb; }
+    #preview-badge {
+      font-size: 0.7rem; padding: 2px 8px; border-radius: 9999px;
+      font-weight: 600; background: #4338ca; color: #c7d2fe;
+    }
+    #preview-body {
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+      overflow-y: auto; max-height: calc(100vh - 120px);
+    }
+    #preview-meta { color: #9ca3af; font-size: 0.75rem; line-height: 1.5; }
+    #preview-meta strong { color: #f9fafb; }
+    #preview-step-list { display: flex; flex-direction: column; gap: 6px; }
+    .preview-step {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 0.75rem; color: #9ca3af; line-height: 1.4;
+    }
+    .preview-step .step-num {
+      flex-shrink: 0; width: 18px; height: 18px;
+      display: flex; align-items: center; justify-content: center;
+      background: #1f2937; border-radius: 4px; font-size: 0.65rem;
+      color: #6b7280; font-family: monospace;
+    }
+    .preview-step.active .step-num { background: #4338ca; color: #c7d2fe; }
+    .preview-step.done .step-num { background: #065f46; color: #6ee7b7; }
+    .preview-step.failed .step-num { background: #450a0a; color: #fca5a5; }
+    .preview-step .step-desc { flex: 1; }
+    .preview-step .step-note { font-size: 0.65rem; color: #6b7280; flex-shrink: 0; }
+    #btn-start-preview {
+      width: 100%; padding: 10px 8px; border-radius: 6px; border: none;
+      font-size: 0.85rem; font-weight: 600; cursor: pointer;
+      background: #4338ca; color: white; transition: background .15s;
+    }
+    #btn-start-preview:hover:not(:disabled) { background: #3730a3; }
+    #btn-start-preview:disabled { opacity: 0.5; cursor: not-allowed; }
+    #preview-status { font-size: 0.75rem; padding: 6px 8px; border-radius: 5px; display: none; text-align: center; }
+    #preview-status.complete { background: #064e3b; color: #6ee7b7; display: block; }
+    #preview-status.error { background: #450a0a; color: #fca5a5; display: block; }
+
+    .var-invalid { border-color: #ef4444 !important; box-shadow: 0 0 0 2px rgba(239,68,68,.25) !important; }
+
+    /* ── Visual highlight for replay targets ── */
+    .aegis-preview-highlight {
+      outline: 3px solid #6366f1 !important;
+      outline-offset: 3px !important;
+      box-shadow: 0 0 0 6px rgba(99,102,241,.2) !important;
+      border-radius: 4px;
+    }
   </style>
 </head>
 <body>
@@ -289,6 +351,20 @@
   </div>
 
 </main>
+
+<!-- Aegis Skill Preview Panel (shown only when ?previewRoute= is set) -->
+<div id="preview-panel" role="complementary" aria-label="Aegis Skill Preview" hidden>
+  <div id="preview-header">
+    <h3>▶ Skill Preview</h3>
+    <span id="preview-badge">Preview mode</span>
+  </div>
+  <div id="preview-body">
+    <div id="preview-meta">Loading route…</div>
+    <div id="preview-step-list"></div>
+    <button id="btn-start-preview" disabled>Start Preview</button>
+    <div id="preview-status"></div>
+  </div>
+</div>
 
 <!-- Aegis Recorder Panel -->
 <div id="recorder-panel" role="complementary" aria-label="Aegis Recorder">
@@ -591,7 +667,8 @@ document.addEventListener('click', (e) => {
 document.getElementById('month-select').addEventListener('change', (e) => {
   const el = e.target;
   const selectedText = el.options[el.selectedIndex]?.text;
-  captureEvent('select', el, { raw_value: selectedText });
+  const allOptions = Array.from(el.options).map(o => o.text).filter(Boolean);
+  captureEvent('select', el, { raw_value: selectedText, options: allOptions });
 });
 
 // ─── Show compiled JSON preview ───────────────────────────────────────────────
@@ -616,6 +693,307 @@ btnCopy.addEventListener('click', () => {
   navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
     .then(() => { btnCopy.textContent = 'Copied!'; setTimeout(() => { btnCopy.textContent = 'Copy JSON'; }, 2000); });
 });
+
+// ─── Aegis Skill Preview ──────────────────────────────────────────────────────
+(function () {
+  if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
+
+  const params = new URLSearchParams(location.search);
+  const routeId = params.get('previewRoute') || params.get('route');
+  if (!routeId) return;
+
+  document.getElementById('recorder-panel').hidden = true;
+
+  const panel      = document.getElementById('preview-panel');
+  const metaEl     = document.getElementById('preview-meta');
+  const stepListEl = document.getElementById('preview-step-list');
+  const startBtn   = document.getElementById('btn-start-preview');
+  const statusEl   = document.getElementById('preview-status');
+
+  panel.hidden = false;
+
+  let route = null;
+
+  fetch('http://localhost:4000/api/routes/' + encodeURIComponent(routeId))
+    .then(r => r.json())
+    .then(json => {
+      if (!json.ok) throw new Error(json.error?.message ?? 'Route not found');
+      route = json.data;
+      renderMeta(route);
+      renderStepList(route.steps);
+      renderVariableControls(route);
+      startBtn.disabled = false;
+    })
+    .catch(err => {
+      metaEl.innerHTML = '<span style="color:#fca5a5">&#x2717; ' + escText(err.message) + '</span>';
+    });
+
+  function renderMeta(r) {
+    const tier = r.trust_tier.replace(/_/g, ' ');
+    metaEl.innerHTML =
+      '<strong>' + escText(r.workflow_name) + '</strong><br>' +
+      r.steps.length + ' steps · ' + escText(tier) + ' · ' + escText(r.risk_level) + ' risk';
+  }
+
+  function renderStepList(steps) {
+    stepListEl.innerHTML = '';
+    steps.forEach(step => {
+      const row = document.createElement('div');
+      row.className = 'preview-step';
+      row.dataset.stepId = step.step_id;
+
+      const numEl = document.createElement('span');
+      numEl.className = 'step-num';
+      numEl.textContent = String(step.order);
+
+      const descEl = document.createElement('span');
+      descEl.className = 'step-desc';
+      descEl.textContent = step.description || step.intent.replace(/_/g, ' ');
+
+      const noteEl = document.createElement('span');
+      noteEl.className = 'step-note';
+      const vp = step.value_policy;
+      if (vp && (vp.type === 'sensitive_redacted' || vp.type === 'runtime_variable')) {
+        noteEl.textContent = 'user input';
+      }
+
+      row.appendChild(numEl);
+      row.appendChild(descEl);
+      row.appendChild(noteEl);
+      stepListEl.appendChild(row);
+    });
+  }
+
+  function renderVariableControls(r) {
+    const existing = document.getElementById('variable-controls');
+    if (existing) existing.remove();
+    if (!r.variables || r.variables.length === 0) return;
+
+    const section = document.createElement('div');
+    section.id = 'variable-controls';
+    section.style.cssText = 'margin:10px 0 8px;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px';
+
+    const heading = document.createElement('div');
+    heading.textContent = 'Configure variables';
+    heading.style.cssText = 'font-size:11px;font-weight:600;color:#a5b4fc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px';
+    section.appendChild(heading);
+
+    for (const v of r.variables) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px';
+
+      const lbl = document.createElement('label');
+      lbl.textContent = v.label;
+      lbl.htmlFor = 'var-' + v.name;
+      lbl.style.cssText = 'font-size:12px;color:#94a3b8;min-width:110px;flex-shrink:0';
+
+      let ctrl;
+      if (v.type === 'select' && v.allowed_values && v.allowed_values.length > 0) {
+        ctrl = document.createElement('select');
+        for (const opt of v.allowed_values) {
+          const o = document.createElement('option');
+          o.value = opt;
+          o.textContent = opt;
+          if (opt === v.default_value) o.selected = true;
+          ctrl.appendChild(o);
+        }
+      } else {
+        ctrl = document.createElement('input');
+        ctrl.type = 'text';
+        ctrl.placeholder = v.default_value;
+        ctrl.value = v.default_value;
+      }
+      ctrl.id = 'var-' + v.name;
+      ctrl.style.cssText = 'font-size:12px;padding:4px 8px;border-radius:4px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;flex:1';
+
+      row.appendChild(lbl);
+      row.appendChild(ctrl);
+      section.appendChild(row);
+    }
+
+    startBtn.parentElement.insertBefore(section, startBtn);
+  }
+
+  function validateVariableValues(r, values) {
+    const errors = [];
+    if (!r.variables) return errors;
+    for (const v of r.variables) {
+      const val = values[v.name];
+      if (v.allowed_values && v.allowed_values.length > 0 && !v.allowed_values.includes(val)) {
+        errors.push({ name: v.name, label: v.label, value: val });
+      }
+    }
+    return errors;
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (!route) return;
+
+    // Clear previous invalid state
+    document.querySelectorAll('.var-invalid').forEach(el => el.classList.remove('var-invalid'));
+    statusEl.className = '';
+    statusEl.style.display = 'none';
+
+    const variableValues = {};
+    if (route.variables) {
+      for (const v of route.variables) {
+        const ctrl = document.getElementById('var-' + v.name);
+        variableValues[v.name] = ctrl ? ctrl.value : v.default_value;
+      }
+    }
+
+    const validationErrors = validateVariableValues(route, variableValues);
+    if (validationErrors.length > 0) {
+      for (const err of validationErrors) {
+        const ctrl = document.getElementById('var-' + err.name);
+        if (ctrl) ctrl.classList.add('var-invalid');
+      }
+      const msg = validationErrors
+        .map(e => 'Invalid value “' + e.value + '” for ' + e.label)
+        .join(' · ');
+      statusEl.className = 'error';
+      statusEl.textContent = msg;
+      return;
+    }
+
+    startBtn.disabled = true;
+
+    const steps = route.steps;
+    let completed = 0;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const row = stepListEl.querySelector('[data-step-id="' + step.step_id + '"]');
+      if (row) row.className = 'preview-step active';
+
+      const el = findTarget(step.target);
+
+      if (!el) {
+        if (row) row.className = 'preview-step failed';
+        statusEl.className = 'error';
+        statusEl.textContent = 'Step ' + step.order + ' failed — target element not found.';
+        break;
+      }
+
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('aegis-preview-highlight');
+      await wait(800);
+      const ok = await performSafeAction(step, el, variableValues);
+      await wait(600);
+      el.classList.remove('aegis-preview-highlight');
+
+      if (!ok) {
+        if (row) row.className = 'preview-step failed';
+        const chosenVal = step.variable_binding ? variableValues[step.variable_binding] : null;
+        statusEl.className = 'error';
+        statusEl.textContent = chosenVal
+          ? 'Step ' + step.order + ' failed — option “' + chosenVal + '” not found in dropdown.'
+          : 'Step ' + step.order + ' failed — could not execute action.';
+        break;
+      }
+
+      if (row) row.className = 'preview-step done';
+      completed++;
+      await wait(300);
+    }
+
+    if (completed === steps.length) {
+      statusEl.className = 'complete';
+      statusEl.textContent = 'Preview complete — ' + completed + '/' + steps.length + ' steps followed.';
+    }
+    startBtn.disabled = false;
+    startBtn.textContent = '↺ Replay';
+  });
+
+  function findTarget(target) {
+    const all = [target.preferred_locator, ...(target.fallback_locators ?? [])];
+    for (const loc of all) {
+      const el = resolveLocator(loc);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function resolveLocator(loc) {
+    if (!loc) return null;
+    try {
+      switch (loc.type) {
+        case 'role':        return findByRoleAndName(loc.role, loc.name);
+        case 'label':       return findByLabelText(loc.name);
+        case 'placeholder': return document.querySelector('[placeholder="' + cssEsc(loc.value) + '"]');
+        case 'testid':
+          return (
+            document.querySelector('[data-testid="' + cssEsc(loc.value) + '"]') ||
+            document.querySelector('[data-aegis="' + cssEsc(loc.value) + '"]')
+          );
+        case 'css':   return document.querySelector(loc.value);
+        case 'xpath': return document.evaluate(loc.value, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        default:      return null;
+      }
+    } catch { return null; }
+  }
+
+  function findByRoleAndName(role, name) {
+    if (!role) return null;
+    const implicitTags = { button: 'button', link: 'a', combobox: 'select', textbox: 'input' };
+    const extra = implicitTags[role] ? ', ' + implicitTags[role] : '';
+    const selector = '[role="' + role + '"]' + extra;
+    const candidates = Array.from(document.querySelectorAll(selector));
+    if (!name) return candidates[0] ?? null;
+    const lname = name.toLowerCase().trim();
+    return candidates.find(el => {
+      const label = (el.getAttribute('aria-label') || el.textContent || '').trim().toLowerCase();
+      return label === lname || label.includes(lname);
+    }) ?? null;
+  }
+
+  function findByLabelText(name) {
+    if (!name) return null;
+    const lname = name.toLowerCase().trim();
+    const lbl = Array.from(document.querySelectorAll('label')).find(
+      l => l.textContent.trim().toLowerCase() === lname
+    );
+    if (lbl?.htmlFor) return document.getElementById(lbl.htmlFor);
+    return document.querySelector('[aria-label="' + cssEsc(name) + '"]');
+  }
+
+  async function performSafeAction(step, el, variableValues = {}) {
+    const action = step.action;
+    const vp = step.value_policy;
+    if (action === 'navigate' || action === 'click' || action === 'submit') {
+      el.click();
+      return true;
+    } else if (action === 'select') {
+      if (vp && (vp.type === 'enum_selection' || vp.type === 'safe_literal')) {
+        let targetValue = vp.value;
+        if (step.variable_binding && variableValues[step.variable_binding]) {
+          targetValue = variableValues[step.variable_binding];
+        }
+        if (targetValue) {
+          const opt = Array.from(el.options || []).find(o => o.text === targetValue || o.value === targetValue);
+          if (!opt) return false;
+          el.value = opt.value;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+      return false;
+    } else if (action === 'fill') {
+      if (vp?.type === 'safe_literal' && vp.value) {
+        el.value = vp.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function wait(ms) { return new Promise(res => setTimeout(res, ms)); }
+  function escText(s) { return String(s).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+  function cssEsc(s) { return String(s).replace(/["\\]/g, c => '\\' + c); }
+})();
 
 btnSubmit.addEventListener('click', async () => {
   const payload = compileRouteClientSide();

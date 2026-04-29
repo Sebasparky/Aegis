@@ -3,6 +3,7 @@ import type {
   AegisRoute,
   RouteStep,
   RouteLocator,
+  RouteVariable,
   ElementTarget,
   ValuePolicy,
   ApprovalGate,
@@ -175,9 +176,20 @@ function buildIntent(event: SemanticRecordingEvent, order: number): string {
   return `step_${order}_${event.type}`;
 }
 
+function deriveVariableName(event: SemanticRecordingEvent): string {
+  const raw = event.label_text ?? event.aria_label ?? event.input_name ?? event.input_id ?? '';
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+}
+
+function deriveVariableLabel(event: SemanticRecordingEvent): string {
+  const raw = event.label_text ?? event.aria_label ?? event.input_name ?? event.input_id ?? '';
+  return raw.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim();
+}
+
 export function compileRoute(payload: RecordingPayload): AegisRoute {
   const now = new Date().toISOString();
   const steps: RouteStep[] = [];
+  const variables: RouteVariable[] = [];
   const approvalGates: ApprovalGate[] = [];
   const inferredAllowed = new Set<ActionType>(["browse"]);
   const inferredForbidden = new Set<ActionType>();
@@ -241,6 +253,22 @@ export function compileRoute(payload: RecordingPayload): AegisRoute {
     };
 
     steps.push(step);
+
+    if (event.type === 'select' && step.value_policy?.type === 'enum_selection') {
+      const varName = deriveVariableName(event);
+      if (varName) {
+        variables.push({
+          name: varName,
+          label: deriveVariableLabel(event),
+          type: 'select',
+          default_value: event.raw_value ?? '',
+          allowed_values: event.options?.filter(Boolean),
+          step_id: step.step_id,
+        });
+        step.variable_binding = varName;
+      }
+    }
+
     stepOrder++;
   }
 
@@ -269,6 +297,7 @@ export function compileRoute(payload: RecordingPayload): AegisRoute {
     approval_gates: approvalGates,
     confidence_threshold: 0.7,
     steps,
+    variables: variables.length > 0 ? variables : undefined,
     run_count: 0,
     success_rate: 0,
     incident_count: 0,

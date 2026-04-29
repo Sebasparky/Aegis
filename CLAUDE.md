@@ -1,0 +1,223 @@
+# Aegis — AI Session Guide
+
+## One-Line Thesis
+
+Aegis is the trust and workflow layer for delegated AI action.
+
+## What Aegis Is
+
+Agents are becoming capable enough to act across the web, but the web does not yet know how to trust them. Today, agents improvise on websites built for humans, wasting context, increasing failure rates, and creating liability ambiguity.
+
+Aegis gives agents identity, scoped permissions, verified workflow routes, runtime guardrails, and auditability. It is not an agent builder. It is the layer users and businesses attach to agents before those agents act on their behalf.
+
+Two useful metaphors:
+
+- **Google Maps for AI agents.** Aegis does not replace websites. It makes websites navigable for agents through verified routes, scoped permissions, and trust signals.
+- **ID badges for AI workers.** Agents are becoming workers. Aegis gives them identity, access rules, verified workflows, supervision, and accountability.
+
+## What Aegis Is Not
+
+- Not a password manager
+- Not an agent builder
+- Not a surveillance dashboard
+- Not a generic browser automation tool
+- Not a prompt-only safety system
+- Not a markdown skill-file marketplace
+- Not a platform for running arbitrary code from strangers inside user accounts
+- Not a claim that agents will never fail or that liability is removed
+
+## The 5 Product Pillars
+
+### 1. AegisID
+
+Every agent, route creator, business, and delegated actor can have a verifiable identity.
+
+- Who is this agent?
+- Who created it?
+- Who is it acting for?
+- Is it verified?
+- What is its trust history?
+
+### 2. Delegation and Permissions (Collars)
+
+Users explicitly grant agents scoped authority through **Collars** — customizable, signed, revocable policy objects.
+
+A collar answers:
+- What can this agent do?
+- On which sites?
+- For how long?
+- With what spending or action limits?
+- What requires approval?
+- What is forbidden?
+- Can this be revoked?
+
+Use "collar" in code. Use "scoped permissions" or "delegation" in product copy.
+
+### 3. Verified Workflow Routes — Aegis Rails
+
+Agents should not improvise inside sensitive workflows when a verified route exists.
+
+Aegis Rails let humans, businesses, and verified creators publish reusable workflow routes that agents can discover and follow.
+
+A route is not a markdown file. A route is not arbitrary executable code. A route is a structured, inspectable, permission-scoped, versioned, reviewed, and enforceable execution path.
+
+Route lifecycle:
+1. **Teach** — A human demonstrates a workflow once
+2. **Record** — Aegis captures semantic browser telemetry (accessibility tree, DOM metadata, browser events, network events)
+3. **Compile** — Aegis produces a declarative route object from the recording
+4. **Verify** — The route is reviewed, tested, and assigned a trust tier
+5. **Publish or save privately** — Route goes to registry or stays local
+6. **Discover** — An agent queries the registry for a verified route matching its task
+7. **Execute with guardrails** — Aegis Guard enforces the route during execution
+8. **Audit** — Receipts record what was followed, what was blocked, what was approved
+
+See `docs/AEGIS_RAILS.md` for the full technical spec.
+
+### 4. Runtime Guardrails — Aegis Guard
+
+Aegis Guard is the umbrella name for the runtime monitoring and enforcement layer. It covers:
+
+- `SensitiveActionDetector` — rule-based classification of browser actions
+- `PolicyService` — collar + route enforcement against detected actions
+- Approval inbox — human-in-the-loop gates
+- Session pause, block, and revocation
+
+Sensitive actions Aegis Guard must catch:
+- Transfer money / payment / purchase
+- Submit order
+- Accept terms
+- Grant OAuth permissions
+- Delete data
+- Send external messages
+- Change account settings
+- Add payment method
+- Connect external account
+- Identity disclosure
+
+### 5. Accountability and Audit Trail
+
+Aegis records what authority was granted, what route was followed, what actions were taken, what approvals happened, and what was blocked. This creates a trust and liability trail for users, agents, and websites.
+
+**Receipts** capture trust-relevant events, not everything.
+
+## Architecture Principles
+
+- **Enforcement outside the model.** Collar and route enforcement happens through tools, tokens, browser sessions, and approval flows — not prompts.
+- **Control the action boundary, not every thought.** Only interrupt at sensitive commitments.
+- **Treat outside agents as untrusted.** Validate pass, collar, session, and action at every step.
+- **Declarative routes only.** No arbitrary marketplace code execution inside user accounts.
+- **Store structure, not private data.** Prefer accessibility tree and DOM metadata over full screenshots. Never store raw passwords, card numbers, or full identity documents.
+- **Prefer local processing.** Minimize data sent off-device for route compilation and enforcement.
+- **Sensitive workflows default to approval.** When uncertain, prefer `approval_required` over silent allow.
+- **Browser extension teaches, Playwright verifies, action API executes.** These three surfaces have separate roles in Aegis Rails and must not be mixed. The browser extension is the human teaching surface. Playwright is the verification and regression-testing runtime. The Aegis action API mediates all agent actions during route execution — agents never receive a Playwright handle or unrestricted browser context.
+
+## Current Implementation State
+
+The working MVP proves this loop:
+1. User creates a Collar + Aegis Pass
+2. Outside agent requests a protected browser session
+3. Aegis launches an isolated Playwright/Chromium context
+4. Agent browses freely
+5. Aegis Guard detects a sensitive action boundary
+6. Policy engine evaluates against the collar
+7. Allow, block, or `approval_required`
+8. User approves or denies in the approval inbox
+9. Aegis Runner executes the sensitive step (no raw secrets exposed)
+10. Receipt is created; reputation events update
+
+Working demo: `http://localhost:3000/demo`
+
+## Next Near-Term Milestone: Aegis Rails Recording
+
+The highest-priority next milestone is a minimal Aegis Rails semantic recorder prototype:
+
+1. User demonstrates a workflow in the browser (browser extension is the eventual teaching surface; a web-based demo recorder is the MVP stand-in)
+2. Aegis captures semantic browser telemetry — accessibility role, accessible name, label associations, nearby context — not raw coordinates or screenshots
+3. The field resolver resolves each interacted element using the label/aria/placeholder/selector chain
+4. Aegis compiles the recording into a declarative route object with Playwright-style `RouteLocator` targets and `ValuePolicy` per input
+5. Route is saved privately to the registry
+6. An agent can query the registry and receive the route
+7. The agent requests actions through the Aegis action API; Aegis checks route + collar before each action
+
+See `docs/NEXT_SESSION_PROMPT.md` for the implementation prompt.
+See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture: field resolver spec, locator format, value policies, action API design.
+
+## Session Rules for Every AI Coding Session
+
+Before making any changes:
+
+- Read `docs/CHECKPOINT.md` to understand current working state
+- Read `docs/RAILS_ARCHITECTURE.md` when working on Aegis Rails recording, verification, or execution
+- Inspect only files relevant to the requested task
+- Do not broad-refactor; the /demo flow is fragile to architectural changes
+- Do not introduce real secrets, real card numbers, or real payment submission
+- Do not add Supabase, real auth, or real LLM API calls unless that milestone is explicitly requested
+- Keep Aegis Guard (detector, policy, approval) separate from browser automation
+- Keep domain logic separate from UI
+- Preserve all existing service boundaries: CollarService, PassService, BrowserSessionService, SensitiveActionDetector, PolicyService, ApprovalService, RunnerService, ReceiptService, ReputationService
+
+## Terminology — Always Use
+
+| Term | Meaning |
+|---|---|
+| AegisID | Verifiable identity for users, agents, businesses, websites |
+| Collar | Scoped permission object attached to an agent session |
+| Aegis Pass | Credential given to an outside agent (not raw secrets) |
+| Aegis Runner | Short-lived executor for sensitive steps |
+| Aegis Guard | Runtime monitoring and enforcement layer |
+| Aegis Rails | Verified workflow routes |
+| Verified workflow route | Structured, inspectable, enforceable execution path |
+| Route registry | Agent-readable index of verified routes |
+| Scoped permissions | What a collar defines (use in product copy) |
+| Delegation | User granting an agent authority under a collar |
+| Audit trail | Receipts recording what was done, approved, and blocked |
+| Trust layer | What Aegis is at the infrastructure level |
+| Delegated AI action | The core use case Aegis enables |
+
+## Terminology — Avoid or Downplay
+
+| Term | Why to avoid |
+|---|---|
+| Password manager | Reduces Aegis to credential storage |
+| Generic browser agent | We are the trust layer, not the agent |
+| Agent marketplace | Implies trading agents, not routes |
+| Prompt marketplace | Routes are structured objects, not prompts |
+| Markdown skill file | Routes are not flat text files |
+| Fully autonomous agent | We require human approval for irreversible actions |
+| Train a model | We compile routes from demonstrations; no model training |
+| Arbitrary script execution | Routes are declarative and inspectable |
+
+## Security Principles
+
+- Never imply Aegis stores raw passwords as its core value
+- Never imply routes are arbitrary executable scripts from strangers
+- Never imply agents should bypass user approval for financial, legal, medical, identity, or irreversible actions
+- Sensitive workflows default to human approval
+- Agents with Aegis can do more because they act inside trusted boundaries — not because limits are removed
+- Prompt injection protection is a first-class concern for route recording and execution
+- Version, review, and audit every published route
+- Block or pause on low-confidence action classification
+
+## Things Never to Do in This Codebase
+
+- Store raw passwords, full card numbers, CVVs, or government IDs
+- Allow the outside agent direct access to the Playwright browser context or CDP connection
+- Give agents unrestricted browser control during route execution — all agent actions must go through the Aegis action API
+- Auto-approve sensitive actions without user input
+- Skip collar validation on any API route
+- Upload arbitrary user-supplied code to execute inside a protected session
+- Use screenshots as the primary data representation for routes (accessibility tree and semantic locators first)
+- Store raw typed values from recording without a value policy classification — sensitive fields must produce `sensitive_redacted` or `runtime_variable`
+- Use raw coordinates or XPath as the primary locator in compiled routes — prefer role, label, or placeholder locators
+- Claim that Aegis removes all risk or guarantees agent safety
+
+## Core Lines
+
+- Agents are disposable. Trust is not.
+- Aegis is the collar you put on AI agents before letting them act for you.
+- Do not give your agent your password. Give it an Aegis Pass.
+- Agents can browse. Aegis decides when they can commit.
+- Outside agents plan. Aegis executes sensitive steps.
+- Browse freely. Commit safely.
+- Platform IDs prove origin. AegisID proves trust.
+- Aegis reputation is a history of how safely your agents act under verified delegation.

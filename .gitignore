@@ -1,0 +1,11 @@
+node_modules
+.next
+.turbo
+turbo
+dist
+build
+.env
+.env.*
+!.env.example
+apps/api/.data
+.DS_Store

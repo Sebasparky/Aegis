@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AegisDemo Bank</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f2f5; color: #111; min-height: 100vh; }
+
+    /* ── Bank shell ── */
+    .bank-header {
+      background: #1a2942; color: white;
+      padding: 14px 32px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .bank-header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: -0.01em; }
+    .bank-header .user { font-size: 0.8rem; color: #aec6e8; }
+
+    .bank-nav {
+      background: #243554; display: flex; gap: 0; border-bottom: 2px solid #1a2942;
+    }
+    .bank-nav button {
+      background: none; border: none; color: #aec6e8;
+      padding: 12px 24px; font-size: 0.875rem; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -2px;
+    }
+    .bank-nav button:hover { color: white; }
+    .bank-nav button.active { color: white; border-bottom-color: #4f8ef7; font-weight: 600; }
+
+    .bank-content { max-width: 860px; margin: 32px auto; padding: 0 20px; }
+
+    .card {
+      background: white; border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 24px; margin-bottom: 20px;
+    }
+    .card h2 { font-size: 0.95rem; color: #374151; margin-bottom: 16px; font-weight: 600; }
+
+    .balance-amount { font-size: 2.2rem; font-weight: 700; color: #1a2942; }
+    .balance-label { font-size: 0.8rem; color: #6b7280; margin-top: 4px; }
+
+    .action-grid { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 18px; border-radius: 6px; font-size: 0.875rem; font-weight: 500;
+      cursor: pointer; border: 1px solid transparent; transition: background .15s;
+    }
+    .btn-primary { background: #3b5fc0; color: white; }
+    .btn-primary:hover { background: #2d4fa8; }
+    .btn-safe { background: #1d7d56; color: white; border-color: #1d7d56; }
+    .btn-safe:hover { background: #16674a; }
+
+    /* Dangerous buttons get a red treatment */
+    .btn-danger {
+      background: white; color: #b91c1c; border-color: #fca5a5;
+      position: relative;
+    }
+    .btn-danger:hover { background: #fef2f2; }
+    .btn-danger::after {
+      content: "⛔ Aegis Guard — blocked action";
+      position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+      background: #1a1a1a; color: #f9fafb; font-size: 0.7rem;
+      padding: 4px 8px; border-radius: 4px; white-space: nowrap;
+      opacity: 0; pointer-events: none; transition: opacity .15s;
+    }
+    .btn-danger:hover::after { opacity: 1; }
+
+    /* Statements view */
+    .form-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 0.8rem; color: #374151; font-weight: 500; }
+    .form-group select {
+      padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 0.875rem; background: white; cursor: pointer;
+      min-width: 180px;
+    }
+
+    .view { display: none; }
+    .view.active { display: block; }
+
+    /* ── Aegis Recorder Panel ── */
+    #recorder-panel {
+      position: fixed; bottom: 20px; right: 20px;
+      width: 340px; background: #111827; color: #f9fafb;
+      border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,.4);
+      font-size: 0.8rem; z-index: 9999; overflow: hidden;
+      max-height: calc(100vh - 40px);
+      border: 2px solid transparent;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    #recorder-panel.is-recording {
+      border-color: #dc2626;
+      box-shadow: 0 8px 32px rgba(220,38,38,.35);
+    }
+    #recorder-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: #1f2937; border-bottom: 1px solid #374151;
+    }
+    #recorder-header h3 { font-size: 0.85rem; font-weight: 600; color: #f9fafb; }
+    #recorder-status {
+      font-size: 0.7rem; padding: 2px 8px; border-radius: 9999px;
+      font-weight: 600;
+    }
+    #recorder-status.idle { background: #374151; color: #9ca3af; }
+    #recorder-status.recording { background: #dc2626; color: white; animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.6 } }
+
+    #recorder-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; max-height: calc(100vh - 110px); }
+    #recorder-body p { color: #9ca3af; font-size: 0.75rem; line-height: 1.5; }
+
+    #recorder-controls { display: flex; flex-direction: column; gap: 8px; }
+    #btn-start, #btn-stop {
+      width: 100%; padding: 10px 8px; border-radius: 6px; border: none; font-size: 0.85rem;
+      font-weight: 600; cursor: pointer; transition: background .15s;
+    }
+    #btn-start { background: #3b82f6; color: white; display: block; }
+    #btn-start:hover:not(:disabled) { background: #2563eb; }
+    #btn-stop { background: #dc2626; color: white; display: none; }
+    #btn-stop:hover { background: #b91c1c; }
+    #recorder-panel.is-recording #btn-stop { display: block !important; }
+    #recorder-panel.is-recording #btn-start { display: none !important; }
+    #recording-warning {
+      display: none;
+      background: #7f1d1d; color: #fca5a5;
+      font-size: 0.72rem; padding: 6px 8px; border-radius: 5px;
+      text-align: center; font-weight: 500; line-height: 1.4;
+    }
+    #btn-reset {
+      width: 100%; padding: 7px; border-radius: 5px; border: none;
+      font-size: 0.75rem; font-weight: 600; cursor: pointer;
+      background: #1f2937; color: #9ca3af; margin-top: 2px;
+    }
+    #btn-reset:hover { background: #374151; color: #f9fafb; }
+
+    #event-count { font-size: 0.72rem; color: #6b7280; text-align: center; }
+
+    #result-area { display: none; flex-direction: column; gap: 8px; }
+    #result-area label { font-size: 0.72rem; color: #9ca3af; font-weight: 500; }
+    #route-json {
+      background: #0f172a; border: 1px solid #374151; border-radius: 6px;
+      padding: 10px; font-size: 0.65rem; font-family: monospace; color: #a5f3fc;
+      max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    }
+    #result-actions { display: flex; gap: 6px; }
+    #btn-copy, #btn-submit {
+      flex: 1; padding: 7px; border-radius: 5px; border: none; font-size: 0.75rem;
+      font-weight: 600; cursor: pointer;
+    }
+    #btn-copy { background: #374151; color: #f9fafb; }
+    #btn-copy:hover { background: #4b5563; }
+    #btn-submit { background: #059669; color: white; }
+    #btn-submit:hover { background: #047857; }
+    #submit-result {
+      font-size: 0.7rem; padding: 6px 8px; border-radius: 5px;
+      display: none;
+    }
+    #submit-result.success { background: #064e3b; color: #6ee7b7; }
+    #submit-result.error { background: #450a0a; color: #fca5a5; }
+  </style>
+</head>
+<body>
+
+<!-- Bank Shell -->
+<header class="bank-header" role="banner">
+  <h1>AegisDemo Bank</h1>
+  <span class="user">Demo User · **** 4821</span>
+</header>
+
+<nav class="bank-nav" role="tablist" aria-label="Account navigation">
+  <button role="tab" aria-selected="true" aria-controls="view-dashboard"
+          class="active" data-tab="dashboard" id="tab-dashboard">Dashboard</button>
+  <button role="tab" aria-selected="false" aria-controls="view-statements"
+          data-tab="statements" id="tab-statements">Statements</button>
+  <button role="tab" aria-selected="false" aria-controls="view-settings"
+          data-tab="settings" id="tab-settings">Settings</button>
+</nav>
+
+<main class="bank-content">
+
+  <!-- Dashboard -->
+  <div id="view-dashboard" class="view active" role="tabpanel" aria-labelledby="tab-dashboard">
+    <div class="card">
+      <h2>Checking Account</h2>
+      <div class="balance-amount" aria-label="Account balance">$12,450.00</div>
+      <div class="balance-label">Available balance</div>
+      <div class="action-grid" style="margin-top:20px;">
+        <button class="btn btn-danger" id="btn-transfer" aria-label="Transfer money"
+                data-aegis="dangerous-action" data-dangerous="true">
+          Transfer Money
+        </button>
+        <button class="btn btn-danger" id="btn-add-account" aria-label="Add external account"
+                data-aegis="dangerous-action" data-dangerous="true">
+          Add External Account
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Transactions</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+        <thead><tr style="text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb;">
+          <th style="padding:6px 0">Date</th><th>Description</th><th style="text-align:right">Amount</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #f3f4f6;">
+            <td style="padding:8px 0;color:#6b7280">Apr 27</td>
+            <td>Grocery Store</td>
+            <td style="text-align:right;color:#b91c1c">−$84.32</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f3f4f6;">
+            <td style="padding:8px 0;color:#6b7280">Apr 26</td>
+            <td>Direct Deposit</td>
+            <td style="text-align:right;color:#065f46">+$2,400.00</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Apr 24</td>
+            <td>Coffee Shop</td>
+            <td style="text-align:right;color:#b91c1c">−$6.50</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Statements (safe workflow target) -->
+  <div id="view-statements" class="view" role="tabpanel" aria-labelledby="tab-statements">
+    <div class="card">
+      <h2>Account Statements</h2>
+      <p style="font-size:0.85rem;color:#6b7280;margin-bottom:20px;">
+        Download your monthly account statements as PDF.
+      </p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="month-select">Select Month</label>
+          <select id="month-select" name="month" aria-label="Statement month"
+                  data-aegis="statement-month">
+            <option value="">— choose —</option>
+            <option value="2024-01">January 2024</option>
+            <option value="2024-02">February 2024</option>
+            <option value="2024-03">March 2024</option>
+            <option value="2024-04">April 2024</option>
+            <option value="2024-05">May 2024</option>
+            <option value="2024-06">June 2024</option>
+            <option value="2024-07">July 2024</option>
+            <option value="2024-08">August 2024</option>
+            <option value="2024-09">September 2024</option>
+            <option value="2024-10">October 2024</option>
+            <option value="2024-11">November 2024</option>
+            <option value="2024-12">December 2024</option>
+          </select>
+        </div>
+
+        <button id="download-btn" class="btn btn-safe"
+                aria-label="Download statement"
+                data-aegis="download-statement"
+                data-testid="download-statement">
+          ⬇ Download Statement
+        </button>
+      </div>
+
+      <div id="download-feedback" style="margin-top:16px;display:none;
+           padding:10px 14px;background:#ecfdf5;border:1px solid #6ee7b7;
+           border-radius:6px;font-size:0.85rem;color:#065f46;">
+        ✓ Statement downloaded for <span id="download-month-label"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings (dangerous) -->
+  <div id="view-settings" class="view" role="tabpanel" aria-labelledby="tab-settings">
+    <div class="card">
+      <h2>Account Settings</h2>
+      <p style="font-size:0.85rem;color:#6b7280;margin-bottom:20px;">
+        Manage your account security and preferences.
+      </p>
+      <div class="action-grid">
+        <button class="btn btn-danger" aria-label="Change password"
+                data-aegis="dangerous-action" data-dangerous="true">
+          Change Password
+        </button>
+        <button class="btn btn-danger" aria-label="Close account"
+                data-aegis="dangerous-action" data-dangerous="true">
+          Close Account
+        </button>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Aegis Recorder Panel -->
+<div id="recorder-panel" role="complementary" aria-label="Aegis Recorder">
+  <div id="recorder-header">
+    <h3>⬤ Aegis Recorder</h3>
+    <span id="recorder-status" class="idle">idle</span>
+  </div>
+  <div id="recorder-body">
+    <p>Record a safe banking workflow and compile it into a verified Aegis Rails route.</p>
+    <div id="recorder-controls">
+      <button id="btn-start">Start Recording</button>
+      <button id="btn-stop">⏹ Stop Recording</button>
+    </div>
+    <div id="recording-warning">Recording browser actions. Click Stop Recording when finished.</div>
+    <div id="event-count"></div>
+    <div id="result-area">
+      <label>Generated AegisRoute JSON</label>
+      <pre id="route-json"></pre>
+      <div id="result-actions">
+        <button id="btn-copy">Copy JSON</button>
+        <button id="btn-submit">Submit to Aegis API</button>
+      </div>
+      <div id="submit-result"></div>
+      <button id="btn-reset">↺ New Recording</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Tab navigation ────────────────────────────────────────────────────────────
+const tabs = document.querySelectorAll('.bank-nav button[role="tab"]');
+const views = document.querySelectorAll('.view');
+
+tabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.tab;
+    tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+    views.forEach(v => v.classList.remove('active'));
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    document.getElementById('view-' + target).classList.add('active');
+    if (recording) captureNavigate(target);
+  });
+});
+
+// ─── Download feedback ────────────────────────────────────────────────────────
+document.getElementById('download-btn').addEventListener('click', () => {
+  const select = document.getElementById('month-select');
+  const label = select.options[select.selectedIndex]?.text ?? 'selected month';
+  if (!select.value) {
+    alert('Please select a month first.');
+    return;
+  }
+  document.getElementById('download-month-label').textContent = label;
+  document.getElementById('download-feedback').style.display = 'block';
+});
+
+// Prevent dangerous buttons from doing anything real
+document.querySelectorAll('[data-dangerous]').forEach(btn => {
+  btn.addEventListener('click', e => { e.preventDefault(); });
+});
+
+// ─── Aegis Recorder ───────────────────────────────────────────────────────────
+let recording = false;
+let recordedEvents = [];
+let workflowName = 'Demo Banking Workflow';
+const AEGIS_API = 'http://localhost:4000';
+
+const statusEl      = document.getElementById('recorder-status');
+const countEl       = document.getElementById('event-count');
+const btnStart      = document.getElementById('btn-start');
+const btnStop       = document.getElementById('btn-stop');
+const resultArea    = document.getElementById('result-area');
+const routeJson     = document.getElementById('route-json');
+const btnCopy       = document.getElementById('btn-copy');
+const btnSubmit     = document.getElementById('btn-submit');
+const submitRes     = document.getElementById('submit-result');
+const recorderPanel = document.getElementById('recorder-panel');
+const warningEl     = document.getElementById('recording-warning');
+const btnReset      = document.getElementById('btn-reset');
+
+function setStatus(isRecording) {
+  recording = isRecording;
+  statusEl.textContent = isRecording ? '● recording' : 'idle';
+  statusEl.className   = isRecording ? 'recording' : 'idle';
+  btnStart.style.display = isRecording ? 'none' : 'block';
+  btnStop.style.display  = isRecording ? 'block' : 'none';
+  recorderPanel.classList.toggle('is-recording', isRecording);
+  warningEl.style.display = isRecording ? 'block' : 'none';
+  if (isRecording) {
+    resultArea.style.display = 'none';
+    submitRes.style.display = 'none';
+    recordedEvents = [];
+    updateCount();
+  }
+}
+
+function updateCount() {
+  countEl.textContent = recording
+    ? `${recordedEvents.length} event${recordedEvents.length !== 1 ? 's' : ''} captured`
+    : '';
+}
+
+btnStart.addEventListener('click', () => setStatus(true));
+btnStop.addEventListener('click', () => {
+  setStatus(false);
+  showResult();
+});
+
+btnReset.addEventListener('click', () => {
+  resultArea.style.display = 'none';
+  submitRes.style.display  = 'none';
+  submitRes.className = '';
+  submitRes.textContent = '';
+  recordedEvents = [];
+  updateCount();
+  statusEl.textContent = 'idle';
+  statusEl.className   = 'idle';
+  btnStart.style.display = 'block';
+  btnStop.style.display  = 'none';
+  recorderPanel.classList.remove('is-recording');
+  warningEl.style.display = 'none';
+});
+
+// ─── Field resolver (runs in-browser on each interacted element) ──────────────
+
+function resolveFieldLabel(el) {
+  // 1. label[for=id]
+  if (el.id) {
+    const lbl = document.querySelector('label[for="' + el.id + '"]');
+    if (lbl) return lbl.textContent.trim();
+  }
+  // 2. parent <label>
+  const parentLabel = el.closest('label');
+  if (parentLabel) return parentLabel.textContent.replace(el.value || '', '').trim();
+  // 3. aria-label
+  if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+  // 4. aria-labelledby
+  const lblBy = el.getAttribute('aria-labelledby');
+  if (lblBy) {
+    const ref = document.getElementById(lblBy);
+    if (ref) return ref.textContent.trim();
+  }
+  // 5. placeholder
+  if (el.placeholder) return el.placeholder;
+  // 6. name
+  if (el.name) return el.name;
+  // 7. id (only if looks descriptive)
+  if (el.id && !/^\d/.test(el.id) && el.id.length < 40) return el.id;
+  // 8. type
+  if (el.type && el.type !== 'text') return el.type;
+  // 9. nearest preceding text sibling
+  let sib = el.previousSibling;
+  while (sib) {
+    if (sib.nodeType === 3 && sib.textContent.trim()) return sib.textContent.trim();
+    if (sib.nodeType === 1 && sib.textContent.trim()) return sib.textContent.trim();
+    sib = sib.previousSibling;
+  }
+  // 10. nearest ancestor heading
+  const heading = el.closest('section, .card, form, fieldset')?.querySelector('h1,h2,h3,h4');
+  if (heading) return heading.textContent.trim();
+  return null;
+}
+
+function inferRole(el) {
+  const explicit = el.getAttribute('role');
+  if (explicit) return explicit;
+  const tag = el.tagName.toLowerCase();
+  const type = el.type?.toLowerCase();
+  if (tag === 'button') return 'button';
+  if (tag === 'a') return 'link';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'input') {
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    if (type === 'submit') return 'button';
+    return 'textbox';
+  }
+  if (['h1','h2','h3','h4'].includes(tag)) return 'heading';
+  if (tag === 'nav') return 'navigation';
+  if (tag === 'main') return 'main';
+  return tag;
+}
+
+function buildLocators(el, labelText) {
+  const locators = [];
+  const role = inferRole(el);
+  const visibleText = (el.textContent || el.value || '').trim().slice(0, 80);
+  const ariaLabel = el.getAttribute('aria-label');
+  const placeholder = el.placeholder;
+  const name = el.name;
+  const elId = el.id;
+  const testId = el.dataset.testid || el.dataset.aegis;
+  const dataAegis = el.dataset.aegis;
+
+  // 1. role + accessible name
+  const accessibleName = ariaLabel || labelText || visibleText;
+  if (role && accessibleName) {
+    locators.push({ type: 'role', role, name: accessibleName });
+  }
+  // 2. label
+  if (labelText) locators.push({ type: 'label', name: labelText });
+  // 3. placeholder
+  if (placeholder) locators.push({ type: 'placeholder', value: placeholder });
+  // 4. testid / data-aegis
+  if (dataAegis) locators.push({ type: 'testid', value: dataAegis });
+  if (testId && testId !== dataAegis) locators.push({ type: 'testid', value: testId });
+  // 5. name-based CSS
+  if (name) locators.push({ type: 'css', value: '[name="' + name + '"]' });
+  // 6. id-based CSS
+  if (elId && !/^\d/.test(elId)) locators.push({ type: 'css', value: '#' + elId });
+  // 7. tag+text as fallback CSS (only if simple)
+  if (visibleText && role === 'button' && visibleText.length < 30) {
+    locators.push({ type: 'css', value: 'button' });
+  }
+
+  return locators;
+}
+
+function isSensitiveField(el, labelText) {
+  const SENS = /password|card\s*number|cvv|cvc|security\s*code|ssn|social\s*security|account\s*number|routing/i;
+  if (el.type === 'password') return true;
+  const ac = el.getAttribute('autocomplete') || '';
+  if (/^cc-number$|^cc-csc$|^cc-exp/i.test(ac)) return true;
+  if (SENS.test(labelText || '')) return true;
+  if (SENS.test(el.placeholder || '')) return true;
+  if (SENS.test(el.name || '')) return true;
+  return false;
+}
+
+function captureEvent(type, el, extra = {}) {
+  if (!recording) return;
+  if (el.closest('#recorder-panel')) return; // never record recorder interactions
+
+  const labelText = resolveFieldLabel(el);
+  const sensitive = isSensitiveField(el, labelText);
+  const locators  = buildLocators(el, labelText);
+  const role      = inferRole(el);
+  const visText   = (el.textContent || '').trim().slice(0, 80);
+
+  // Nearby text: first parent section heading text
+  const nearbyHeading = el.closest('section, .card, .view')?.querySelector('h2, h1')?.textContent?.trim();
+
+  const event = {
+    type,
+    url: window.location.href,
+    timestamp: new Date().toISOString(),
+    locators,
+    element_type: el.tagName.toLowerCase(),
+    element_role: role,
+    label_text: labelText || undefined,
+    aria_label: el.getAttribute('aria-label') || undefined,
+    placeholder: el.placeholder || undefined,
+    input_name: el.name || undefined,
+    input_id: el.id || undefined,
+    input_type: el.type || undefined,
+    visible_text: visText || undefined,
+    nearby_text: nearbyHeading || undefined,
+    autocomplete: el.getAttribute('autocomplete') || undefined,
+    // Never capture raw value for sensitive fields
+    raw_value: sensitive ? undefined : extra.raw_value,
+  };
+
+  // Remove undefined keys to keep payload clean
+  Object.keys(event).forEach(k => event[k] === undefined && delete event[k]);
+
+  recordedEvents.push(event);
+  updateCount();
+}
+
+function captureNavigate(tabName) {
+  if (!recording) return;
+  const tabEl = document.getElementById('tab-' + tabName);
+  if (!tabEl) return;
+  const event = {
+    type: 'navigate',
+    url: window.location.href + '#' + tabName,
+    timestamp: new Date().toISOString(),
+    locators: buildLocators(tabEl, tabEl.textContent.trim()),
+    element_type: 'button',
+    element_role: 'tab',
+    visible_text: tabEl.textContent.trim(),
+    nearby_text: 'Account navigation',
+  };
+  recordedEvents.push(event);
+  updateCount();
+}
+
+// ─── DOM event listeners ──────────────────────────────────────────────────────
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('button, a, [role="button"], [role="tab"]');
+  if (!el) return;
+  if (el.closest('.bank-nav')) return; // tabs captured separately
+  if (el.closest('#recorder-panel')) return;
+  captureEvent('click', el);
+}, true);
+
+document.getElementById('month-select').addEventListener('change', (e) => {
+  const el = e.target;
+  const selectedText = el.options[el.selectedIndex]?.text;
+  captureEvent('select', el, { raw_value: selectedText });
+});
+
+// ─── Show compiled JSON preview ───────────────────────────────────────────────
+
+function compileRouteClientSide() {
+  // Client-side preview only — actual compilation happens server-side
+  return {
+    workflow_name: workflowName,
+    domain: 'localhost',
+    events: recordedEvents,
+  };
+}
+
+function showResult() {
+  const payload = compileRouteClientSide();
+  routeJson.textContent = JSON.stringify(payload, null, 2);
+  resultArea.style.display = 'flex';
+}
+
+btnCopy.addEventListener('click', () => {
+  const payload = compileRouteClientSide();
+  navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+    .then(() => { btnCopy.textContent = 'Copied!'; setTimeout(() => { btnCopy.textContent = 'Copy JSON'; }, 2000); });
+});
+
+btnSubmit.addEventListener('click', async () => {
+  const payload = compileRouteClientSide();
+  btnSubmit.disabled = true;
+  btnSubmit.textContent = 'Submitting…';
+  submitRes.style.display = 'none';
+
+  try {
+    const res = await fetch(AEGIS_API + '/api/routes/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json();
+    if (json.ok) {
+      submitRes.className = 'success';
+      submitRes.textContent =
+        '✓ Route saved — ' + json.data.route_id +
+        ' (' + json.data.step_count + ' steps, trust_tier: ' + json.data.trust_tier + ')';
+    } else {
+      submitRes.className = 'error';
+      submitRes.textContent = '✗ ' + (json.error?.message ?? 'Unknown error');
+    }
+  } catch (err) {
+    submitRes.className = 'error';
+    submitRes.textContent = '✗ Could not reach Aegis API (is it running on port 4000?)';
+  }
+
+  submitRes.style.display = 'block';
+  btnSubmit.disabled = false;
+  btnSubmit.textContent = 'Submit to Aegis API';
+});
+</script>
+</body>
+</html>

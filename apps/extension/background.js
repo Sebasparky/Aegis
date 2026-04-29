@@ -158,6 +158,53 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
 
+      case 'preview': {
+        const { tabId, routeId } = msg;
+
+        let route;
+        try {
+          const res = await fetch(`http://localhost:4000/api/routes/${routeId}`);
+          const body = await res.json();
+          if (!res.ok || !body.ok) {
+            sendResponse({ ok: false, error: body?.error?.message ?? 'Failed to fetch route.' });
+            break;
+          }
+          route = body.data;
+        } catch (_) {
+          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
+          break;
+        }
+
+        if (route.domain !== 'en.wikipedia.org') {
+          sendResponse({ ok: false, error: `Route domain is "${route.domain}", not en.wikipedia.org.` });
+          break;
+        }
+
+        try {
+          await chrome.scripting.executeScript({ target: { tabId }, files: ['replay.js'] });
+        } catch (err) {
+          sendResponse({ ok: false, error: 'Failed to inject replay script: ' + err.message });
+          break;
+        }
+
+        try {
+          await chrome.tabs.sendMessage(tabId, { action: 'start_replay', route });
+        } catch (err) {
+          sendResponse({ ok: false, error: 'Failed to start replay: ' + err.message });
+          break;
+        }
+
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'replay_progress':
+      case 'replay_done': {
+        await chrome.storage.session.set({ aegisReplayStatus: msg });
+        sendResponse({ ok: true });
+        break;
+      }
+
       default:
         sendResponse({ ok: false, error: 'unknown action' });
     }

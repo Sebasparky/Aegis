@@ -469,6 +469,16 @@ function SkillCard({
                 Open visual replay
               </a>
             )}
+            {route.domain === "en.wikipedia.org" && (
+              <a
+                href={`https://en.wikipedia.org/wiki/Main_Page#aegis-preview=${encodeURIComponent(route.route_id)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs px-3 py-1.5 rounded-md border border-indigo-800 text-indigo-400 hover:bg-indigo-950 transition-colors"
+              >
+                Open external replay
+              </a>
+            )}
             <button
               onClick={handleVerify}
               disabled={verifying || deleting}

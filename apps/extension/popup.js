@@ -1,12 +1,16 @@
-const dot          = document.getElementById('dot');
-const statusText   = document.getElementById('status-text');
-const domainText   = document.getElementById('domain-text');
-const countEl      = document.getElementById('count');
-const btn          = document.getElementById('toggle-btn');
-const copyBtn      = document.getElementById('copy-btn');
-const submitBtn    = document.getElementById('submit-btn');
-const submitResult = document.getElementById('submit-result');
-const eventList    = document.getElementById('event-list');
+const dot            = document.getElementById('dot');
+const statusText     = document.getElementById('status-text');
+const domainText     = document.getElementById('domain-text');
+const countEl        = document.getElementById('count');
+const btn            = document.getElementById('toggle-btn');
+const copyBtn        = document.getElementById('copy-btn');
+const submitBtn      = document.getElementById('submit-btn');
+const submitResult   = document.getElementById('submit-result');
+const previewSection = document.getElementById('preview-section');
+const routeIdInput   = document.getElementById('route-id-input');
+const previewBtn     = document.getElementById('preview-btn');
+const previewResult  = document.getElementById('preview-result');
+const eventList      = document.getElementById('event-list');
 
 function defaultState() {
   return { recording: false, tabId: null, domain: null, eventCount: 0 };
@@ -89,10 +93,32 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
   renderEvents(result.aegisRecorderEvents ?? []);
 });
 
+// Show preview section when popup is on a Wikipedia tab; pre-fill route_id from URL hash.
+(async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.url) {
+    try {
+      const u = new URL(tab.url);
+      if (u.hostname === 'en.wikipedia.org') {
+        previewSection.style.display = 'block';
+        const match = u.hash.match(/aegis-preview=([^&]+)/);
+        if (match) routeIdInput.value = decodeURIComponent(match[1]);
+      }
+    } catch (_) {}
+  }
+})();
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'session') return;
   if (changes.aegisRecorder)       applyState(changes.aegisRecorder.newValue ?? defaultState());
   if (changes.aegisRecorderEvents) renderEvents(changes.aegisRecorderEvents.newValue ?? []);
+  if (changes.aegisReplayStatus) {
+    const s = changes.aegisReplayStatus.newValue;
+    if (s?.action === 'replay_done') {
+      previewResult.textContent = '✓ Replay complete';
+      previewResult.className = 'result-ok';
+    }
+  }
 });
 
 // ── Button handlers ───────────────────────────────────────────────────────────
@@ -127,6 +153,34 @@ submitBtn.addEventListener('click', async () => {
   } else {
     submitResult.textContent = resp?.error ?? 'Unknown error.';
     submitResult.className = 'result-err';
+  }
+});
+
+previewBtn.addEventListener('click', async () => {
+  const routeId = routeIdInput.value.trim();
+  if (!routeId) {
+    previewResult.textContent = 'Enter a route ID.';
+    previewResult.className = 'result-err';
+    return;
+  }
+
+  previewBtn.disabled = true;
+  previewBtn.textContent = 'Starting…';
+  previewResult.textContent = '';
+  previewResult.className = '';
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const resp = await chrome.runtime.sendMessage({ action: 'preview', tabId: tab.id, routeId });
+
+  previewBtn.disabled = false;
+  previewBtn.textContent = 'Start Preview';
+
+  if (resp?.ok) {
+    previewResult.textContent = 'Replaying on page…';
+    previewResult.className = 'result-ok';
+  } else {
+    previewResult.textContent = resp?.error ?? 'Unknown error.';
+    previewResult.className = 'result-err';
   }
 });
 

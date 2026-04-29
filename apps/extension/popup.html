@@ -133,6 +133,58 @@
     #submit-result.result-ok  { color: #4ade80; }
     #submit-result.result-err { color: #f87171; }
 
+    /* ── Preview section ── */
+
+    #preview-section { display: none; }
+
+    #preview-divider {
+      border-top: 1px solid #1e293b;
+      margin: 12px 0 10px;
+    }
+
+    #preview-label {
+      font-size: 11px;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+
+    #route-id-input {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      padding: 6px 8px;
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      color: #94a3b8;
+      outline: none;
+      box-sizing: border-box;
+    }
+
+    #route-id-input:focus { border-color: #3b82f6; }
+
+    #preview-btn {
+      display: block;
+      margin-top: 6px;
+      background: #166534;
+      color: #dcfce7;
+      border: 1px solid #15803d;
+      font-size: 12px;
+    }
+
+    #preview-btn:hover:not(:disabled) { background: #15803d; }
+    #preview-btn:disabled { opacity: 0.6; cursor: default; }
+
+    #preview-result {
+      font-size: 11px;
+      margin-top: 6px;
+      min-height: 14px;
+      word-break: break-all;
+    }
+
+    #preview-result.result-ok  { color: #22d3ee; }
+    #preview-result.result-err { color: #f87171; }
+
     /* ── Event list ── */
 
     #event-list {
@@ -224,6 +276,14 @@
   <button id="copy-btn">Copy JSON</button>
   <button id="submit-btn">Submit to Aegis</button>
   <div id="submit-result"></div>
+
+  <div id="preview-section">
+    <div id="preview-divider"></div>
+    <div id="preview-label">Preview Route</div>
+    <input id="route-id-input" type="text" placeholder="Route ID" spellcheck="false" autocomplete="off" />
+    <button id="preview-btn">Start Preview</button>
+    <div id="preview-result"></div>
+  </div>
 
   <div id="event-list"></div>
 

@@ -12,8 +12,7 @@
       font-size: 13px;
       background: #0f1117;
       color: #e2e8f0;
-      width: 260px;
-      min-height: 160px;
+      width: 320px;
       padding: 16px;
     }
 
@@ -24,9 +23,7 @@
       margin-bottom: 14px;
     }
 
-    header svg {
-      flex-shrink: 0;
-    }
+    header svg { flex-shrink: 0; }
 
     header span {
       font-weight: 600;
@@ -62,10 +59,7 @@
       50%       { opacity: 0.5; }
     }
 
-    #status-text {
-      font-weight: 500;
-      color: #cbd5e1;
-    }
+    #status-text { font-weight: 500; color: #cbd5e1; }
 
     #domain-text {
       font-size: 11px;
@@ -80,14 +74,11 @@
     #event-count {
       font-size: 11px;
       color: #64748b;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
       min-height: 14px;
     }
 
-    #event-count span {
-      color: #94a3b8;
-      font-weight: 500;
-    }
+    #event-count span { color: #94a3b8; font-weight: 500; }
 
     button {
       width: 100%;
@@ -102,15 +93,113 @@
 
     button:active { opacity: 0.8; }
 
-    #toggle-btn.idle {
-      background: #2563eb;
-      color: #fff;
-    }
-
+    #toggle-btn.idle     { background: #2563eb; color: #fff; }
     #toggle-btn.recording {
       background: #1e293b;
       color: #f87171;
       border: 1px solid #374151;
+    }
+
+    #copy-btn {
+      display: none;
+      margin-top: 8px;
+      background: #1e293b;
+      color: #94a3b8;
+      border: 1px solid #334155;
+      font-size: 12px;
+    }
+
+    #copy-btn:hover { color: #e2e8f0; }
+
+    #submit-btn {
+      display: none;
+      margin-top: 6px;
+      background: #166534;
+      color: #dcfce7;
+      border: 1px solid #15803d;
+      font-size: 12px;
+    }
+
+    #submit-btn:hover:not(:disabled) { background: #15803d; }
+    #submit-btn:disabled { opacity: 0.6; cursor: default; }
+
+    #submit-result {
+      font-size: 11px;
+      margin-top: 6px;
+      min-height: 14px;
+      word-break: break-all;
+    }
+
+    #submit-result.result-ok  { color: #4ade80; }
+    #submit-result.result-err { color: #f87171; }
+
+    /* ── Event list ── */
+
+    #event-list {
+      margin-top: 12px;
+      max-height: 220px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: #334155 transparent;
+    }
+
+    .empty-msg {
+      font-size: 11px;
+      color: #475569;
+      text-align: center;
+      padding: 12px 0;
+    }
+
+    .event-row {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      grid-template-rows: auto auto;
+      gap: 1px 6px;
+      padding: 6px 0;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .event-row:last-child { border-bottom: none; }
+
+    .badge {
+      grid-row: 1 / 3;
+      align-self: center;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 5px;
+      border-radius: 4px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .badge.click  { background: #1e3a5f; color: #60a5fa; }
+    .badge.fill   { background: #2e1065; color: #c084fc; }
+    .badge.select { background: #0f2a2a; color: #2dd4bf; }
+    .badge.navigate { background: #1a2e1a; color: #86efac; }
+    .badge.submit { background: #3b1515; color: #f87171; }
+
+    .ev-target {
+      font-size: 12px;
+      color: #cbd5e1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ev-meta {
+      font-size: 10px;
+      color: #475569;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ev-value {
+      font-style: italic;
+      color: #64748b;
+      margin-left: 6px;
     }
   </style>
 </head>
@@ -132,6 +221,11 @@
   <div id="event-count">Events captured: <span id="count">0</span></div>
 
   <button id="toggle-btn" class="idle">Start Recording</button>
+  <button id="copy-btn">Copy JSON</button>
+  <button id="submit-btn">Submit to Aegis</button>
+  <div id="submit-result"></div>
+
+  <div id="event-list"></div>
 
   <script src="popup.js"></script>
 </body>

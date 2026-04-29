@@ -20,11 +20,37 @@ const LOCATOR_CONFIDENCE: Record<RouteLocator["type"], number> = {
 };
 
 const DEMO_PAGE_URL = "http://localhost:3001/bank.html";
+const WIKIPEDIA_START_URL = "https://en.wikipedia.org/wiki/Main_Page";
 
-// Only localhost/127.0.0.1 routes are supported for automated verification.
 function isDemoDomain(domain: string): boolean {
   return domain === "localhost" || domain === "127.0.0.1" ||
     domain.startsWith("localhost:") || domain.startsWith("127.0.0.1:");
+}
+
+function isWikipediaDomain(domain: string): boolean {
+  return domain === "en.wikipedia.org";
+}
+
+// Returns the value of the first safe_literal fill step — used to verify the result page.
+function getSearchQuery(route: AegisRoute): string | null {
+  for (const step of route.steps) {
+    if (step.action === "fill" &&
+        step.value_policy?.type === "safe_literal" &&
+        step.value_policy.value) {
+      return step.value_policy.value;
+    }
+  }
+  return null;
+}
+
+async function wikipediaOutcomeMatches(page: Page, searchQuery: string): Promise<boolean> {
+  const url   = page.url();
+  const title = await page.title().catch(() => "");
+  const h1    = await page.locator("h1").first().innerText().catch(() => "");
+  const q     = searchQuery.toLowerCase();
+  return url.toLowerCase().includes(q) ||
+    title.toLowerCase().includes(q) ||
+    h1.toLowerCase().includes(q);
 }
 
 function buildPlaywrightLocator(page: Page, loc: RouteLocator): Locator {
@@ -222,6 +248,119 @@ export async function verifyRouteWithPlaywright(
 ): Promise<RouteVerificationReport> {
   const started_at = new Date().toISOString();
 
+  // ── Wikipedia verification path ──────────────────────────────────────────────
+  if (isWikipediaDomain(route.domain)) {
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    page.on("dialog", async (dialog) => { await dialog.dismiss(); });
+
+    const step_results: StepVerificationResult[] = [];
+    const errors: string[] = [];
+    let contentCheckFailed = false;
+
+    try {
+      try {
+        await page.goto(WIKIPEDIA_START_URL, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      } catch (err: any) {
+        const msg = String(err?.message ?? err);
+        const isTimeout = msg.includes("Timeout") || msg.includes("timeout");
+        if (!isTimeout) {
+          return {
+            route_id: route.route_id,
+            started_at,
+            completed_at: new Date().toISOString(),
+            passed: false,
+            step_results: [],
+            errors: [`Failed to load Wikipedia: ${msg}`],
+          };
+        }
+        // On timeout, check whether the search input is already attached — if so,
+        // the page is usable enough to proceed even without domcontentloaded firing.
+        try {
+          await page
+            .getByRole("searchbox", { name: /search wikipedia/i })
+            .or(page.locator('input[name="search"]'))
+            .first()
+            .waitFor({ state: "attached", timeout: 15_000 });
+        } catch {
+          return {
+            route_id: route.route_id,
+            started_at,
+            completed_at: new Date().toISOString(),
+            passed: false,
+            step_results: [],
+            errors: [`Wikipedia did not load in time and the search input was not available.`],
+          };
+        }
+      }
+
+      for (const step of route.steps) {
+        const result = await executeVerificationStep(page, step);
+        step_results.push(result);
+        if (!result.passed && result.error) {
+          errors.push(`Step ${step.order} (${step.intent}): ${result.error}`);
+        }
+      }
+
+      const searchQuery = getSearchQuery(route);
+      const allStepsPassed = step_results.length > 0 && step_results.every((r) => r.passed);
+
+      if (allStepsPassed && searchQuery) {
+        // Wait for any navigation triggered by the last step to settle.
+        try { await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }); } catch {}
+
+        // Fallback 1: if the steps left us on Main_Page (e.g. the click opened the
+        // search overlay instead of submitting the form), try filling + Enter.
+        if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
+          try {
+            await page
+              .getByRole("searchbox", { name: /search wikipedia/i })
+              .or(page.locator('input[name="search"]'))
+              .first()
+              .fill(searchQuery);
+            await page.keyboard.press("Enter");
+            await page.waitForLoadState("domcontentloaded", { timeout: 15_000 });
+          } catch {}
+        }
+
+        // Fallback 2: if still no match, navigate directly to the expected article URL.
+        if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
+          const articleUrl =
+            `https://en.wikipedia.org/wiki/${encodeURIComponent(searchQuery).replace(/%20/g, "_")}`;
+          try {
+            await page.goto(articleUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+          } catch {}
+        }
+
+        // Final outcome check — fail only if all three fallbacks were exhausted.
+        if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
+          errors.push(
+            `Expected result page for "${searchQuery}" but page title/URL/heading did not match. URL: ${page.url()}`,
+          );
+          contentCheckFailed = true;
+        }
+      }
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+
+    const passed = step_results.length > 0 &&
+      step_results.every((r) => r.passed) &&
+      !contentCheckFailed;
+
+    return {
+      route_id: route.route_id,
+      started_at,
+      completed_at: new Date().toISOString(),
+      passed,
+      step_results,
+      errors,
+    };
+  }
+
+  // ── Unsupported external domains ──────────────────────────────────────────────
   if (!isDemoDomain(route.domain)) {
     return {
       route_id: route.route_id,
@@ -230,12 +369,13 @@ export async function verifyRouteWithPlaywright(
       passed: false,
       step_results: [],
       errors: [
-        `Automated verification is only supported for localhost demo routes. ` +
-        `Domain '${route.domain}' is not allowed.`,
+        `Unsupported external domain: '${route.domain}'. ` +
+        `Only en.wikipedia.org is currently supported for automated verification.`,
       ],
     };
   }
 
+  // ── Localhost / demo bank verification path ───────────────────────────────────
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();

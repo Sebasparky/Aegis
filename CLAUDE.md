@@ -113,7 +113,7 @@ Aegis records what authority was granted, what route was followed, what actions 
 
 ## Current Implementation State
 
-The working MVP proves this loop:
+### Core guard loop (working demo at `http://localhost:3000/demo`)
 1. User creates a Collar + Aegis Pass
 2. Outside agent requests a protected browser session
 3. Aegis launches an isolated Playwright/Chromium context
@@ -125,28 +125,37 @@ The working MVP proves this loop:
 9. Aegis Runner executes the sensitive step (no raw secrets exposed)
 10. Receipt is created; reputation events update
 
-Working demo: `http://localhost:3000/demo`
+### Aegis Rails (working — `http://localhost:3000/rails`)
+- Route types, compiler, verifier, and store are implemented
+- Chrome extension records workflows on external websites (Wikipedia demonstrated)
+- Playwright verifies recorded routes; passing verification promotes trust tier to `aegis_scanned`
+- Visual replay works for both local (mock bank) and external (Wikipedia) routes
+- Parameterized variables allow runtime binding per route execution
+- Private skill vs marketplace skill model is implemented
+- Submit for Review, Marketplace Review queue, approve/reject flow are implemented
+- `npm run seed:demo` resets to a clean 4-route demo state
+- Demo walkthrough: `docs/DEMO_WALKTHROUGH.md`
 
-## Next Near-Term Milestone: Aegis Rails Recording
+## Next Near-Term Milestone: Third-Party Agent Delegation API
 
-The highest-priority next milestone is a minimal Aegis Rails semantic recorder prototype:
+The core product value is not the route marketplace — it is the trust operating layer that third-party autonomous agents plug into. ChatGPT, Claude, Gemini, MCP agents, OpenClaw-style agents, and custom agent runtimes should all be able to integrate with Aegis rather than receiving raw user passwords or unrestricted browser control.
 
-1. User demonstrates a workflow in the browser (browser extension is the eventual teaching surface; a web-based demo recorder is the MVP stand-in)
-2. Aegis captures semantic browser telemetry — accessibility role, accessible name, label associations, nearby context — not raw coordinates or screenshots
-3. The field resolver resolves each interacted element using the label/aria/placeholder/selector chain
-4. Aegis compiles the recording into a declarative route object with Playwright-style `RouteLocator` targets and `ValuePolicy` per input
-5. Route is saved privately to the registry
-6. An agent can query the registry and receive the route
-7. The agent requests actions through the Aegis action API; Aegis checks route + collar before each action
+The next milestone makes that integration surface real:
 
-See `docs/NEXT_SESSION_PROMPT.md` for the implementation prompt.
-See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture: field resolver spec, locator format, value policies, action API design.
+1. **Delegation API** — a structured way for a third-party agent to request and receive a scoped delegation (pass + collar) from a user, without the user having to pre-create passes manually
+2. **RouteRun API** — an agent-facing endpoint to request execution of a specific verified route, returning run status and receipts
+3. **Pending runs UI** — surface active and pending route run requests in the dashboard so users can monitor and approve
+4. **Run receipts** — structured audit logs per route execution (which route, which steps, approvals triggered, outcome)
+5. **Fake external agent script** — a simple Node script that acts as a third-party agent, requests delegation, queries routes, and triggers runs — the first real integration test
+
+See `docs/NEXT_SESSION_PROMPT.md` for the recommended implementation order.
+See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
 
 ## Session Rules for Every AI Coding Session
 
 Before making any changes:
 
-- Read `docs/CHECKPOINT.md` to understand current working state
+- Read `docs/NEXT_SESSION_PROMPT.md` to understand current working state and recommended next steps
 - Read `docs/RAILS_ARCHITECTURE.md` when working on Aegis Rails recording, verification, or execution
 - Inspect only files relevant to the requested task
 - Do not broad-refactor; the /demo flow is fragile to architectural changes
@@ -167,6 +176,9 @@ Before making any changes:
 | Aegis Guard | Runtime monitoring and enforcement layer |
 | Aegis Rails | Verified workflow routes |
 | Verified workflow route | Structured, inspectable, enforceable execution path |
+| Route | The technical record: ordered steps, locators, value policies, trust tier, verification report |
+| Skill | Product package around a route — name, summary, permissions, risk, approval gates, domain, trust evidence |
+| Skill Library | A user's installed marketplace skills, available to their delegated agents |
 | Route registry | Agent-readable index of verified routes |
 | Scoped permissions | What a collar defines (use in product copy) |
 | Delegation | User granting an agent authority under a collar |

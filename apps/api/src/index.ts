@@ -16,6 +16,7 @@ import { runnerRoutes } from "./routes/runners.js";
 import { taskRoutes } from "./routes/tasks.js";
 import { delegationRoutes } from "./routes/delegations.js";
 import { routeRoutes } from "./routes/routes.js";
+import { skillRoutes } from "./routes/skills.js";
 import { actionRoutes } from "./routes/action.js";
 import { devRoutes } from "./routes/dev.js";
 
@@ -51,6 +52,7 @@ async function main() {
   await server.register(taskRoutes);
   await server.register(delegationRoutes);
   await server.register(routeRoutes);
+  await server.register(skillRoutes);
   await server.register(actionRoutes);
 
   if (process.env.NODE_ENV !== "production") {

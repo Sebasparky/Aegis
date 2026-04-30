@@ -358,6 +358,18 @@ Think of the route marketplace as an App Store for agent workflows. Like a mobil
 
 Routes are private by default. A newly recorded skill is immediately usable by its owner and invisible to all other users and agents. `unverified_draft` is not a broken state — it is the correct state for a personal workflow route. Verification is optional for private use and required before a route can be submitted for marketplace listing.
 
+### Route, Skill, Library, and Runtime — the four-layer model
+
+**Route** is the technical record: ordered steps, locators, value policies, trust tier, verification report. It is what the compiler produces and what Playwright executes. Routes are the implementation layer.
+
+**Skill** is the product package: a route wrapped with a human-readable name, plain-language summary, permission summary, risk level, approval gate declarations, supported domain, and trust evidence. Skills are what users browse, install, and what agents read to decide whether to invoke a workflow.
+
+**Skill Library** is a user's personally installed set of marketplace skills. When a user finds a skill in the marketplace they want their agents to use, they install it. Installed skills are tied to that user and available to their delegated agents. The library is not a mirror of the whole marketplace — it is a deliberate, curated subset.
+
+**Runtime** is domain-scoped and library-scoped. When a third-party agent is operating on `en.wikipedia.org`, it can ask Aegis: "What installed skills do I have for this domain?" Aegis returns only skills from the user's library that match that domain — not a global marketplace search. The agent reads the skill summaries and decides whether to invoke one. Aegis does not push suggestions from the full marketplace at runtime.
+
+Marketplace discovery is intentional — a user or agent explicitly searches for skills and chooses what to install. Runtime surfacing is quiet, scoped, and never global. This distinction is what separates Aegis from a recommendation engine or a skill spam surface.
+
 ### What Routes Are Not
 
 A route is not:
@@ -371,6 +383,30 @@ Routes are declarative. They can be read, reviewed, diffed, versioned, and block
 ### Routes Do Not Override Collars
 
 A collar's `blocked_actions` always win. If a route step triggers a collar restriction, Aegis falls back to the collar enforcement flow. Routes narrow the execution path within collar-permitted space — they do not expand it.
+
+## Third-Party Agents Are the Primary Integration Surface
+
+Aegis is not an agent builder. It is the trusted operating layer beneath the agents people already use.
+
+Users will keep using ChatGPT, Claude, Gemini, Cursor, OpenClaw-style agents, custom MCP agents, and whatever the next generation of agent runtimes turns out to be. They will not want to replace those agents with something Aegis provides. They will want those agents to act safely on their behalf.
+
+Aegis answers the question those agents cannot answer for themselves:
+
+> "How does this agent prove it is authorized, act within the user's stated limits, handle sensitive execution safely, and leave an audit trail — without the user handing it raw credentials?"
+
+The integration model:
+
+1. User creates a delegation (collar + pass) for the agent they use
+2. The third-party agent receives the pass, not the raw password or card
+3. The agent browses, plans, and reasons autonomously
+4. When the agent reaches a sensitive action boundary, it calls Aegis
+5. Aegis enforces the collar, triggers approval if needed, executes sensitive steps via Runner
+6. Receipts and reputation events are created
+7. The agent continues — Aegis does not control it, it governs the boundary
+
+Route discovery fits inside this model: when an agent reaches a complex site it has never navigated, it can query the Aegis registry for a verified route rather than improvising. Routes save tokens, reduce failure rates, and make the agent more reliable — but they are an efficiency layer on top of the delegation model, not a replacement for it.
+
+The primary customer is a third-party agent that wants to do more for its users than it could with raw browser control and no trust infrastructure. Aegis makes that agent trustworthy enough to act.
 
 ## Two-Sided Trust
 
@@ -537,22 +573,34 @@ The core loop is demonstrated:
 - Aegis Runner executes sensitive step
 - receipt is created
 
-## Near-Term Wedge: Verified Workflow Rails
+## Implemented Wedge: Verified Workflow Rails ✓
 
-The next concrete wedge is verified workflow rails for browser agents.
+Verified workflow rails are implemented. The full lifecycle works:
 
-Workflow:
-1. A human teaches Aegis a workflow by performing it once
-2. Aegis records semantic browser telemetry (accessibility tree first, screenshots as fallback)
+1. User demonstrates a workflow once in the Chrome extension
+2. Aegis captures semantic browser telemetry (accessibility tree first, not screenshots)
 3. Aegis compiles the recording into a declarative route object
-4. The route identifies allowed actions, blocked actions, approval gates, and success conditions
-5. The route can be privately saved, reviewed, verified, or published to a registry
-6. A future agent queries Aegis for a route when it reaches a complex or sensitive task
-7. Aegis returns the best verified route and enforces guardrails during execution
+4. Playwright verifies the route; passing verification promotes trust tier to `aegis_scanned`
+5. User keeps the route private (usable immediately) or submits it for marketplace review
+6. Marketplace routes require Aegis review; approved routes are discoverable by agents
+7. Visual replay and parameterized variables are supported
 
-This is the clearest path to demonstrating Aegis as infrastructure for delegated AI action — not just a gatekeeper, but a guide.
+The Google Maps metaphor applies: Aegis does not replace websites. It makes websites navigable for agents through verified routes, scoped permissions, and trust signals. But routes are one pillar — not the whole product.
 
-The Google Maps metaphor applies here: Aegis does not replace websites. It makes websites navigable for agents through verified routes, scoped permissions, and trust signals.
+## Next Wedge: Agent Delegation and RouteRun API
+
+The core product value is the trust operating layer that third-party autonomous agents plug into. The next concrete wedge makes that integration surface real.
+
+Agents built by anyone (ChatGPT plugins, Claude MCP agents, custom runtimes) should be able to:
+
+1. Request a delegation from a user — receiving a pass + collar without the user manually pre-creating them
+2. Query available routes for the domain and task at hand
+3. Request a RouteRun — agent-initiated workflow execution with Aegis enforcing the route + collar
+4. Receive a run receipt when the execution completes or requires approval
+
+This is the wedge that turns Aegis from "a dashboard users configure" into "infrastructure agents depend on." The route marketplace provides the content. The delegation + run API provides the integration point.
+
+First integration test: a simple Node.js script that acts as a fake third-party agent — requests delegation, queries routes, triggers a run — and validates the full trust loop end to end.
 
 ## MVP Scope
 

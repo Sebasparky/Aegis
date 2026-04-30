@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill } from "@aegis/types";
 import {
   users,
   collars,
@@ -16,6 +16,8 @@ import {
   agentTasks,
   agentDelegations,
   routes,
+  skills,
+  installedSkills,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord } from "./index.js";
 
@@ -163,6 +165,8 @@ export function persistStore(): void {
       agentTasks: Array.from(agentTasks.entries()),
       agentDelegations: Array.from(agentDelegations.entries()),
       routes: Array.from(routes.entries()),
+      skills: Array.from(skills.entries()),
+      installedSkills: Array.from(installedSkills.entries()),
     };
     writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
@@ -210,6 +214,8 @@ export function loadStore(): void {
     for (const [k, v] of (data.agentTasks ?? [])) agentTasks.set(k, v as AgentTask);
     for (const [k, v] of (data.agentDelegations ?? [])) agentDelegations.set(k, v as AgentDelegation);
     for (const [k, v] of (data.routes ?? [])) routes.set(k, v as AegisRoute);
+    for (const [k, v] of (data.skills ?? [])) skills.set(k, v as Skill);
+    for (const [k, v] of (data.installedSkills ?? [])) installedSkills.set(k, v as InstalledSkill);
 
     ensureWebsiteTrustSeeds();
 
@@ -238,6 +244,8 @@ export function resetStoreForDemo(): void {
   agentTasks.clear();
   agentDelegations.clear();
   routes.clear();
+  skills.clear();
+  installedSkills.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

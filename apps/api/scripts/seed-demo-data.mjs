@@ -329,6 +329,26 @@ const routes = [
   ]
 ];
 
+const skills = [
+  [
+    "skill_demo_wikipedia_001",
+    {
+      skill_id: "skill_demo_wikipedia_001",
+      route_id: "route_demo_wikipedia_001",
+      name: "Wikipedia Search",
+      summary: "Search Wikipedia for any topic. Fills the search box and submits. Verified against live Wikipedia.",
+      domain: "en.wikipedia.org",
+      risk_level: "low",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["browse"],
+      forbidden_actions: [],
+      approval_gates: [],
+      created_at: "2026-04-30T12:00:00.000Z",
+      published_at: "2026-04-30T12:00:00.000Z"
+    }
+  ]
+];
+
 const store = {
   users: [
     [
@@ -443,12 +463,15 @@ const store = {
   ],
   agentTasks: [],
   agentDelegations: [],
-  routes
+  routes,
+  skills,
+  installedSkills: []
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 4 routes written.");
-console.log("  route_demo_banking_001  — Demo Banking Workflow        (localhost, aegis_scanned, private)");
-console.log("  route_demo_wikipedia_001 — Wikipedia Search             (en.wikipedia.org, aegis_scanned, approved)");
-console.log("  route_demo_draft_001    — Account Statement Draft       (localhost, unverified_draft)");
-console.log("  route_demo_pending_001  — Wikipedia Topic Lookup        (en.wikipedia.org, aegis_scanned, pending_review)");
+console.log("Demo data seeded. 4 routes, 1 marketplace skill written.");
+console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
+console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved)");
+console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");
+console.log("  route_demo_pending_001   — Wikipedia Topic Lookup      (en.wikipedia.org, aegis_scanned, pending_review)");
+console.log("  skill_demo_wikipedia_001 — Wikipedia Search (Skill)    (/marketplace — install to add to Skill Library)");

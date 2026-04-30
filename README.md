@@ -11,6 +11,22 @@ Two ways to think about Aegis:
 
 > Do not give your agent your password. Give it an Aegis Pass.
 
+## How Third-Party Agents Integrate
+
+Aegis is the operating layer beneath the agents you already use — ChatGPT, Claude, Gemini, MCP agents, custom agent runtimes, and whatever comes next. You do not replace your agent. You attach Aegis to it.
+
+The integration model:
+
+1. You create a delegation for the agent: a scoped collar (what it can and cannot do) and an Aegis Pass (what it presents to identify itself)
+2. The agent receives the pass — not your password, card, or account credentials
+3. The agent browses, plans, and reasons autonomously through protected sessions
+4. When it hits a sensitive boundary (payment, login, form submission, identity disclosure), it calls Aegis
+5. Aegis enforces the collar — allow, block, or ask you to approve
+6. Aegis Runner completes sensitive steps without exposing secrets to the agent
+7. Receipts record what happened
+
+Agents that integrate with Aegis can do more because they act inside trusted boundaries — not because those boundaries are removed.
+
 ## Core Thesis
 
 As AI agents become easier to create, agents themselves will become disposable. Users will switch models, prompts, platforms, and runtimes constantly.
@@ -272,16 +288,18 @@ The first MVP proves the core trust and control loop:
 
 Working demo: `http://localhost:3000/demo`
 
-### Next Milestone: Aegis Rails Recording
+### Aegis Rails — Implemented ✓
 
-The near-term wedge after the current MVP is verified workflow rails for browser agents:
+Verified workflow rails are working. Users can record workflows via the Chrome extension, verify them with Playwright, keep them private, or submit them for marketplace review. The Recorded Skills workspace is at `http://localhost:3000/rails`. Run `npm run seed:demo` for a clean 4-route demo state.
 
-1. User clicks "teach a workflow" and demonstrates it once.
-2. Aegis records semantic browser telemetry (accessibility tree, DOM events — not full screenshots).
-3. Aegis compiles a declarative route object with allowed/forbidden actions and approval gates.
-4. The route is saved privately and optionally published to the registry.
-5. A future agent queries the registry when it reaches a complex or sensitive task.
-6. Aegis returns the best verified route and enforces it during execution.
+### Next Milestone: Agent Delegation and RouteRun API
+
+The next step is making Aegis a real integration target for third-party autonomous agents.
+
+1. **Delegation API** — agents request scoped delegation (collar + pass) directly, without users pre-creating passes manually
+2. **RouteRun API** — agents request execution of a verified route; Aegis handles enforcement, approval gates, and receipts
+3. **Run receipts** — structured audit log per route execution visible to the user
+4. **Integration test** — a fake external agent script that requests delegation, queries routes, triggers a run, and validates the full trust loop
 
 Do not start with:
 
@@ -289,9 +307,7 @@ Do not start with:
 - Full identity verification
 - Universal website verification
 - Real payment processing
-- Insurance
-- Family and elder modes
-- Full reputation graph
+- Insurance, family controls, elder protection mode
 
 Those are future expansions.
 

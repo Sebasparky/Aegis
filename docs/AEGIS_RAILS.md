@@ -145,6 +145,20 @@ Receipts are created for each route execution:
 - Whether the success condition was met
 - Any incidents or deviations
 
+## Route, Skill, Library, and Runtime
+
+Four distinct concepts — conflating them leads to wrong product decisions.
+
+**Route** is the technical record produced by the compiler: ordered steps, `RouteLocator` targets, `ValuePolicy` per input, trust tier, verification report. Routes are what Playwright executes. A developer inspects a route. An agent executes a route.
+
+**Skill** is the product package around a route: human-readable name, plain-language summary, permission summary, risk level, approval gate declarations, supported domain, and trust evidence. A user reads a skill description to decide whether to install it. An agent reads a skill summary to decide whether to invoke it.
+
+**Skill Library** is a user's personally installed set of marketplace skills. Users choose which marketplace skills to make available to their agents. The library is a deliberate subset of the marketplace, not a mirror of it.
+
+**Runtime surfacing** is domain-scoped and library-scoped. When an agent is operating on `example.com`, it calls `GET /api/skills?domain=example.com` to see which installed skills are relevant. Aegis returns only skills from that user's library for that domain — never the whole marketplace catalog. Agents read the summaries and decide whether to invoke one.
+
+Marketplace discovery is intentional (user or agent explicitly searches). Runtime surfacing is quiet and scoped. Aegis is not a recommendation engine and does not push marketplace skills at runtime.
+
 ## Private Skills vs Marketplace Skills
 
 When a recording is submitted, a route is created immediately with the `unverified_draft` trust tier. This is the correct and normal state for a personal skill — it is not a failure state or a warning.

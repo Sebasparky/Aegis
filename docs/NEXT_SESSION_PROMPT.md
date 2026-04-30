@@ -91,37 +91,77 @@ Session rules:
 
 Work through these in order. Do not skip ahead.
 
-### 1. Polish demo UX
+### 0. Skill Library (highest priority)
+
+The route marketplace is not a runtime suggestion engine. Users intentionally install marketplace skills into their personal Skill Library. Agents at runtime see only installed skills relevant to the current domain — not the entire marketplace catalog.
+
+Build in this order:
+
+**Step 0a — Public Marketplace page (`/marketplace`)**  
+Show only routes with `marketplace_status: approved`. This is the discovery surface — users browse it intentionally.
+- Card per approved skill: name, domain, trust tier badge, step count, risk level, verification date, short description
+- "Install Skill" button on each card
+- Filter by domain
+- No editing — read-only catalog view
+
+**Step 0b — Install Skill into Library**  
+When a user installs a skill, create an `InstalledSkill` record linking their user ID to the route ID.
+- `POST /api/skills/:routeId/install` — creates the link, validates route is `marketplace_status: approved`
+- `DELETE /api/skills/:routeId/install` — uninstalls
+- Installed skills carry a `source: marketplace` marker and are read-only (no edit, only fork)
+
+**Step 0c — Installed Skills library page (`/skills`)**  
+The user's personal skill library. Distinct from `/rails` (which shows routes the user *recorded*).
+- Shows all installed marketplace skills
+- Shows fork and uninstall options
+- Empty state with link to `/marketplace`
+
+**Step 0d — Runtime endpoint: installed skills for domain**  
+`GET /api/skills?domain=en.wikipedia.org` — returns only skills from the user's library that match the current domain. This is the endpoint third-party agents call when they reach a new site.
+- Scoped to the authenticated user (via pass token)
+- Domain-exact match against each skill's route domain
+- Returns skill summary, route ID, required permissions — not the full step list
+
+**Step 0e — RouteRun invocation from installed skill**  
+`POST /api/skills/:routeId/run` — agent-initiated execution of an installed skill. The agent supplies the pass token and any runtime variable values. Aegis validates: skill is installed by this user, collar permits the route's required permissions, then executes via Playwright.
+- Returns run receipt: steps completed, approval gates triggered, outcome
+- Approval gates surface in the existing `/approvals` inbox
+- Collar restrictions always win over route steps
+- Agent never receives a Playwright handle
+
+### 1. Agent delegation API
+
+After the Skill Library exists, third-party agents need a way to request delegation without the user pre-creating passes manually.
+
+**Delegation request** — `POST /api/delegations/request`  
+Agent presents identity (name, platform, purpose). User approves in dashboard. Agent receives pass + collar.
+
+**Installed skill discovery** — agents call `GET /api/skills?domain=...` with their pass token to see what skills are available for the current domain.
+
+**Fake external agent script** — `apps/api/scripts/fake-agent.mjs` — a Node.js script simulating a third-party agent: requests delegation, navigates to a domain, calls the installed skills endpoint, invokes a RouteRun, polls for approval if needed, prints the receipt. First real end-to-end integration test.
+
+Constraints for both steps 0 and 1:
+- Agents never receive a Playwright handle or browser context
+- Collar restrictions always win
+- Sensitive steps go through the existing Runner / approval flow
+- Do not break the existing `/demo` flow
+
+### 2. Polish demo UX
 Fix any visible rough edges on `/rails` before adding new features. Common candidates:
 - Card layout consistency when marketplace status label is long
 - Preview panel scroll on small viewports
 - Loading / error states on verify and submit actions
 - Extension popup: confirm the event-count display is accurate on fast pages
 
-### 2. Public Marketplace page (`/marketplace`)
-Show only routes with `marketplace_status: approved`. This is the agent-facing discovery surface.
-- Card design distinct from `/rails` (creator-facing) — this is the consumer view
-- Show: workflow name, domain, trust tier badge, step count, risk level, verification date, short description
-- "Copy Route ID" action so agents can reference it
-- Filter by domain
-- No editing or management controls — read-only
-
-### 3. Install / Use Skill flow
-Let a user install a marketplace-approved route so their agents can use it.
-- "Install Skill" button on each marketplace card
-- Installed routes appear in `/rails` with `source: marketplace` label and read-only badge
-- Agent can query installed routes via `POST /api/routes/query` as usual
-- Do not allow the user to edit an installed route — only fork (copy + save as private draft)
-
-### 4. Trust evidence summary
-Add a human-readable trust evidence block to the marketplace card and preview panel.
+### 3. Trust evidence summary
+Add a human-readable trust evidence block to the marketplace card and skill library preview.
 - Verified by: Aegis automated scan / Human review / Run history
 - Locator quality summary (how many steps use semantic vs fragile locators)
 - Last verified date and version
 - Creator AegisID (linked to `/counterparty-agent` lookup if available)
 
-### 5. Second external domain (GitHub public search)
-Only after `/marketplace` and Install flow are solid.
+### 4. Second external domain (GitHub public search)
+Only after Skill Library and `/marketplace` are solid.
 - Target: `https://github.com/search` — no auth, no PII, stable ARIA, no payment path
 - Record via extension, verify via Playwright, add to seed script as a second approved marketplace route
 - Do not move to any third domain until the locator quality and verification pipeline are proven reliable at scale

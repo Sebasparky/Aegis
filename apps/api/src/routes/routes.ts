@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import type { RecordingPayload, RouteTrustTier, RouteVerificationReport } from "@aegis/types";
-import { routes, newId } from "../store/index.js";
+import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill } from "@aegis/types";
+import { routes, newId, skills } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { compileRoute } from "../services/routeCompiler.js";
 import { verifyRouteWithPlaywright } from "../services/routeVerifier.js";
@@ -233,6 +233,31 @@ export async function routeRoutes(server: FastifyInstance) {
         route.review_note = review_note.trim();
       }
       routes.set(route.route_id, route);
+
+      if (decision === "approved") {
+        const existingSkill = Array.from(skills.values()).find(
+          (s) => s.route_id === route.route_id
+        );
+        if (!existingSkill) {
+          const now = new Date().toISOString();
+          const skill: Skill = {
+            skill_id: newId("skill"),
+            route_id: route.route_id,
+            name: route.workflow_name,
+            summary: route.workflow_description ?? "",
+            domain: route.domain,
+            risk_level: route.risk_level,
+            trust_tier: route.trust_tier,
+            required_permissions: route.required_permissions,
+            forbidden_actions: route.forbidden_actions,
+            approval_gates: route.approval_gates,
+            created_at: now,
+            published_at: now,
+          };
+          skills.set(skill.skill_id, skill);
+        }
+      }
+
       schedulePersist();
       return { ok: true, data: route };
     }

@@ -17,6 +17,8 @@ import type {
   RouteVerificationReport,
   ActionRequest,
   ActionDecisionResponse,
+  Skill,
+  InstalledSkill,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -205,6 +207,22 @@ export const submitRouteForReview = (routeId: string) =>
   request<AegisRoute>(`/api/routes/${routeId}/submit-review`, { method: "POST", body: JSON.stringify({}) });
 export const reviewRoute = (routeId: string, decision: "approved" | "rejected", review_note?: string) =>
   request<AegisRoute>(`/api/routes/${routeId}/review`, { method: "POST", body: JSON.stringify({ decision, review_note }) });
+
+// Skills Marketplace
+export type SkillWithInstalled = Skill & { installed: boolean };
+export const listSkills = (params?: { domain?: string; installed?: boolean }) => {
+  const entries: [string, string][] = [];
+  if (params?.domain) entries.push(["domain", params.domain]);
+  if (params?.installed !== undefined) entries.push(["installed", String(params.installed)]);
+  const qs = entries.length ? "?" + new URLSearchParams(entries).toString() : "";
+  return request<SkillWithInstalled[]>(`/api/skills${qs}`);
+};
+export const installSkill = (skillId: string) =>
+  request<InstalledSkill>(`/api/skills/${skillId}/install`, { method: "POST", body: JSON.stringify({}) });
+export const uninstallSkill = (skillId: string) =>
+  request<{ uninstalled: boolean }>(`/api/skills/${skillId}/install`, { method: "DELETE" });
+export const listInstalledSkills = () =>
+  request<(InstalledSkill & { skill: Skill })[]>("/api/installed-skills");
 
 // Action API
 export const requestAction = (body: ActionRequest) =>

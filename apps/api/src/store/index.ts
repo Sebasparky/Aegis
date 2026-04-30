@@ -9,6 +9,8 @@ import type {
   AgentTask,
   AgentDelegation,
   AegisRoute,
+  Skill,
+  InstalledSkill,
 } from "@aegis/types";
 
 // In-memory Maps are the runtime source of truth.
@@ -88,6 +90,10 @@ export const agentTasks = new Map<string, AgentTask>();
 export const agentDelegations = new Map<string, AgentDelegation>();
 
 export const routes = new Map<string, AegisRoute>();
+
+export const skills = new Map<string, Skill>();
+
+export const installedSkills = new Map<string, InstalledSkill>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

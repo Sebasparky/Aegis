@@ -422,6 +422,29 @@ export interface AegisRoute {
   review_note?: string;
 }
 
+export interface Skill {
+  skill_id: string;
+  route_id: string;
+  name: string;
+  summary: string;
+  domain: string;
+  risk_level: string;
+  trust_tier: string;
+  required_permissions: string[];
+  forbidden_actions: string[];
+  approval_gates: ApprovalGate[];
+  created_at: string;
+  published_at: string;
+}
+
+export interface InstalledSkill {
+  installed_skill_id: string;
+  skill_id: string;
+  user_id: string;
+  installed_at: string;
+  enabled: boolean;
+}
+
 export interface StepVerificationResult {
   step_id: string;
   order: number;

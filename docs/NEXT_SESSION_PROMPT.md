@@ -1,234 +1,205 @@
 # NEXT_SESSION_PROMPT.md
 
-Copy-paste prompts for future Claude/Codex sessions on the Aegis project.
+Dispatch document for future Claude/Codex sessions on the Aegis project.  
+Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
-## 1. Default Startup Prompt (v2 — current)
+## Current Baseline (as of 2026-04-30)
 
-Use this at the start of any Aegis coding session.
+Everything below is implemented and working. Do not re-implement any of it.
+
+### Core guard flow
+- Collar + Pass creation, scoped permissions, revocation
+- Protected browser sessions via Playwright/Chromium
+- SensitiveActionDetector — classifies browser actions at the boundary
+- PolicyService — collar enforcement (allow / block / approval_required)
+- Approval inbox with approve/deny
+- Aegis Runner — executes approved steps without exposing raw secrets
+- Receipts and reputation events
+- Working demo at `/demo`
+
+### Aegis Rails
+- Route types in `packages/types/src/index.ts`: `AegisRoute`, `RouteStep`, `RouteLocator`, `ElementTarget`, `ValuePolicy`
+- Route store with JSON persistence in `apps/api/.data/aegis-store.json`
+- Route compiler at `apps/api/src/services/routeCompiler.ts`
+- API endpoints: `GET/POST /api/routes`, `GET/DELETE /api/routes/:id`, `POST /api/routes/record`, `POST /api/routes/query`, `PATCH /api/routes/:id`, `POST /api/routes/:id/verify`, `POST /api/routes/:id/submit-review`, `POST /api/routes/:id/review`
+- Trust tier ladder: `unverified_draft` → `community` → `aegis_scanned` → `aegis_reviewed` → `run_verified` → `business_official`
+- Playwright-based route verification at `apps/api/src/services/routeVerifier.ts`
+- Parameterized variables with runtime binding (`variable_binding` on step, `variables[]` on route)
+- Sensitive value redaction in the compiler (`sensitive_redacted`, `runtime_variable`, `safe_literal`, `enum_selection`)
+
+### Recorded Skills workspace (`/rails`)
+- SkillCard per route with capability badges (Local demo, Wikipedia, Visual replay, Parameterized, Sensitive values protected)
+- Two-status row: Private use (always ready) / Marketplace (conditional)
+- PreviewPanel with Route Health checklist, step list, locator quality indicators
+- Local visual replay via Playwright (opens `localhost:3001`, steps execute live)
+- External visual replay via Chrome extension `replay.js` (opens Wikipedia, steps execute live)
+- Inline Verify button — runs Playwright, promotes tier to `aegis_scanned`, updates card in place
+- Submit for Review button — enabled only after verification; sets `marketplace_status: pending_review`
+
+### Marketplace review (`/marketplace-review`)
+- Lists all routes with `marketplace_status: pending_review`
+- ReviewCard: trust tier, domain, step count, risk, submitted time, key signals
+- Approve / Reject with optional note; removes card on decision
+- Approved routes show green "Approved" status on `/rails` cards
+
+### Chrome extension (`apps/extension/`)
+- Manifest V3, `activeTab` + `scripting` + `storage` permissions
+- Popup UI: Start/Stop Recording, live event log with FILL/CLICK/NAVIGATE/SELECT/SUBMIT badges
+- Content script captures semantic events using accessibility tree (role, label, placeholder)
+- Sensitive field detection in content script — strips values before any IPC
+- Background service worker buffers events, POSTs `RecordingPayload` to `localhost:4000/api/routes/record`
+- Copy JSON button, Submit to Aegis button with result feedback
+- Preview Route section: enter a route ID, Start Preview triggers `replay.js` Playwright replay
+
+### Demo tooling
+- `npm run seed:demo` — resets store to 4 clean routes, backs up old store
+- `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
+
+---
+
+## Start Here (session startup prompt)
+
+Use this at the top of every new Aegis session:
 
 ```
-Read CLAUDE.md first. Then read docs/CHECKPOINT.md before making any changes.
+Read CLAUDE.md first. Then read docs/NEXT_SESSION_PROMPT.md.
 
-Then inspect only the files relevant to the requested task — do not read the entire codebase.
-
-Aegis is the trust and workflow layer for delegated AI action. It has five pillars:
+Aegis is the trust and workflow layer for delegated AI action. The five pillars are:
 1. AegisID — verifiable identity
 2. Delegation and Permissions (Collars) — scoped, revocable authority
 3. Verified Workflow Routes (Aegis Rails) — declarative, enforceable execution paths
 4. Runtime Guardrails (Aegis Guard) — detector + policy + approval layer
 5. Accountability and Audit Trail — receipts and trust history
 
-Rules for this session:
-- Preserve the working /demo flow (http://localhost:3000/demo). If a change could break the two-button demo, test it first.
-- Do not broad refactor. The demo loop is fragile to architectural changes.
-- Do not introduce real secrets, real card numbers, real credentials, or real payment submission anywhere.
-- Keep Runner deterministic — it executes one approved step and stops. It is not an autonomous agent.
-- Keep Aegis separate from the outside agent — Aegis owns the browser runtime and enforces collars; outside agents call Aegis endpoints and never access the browser directly.
-- Keep Aegis Guard components separate: sensitiveDetector.ts, PolicyService (evaluate.ts), and ApprovalService are distinct — do not merge them.
-- Do not add Supabase, MCP, real auth, or real LLM API calls unless that milestone is explicitly requested.
-- Routes are declarative objects — never allow arbitrary executable code in route steps.
+Session rules:
+- Read docs/NEXT_SESSION_PROMPT.md before writing any code. The current baseline is described there.
+- Preserve the working /demo flow. Test any change that touches the collar, pass, session, or approval path.
+- Do not broad-refactor. The demo loop is fragile to architectural changes.
+- Do not re-implement anything listed in the "Current Baseline" section of NEXT_SESSION_PROMPT.md.
+- Do not introduce real secrets, credentials, card numbers, or payment submission.
+- Routes are declarative objects — no executable code in route steps, ever.
 - Screenshots are not the primary data source — prefer accessibility tree and DOM metadata.
+- Keep Aegis Guard components separate: sensitiveDetector.ts, evaluate.ts, ApprovalService.
+- Do not add Supabase, real auth, or real LLM calls unless explicitly requested.
 ```
 
 ---
 
-## 2. Next Task: Aegis Rails — Semantic Recorder Prototype
+## Recommended Next Build Steps
 
-Use this prompt to implement the first Aegis Rails milestone. The architecture has three layers:
-browser extension (teaching), Playwright (verification), action API (execution). This session
-implements the backend types, compiler, and a web-based demo recorder as a stand-in for the
-extension. Read docs/RAILS_ARCHITECTURE.md before starting.
+Work through these in order. Do not skip ahead.
 
-```
-Read CLAUDE.md and docs/CHECKPOINT.md first.
-Then read docs/AEGIS_RAILS.md and docs/RAILS_ARCHITECTURE.md before writing any code.
+### 1. Polish demo UX
+Fix any visible rough edges on `/rails` before adding new features. Common candidates:
+- Card layout consistency when marketplace status label is long
+- Preview panel scroll on small viewports
+- Loading / error states on verify and submit actions
+- Extension popup: confirm the event-count display is accurate on fast pages
 
-Task: Build the Aegis Rails semantic recorder prototype.
+### 2. Public Marketplace page (`/marketplace`)
+Show only routes with `marketplace_status: approved`. This is the agent-facing discovery surface.
+- Card design distinct from `/rails` (creator-facing) — this is the consumer view
+- Show: workflow name, domain, trust tier badge, step count, risk level, verification date, short description
+- "Copy Route ID" action so agents can reference it
+- Filter by domain
+- No editing or management controls — read-only
 
-Architecture context (critical — do not skip):
-- Layer 1 is the browser extension (teaching surface). We build a web-based demo recorder as a
-  stand-in for now. The real extension comes later.
-- Layer 2 is Playwright (verification surface). Not the recording surface.
-- Layer 3 is the Aegis action API (execution surface). Agents never get unrestricted browser control.
-- Route steps use RouteLocator objects (role/label/placeholder/testid/css/xpath/coordinates) —
-  not raw CSS strings as the primary format.
-- Every input step has a ValuePolicy. Sensitive fields must produce sensitive_redacted or
-  runtime_variable — never store raw typed values.
+### 3. Install / Use Skill flow
+Let a user install a marketplace-approved route so their agents can use it.
+- "Install Skill" button on each marketplace card
+- Installed routes appear in `/rails` with `source: marketplace` label and read-only badge
+- Agent can query installed routes via `POST /api/routes/query` as usual
+- Do not allow the user to edit an installed route — only fork (copy + save as private draft)
 
-Step 1 — Update route types
-In packages/types/src/index.ts, add:
-- RouteLocator interface (type, role, name, value, x, y)
-- ElementTarget interface (preferred_locator, fallback_locators, confidence, frame_path,
-  shadow_root_warning)
-- ValuePolicy interface (type, name, value, store_value)
-- Update RouteStep: replace value?: string with value_policy?: ValuePolicy; add intent: string;
-  update target to use the new ElementTarget
-- Add all other AegisRoute fields: route_id, version, domain, workflow_name, creator_aegis_id,
-  trust_tier, required_permissions, allowed_actions, forbidden_actions, approval_gates, steps,
-  confidence_threshold
-See docs/AEGIS_RAILS.md for the full TypeScript schema.
-Do not add routes to the existing collar, session, or pass stores — routes are their own entity.
+### 4. Trust evidence summary
+Add a human-readable trust evidence block to the marketplace card and preview panel.
+- Verified by: Aegis automated scan / Human review / Run history
+- Locator quality summary (how many steps use semantic vs fragile locators)
+- Last verified date and version
+- Creator AegisID (linked to `/counterparty-agent` lookup if available)
 
-Step 2 — Route store
-Add a simple routes store to apps/api/src/store/index.ts alongside the existing stores.
-Support: create, get by id, list (filterable by domain and trust_tier), update, delete.
-Persist to the same JSON file used by other stores.
+### 5. Second external domain (GitHub public search)
+Only after `/marketplace` and Install flow are solid.
+- Target: `https://github.com/search` — no auth, no PII, stable ARIA, no payment path
+- Record via extension, verify via Playwright, add to seed script as a second approved marketplace route
+- Do not move to any third domain until the locator quality and verification pipeline are proven reliable at scale
 
-Step 3 — Semantic recording endpoint
-Create POST /api/routes/record in apps/api/src/routes/routes.ts.
-This endpoint accepts a semantic recording payload — an ordered list of browser events where
-each event includes:
-  { type: 'click'|'fill'|'navigate'|'select'|'submit', url: string, locators: RouteLocator[],
-    raw_value?: string, element_type?: string, autocomplete?: string, label_text?: string }
-The compiler must:
-- Extract the ordered step list
-- For each step, set preferred_locator = locators[0], fallback_locators = locators[1..]
-- Infer action type from event type
-- Classify value_policy for fill/select steps:
-    - raw_value typed into type=password or autocomplete=cc-* → sensitive_redacted
-    - raw_value typed into type=email → runtime_variable
-    - field label contains 'password', 'card', 'CVV', 'SSN' → sensitive_redacted
-    - otherwise → safe_literal (store verbatim) or runtime_variable (no value)
-- Set trust_tier = 'unverified_draft'
-- Do not store raw_value for sensitive_redacted or runtime_variable steps
-Keep the compiler deterministic and rule-based. No AI classification in MVP.
-Validate that no route step contains executable code (no script tags, no eval patterns).
+### 6. Do not approach yet
+These require a stronger safety model, business verification, and legal review before any prototype work:
 
-Step 4 — Route CRUD endpoints
-Create GET /api/routes, GET /api/routes/:id, DELETE /api/routes/:id.
-GET /api/routes accepts optional query params: domain, trust_tier.
-
-Step 5 — Route registry query endpoint
-Create POST /api/routes/query.
-Input: { domain, intent, required_permissions, min_trust_tier }.
-Output: { route | null, matched: boolean, reason: string }.
-For MVP, match by domain exact match and return the highest-trust route.
-Add a comment: "Routes cannot override collar restrictions. Collar enforcement happens at the
-action API layer, not here."
-
-Step 6 — Action API skeleton (stub only)
-Create POST /api/action/request in apps/api/src/routes/action.ts.
-Input: { agent_id, session_id, route_id, requested_action: { type, step_id, target_locator } }.
-For now, stub the response: validate that the session and route exist, then return
-{ decision: 'allow', reason: 'stub — route and session validated', audit_event_id: null }.
-This endpoint will be wired to real route+collar enforcement in a later session.
-Do not implement real browser execution here.
-
-Step 7 — Routes frontend page
-Create apps/web/src/app/rails/page.tsx.
-Show: list of saved routes with workflow_name, domain, trust_tier, step count, created_at.
-Add a "New Recording" button that opens a modal with:
-  - A description of what Aegis Rails are
-  - A JSON paste area for submitting a demo recording payload to POST /api/routes/record
-  - On success, show the compiled route ID and step count
-Add a route detail view: steps list (action, intent, preferred_locator type, value_policy type),
-required_permissions, allowed_actions, forbidden_actions, trust_tier.
-
-Constraints:
-- Do not modify any existing API routes.
-- Do not touch apps/web/src/app/demo/page.tsx.
-- Do not allow executable code in route steps — validate and reject at compile time.
-- Do not store raw typed values for sensitive_redacted or runtime_variable steps.
-- Do not use raw CSS strings or XPath as the primary locator in compiled steps.
-- Do not use screenshots as the primary data format.
-- Preserve the working /demo flow end-to-end.
-
-Key files to read before starting:
-- CLAUDE.md
-- docs/CHECKPOINT.md
-- docs/AEGIS_RAILS.md
-- docs/RAILS_ARCHITECTURE.md
-- packages/types/src/index.ts
-- apps/api/src/store/index.ts
-- apps/api/src/routes/ (read existing routes as a pattern reference)
-```
+| Category | Examples |
+|---|---|
+| Auth-gated sites | Gmail, LinkedIn, GitHub (logged in), any bank |
+| Financial flows | Checkout, payment, subscription, transfer |
+| Communication | Email sending, Slack, messaging apps |
+| Medical / legal | Any portal with regulated PII |
+| Identity | SSO, OAuth flows, government portals |
 
 ---
 
-## 3. Next Task: Agent Bridge UI
+## Validation Checklist
 
-Copy-paste this prompt to implement the Agent Bridge UI milestone.
+Run this after any change to confirm nothing regressed.
 
+```bash
+npm run seed:demo   # resets to 4 clean routes
+npm run dev         # starts web (3000), mock bank (3001), API (4000)
 ```
-Read docs/CHECKPOINT.md first.
 
-Task: Build the Agent Bridge UI.
+Then confirm:
 
-Step 1 — API manifest endpoint
-Create GET /api/agent/tools in apps/api/src/routes/agent.ts.
-Return a JSON manifest listing all available agent endpoints with their method, path, required body fields, and a one-line description.
-Do not implement MCP. Do not call a real LLM. Do not touch any existing POST endpoints.
-
-Step 2 — Agent Bridge frontend page
-Create apps/web/src/app/agent-bridge/page.tsx.
-The page should show:
-1. A brief explanation of what Aegis Agent Bridge is (agents call HTTP endpoints; Aegis enforces collars).
-2. The list of available tools fetched from GET /api/agent/tools.
-3. A copy-pasteable system prompt for a real outside agent (use the prompt from docs/AGENT_BRIDGE.md section 6 verbatim).
-4. Example API call snippets for the most important endpoints (create-session, navigate, click, close).
-
-Constraints:
-- Do not implement MCP.
-- Do not implement real LLM integration.
-- Do not touch apps/web/src/app/demo/page.tsx or any existing API routes.
-- Do not store or log any secrets.
-- Preserve the working /demo flow end-to-end.
-
-Key files to read before starting:
-- docs/CHECKPOINT.md
-- docs/AGENT_BRIDGE.md
-- apps/api/src/routes/agent.ts
-- apps/web/src/app/demo/page.tsx (read only — understand the pattern, do not modify)
-```
+- [ ] `/demo` — two-button demo works end-to-end (create pass → start session → click Place Order → approve → receipt)
+- [ ] `/rails` — shows exactly 4 routes: Demo Banking Workflow, Wikipedia Search, Account Statement Draft, Wikipedia Topic Lookup
+- [ ] `/rails` — Demo Banking Workflow shows: Verified badge, Private use: Ready, Marketplace: Ready for review, Submit button enabled
+- [ ] `/rails` — Wikipedia Search shows: Approved marketplace status
+- [ ] `/rails` — Account Statement Draft shows: Draft badge, Marketplace: Needs verification
+- [ ] `/rails` — Wikipedia Topic Lookup shows: Pending review status
+- [ ] `/rails` → Preview Demo Banking Workflow → Replay on Local Demo — mock bank opens, steps execute
+- [ ] `/rails` → Preview Wikipedia Search → Replay on Wikipedia — Wikipedia opens, search executes
+- [ ] `/rails` → Verify Account Statement Draft — tier promotes to Verified, Route Health fills in
+- [ ] `/rails` → Submit Account Statement Draft for Review — status updates to Pending review
+- [ ] `/marketplace-review` — Wikipedia Topic Lookup (and newly submitted route) appear in review queue
+- [ ] `/marketplace-review` → Approve Wikipedia Topic Lookup → card disappears, `/rails` card updates
+- [ ] Extension → navigate to `en.wikipedia.org` → Start Recording → perform search → Stop → Submit to Aegis → new route appears in `/rails`
 
 ---
 
-## 4. Future Task: MCP Wrapper
+## Future Tasks (deferred)
 
-Do not implement this now. Use this prompt when MCP is explicitly requested.
+### MCP Wrapper
+
+Do not implement until explicitly requested.
 
 ```
-Read docs/CHECKPOINT.md first.
-
 Task: Wrap Aegis browser actions as MCP tools.
 
 Create an MCP server that exposes the 8 Aegis agent endpoints as MCP tools:
 create-session, navigate, read-page, click, type, screenshot, request-capability, close.
 
 Constraints:
-- Preserve all existing security semantics: collars, approval_required, block.
-- Do not bypass collar enforcement in any MCP tool handler.
-- Do not expose vault values, card numbers, CVVs, passwords, or addresses in any MCP tool response.
-- Stop and surface approval_required to the MCP client — do not auto-approve.
-- Do not modify existing API routes.
-- Do not touch the working /demo flow.
-- Do not add real LLM calls or real payment submission.
+- Preserve all existing collar enforcement — no collar bypass in any MCP tool handler.
+- Do not expose vault values, card numbers, CVVs, passwords, or addresses in any tool response.
+- Surface approval_required to the MCP client — do not auto-approve.
+- Do not modify existing API routes or the /demo flow.
 ```
 
----
+### Persistence (Supabase or SQLite)
 
-## 5. Future Task: Persistence
-
-Do not implement this now. Use this prompt when persistence is explicitly requested.
+Do not implement until explicitly requested.
 
 ```
-Read docs/CHECKPOINT.md first.
+Task: Move the in-memory store to persistent storage.
 
-Task: Move the in-memory store to local persistence or Supabase.
-
-The current in-memory store is in apps/api/src/store/index.ts.
-It holds: collars, passes, sessions, approvals, receipts, runners.
+The current store is in apps/api/src/store/index.ts.
+Entities: collars, passes, sessions, approvals, receipts, runners, routes, agentTasks, agentDelegations.
 
 Constraints:
-- Preserve all existing flows — all existing API routes must behave identically.
-- Do not change any product behavior or API response shapes.
-- Do not store raw secrets, card numbers, CVVs, passwords, or addresses.
+- All existing API routes must behave identically after migration.
+- Do not store raw secrets, card numbers, CVVs, or passwords.
 - Do not add auth before persistence is complete.
-- Do not modify apps/web (frontend) unless a frontend data-fetch change is strictly required.
-- Preserve the working /demo flow end-to-end.
-
-If using Supabase: create migrations for each entity. Seed the default collar and demo user on first run.
-If using SQLite: use a local file. Do not commit the database file to git.
+- Do not modify apps/web unless a frontend data-fetch change is strictly required.
+- Preserve the /demo flow end-to-end.
+- Seed the default collar, demo user, and 4 demo routes on first run (equivalent to npm run seed:demo).
 ```

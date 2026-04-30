@@ -416,6 +416,8 @@ export interface AegisRoute {
   success_rate: number;
   incident_count: number;
   verification_report?: RouteVerificationReport;
+  marketplace_status?: 'private' | 'pending_review' | 'approved' | 'rejected';
+  submitted_for_review_at?: string;
 }
 
 export interface StepVerificationResult {

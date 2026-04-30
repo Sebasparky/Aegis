@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AegisRoute, ActionType, RouteStep, RouteVerificationReport, StepVerificationResult } from "@aegis/types";
-import { listRoutes, recordRoute, deleteRoute, verifyRoute, patchRoute } from "../../lib/api";
+import { listRoutes, recordRoute, deleteRoute, verifyRoute, patchRoute, submitRouteForReview } from "../../lib/api";
 
 // ─── Trust tier → friendly label ─────────────────────────────────────────────
 
@@ -562,6 +562,9 @@ function SkillCard({
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [localTier, setLocalTier] = useState(route.trust_tier);
   const [localName, setLocalName] = useState(route.workflow_name);
+  const [localMarketplaceStatus, setLocalMarketplaceStatus] = useState(route.marketplace_status ?? 'private');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   async function handleDelete() {
     setDeleting(true);
@@ -587,6 +590,19 @@ function SkillCard({
       setVerifyError(err.message ?? "Verification failed.");
     } finally {
       setVerifying(false);
+    }
+  }
+
+  async function handleSubmitForReview() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const updated = await submitRouteForReview(route.route_id);
+      setLocalMarketplaceStatus(updated.marketplace_status ?? 'pending_review');
+    } catch (err: any) {
+      setSubmitError(err.message ?? "Submission failed.");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -648,12 +664,22 @@ function SkillCard({
               <span className="text-teal-400 font-medium">Ready</span>
             </span>
             <span className="flex items-center gap-1.5">
-              <span className={`font-mono ${isRouteVerified(localTier) ? "text-cyan-400" : "text-gray-600"}`}>
-                {isRouteVerified(localTier) ? "✓" : "○"}
+              <span className={`font-mono ${
+                localMarketplaceStatus === 'pending_review' ? "text-amber-400" :
+                isRouteVerified(localTier) ? "text-cyan-400" :
+                "text-gray-600"
+              }`}>
+                {localMarketplaceStatus === 'pending_review' ? "⏳" : isRouteVerified(localTier) ? "✓" : "○"}
               </span>
               <span className="text-gray-500">Marketplace:</span>
-              <span className={isRouteVerified(localTier) ? "text-cyan-400 font-medium" : "text-gray-500"}>
-                {isRouteVerified(localTier) ? "Ready for review" : "Needs verification before review"}
+              <span className={
+                localMarketplaceStatus === 'pending_review' ? "text-amber-400 font-medium" :
+                isRouteVerified(localTier) ? "text-cyan-400 font-medium" :
+                "text-gray-500"
+              }>
+                {localMarketplaceStatus === 'pending_review' ? "Pending review" :
+                 isRouteVerified(localTier) ? "Ready for review" :
+                 "Needs verification before review"}
               </span>
             </span>
           </div>
@@ -707,17 +733,34 @@ function SkillCard({
             >
               Rename
             </button>
-            <span
-              title="Marketplace listing requires a passing verification run and an Aegis safety review. Verify your route first, then submit."
-              className="inline-block"
-            >
+            {localMarketplaceStatus === 'pending_review' ? (
               <button
                 disabled
-                className="text-xs px-3 py-1.5 rounded-md border border-gray-800 text-gray-700 cursor-not-allowed"
+                className="text-xs px-3 py-1.5 rounded-md border border-amber-900 text-amber-600 cursor-not-allowed"
               >
-                Submit for Review
+                Pending review
               </button>
-            </span>
+            ) : isRouteVerified(localTier) ? (
+              <button
+                onClick={handleSubmitForReview}
+                disabled={submitting || deleting || verifying}
+                className="text-xs px-3 py-1.5 rounded-md border border-cyan-800 text-cyan-400 hover:bg-cyan-950 disabled:opacity-50 transition-colors"
+              >
+                {submitting ? "Submitting…" : "Submit for Review"}
+              </button>
+            ) : (
+              <span
+                title="Verify this route before marketplace review."
+                className="inline-block"
+              >
+                <button
+                  disabled
+                  className="text-xs px-3 py-1.5 rounded-md border border-gray-800 text-gray-700 cursor-not-allowed"
+                >
+                  Submit for Review
+                </button>
+              </span>
+            )}
             <button
               onClick={handleDelete}
               disabled={deleting || verifying}
@@ -727,6 +770,13 @@ function SkillCard({
             </button>
           </div>
         </div>
+
+        {/* Submit error strip */}
+        {submitError && (
+          <div className="mx-4 mb-3 px-3 py-2 rounded text-xs border text-red-300 bg-red-950 border-red-900">
+            Submission error: {submitError}
+          </div>
+        )}
 
         {/* Verification status strip */}
         {(verifyReport || verifyError) && (

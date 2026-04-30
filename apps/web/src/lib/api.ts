@@ -201,6 +201,8 @@ export const verifyRoute = (routeId: string) =>
   request<RouteVerificationReport>(`/api/routes/${routeId}/verify`, { method: "POST", body: JSON.stringify({}) });
 export const patchRoute = (routeId: string, body: { workflow_name?: string; workflow_description?: string }) =>
   request<AegisRoute>(`/api/routes/${routeId}`, { method: "PATCH", body: JSON.stringify(body) });
+export const submitRouteForReview = (routeId: string) =>
+  request<AegisRoute>(`/api/routes/${routeId}/submit-review`, { method: "POST", body: JSON.stringify({}) });
 
 // Action API
 export const requestAction = (body: ActionRequest) =>

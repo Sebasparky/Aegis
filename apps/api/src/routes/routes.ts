@@ -183,6 +183,30 @@ export async function routeRoutes(server: FastifyInstance) {
   );
 
   /**
+   * POST /api/routes/:routeId/submit-review
+   *
+   * Marks a verified route as pending marketplace review.
+   * Requires trust_tier aegis_scanned or higher.
+   */
+  server.post<{ Params: { routeId: string } }>(
+    "/api/routes/:routeId/submit-review",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      if (TRUST_TIER_RANK[route.trust_tier] < TRUST_TIER_RANK["aegis_scanned"]) {
+        return sendError(reply, 400, "UNVERIFIED_ROUTE", "Verify this route before submitting it for marketplace review.");
+      }
+
+      route.marketplace_status = "pending_review";
+      route.submitted_for_review_at = new Date().toISOString();
+      routes.set(route.route_id, route);
+      schedulePersist();
+      return { ok: true, data: route };
+    }
+  );
+
+  /**
    * POST /api/routes/query
    *
    * Agent registry query. Returns the highest-trust route matching the domain.

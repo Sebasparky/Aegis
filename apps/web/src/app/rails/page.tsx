@@ -83,6 +83,43 @@ function stepDescription(step: RouteStep): string {
   return `${step.action} — ${intentLabel}`;
 }
 
+// ─── Route capability helpers ─────────────────────────────────────────────────
+
+function routeOrigin(domain: string): 'local' | 'wikipedia' | 'external' {
+  if (domain === 'localhost' || domain === '127.0.0.1') return 'local';
+  if (domain === 'en.wikipedia.org') return 'wikipedia';
+  return 'external';
+}
+
+function hasVisualReplay(domain: string): boolean {
+  const o = routeOrigin(domain);
+  return o === 'local' || o === 'wikipedia';
+}
+
+const VERIFIED_TIERS = new Set(['aegis_scanned', 'aegis_reviewed', 'run_verified', 'business_official']);
+
+function isRouteVerified(tier: string): boolean {
+  return VERIFIED_TIERS.has(tier);
+}
+
+function hasSensitiveValues(steps: RouteStep[]): boolean {
+  return steps.some(s => s.value_policy?.type === 'sensitive_redacted');
+}
+
+function hasFillSteps(steps: RouteStep[]): boolean {
+  return steps.some(s => s.action === 'fill');
+}
+
+function locatorQuality(steps: RouteStep[]): { high: number; low: number } {
+  let high = 0, low = 0;
+  for (const step of steps) {
+    const t = step.target.preferred_locator.type;
+    if (t === 'role' || t === 'label' || t === 'placeholder') high++;
+    else low++;
+  }
+  return { high, low };
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function StatusBadge({ tier }: { tier: string }) {
@@ -155,9 +192,94 @@ function VerificationStepRow({ step, result }: { step: RouteStep; result: StepVe
   );
 }
 
+// ─── Health Row ───────────────────────────────────────────────────────────────
+
+function HealthRow({
+  ok,
+  label,
+  detail,
+  neutral = false,
+}: {
+  ok: boolean;
+  label: string;
+  detail?: string;
+  neutral?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-2 text-xs">
+      <span className={`shrink-0 font-mono mt-0.5 w-3 text-center ${neutral ? 'text-gray-600' : ok ? 'text-green-400' : 'text-yellow-500'}`}>
+        {neutral ? '·' : ok ? '✓' : '○'}
+      </span>
+      <div className="min-w-0">
+        <span className={`font-medium ${neutral ? 'text-gray-500' : ok ? 'text-gray-300' : 'text-yellow-300'}`}>
+          {label}
+        </span>
+        {detail && <span className="text-gray-600 ml-1.5">{detail}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Capability Badges ────────────────────────────────────────────────────────
+
+function CapabilityBadges({ route }: { route: AegisRoute }) {
+  const origin = routeOrigin(route.domain);
+  const visualReplay = hasVisualReplay(route.domain);
+  const parameterized = (route.variables?.length ?? 0) > 0;
+  const sensProtected = hasSensitiveValues(route.steps);
+  const hasFills = hasFillSteps(route.steps);
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {origin === 'local' && (
+        <span className="text-xs px-2 py-0.5 rounded border text-teal-400 bg-teal-950 border-teal-900">
+          Local demo
+        </span>
+      )}
+      {origin === 'wikipedia' && (
+        <span className="text-xs px-2 py-0.5 rounded border text-blue-400 bg-blue-950 border-blue-900">
+          Wikipedia
+        </span>
+      )}
+      {origin === 'external' && (
+        <span className="text-xs px-2 py-0.5 rounded border text-gray-500 bg-gray-800 border-gray-700">
+          External site
+        </span>
+      )}
+      {visualReplay && (
+        <span className="text-xs px-2 py-0.5 rounded border text-indigo-400 bg-indigo-950 border-indigo-800">
+          Visual replay
+        </span>
+      )}
+      {parameterized && (
+        <span className="text-xs px-2 py-0.5 rounded border text-purple-400 bg-purple-950 border-purple-900">
+          Parameterized
+        </span>
+      )}
+      {sensProtected && (
+        <span className="text-xs px-2 py-0.5 rounded border text-amber-400 bg-amber-950 border-amber-900">
+          Sensitive values protected
+        </span>
+      )}
+      {!sensProtected && hasFills && (
+        <span className="text-xs px-2 py-0.5 rounded border text-gray-500 bg-gray-800 border-gray-700">
+          No sensitive fields
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Preview Panel ────────────────────────────────────────────────────────────
 
 function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport: RouteVerificationReport | null }) {
+  const origin = routeOrigin(route.domain);
+  const visualReplay = hasVisualReplay(route.domain);
+  const verified = isRouteVerified(route.trust_tier);
+  const sensProtected = hasSensitiveValues(route.steps);
+  const hasVars = (route.variables?.length ?? 0) > 0;
+  const { high: highLocators, low: lowLocators } = locatorQuality(route.steps);
+
   return (
     <div className="border-t border-gray-800 bg-gray-950 px-5 py-4 space-y-5">
       {/* What this skill does */}
@@ -240,6 +362,66 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
           </div>
         </div>
       )}
+
+      {/* Route Health */}
+      <div>
+        <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
+          Route Health
+        </h4>
+        <div className="space-y-1.5">
+          <HealthRow
+            ok={true}
+            label="Domain locked"
+            detail={`Restricted to ${route.domain}`}
+          />
+          <HealthRow
+            ok={verified}
+            label={verified ? `Verified — ${TIER_LABEL[route.trust_tier] ?? route.trust_tier}` : "Not yet verified"}
+            detail={verified ? undefined : "Run Verify to confirm all steps resolve"}
+          />
+          <HealthRow
+            ok={visualReplay}
+            label={visualReplay ? "Visual replay available" : "Visual replay not supported"}
+            detail={
+              origin === 'local' ? "Via demo bank page" :
+              origin === 'wikipedia' ? "Via Chrome extension" :
+              "Not yet supported for this domain"
+            }
+          />
+          <HealthRow
+            ok={sensProtected}
+            label={sensProtected ? "Sensitive values protected" : "No sensitive fields detected"}
+            detail={
+              sensProtected
+                ? "Redacted at record time; supplied at runtime"
+                : "All recorded values are safe literals or selectors"
+            }
+          />
+          <HealthRow
+            ok={hasVars}
+            label={
+              hasVars
+                ? `Parameterized — ${route.variables!.length} variable${route.variables!.length !== 1 ? 's' : ''}`
+                : "No variables"
+            }
+            detail={hasVars ? "Route accepts runtime inputs" : "Route uses fixed recorded values"}
+            neutral={!hasVars}
+          />
+          <HealthRow
+            ok={lowLocators === 0}
+            label={
+              lowLocators === 0
+                ? `${highLocators} semantic locator${highLocators !== 1 ? 's' : ''}`
+                : `${lowLocators} fragile locator${lowLocators !== 1 ? 's' : ''}`
+            }
+            detail={
+              lowLocators === 0
+                ? "All steps use role, label, or placeholder targeting"
+                : `${lowLocators} step${lowLocators !== 1 ? 's' : ''} use css/xpath — may break on layout changes`
+            }
+          />
+        </div>
+      </div>
 
       {/* Verification summary */}
       {verifyReport && (
@@ -446,6 +628,9 @@ function SkillCard({
               </div>
             </div>
           </div>
+
+          {/* Capability badges */}
+          <CapabilityBadges route={{ ...route, trust_tier: localTier }} />
 
           {/* Action buttons */}
           <div className="flex items-center gap-2 flex-wrap">

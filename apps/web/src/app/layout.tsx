@@ -19,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <NavLink href="/demo" label="Demo" />
           <NavLink href="/agent-bridge" label="Agent Bridge" />
           <NavLink href="/rails" label="Aegis Rails" />
+          <NavLink href="/marketplace-review" label="Marketplace Review" />
           <NavLink href="/passes" label="Passes" />
           <NavLink href="/collars" label="Collars" />
           <NavLink href="/sessions" label="Sessions" />

@@ -665,19 +665,28 @@ function SkillCard({
             </span>
             <span className="flex items-center gap-1.5">
               <span className={`font-mono ${
+                localMarketplaceStatus === 'approved' ? "text-green-400" :
+                localMarketplaceStatus === 'rejected' ? "text-rose-400" :
                 localMarketplaceStatus === 'pending_review' ? "text-amber-400" :
                 isRouteVerified(localTier) ? "text-cyan-400" :
                 "text-gray-600"
               }`}>
-                {localMarketplaceStatus === 'pending_review' ? "⏳" : isRouteVerified(localTier) ? "✓" : "○"}
+                {localMarketplaceStatus === 'approved' ? "✓" :
+                 localMarketplaceStatus === 'rejected' ? "✗" :
+                 localMarketplaceStatus === 'pending_review' ? "⏳" :
+                 isRouteVerified(localTier) ? "✓" : "○"}
               </span>
               <span className="text-gray-500">Marketplace:</span>
               <span className={
+                localMarketplaceStatus === 'approved' ? "text-green-400 font-medium" :
+                localMarketplaceStatus === 'rejected' ? "text-rose-400 font-medium" :
                 localMarketplaceStatus === 'pending_review' ? "text-amber-400 font-medium" :
                 isRouteVerified(localTier) ? "text-cyan-400 font-medium" :
                 "text-gray-500"
               }>
-                {localMarketplaceStatus === 'pending_review' ? "Pending review" :
+                {localMarketplaceStatus === 'approved' ? "Approved" :
+                 localMarketplaceStatus === 'rejected' ? "Rejected" :
+                 localMarketplaceStatus === 'pending_review' ? "Pending review" :
                  isRouteVerified(localTier) ? "Ready for review" :
                  "Needs verification before review"}
               </span>
@@ -733,7 +742,21 @@ function SkillCard({
             >
               Rename
             </button>
-            {localMarketplaceStatus === 'pending_review' ? (
+            {localMarketplaceStatus === 'approved' ? (
+              <button
+                disabled
+                className="text-xs px-3 py-1.5 rounded-md border border-green-900 text-green-600 cursor-not-allowed"
+              >
+                Approved
+              </button>
+            ) : localMarketplaceStatus === 'rejected' ? (
+              <button
+                disabled
+                className="text-xs px-3 py-1.5 rounded-md border border-rose-900 text-rose-600 cursor-not-allowed"
+              >
+                Rejected
+              </button>
+            ) : localMarketplaceStatus === 'pending_review' ? (
               <button
                 disabled
                 className="text-xs px-3 py-1.5 rounded-md border border-amber-900 text-amber-600 cursor-not-allowed"

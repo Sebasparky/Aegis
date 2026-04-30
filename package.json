@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "turbo dev",
     "build": "turbo build",
-    "typecheck": "turbo typecheck"
+    "typecheck": "turbo typecheck",
+    "seed:demo": "node apps/api/scripts/seed-demo-data.mjs"
   },
   "devDependencies": {
     "serve": "^14.2.6",

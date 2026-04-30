@@ -203,6 +203,8 @@ export const patchRoute = (routeId: string, body: { workflow_name?: string; work
   request<AegisRoute>(`/api/routes/${routeId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const submitRouteForReview = (routeId: string) =>
   request<AegisRoute>(`/api/routes/${routeId}/submit-review`, { method: "POST", body: JSON.stringify({}) });
+export const reviewRoute = (routeId: string, decision: "approved" | "rejected", review_note?: string) =>
+  request<AegisRoute>(`/api/routes/${routeId}/review`, { method: "POST", body: JSON.stringify({ decision, review_note }) });
 
 // Action API
 export const requestAction = (body: ActionRequest) =>

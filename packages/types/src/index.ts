@@ -418,6 +418,8 @@ export interface AegisRoute {
   verification_report?: RouteVerificationReport;
   marketplace_status?: 'private' | 'pending_review' | 'approved' | 'rejected';
   submitted_for_review_at?: string;
+  reviewed_at?: string;
+  review_note?: string;
 }
 
 export interface StepVerificationResult {

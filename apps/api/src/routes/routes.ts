@@ -207,6 +207,38 @@ export async function routeRoutes(server: FastifyInstance) {
   );
 
   /**
+   * POST /api/routes/:routeId/review
+   *
+   * Internal prototype review queue. Approve or reject a pending_review route.
+   * This is a demo review action — not real legal or security certification.
+   */
+  server.post<{ Params: { routeId: string }; Body: { decision: string; review_note?: string } }>(
+    "/api/routes/:routeId/review",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      if (route.marketplace_status !== "pending_review") {
+        return sendError(reply, 400, "INVALID_STATE", "Route is not pending review.");
+      }
+
+      const { decision, review_note } = req.body ?? {};
+      if (decision !== "approved" && decision !== "rejected") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "decision must be 'approved' or 'rejected'.");
+      }
+
+      route.marketplace_status = decision as "approved" | "rejected";
+      route.reviewed_at = new Date().toISOString();
+      if (typeof review_note === "string" && review_note.trim()) {
+        route.review_note = review_note.trim();
+      }
+      routes.set(route.route_id, route);
+      schedulePersist();
+      return { ok: true, data: route };
+    }
+  );
+
+  /**
    * POST /api/routes/query
    *
    * Agent registry query. Returns the highest-trust route matching the domain.

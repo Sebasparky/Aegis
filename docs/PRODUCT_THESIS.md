@@ -354,6 +354,10 @@ Trust tiers (ascending): Unverified draft → Community → Aegis scanned → Ae
 
 Agents should never execute a marketplace route without the user being able to inspect: what the route does, what it never does, what permissions it needs, and who verified it.
 
+Think of the route marketplace as an App Store for agent workflows. Like a mobile app store, any user can build and use their own shortcuts privately — no review required. But publishing to the store for others to discover and install requires passing automated safety checks and a human review. The same model applies here: private skills work immediately for their creator, and marketplace listing is the gate that requires verification and Aegis review.
+
+Routes are private by default. A newly recorded skill is immediately usable by its owner and invisible to all other users and agents. `unverified_draft` is not a broken state — it is the correct state for a personal workflow route. Verification is optional for private use and required before a route can be submitted for marketplace listing.
+
 ### What Routes Are Not
 
 A route is not:

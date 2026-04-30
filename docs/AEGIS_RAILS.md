@@ -145,6 +145,28 @@ Receipts are created for each route execution:
 - Whether the success condition was met
 - Any incidents or deviations
 
+## Private Skills vs Marketplace Skills
+
+When a recording is submitted, a route is created immediately with the `unverified_draft` trust tier. This is the correct and normal state for a personal skill — it is not a failure state or a warning.
+
+**Private Skill (default):**
+- Created instantly when recording is submitted
+- No verification required
+- Replayable and usable by the owner immediately
+- Not visible to other users or agents
+- `unverified_draft` is the intended tier for personal workflows
+
+**Marketplace Skill:**
+- Requires explicit submission via Submit for Review
+- Requires a passing Playwright verification run before submission
+- Requires Aegis safety review after submission
+- Must declare clear permissions, forbidden actions, and approval gates
+- Only listed in the registry after full review
+
+> Verification is optional for private use and required for marketplace submission.
+
+Private routes should be the default for sensitive personal workflows. Sharing or publishing a route is an explicit, deliberate action — not the default.
+
 ## Route Schema
 
 ```typescript

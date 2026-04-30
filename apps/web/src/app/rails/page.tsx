@@ -371,13 +371,24 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
         <div className="space-y-1.5">
           <HealthRow
             ok={true}
+            label="Private use"
+            detail="Available — only visible to you, not discoverable by other agents"
+          />
+          <HealthRow
+            ok={true}
             label="Domain locked"
             detail={`Restricted to ${route.domain}`}
           />
           <HealthRow
             ok={verified}
             label={verified ? `Verified — ${TIER_LABEL[route.trust_tier] ?? route.trust_tier}` : "Not yet verified"}
-            detail={verified ? undefined : "Run Verify to confirm all steps resolve"}
+            detail={verified ? "Eligible for marketplace review submission" : "Optional for private use — required before marketplace submission"}
+          />
+          <HealthRow
+            ok={verified}
+            label={verified ? "Eligible for marketplace submission" : "Not submitted for marketplace"}
+            detail={verified ? "Use Submit for Review to list this skill" : "Verify your route first, then submit for review"}
+            neutral={!verified}
           />
           <HealthRow
             ok={visualReplay}
@@ -629,6 +640,24 @@ function SkillCard({
             </div>
           </div>
 
+          {/* Private / Marketplace status */}
+          <div className="flex items-center gap-x-5 gap-y-1 flex-wrap text-xs">
+            <span className="flex items-center gap-1.5">
+              <span className="font-mono text-teal-400">✓</span>
+              <span className="text-gray-500">Private use:</span>
+              <span className="text-teal-400 font-medium">Ready</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className={`font-mono ${isRouteVerified(localTier) ? "text-cyan-400" : "text-gray-600"}`}>
+                {isRouteVerified(localTier) ? "✓" : "○"}
+              </span>
+              <span className="text-gray-500">Marketplace:</span>
+              <span className={isRouteVerified(localTier) ? "text-cyan-400 font-medium" : "text-gray-500"}>
+                {isRouteVerified(localTier) ? "Ready for review" : "Needs verification before review"}
+              </span>
+            </span>
+          </div>
+
           {/* Capability badges */}
           <CapabilityBadges route={{ ...route, trust_tier: localTier }} />
 
@@ -679,7 +708,7 @@ function SkillCard({
               Rename
             </button>
             <span
-              title="Marketplace submission will require Aegis verification, Aegis review, and a route safety audit."
+              title="Marketplace listing requires a passing verification run and an Aegis safety review. Verify your route first, then submit."
               className="inline-block"
             >
               <button
@@ -889,31 +918,29 @@ export default function RailsPage() {
       <div>
         <h1 className="text-2xl font-semibold text-white">Recorded Skills</h1>
         <p className="mt-2 text-gray-400 text-sm leading-relaxed">
-          Teach Aegis a workflow once, verify it, then let agents follow it safely.
+          Teach Aegis a workflow once and use it privately. Verify and submit for review when you&apos;re ready to share.
+        </p>
+        <p className="mt-1 text-gray-600 text-xs">
+          Private by default. Verified before marketplace.
         </p>
       </div>
 
       {/* How it works — flow chips */}
-      <div className="flex items-center gap-0 overflow-x-auto">
+      <div className="grid grid-cols-2 gap-2">
         {[
           { step: "1", label: "Record", sub: "Demonstrate a workflow on the demo bank page" },
-          { step: "2", label: "Verify", sub: "Aegis replays it and confirms every step resolves" },
-          { step: "3", label: "Preview", sub: "Inspect what the skill does in plain English" },
-          { step: "4", label: "Keep or submit", sub: "Stay private or submit for marketplace review" },
-        ].map((item, i, arr) => (
-          <div key={item.step} className="flex items-center shrink-0">
-            <div className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3 text-center min-w-[140px]">
-              <div className="flex items-center justify-center gap-1.5 mb-1">
-                <span className="w-5 h-5 flex items-center justify-center rounded-full bg-indigo-900 text-indigo-300 text-xs font-bold">
-                  {item.step}
-                </span>
-                <span className="text-xs font-semibold text-white">{item.label}</span>
-              </div>
-              <p className="text-xs text-gray-600 leading-snug">{item.sub}</p>
+          { step: "2", label: "Use privately", sub: "Replay yourself or let your own agents follow it — no verification needed" },
+          { step: "3", label: "Verify (optional)", sub: "Confirm every step resolves before submitting for marketplace" },
+          { step: "4", label: "Keep or submit", sub: "Marketplace listing requires verification and Aegis review" },
+        ].map((item) => (
+          <div key={item.step} className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+            <div className="flex items-center gap-1.5 mb-1">
+              <span className="w-5 h-5 flex items-center justify-center rounded-full bg-indigo-900 text-indigo-300 text-xs font-bold shrink-0">
+                {item.step}
+              </span>
+              <span className="text-xs font-semibold text-white">{item.label}</span>
             </div>
-            {i < arr.length - 1 && (
-              <span className="text-gray-700 mx-1 text-sm shrink-0">→</span>
-            )}
+            <p className="text-xs text-gray-600 leading-snug">{item.sub}</p>
           </div>
         ))}
       </div>

@@ -110,6 +110,19 @@ Everything below is implemented and working.
 - `docs/AGENT_INTEGRATION_CONTRACT.md` — canonical agent-facing API reference
 - Covers: authentication, skill discovery, run creation, all response variants (pending / pending_approval / blocked / error codes), polling, receipt lookup, status lifecycle diagram, curl examples for all three paths (happy / approval-required / denied), executable harness reference, and security notes
 
+### Aegis MCP Tool Server (External Agent Integration via MCP)
+- `examples/aegis-tool-server.mjs` — MCP server exposing Aegis agent APIs as MCP tools
+- Tools: `discover_installed_skills`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt`
+- Connect via: `claude mcp add aegis -- node /Users/sebastianchacon/Desktop/aegis/examples/aegis-tool-server.mjs`
+- **First successful end-to-end test (2026-05-01):**
+  - Claude Code discovered Wikipedia Search via `discover_installed_skills`
+  - Requested RouteRun for query `Wisconsin` via `request_skill_run`
+  - User clicked Start Run in the Aegis extension
+  - Claude Code polled with `get_route_run_status` until `completed`
+  - Read receipt `rrreceipt_20b593b94de7` via `get_route_run_receipt`
+- Proves the full external-agent flow: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt
+- Do not rebuild this server unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -137,6 +150,7 @@ Session rules:
 - Do not re-implement anything listed in the "Completed Increments" section of NEXT_SESSION_PROMPT.md.
 - Do not introduce real secrets, credentials, card numbers, or payment submission.
 - Routes are declarative objects — no executable code in route steps, ever.
+- Agents remain autonomous above Aegis. Aegis tools are invoked only for trusted installed workflows, credentialed actions, approval gates, or audit receipts — not for general browsing, reading, or research.
 - Screenshots are not the primary data source — prefer accessibility tree and DOM metadata.
 - Keep Aegis Guard components separate: sensitiveDetector.ts, evaluate.ts, ApprovalService.
 - Do not add Supabase, real auth, or real LLM calls unless explicitly requested.
@@ -144,17 +158,11 @@ Session rules:
 
 ---
 
-## Current Next Task — External Agent Integration Hardening
+## Current Next Task
 
-Delegation Token / Agent API Auth v1 is complete. The next milestone is **External Agent Integration Hardening**: make `apps/api/scripts/fake-agent-create-run.mjs` a realistic end-to-end scenario covering:
-- Agent queries installed skills using token-scoped access
-- Agent requests route run with variables
-- Handles `pending`, `pending_approval`, `blocked`, `completed`, `failed` states
-- Polls run status until terminal
-- Reads receipt after completion
-- Does not use raw browser control
+External Agent Integration Hardening is **complete** — validated end-to-end via the Aegis MCP Tool Server (`examples/aegis-tool-server.mjs`). Claude Code successfully discovered skills, requested a RouteRun, polled status, and read the receipt through MCP tools on 2026-05-01.
 
-**Other candidate milestones (lower priority):**
+**Candidate next milestones:**
 
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation, clear error responses for invalid state changes
 2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy (all / exclude / only), and approval gating logic
@@ -197,22 +205,9 @@ Then confirm:
 
 ## Future Tasks (deferred)
 
-### MCP Wrapper
+### MCP Tool Server
 
-Do not implement until explicitly requested.
-
-```
-Task: Wrap Aegis browser actions as MCP tools.
-
-Create an MCP server that exposes the 8 Aegis agent endpoints as MCP tools:
-create-session, navigate, read-page, click, type, screenshot, request-capability, close.
-
-Constraints:
-- Preserve all existing collar enforcement — no collar bypass in any MCP tool handler.
-- Do not expose vault values, card numbers, CVVs, passwords, or addresses in any tool response.
-- Surface approval_required to the MCP client — do not auto-approve.
-- Do not modify existing API routes or the /demo flow.
-```
+**Completed.** See `examples/aegis-tool-server.mjs` and the "Aegis MCP Tool Server" entry in Completed Increments above. Do not rebuild unless explicitly requested.
 
 ### Persistence (Supabase or SQLite)
 

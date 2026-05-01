@@ -101,6 +101,8 @@ An MCP stdio server that wraps Aegis skill execution as standard tools. Connect 
 
 The agent receives tools from the environment. It does not need to know about Aegis. Aegis remains the trust and execution layer beneath.
 
+**Agent autonomy model:** Agents should use their own browsing, reading, searching, and reasoning tools for normal tasks. Aegis tools are invoked selectively — only when the agent needs a trusted installed workflow, a credentialed or approval-gated action, or an auditable execution receipt. Aegis does not replace the agent's general tools.
+
 ### How it works
 
 1. Agent runtime connects to the server via stdio

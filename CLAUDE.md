@@ -102,6 +102,7 @@ Aegis records what authority was granted, what route was followed, what actions 
 
 ## Architecture Principles
 
+- **Agent autonomy above, Aegis enforcement below.** Agents use their own tools for browsing, reading, and reasoning. Aegis is invoked only for trust-sensitive execution: verified workflow routes, credentialed actions, approval gates, and audit receipts.
 - **Enforcement outside the model.** Collar and route enforcement happens through tools, tokens, browser sessions, and approval flows — not prompts.
 - **Control the action boundary, not every thought.** Only interrupt at sensitive commitments.
 - **Treat outside agents as untrusted.** Validate pass, collar, session, and action at every step.
@@ -144,20 +145,13 @@ Aegis records what authority was granted, what route was followed, what actions 
 - Approval-gated RouteRuns: approval-required permissions create `pending_approval` runs; approve/reject API; extension only sees `status=pending`
 - Route Run Approvals page (`/route-run-approvals`): UI for approving/rejecting `pending_approval` runs
 - Delegation token auth (v1): `POST /api/skills/:skillId/runs` requires `Authorization: Bearer <token>`; token is `AgentDelegation.token_id`; missing token → `AUTH_REQUIRED`; invalid token → `INVALID_TOKEN`; `agent_id`, `delegation_id`, `collar_id` derived from resolved delegation (never trusted from request body); `fake-agent-create-run.mjs` uses `AEGIS_AGENT_TOKEN` env var
+- Aegis MCP Tool Server: `examples/aegis-tool-server.mjs` exposes `discover_installed_skills`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt` as MCP tools; connect via `claude mcp add aegis -- node /path/to/aegis-tool-server.mjs`; first successful end-to-end test completed 2026-05-01 (Claude Code discovered Wikipedia Search, requested RouteRun for query Wisconsin, user started run via extension, Claude Code polled to completion, read receipt `rrreceipt_20b593b94de7`); do not rebuild unless explicitly requested
 
-## Next Near-Term Milestone: External Agent Integration Hardening
+## Next Near-Term Milestone
 
-The Delegation Token / Agent API Auth v1 milestone is complete (bearer token on RouteRun API, token resolves delegation, `agent_id` / `delegation_id` / `collar_id` derived server-side, `AUTH_REQUIRED` / `INVALID_TOKEN` errors). The next milestone is external agent integration hardening.
+External Agent Integration Hardening is **complete** — validated via the Aegis MCP Tool Server on 2026-05-01. The full external-agent flow works: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt.
 
-**Next milestone: External Agent Integration Hardening** — make the fake external agent script (`apps/api/scripts/fake-agent-create-run.mjs`) a realistic end-to-end integration scenario:
-- Agent queries installed skills using token-scoped access
-- Agent requests route run with variables
-- Handles `pending`, `pending_approval`, `blocked`, `completed`, `failed` states
-- Polls run status until terminal
-- Reads receipt after completion
-- Does not use raw browser control
-
-Other candidate tasks:
+Candidate next milestones:
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
 

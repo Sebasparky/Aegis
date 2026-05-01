@@ -165,7 +165,7 @@ const TOOLS = [
   {
     name: "discover_installed_skills",
     description:
-      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Returns a list of skills the agent can request to execute. Call this first to find what Aegis can do on a target domain.",
+      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Returns a list of skills the agent can request to execute. Use this when you need a trusted installed workflow, credentialed action, or auditable execution path on a domain — not for general browsing, reading, or research, which should use your normal tools.",
     inputSchema: {
       type: "object",
       properties: {

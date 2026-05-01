@@ -12,6 +12,19 @@ An agent holds a **Delegation Token** bound to a user's active delegation. It ca
 
 ---
 
+## Agent Autonomy Model
+
+Aegis is not the agent's general browsing or research layer. Agents remain fully autonomous above Aegis — using their own tools for reading pages, searching, summarizing, planning, and reasoning.
+
+Aegis is invoked selectively when the agent needs:
+- A **trusted installed workflow** (verified route) on a domain
+- A **credentialed or approval-gated action** the user has pre-authorized
+- An **auditable execution path** with a receipt
+
+For non-sensitive reading, searching, or summarization, agents should use their own tools. Aegis governs trust-sensitive execution below the agent — it does not replace the agent's autonomy above it.
+
+---
+
 ## Core Model
 
 | Concept | What it is |
@@ -416,3 +429,4 @@ AEGIS_AUTO_START=true node apps/api/scripts/fake-agent-create-run.mjs
 - This is not an agent builder. Aegis executes workflows that users have installed and authorized.
 - This is not production-ready. Token management, key rotation, rate limiting, and multi-user auth are not implemented.
 - Routes are not arbitrary executable scripts. They are declarative, inspectable, versioned workflow objects reviewed before publication.
+- This is not a general browsing or web research layer. For non-sensitive reading, searching, and summarization, agents should use their own tools.

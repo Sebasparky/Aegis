@@ -1,7 +1,42 @@
 import type { FastifyInstance } from "fastify";
-import type { RouteRun } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, MOCK_USER_ID, newId } from "../store/index.js";
+import type { RouteRun, RouteRunReceipt } from "@aegis/types";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
+
+function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
+  const skill = skills.get(run.skill_id);
+  const route = routes.get(run.route_id);
+  const skillName = skill?.name ?? run.skill_id;
+  const routeName = route?.workflow_name ?? run.route_id;
+  const trustTier = route?.trust_tier ?? "unknown";
+  const now = new Date().toISOString();
+
+  const allowed_reason = status === "completed"
+    ? `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was completed through the Aegis browser extension.`
+    : `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was attempted through the Aegis browser extension but failed: ${error ?? "unknown error"}.`;
+
+  const receipt: RouteRunReceipt = {
+    receipt_id: newId("rrreceipt"),
+    run_id: run.run_id,
+    skill_id: run.skill_id,
+    route_id: run.route_id,
+    installed_skill_id: run.installed_skill_id,
+    user_id: run.user_id,
+    domain: run.domain,
+    status,
+    allowed_reason,
+    execution_surface: "chrome_extension",
+    route_trust_tier: trustTier,
+    skill_name: skillName,
+    route_name: routeName,
+    created_at: run.created_at,
+    completed_at: now,
+    ...(run.agent_id ? { agent_id: run.agent_id } : {}),
+    ...(run.variables && Object.keys(run.variables).length > 0 ? { variables: run.variables } : {}),
+    ...(error ? { error } : {}),
+  };
+  return receipt;
+}
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost"]);
 
@@ -142,8 +177,14 @@ export async function routeRunRoutes(server: FastifyInstance) {
       run.status = "completed";
       run.completed_at = new Date().toISOString();
       routeRuns.set(run.run_id, run);
-      schedulePersist();
 
+      const existingReceipt = Array.from(routeRunReceipts.values()).find((r) => r.run_id === run.run_id);
+      if (!existingReceipt) {
+        const receipt = buildReceipt(run, "completed");
+        routeRunReceipts.set(receipt.receipt_id, receipt);
+      }
+
+      schedulePersist();
       return { ok: true, data: run };
     }
   );
@@ -165,10 +206,17 @@ export async function routeRunRoutes(server: FastifyInstance) {
 
     run.status = "failed";
     run.completed_at = new Date().toISOString();
-    if (req.body?.error) run.error = req.body.error;
+    const failError = req.body?.error;
+    if (failError) run.error = failError;
     routeRuns.set(run.run_id, run);
-    schedulePersist();
 
+    const existingReceipt = Array.from(routeRunReceipts.values()).find((r) => r.run_id === run.run_id);
+    if (!existingReceipt) {
+      const receipt = buildReceipt(run, "failed", failError);
+      routeRunReceipts.set(receipt.receipt_id, receipt);
+    }
+
+    schedulePersist();
     return { ok: true, data: run };
   });
 }

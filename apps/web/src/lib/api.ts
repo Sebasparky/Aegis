@@ -19,6 +19,7 @@ import type {
   ActionDecisionResponse,
   Skill,
   InstalledSkill,
+  RouteRunReceipt,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -73,6 +74,10 @@ export const denyRequest = (id: string, note?: string) =>
 
 // Receipts
 export const listReceipts = () => request<Receipt[]>("/api/receipts");
+
+// Route Run Receipts
+export const listRouteRunReceipts = () => request<RouteRunReceipt[]>("/api/route-run-receipts");
+export const getRouteRunReceipt = (receiptId: string) => request<RouteRunReceipt>(`/api/route-run-receipts/${receiptId}`);
 
 // Reputation
 export const getReputationSummary = () => request<ReputationSummary>("/api/reputation/summary");

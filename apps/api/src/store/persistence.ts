@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt } from "@aegis/types";
 import {
   users,
   collars,
@@ -19,6 +19,7 @@ import {
   skills,
   installedSkills,
   routeRuns,
+  routeRunReceipts,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord } from "./index.js";
 
@@ -169,6 +170,7 @@ export function persistStore(): void {
       skills: Array.from(skills.entries()),
       installedSkills: Array.from(installedSkills.entries()),
       routeRuns: Array.from(routeRuns.entries()),
+      routeRunReceipts: Array.from(routeRunReceipts.entries()),
     };
     writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
@@ -219,6 +221,7 @@ export function loadStore(): void {
     for (const [k, v] of (data.skills ?? [])) skills.set(k, v as Skill);
     for (const [k, v] of (data.installedSkills ?? [])) installedSkills.set(k, v as InstalledSkill);
     for (const [k, v] of (data.routeRuns ?? [])) routeRuns.set(k, v as RouteRun);
+    for (const [k, v] of (data.routeRunReceipts ?? [])) routeRunReceipts.set(k, v as RouteRunReceipt);
 
     ensureWebsiteTrustSeeds();
 
@@ -250,6 +253,7 @@ export function resetStoreForDemo(): void {
   skills.clear();
   installedSkills.clear();
   routeRuns.clear();
+  routeRunReceipts.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

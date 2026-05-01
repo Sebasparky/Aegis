@@ -496,6 +496,29 @@ export interface RecordingPayload {
   events: SemanticRecordingEvent[];
 }
 
+// ─── Aegis Rails — RouteRunReceipt ───────────────────────────────────────────
+
+export interface RouteRunReceipt {
+  receipt_id: string;
+  run_id: string;
+  skill_id: string;
+  route_id: string;
+  installed_skill_id: string;
+  user_id: string;
+  agent_id?: string;
+  domain: string;
+  status: "completed" | "failed";
+  variables?: Record<string, string>;
+  allowed_reason: string;
+  execution_surface: "chrome_extension";
+  route_trust_tier: string;
+  skill_name: string;
+  route_name: string;
+  created_at: string;
+  completed_at?: string;
+  error?: string;
+}
+
 // ─── Aegis Rails — RouteRun ───────────────────────────────────────────────────
 
 export type RouteRunStatus = "pending" | "running" | "completed" | "failed" | "blocked";

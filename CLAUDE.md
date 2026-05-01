@@ -135,20 +135,27 @@ Aegis records what authority was granted, what route was followed, what actions 
 - Submit for Review, Marketplace Review queue, approve/reject flow are implemented
 - `npm run seed:demo` resets to a clean 4-route demo state
 - Demo walkthrough: `docs/DEMO_WALKTHROUGH.md`
+- Skill and InstalledSkill models; Marketplace page (`/marketplace`); Skill Library page (`/skill-library`)
+- Extension runtime surfacing of installed skills by domain
+- RouteRun API: agent requests route execution via installed skill; receipts/audit trail recorded per run
+- Extension pending-run pickup and execution
+- Agent delegation skill-access policy: `all / exclude / only`; `PATCH /api/delegations/:id/skill-access`; `agent_id` required on route run requests
+- Collar enforcement for RouteRuns: allowed permissions create pending runs; blocked/unknown return `COLLAR_BLOCKED`
+- Approval-gated RouteRuns: approval-required permissions create `pending_approval` runs; approve/reject API; extension only sees `status=pending`
+- Route Run Approvals page (`/route-run-approvals`): UI for approving/rejecting `pending_approval` runs
 
-## Next Near-Term Milestone: Third-Party Agent Delegation API
+## Next Near-Term Milestone: Integration Hardening
 
-The core product value is not the route marketplace — it is the trust operating layer that third-party autonomous agents plug into. ChatGPT, Claude, Gemini, MCP agents, OpenClaw-style agents, and custom agent runtimes should all be able to integrate with Aegis rather than receiving raw user passwords or unrestricted browser control.
+The Third-Party Agent Delegation API milestone is complete (delegation API, RouteRun API, skill-access policy, collar enforcement, approval-gated runs, run receipts, approvals UI). The next milestone is integration hardening and test coverage.
 
-The next milestone makes that integration surface real:
+Candidate next tasks (choose one at the start of the next session):
 
-1. **Delegation API** — a structured way for a third-party agent to request and receive a scoped delegation (pass + collar) from a user, without the user having to pre-create passes manually
-2. **RouteRun API** — an agent-facing endpoint to request execution of a specific verified route, returning run status and receipts
-3. **Pending runs UI** — surface active and pending route run requests in the dashboard so users can monitor and approve
-4. **Run receipts** — structured audit logs per route execution (which route, which steps, approvals triggered, outcome)
-5. **Fake external agent script** — a simple Node script that acts as a third-party agent, requests delegation, queries routes, and triggers runs — the first real integration test
+1. **End-to-end integration hardening** — fake third-party agent script: delegation → route query → run trigger → `pending_approval` → UI approval → extension pickup → receipt
+2. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
+3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
+4. **Agent delegation token / API authentication v1** — API key or signed token for third-party agents
 
-See `docs/NEXT_SESSION_PROMPT.md` for the recommended implementation order.
+See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
 
 ## Session Rules for Every AI Coding Session

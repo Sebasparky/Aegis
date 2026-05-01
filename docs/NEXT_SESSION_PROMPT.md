@@ -5,9 +5,17 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
-## Current Baseline (as of 2026-04-30)
+## ⚠️ DO NOT Rebuild Completed Increments
 
-Everything below is implemented and working. Do not re-implement any of it.
+The items below are **fully implemented and committed**. Do not re-implement, re-plan, or recreate any of them.
+
+> **Specifically: do NOT rerun or recreate the Agent Delegation Skill-Access Policy plan. It is complete. Do not treat "skill-access policy" or "delegation API" as a pending task.**
+
+---
+
+## Completed Increments (as of 2026-04-30)
+
+Everything below is implemented and working.
 
 ### Core guard flow
 - Collar + Pass creation, scoped permissions, revocation
@@ -53,6 +61,40 @@ Everything below is implemented and working. Do not re-implement any of it.
 - Copy JSON button, Submit to Aegis button with result feedback
 - Preview Route section: enter a route ID, Start Preview triggers `replay.js` Playwright replay
 
+### Skill and Skill Library
+- `Skill` and `InstalledSkill` models implemented
+- Marketplace page (`/marketplace`) — shows only approved routes; users browse and install
+- Skill Library page (`/skill-library`) — user's personally installed skills; distinct from `/rails`
+- `POST /api/skills/:routeId/install` / `DELETE /api/skills/:routeId/install`
+- `GET /api/skills?domain=...` — returns installed skills matching the current domain (used by agents at runtime)
+- Extension runtime surfacing of installed skills by domain
+
+### RouteRun API
+- `POST /api/skills/:routeId/run` — agent-initiated execution of an installed skill
+- Run receipts and audit trail per execution
+- Extension pending-run pickup: extension polls for `status=pending` runs and executes them
+- `agent_id` required on all route run requests
+
+### Agent Delegation and Collar Enforcement
+- Delegation skill-access policy: `all / exclude / only`
+- `PATCH /api/delegations/:id/skill-access` — update an existing delegation's skill access policy
+- Collar enforcement for RouteRuns:
+  - Allowed permissions → run becomes `status: pending`
+  - Blocked or unknown permissions → returns `COLLAR_BLOCKED`
+
+### Approval-Gated RouteRuns
+- Approval-required permissions → run created with `status: pending_approval`
+- `POST /api/route-runs/:id/approve` → run transitions to `status: pending` (extension can now pick it up)
+- `POST /api/route-runs/:id/reject` → run transitions to `status: blocked`
+- Extension only polls for and executes `status: pending` runs (never sees `pending_approval` directly)
+
+### Route Run Approvals UI (`/route-run-approvals`)
+- `GET /api/route-runs?status=pending_approval` — fetch all runs awaiting user approval
+- Displays: skill name, run ID, agent ID, domain, delegation ID, collar ID, created timestamp, approval-required permissions, variables
+- Approve button → `POST /api/route-runs/:id/approve` → run moves to `pending`, picked up by extension
+- Reject button → `POST /api/route-runs/:id/reject` → run becomes `blocked`
+- Approved/rejected runs are removed from the list immediately on success
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -77,7 +119,7 @@ Session rules:
 - Read docs/NEXT_SESSION_PROMPT.md before writing any code. The current baseline is described there.
 - Preserve the working /demo flow. Test any change that touches the collar, pass, session, or approval path.
 - Do not broad-refactor. The demo loop is fragile to architectural changes.
-- Do not re-implement anything listed in the "Current Baseline" section of NEXT_SESSION_PROMPT.md.
+- Do not re-implement anything listed in the "Completed Increments" section of NEXT_SESSION_PROMPT.md.
 - Do not introduce real secrets, credentials, card numbers, or payment submission.
 - Routes are declarative objects — no executable code in route steps, ever.
 - Screenshots are not the primary data source — prefer accessibility tree and DOM metadata.
@@ -87,95 +129,25 @@ Session rules:
 
 ---
 
-## Recommended Next Build Steps
+## Current Next Task — State Alignment / Next Milestone Selection
 
-Work through these in order. Do not skip ahead.
+This documentation pass (updating handoff docs to match the current implementation) is the current task. After it lands, the next technical milestone should be chosen fresh at the start of the next session.
 
-### 0. Skill Library (highest priority)
+**Candidate next technical milestones (pick one):**
 
-The route marketplace is not a runtime suggestion engine. Users intentionally install marketplace skills into their personal Skill Library. Agents at runtime see only installed skills relevant to the current domain — not the entire marketplace catalog.
+1. **End-to-end integration hardening** *(recommended)* — fake third-party agent script (`apps/api/scripts/fake-agent.mjs`): request delegation → query installed skills for domain → trigger route run → hit `pending_approval` → approve via Route Run Approvals UI → confirm extension pickup → verify receipt. This is the first real integration test of the full delegation → execution → approval → audit loop.
 
-Build in this order:
+2. **Run lifecycle state machine + idempotency** — stricter state transitions (guard against double-approve, double-reject, invalid transitions), idempotency keys on run creation, clear error responses for invalid state changes.
 
-**Step 0a — Public Marketplace page (`/marketplace`)**  
-Show only routes with `marketplace_status: approved`. This is the discovery surface — users browse it intentionally.
-- Card per approved skill: name, domain, trust tier badge, step count, risk level, verification date, short description
-- "Install Skill" button on each card
-- Filter by domain
-- No editing — read-only catalog view
+3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy (all / exclude / only), and approval gating logic. Particularly important before opening the delegation API to external callers.
 
-**Step 0b — Install Skill into Library**  
-When a user installs a skill, create an `InstalledSkill` record linking their user ID to the route ID.
-- `POST /api/skills/:routeId/install` — creates the link, validates route is `marketplace_status: approved`
-- `DELETE /api/skills/:routeId/install` — uninstalls
-- Installed skills carry a `source: marketplace` marker and are read-only (no edit, only fork)
+4. **Agent delegation token / API authentication v1** — API key or signed token so third-party agents can authenticate to the Delegation API without relying on the mock user context.
 
-**Step 0c — Installed Skills library page (`/skills`)**  
-The user's personal skill library. Distinct from `/rails` (which shows routes the user *recorded*).
-- Shows all installed marketplace skills
-- Shows fork and uninstall options
-- Empty state with link to `/marketplace`
-
-**Step 0d — Runtime endpoint: installed skills for domain**  
-`GET /api/skills?domain=en.wikipedia.org` — returns only skills from the user's library that match the current domain. This is the endpoint third-party agents call when they reach a new site.
-- Scoped to the authenticated user (via pass token)
-- Domain-exact match against each skill's route domain
-- Returns skill summary, route ID, required permissions — not the full step list
-
-**Step 0e — RouteRun invocation from installed skill**  
-`POST /api/skills/:routeId/run` — agent-initiated execution of an installed skill. The agent supplies the pass token and any runtime variable values. Aegis validates: skill is installed by this user, collar permits the route's required permissions, then executes via Playwright.
-- Returns run receipt: steps completed, approval gates triggered, outcome
-- Approval gates surface in the existing `/approvals` inbox
-- Collar restrictions always win over route steps
-- Agent never receives a Playwright handle
-
-### 1. Agent delegation API
-
-After the Skill Library exists, third-party agents need a way to request delegation without the user pre-creating passes manually.
-
-**Delegation request** — `POST /api/delegations/request`  
-Agent presents identity (name, platform, purpose). User approves in dashboard. Agent receives pass + collar.
-
-**Installed skill discovery** — agents call `GET /api/skills?domain=...` with their pass token to see what skills are available for the current domain.
-
-**Fake external agent script** — `apps/api/scripts/fake-agent.mjs` — a Node.js script simulating a third-party agent: requests delegation, navigates to a domain, calls the installed skills endpoint, invokes a RouteRun, polls for approval if needed, prints the receipt. First real end-to-end integration test.
-
-Constraints for both steps 0 and 1:
+Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context
 - Collar restrictions always win
 - Sensitive steps go through the existing Runner / approval flow
 - Do not break the existing `/demo` flow
-
-### 2. Polish demo UX
-Fix any visible rough edges on `/rails` before adding new features. Common candidates:
-- Card layout consistency when marketplace status label is long
-- Preview panel scroll on small viewports
-- Loading / error states on verify and submit actions
-- Extension popup: confirm the event-count display is accurate on fast pages
-
-### 3. Trust evidence summary
-Add a human-readable trust evidence block to the marketplace card and skill library preview.
-- Verified by: Aegis automated scan / Human review / Run history
-- Locator quality summary (how many steps use semantic vs fragile locators)
-- Last verified date and version
-- Creator AegisID (linked to `/counterparty-agent` lookup if available)
-
-### 4. Second external domain (GitHub public search)
-Only after Skill Library and `/marketplace` are solid.
-- Target: `https://github.com/search` — no auth, no PII, stable ARIA, no payment path
-- Record via extension, verify via Playwright, add to seed script as a second approved marketplace route
-- Do not move to any third domain until the locator quality and verification pipeline are proven reliable at scale
-
-### 6. Do not approach yet
-These require a stronger safety model, business verification, and legal review before any prototype work:
-
-| Category | Examples |
-|---|---|
-| Auth-gated sites | Gmail, LinkedIn, GitHub (logged in), any bank |
-| Financial flows | Checkout, payment, subscription, transfer |
-| Communication | Email sending, Slack, messaging apps |
-| Medical / legal | Any portal with regulated PII |
-| Identity | SSO, OAuth flows, government portals |
 
 ---
 
@@ -203,6 +175,7 @@ Then confirm:
 - [ ] `/marketplace-review` — Wikipedia Topic Lookup (and newly submitted route) appear in review queue
 - [ ] `/marketplace-review` → Approve Wikipedia Topic Lookup → card disappears, `/rails` card updates
 - [ ] Extension → navigate to `en.wikipedia.org` → Start Recording → perform search → Stop → Submit to Aegis → new route appears in `/rails`
+- [ ] `/route-run-approvals` — loads without error; shows empty state when no pending_approval runs exist
 
 ---
 

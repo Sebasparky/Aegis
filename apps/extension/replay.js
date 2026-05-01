@@ -161,7 +161,59 @@ if (window.__aegisReplayActive) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async function replaySteps(steps, variables, run_id) {
+  function setInputValue(el, value) {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (nativeSetter) {
+      nativeSetter.call(el, value);
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function waitForValue(el, expected, timeoutMs = 1000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (el.value === expected) return true;
+      await sleep(50);
+    }
+    return el.value === expected;
+  }
+
+  function isVisible(el) {
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  function findSearchInputInForm(form) {
+    if (!form) return null;
+    return (
+      form.querySelector('input[name="search"]') ??
+      form.querySelector('input[type="search"]') ??
+      form.querySelector('input[placeholder*="Search" i]') ??
+      form.querySelector('input[type="text"]') ??
+      null
+    );
+  }
+
+  function findBestSearchInput(preferredForm, lastFilled) {
+    const inForm = findSearchInputInForm(preferredForm);
+    if (inForm) return inForm;
+    if (lastFilled?.element && isVisible(lastFilled.element)) return lastFilled.element;
+    const candidates = [
+      ...document.querySelectorAll('input[name="search"], input[type="search"], input[placeholder*="Search" i]'),
+    ];
+    const withForm = candidates.filter(el => isVisible(el) && el.closest('form'));
+    if (withForm.length > 0) return withForm[0];
+    return candidates.find(el => isVisible(el)) ?? null;
+  }
+
+  async function replaySteps(route, variables, run_id) {
+    const steps = route.steps ?? [];
+    let lastFilled = null;
     try {
       for (let i = 0; i < steps.length; i++) {
         const step   = steps[i];
@@ -216,22 +268,56 @@ if (window.__aegisReplayActive) {
 
             if (fillValue) {
               el.focus();
-              el.value = '';
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              for (const char of fillValue) {
-                el.value += char;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                await sleep(50);
+              setInputValue(el, '');
+              await sleep(50);
+              setInputValue(el, fillValue);
+              const verified = await waitForValue(el, fillValue, 1000);
+              if (!verified) {
+                throw new Error(`fill verification failed: expected "${fillValue}", got "${el.value}"`);
               }
-              el.dispatchEvent(new Event('change', { bubbles: true }));
               showToast(`${label} — filled "${fillValue}"`);
               await sleep(400);
+              lastFilled = { element: el, value: fillValue };
             }
           }
         } else {
           // click / submit
           showToast(`${label} — clicking`);
           await sleep(300);
+
+          const query = variables?.query?.trim();
+          let form = el.closest('form');
+
+          if (route.domain === 'en.wikipedia.org' && query) {
+            const searchInput = findBestSearchInput(form, lastFilled);
+            if (!searchInput) throw new Error('Wikipedia search submit failed: no search input found');
+
+            setInputValue(searchInput, query);
+            const svOk = await waitForValue(searchInput, query, 1000);
+            if (!svOk) {
+              throw new Error(`Wikipedia search input verification failed before submit: expected "${query}", got "${searchInput.value}"`);
+            }
+
+            form = searchInput.closest('form') ?? form;
+            if (!form) throw new Error('Wikipedia search submit failed: search input has no form');
+
+            const formSearch = findSearchInputInForm(form);
+            if (!formSearch || formSearch.value.trim() !== query) {
+              throw new Error(`Wikipedia form submit blocked: form search value is "${formSearch?.value ?? '<missing>'}", expected "${query}"`);
+            }
+
+            const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], button');
+            if (form.requestSubmit) {
+              form.requestSubmit(submitBtn ?? undefined);
+            } else {
+              form.submit();
+            }
+
+            unhighlight(el);
+            await sleep(800);
+            continue;
+          }
+
           el.click();
           // Don't sleep after click — may navigate away immediately.
         }
@@ -253,7 +339,7 @@ if (window.__aegisReplayActive) {
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'start_replay') {
-      replaySteps(msg.route.steps, msg.variables ?? {}, msg.run_id ?? null);
+      replaySteps(msg.route, msg.variables ?? {}, msg.run_id ?? null);
     }
   });
 

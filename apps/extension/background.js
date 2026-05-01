@@ -2,6 +2,83 @@ function defaultState() {
   return { recording: false, tabId: null, domain: null, eventCount: 0 };
 }
 
+function getHostname(url) {
+  try { return new URL(url).hostname; } catch (_) { return null; }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Returns null on success, an error string on failure.
+// Only Wikipedia Search outcome verification is implemented; other domains pass through.
+async function verifyTabOutcome(tabId, domain, variables) {
+  if (domain !== 'en.wikipedia.org' || !variables?.query) return null;
+
+  const expected     = variables.query.trim();
+  const expectedLow  = expected.toLowerCase();
+  const encExpected  = encodeURIComponent(expected);
+  const deadline     = Date.now() + 3000;
+
+  await sleep(500); // let navigation start before first check
+
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete') {
+        const url   = tab.url  ?? '';
+        const title = (tab.title ?? '').toLowerCase();
+        const match =
+          (url.includes('/wiki/') && title.includes(expectedLow)) ||
+          url.toLowerCase().includes(`search=${expectedLow}`) ||
+          url.includes(`search=${encExpected}`);
+        if (match) return null;
+      }
+    } catch (_) {
+      return `outcome verification failed: tab not accessible after navigating for "${expected}"`;
+    }
+    await sleep(150);
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return `outcome verification failed: expected Wikipedia result for "${expected}", url=${tab.url ?? 'unknown'}, title=${tab.title ?? 'unknown'}`;
+  } catch (_) {
+    return `outcome verification failed: expected Wikipedia result for "${expected}"`;
+  }
+}
+
+// Reads the stored run context as a mutex: the first caller to remove the key wins.
+// Subsequent callers find nothing and return, preventing double-complete.
+async function finishRunWithOutcomeVerification(runId, tabId, domain, variables) {
+  const ctxResult = await chrome.storage.session.get(`aegisRunCtx_${runId}`);
+  if (!ctxResult[`aegisRunCtx_${runId}`]) return;
+  await chrome.storage.session.remove(`aegisRunCtx_${runId}`);
+
+  const error = await verifyTabOutcome(tabId, domain, variables);
+
+  if (error) {
+    fetch(`http://localhost:4000/api/route-runs/${runId}/fail`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error }),
+    }).catch(() => {});
+  } else {
+    fetch(`http://localhost:4000/api/route-runs/${runId}/complete`, { method: 'POST' }).catch(() => {});
+  }
+}
+
+async function getAutoStartedRunIds() {
+  const stored = await chrome.storage.session.get('aegisAutoStartedRunIds');
+  return new Set(stored.aegisAutoStartedRunIds ?? []);
+}
+
+async function markAutoStarted(runId) {
+  const ids = await getAutoStartedRunIds();
+  ids.add(runId);
+  await chrome.storage.session.set({ aegisAutoStartedRunIds: [...ids] });
+}
+
 async function getState() {
   const result = await chrome.storage.session.get('aegisRecorder');
   return result.aegisRecorder ?? defaultState();
@@ -19,6 +96,113 @@ async function notifyContentStop(tabId) {
   } catch (_) {
     // Tab may have navigated away — safe to ignore.
   }
+}
+
+// ─── Shared execution helper ─────────────────────────────────────────────────
+
+async function executeRunOnTab(run, tabId) {
+  let route;
+  try {
+    const res = await fetch(`http://localhost:4000/api/routes/${run.route_id}`);
+    const body = await res.json();
+    if (!res.ok || !body.ok) return { ok: false, error: body?.error?.message ?? 'Route not found.' };
+    route = body.data;
+  } catch (_) {
+    return { ok: false, error: 'Aegis API unavailable at localhost:4000.' };
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const tabHostname = getHostname(tab.url);
+    if (route.domain !== tabHostname) {
+      return { ok: false, error: `Route domain "${route.domain}" does not match current tab "${tabHostname}".` };
+    }
+  } catch (err) {
+    return { ok: false, error: 'Could not read tab URL: ' + err.message };
+  }
+
+  try {
+    const startRes = await fetch(`http://localhost:4000/api/route-runs/${run.run_id}/start`, { method: 'POST' });
+    const startBody = await startRes.json();
+    if (!startRes.ok || !startBody.ok) {
+      return { ok: false, error: startBody?.error?.message ?? 'Failed to start run.' };
+    }
+  } catch (_) {
+    return { ok: false, error: 'Aegis API unavailable at localhost:4000.' };
+  }
+
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['replay.js'] });
+  } catch (err) {
+    return { ok: false, error: 'Failed to inject replay script: ' + err.message };
+  }
+
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      action: 'start_replay',
+      route,
+      variables: run.variables ?? {},
+      run_id: run.run_id,
+    });
+  } catch (err) {
+    return { ok: false, error: 'Failed to start replay: ' + err.message };
+  }
+
+  if (run.run_id) {
+    await chrome.storage.session.set({
+      [`aegisRunCtx_${run.run_id}`]: { tabId, domain: route.domain, variables: run.variables ?? {} },
+    });
+
+    // For navigation-based routes (Wikipedia search), replay.js is destroyed by the
+    // full-page navigation before it can send replay_done. Start a background watcher
+    // that independently verifies the tab outcome and completes/fails the run.
+    if (route.domain === 'en.wikipedia.org' && run.variables?.query) {
+      setTimeout(() => {
+        finishRunWithOutcomeVerification(run.run_id, tabId, route.domain, run.variables ?? {});
+      }, 500);
+    }
+  }
+
+  return { ok: true };
+}
+
+// ─── Background auto-run ─────────────────────────────────────────────────────
+
+async function maybeAutoRunForTab(tab) {
+  if (!tab?.id || !tab?.url) return;
+  if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) return;
+
+  const localResult = await chrome.storage.local.get('aegisAutoRunAllowed');
+  if (!localResult.aegisAutoRunAllowed) return;
+
+  const hostname = getHostname(tab.url);
+  if (!hostname) return;
+
+  let runs;
+  try {
+    const res = await fetch(
+      `http://localhost:4000/api/route-runs?domain=${encodeURIComponent(hostname)}&status=pending`
+    );
+    const json = await res.json();
+    if (!json.ok) return;
+    runs = json.data ?? [];
+  } catch (_) {
+    return;
+  }
+
+  const startedIds = await getAutoStartedRunIds();
+
+  const eligible = runs.filter(r =>
+    r.status === 'pending' &&
+    r.skill_summary?.risk_level === 'low' &&
+    !startedIds.has(r.run_id)
+  );
+
+  if (eligible.length !== 1) return;
+
+  const run = eligible[0];
+  await markAutoStarted(run.run_id);
+  await executeRunOnTab(run, tab.id);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -207,8 +391,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'replay_done': {
         await chrome.storage.session.set({ aegisReplayStatus: msg });
         if (msg.run_id) {
-          fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/complete`, { method: 'POST' })
-            .catch(() => {});
+          const ctxResult = await chrome.storage.session.get(`aegisRunCtx_${msg.run_id}`);
+          const ctx = ctxResult[`aegisRunCtx_${msg.run_id}`] ?? null;
+          if (!ctx) break; // navigation watcher already consumed the context and handled this run
+          await chrome.storage.session.remove(`aegisRunCtx_${msg.run_id}`);
+
+          const outcomeError = await verifyTabOutcome(ctx.tabId, ctx.domain, ctx.variables);
+
+          if (outcomeError) {
+            fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/fail`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ error: outcomeError }),
+            }).catch(() => {});
+          } else {
+            fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/complete`, { method: 'POST' })
+              .catch(() => {});
+          }
         }
         sendResponse({ ok: true });
         break;
@@ -217,6 +416,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'replay_failed': {
         await chrome.storage.session.set({ aegisReplayStatus: msg });
         if (msg.run_id) {
+          const ctxResult = await chrome.storage.session.get(`aegisRunCtx_${msg.run_id}`);
+          if (!ctxResult[`aegisRunCtx_${msg.run_id}`]) break; // watcher already handled this run
+          await chrome.storage.session.remove(`aegisRunCtx_${msg.run_id}`);
           fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/fail`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -247,65 +449,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       case 'start_route_run': {
         const { run, tabId: runTabId } = msg;
-        let route;
-        try {
-          const res = await fetch(`http://localhost:4000/api/routes/${run.route_id}`);
-          const body = await res.json();
-          if (!res.ok || !body.ok) {
-            sendResponse({ ok: false, error: body?.error?.message ?? 'Route not found.' });
-            break;
-          }
-          route = body.data;
-        } catch (_) {
-          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
-          break;
-        }
-
-        try {
-          const tab = await chrome.tabs.get(runTabId);
-          const tabHostname = new URL(tab.url).hostname;
-          if (route.domain !== tabHostname) {
-            sendResponse({ ok: false, error: `Route domain "${route.domain}" does not match current tab "${tabHostname}".` });
-            break;
-          }
-        } catch (err) {
-          sendResponse({ ok: false, error: 'Could not read tab URL: ' + err.message });
-          break;
-        }
-
-        // Transition run from pending → running before injecting replay
-        try {
-          const startRes = await fetch(`http://localhost:4000/api/route-runs/${run.run_id}/start`, { method: 'POST' });
-          const startBody = await startRes.json();
-          if (!startRes.ok || !startBody.ok) {
-            sendResponse({ ok: false, error: startBody?.error?.message ?? 'Failed to start run.' });
-            break;
-          }
-        } catch (_) {
-          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
-          break;
-        }
-
-        try {
-          await chrome.scripting.executeScript({ target: { tabId: runTabId }, files: ['replay.js'] });
-        } catch (err) {
-          sendResponse({ ok: false, error: 'Failed to inject replay script: ' + err.message });
-          break;
-        }
-
-        try {
-          await chrome.tabs.sendMessage(runTabId, {
-            action: 'start_replay',
-            route,
-            variables: run.variables ?? {},
-            run_id: run.run_id,
-          });
-        } catch (err) {
-          sendResponse({ ok: false, error: 'Failed to start replay: ' + err.message });
-          break;
-        }
-
-        sendResponse({ ok: true });
+        const result = await executeRunOnTab(run, runTabId);
+        sendResponse(result);
         break;
       }
 
@@ -334,4 +479,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   // Keep the message channel open for the async response.
   return true;
+});
+
+// ─── Background auto-run listeners ──────────────────────────────────────────
+
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    await maybeAutoRunForTab(tab);
+  } catch (_) {}
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') return;
+  await sleep(750);
+  try {
+    const freshTab = await chrome.tabs.get(tabId);
+    await maybeAutoRunForTab(freshTab);
+  } catch (_) {}
+});
+
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  if (area !== 'local') return;
+  if (!changes.aegisAutoRunAllowed?.newValue) return;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab) await maybeAutoRunForTab(tab);
+  } catch (_) {}
 });

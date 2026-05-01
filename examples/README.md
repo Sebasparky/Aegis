@@ -32,7 +32,12 @@ curl -X POST http://localhost:4000/api/skills/skill_demo_wikipedia_001/install \
 node examples/external-agent-http-client.mjs
 ```
 
-The script will print a run ID and wait. Open `en.wikipedia.org` in Chrome, click the Aegis extension popup, and press **Start Run**. The script prints the final status and receipt when execution completes.
+The script prints a run ID and waits. Execution is driven by the Aegis Chrome extension:
+
+- **With background auto-run enabled (recommended):** ensure `en.wikipedia.org` is your active tab and the auto-run toggle is on in the extension popup. The run executes automatically without further interaction.
+- **Manually:** open `en.wikipedia.org` in Chrome, click the Aegis extension popup, and press **Start Run**.
+
+The script prints the final status and receipt once the run reaches a terminal state. `completed` means the browser outcome was verified — the tab landed on the correct Wikipedia article or search results page.
 
 ### Expected output (happy path)
 
@@ -51,7 +56,8 @@ The script will print a run ID and wait. Open `en.wikipedia.org` in Chrome, clic
     Delegation: del_... | Collar: col_...
 
 [6] Waiting for Aegis-controlled execution.
-    Open en.wikipedia.org in Chrome, click the extension popup, press "Start Run".
+    With auto-run enabled: activate the en.wikipedia.org tab — the run starts automatically.
+    Without auto-run: open en.wikipedia.org in Chrome, click the extension popup, press "Start Run".
 
 [7] Polling for completion (timeout: 60s, interval: 3s)...
     [8s] Status: running
@@ -168,4 +174,5 @@ claude mcp add aegis -- node /path/to/aegis/examples/aegis-tool-server.mjs
 
 - Local and prototype-only. Not production-ready.
 - Calls only public Aegis HTTP APIs. Does not import internal Aegis modules.
-- Does not execute browser actions. Execution is driven by the Aegis Chrome extension after a run is requested.
+- Does not execute browser actions. Execution is driven by the Aegis Chrome extension after a run is requested — automatically via background auto-run (when enabled and conditions are met) or manually via the popup Start Run button.
+- The user or agent must still navigate to or activate the matching domain tab in the current prototype.

@@ -146,10 +146,13 @@ Aegis records what authority was granted, what route was followed, what actions 
 - Route Run Approvals page (`/route-run-approvals`): UI for approving/rejecting `pending_approval` runs
 - Delegation token auth (v1): `POST /api/skills/:skillId/runs` requires `Authorization: Bearer <token>`; token is `AgentDelegation.token_id`; missing token → `AUTH_REQUIRED`; invalid token → `INVALID_TOKEN`; `agent_id`, `delegation_id`, `collar_id` derived from resolved delegation (never trusted from request body); `fake-agent-create-run.mjs` uses `AEGIS_AGENT_TOKEN` env var
 - Aegis MCP Tool Server: `examples/aegis-tool-server.mjs` exposes `discover_installed_skills`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt` as MCP tools; connect via `claude mcp add aegis -- node /path/to/aegis-tool-server.mjs`; first successful end-to-end test completed 2026-05-01 (Claude Code discovered Wikipedia Search, requested RouteRun for query Wisconsin, user started run via extension, Claude Code polled to completion, read receipt `rrreceipt_20b593b94de7`); do not rebuild unless explicitly requested
+- Background auto-run (reliable, opt-in): extension background service worker watches the active tab for low-risk `status=pending` RouteRuns; executes one eligible run automatically without opening the popup; fill values set atomically via native HTMLInputElement setter and verified before proceeding; Wikipedia search submit uses `findBestSearchInput` + `form.requestSubmit()` to ensure the submitted form field holds `variables.query`; `background.js` verifies final tab URL/title before marking a run `completed` (navigation-based routes cannot send `replay_done` — the watcher resolves this); bad outcomes fail instead of producing incorrect completed receipts; validated 2026-05-01 (Wisconsin → `rrreceipt_d9a6ca5ae205`, Alan Turing → `rrreceipt_8f11681c5ab1`); do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
 
 ## Next Near-Term Milestone
 
-External Agent Integration Hardening is **complete** — validated via the Aegis MCP Tool Server on 2026-05-01. The full external-agent flow works: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt.
+Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01. Low-risk pending RouteRuns execute automatically when the matching domain tab is active, with fill verification and outcome verification before marking completed.
+
+External Agent Integration Hardening is also **complete** — validated via the Aegis MCP Tool Server on 2026-05-01. The full external-agent flow works: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt.
 
 Candidate next milestones:
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
@@ -171,6 +174,7 @@ Before making any changes:
 - Keep Aegis Guard (detector, policy, approval) separate from browser automation
 - Keep domain logic separate from UI
 - Preserve all existing service boundaries: CollarService, PassService, BrowserSessionService, SensitiveActionDetector, PolicyService, ApprovalService, RunnerService, ReceiptService, ReputationService
+- Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
 
 ## Terminology — Always Use
 

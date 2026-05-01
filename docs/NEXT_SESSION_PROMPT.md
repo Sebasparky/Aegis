@@ -12,6 +12,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Specifically: do NOT rerun or recreate the Agent Delegation Skill-Access Policy plan. It is complete. Do not treat "skill-access policy" or "delegation API" as a pending task.**
 >
 > **Also: do NOT re-implement Delegation Token Auth. Bearer token enforcement on `POST /api/skills/:skillId/runs` is complete. `agent_id` is resolved server-side from the token — do not accept it from the request body.**
+>
+> **Also: do NOT rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification. All are complete. Do not re-plan, re-implement, or recreate any part of the extension auto-run or replay reliability work.**
 
 ---
 
@@ -123,6 +125,22 @@ Everything below is implemented and working.
 - Proves the full external-agent flow: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt
 - Do not rebuild this server unless explicitly requested
 
+### Background Auto-Run (Reliable, Opt-In)
+- Extension background service worker (`apps/extension/background.js`) watches the active tab for `status=pending` RouteRuns on the matching domain
+- Auto-run is **opt-in**: controlled by the `aegisAutoRunAllowed` toggle in the extension popup; disabled by default
+- Executes exactly one eligible low-risk (`risk_level === "low"`) pending run when conditions are met; does nothing if zero or multiple eligible runs exist
+- Approval-required runs (`pending_approval`) are never auto-run — they remain invisible to the extension until user-approved
+- Fill values are set atomically via native `HTMLInputElement.prototype` setter; fill value is verified against the expected value before the next step proceeds
+- Wikipedia search submit uses `findBestSearchInput` to locate the form's actual search field and `form.requestSubmit()` to ensure the correct field value is submitted
+- `background.js` independently verifies final tab URL/title after navigation (navigation-based routes destroy the content script before `replay_done` can be sent; a `setTimeout` watcher in background resolves this)
+- `aegisRunCtx_<run_id>` in session storage acts as a mutex: the first handler to claim it (watcher or `replay_done`) wins; subsequent handlers skip to prevent double-complete
+- Bad outcomes (wrong URL/title, empty search, fill mismatch) produce `failed` runs with descriptive errors instead of incorrect `completed` receipts
+- **Validated 2026-05-01:**
+  - `Wisconsin` → `run_2eecfe56dd5d` completed → `rrreceipt_d9a6ca5ae205`
+  - `Alan Turing` → `run_2c68416c0364` completed → `rrreceipt_8f11681c5ab1`
+- The user/agent must still navigate to or activate the matching domain tab in the current prototype
+- Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -160,7 +178,9 @@ Session rules:
 
 ## Current Next Task
 
-External Agent Integration Hardening is **complete** — validated end-to-end via the Aegis MCP Tool Server (`examples/aegis-tool-server.mjs`). Claude Code successfully discovered skills, requested a RouteRun, polled status, and read the receipt through MCP tools on 2026-05-01.
+Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01. Low-risk pending RouteRuns execute automatically when the matching domain tab is active, with atomic fill verification and browser outcome verification before marking completed.
+
+External Agent Integration Hardening is also **complete** — validated via the Aegis MCP Tool Server on 2026-05-01.
 
 **Candidate next milestones:**
 
@@ -200,6 +220,9 @@ Then confirm:
 - [ ] `/marketplace-review` → Approve Wikipedia Topic Lookup → card disappears, `/rails` card updates
 - [ ] Extension → navigate to `en.wikipedia.org` → Start Recording → perform search → Stop → Submit to Aegis → new route appears in `/rails`
 - [ ] `/route-run-approvals` — loads without error; shows empty state when no pending_approval runs exist
+- [ ] Extension → enable auto-run toggle → navigate to `en.wikipedia.org` → create one low-risk pending run with `query=Wisconsin` → run completes automatically without opening popup → receipt created
+- [ ] Extension → auto-run with multiple eligible runs → neither executes (manual choice required)
+- [ ] Extension → approval-required run → does not auto-run (stays `pending_approval` until user approves)
 
 ---
 

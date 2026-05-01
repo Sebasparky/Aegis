@@ -368,11 +368,19 @@ curl -s -X POST \
 |---|---|
 | `pending_approval` → `pending` | User (via `/route-run-approvals` UI or `POST .../approve`) |
 | `pending_approval` → `blocked` | User (reject) |
-| `pending` → `running` | Aegis Chrome extension |
-| `running` → `completed` | Aegis Chrome extension |
-| `running` → `failed` | Aegis Chrome extension (on error) |
+| `pending` → `running` | Aegis Chrome extension — automatically when background auto-run is enabled and exactly one low-risk pending run exists for the active tab domain, or manually via the popup Start Run button |
+| `running` → `completed` | Aegis Chrome extension, after verifying the final browser outcome matches the expected result |
+| `running` → `failed` | Aegis Chrome extension (on replay error, fill verification failure, or outcome mismatch) |
 
 An agent only observes status changes — it never drives them.
+
+**Background auto-run conditions (all must be true for automatic execution):**
+
+- User has enabled the auto-run toggle in the extension popup (opt-in, off by default)
+- The active tab domain matches the run's domain
+- The run has `risk_level === "low"`
+- Exactly one eligible pending run exists for that domain (multiple eligible runs require manual choice)
+- The run is not `pending_approval` (those require explicit user approval first)
 
 ---
 

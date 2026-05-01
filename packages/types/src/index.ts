@@ -14,6 +14,7 @@ export type AgentTaskStatus =
 
 export type AgentDelegationStatus = "active" | "revoked" | "expired";
 export type AgentDelegationChannel = "slack" | "discord" | "api" | "other";
+export type SkillAccessMode = "all" | "exclude" | "only";
 
 export interface AgentDelegation {
   id: string;
@@ -28,6 +29,8 @@ export interface AgentDelegation {
   created_at: string;
   updated_at: string;
   expires_at?: string;
+  skill_access_mode?: SkillAccessMode;
+  skill_access_skill_ids?: string[];
 }
 
 export interface AgentTask {
@@ -537,6 +540,8 @@ export interface RouteRun {
   started_at?: string;
   completed_at?: string;
   error?: string;
+  delegation_id?: string;
+  collar_id?: string;
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

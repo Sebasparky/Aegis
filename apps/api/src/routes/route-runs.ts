@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
@@ -53,10 +53,14 @@ export async function routeRunRoutes(server: FastifyInstance) {
    */
   server.post<{
     Params: { skillId: string };
-    Body: { agent_id?: string; variables?: Record<string, string> };
+    Body: { agent_id?: string; variables?: Record<string, string> }; // agent_id required at runtime; optional in type for graceful 400
   }>("/api/skills/:skillId/runs", async (req, reply) => {
     const { skillId } = req.params;
     const { agent_id, variables } = req.body ?? {};
+
+    if (!agent_id || typeof agent_id !== "string" || agent_id.trim() === "") {
+      return sendError(reply, 400, "VALIDATION_ERROR", "agent_id is required for route runs.");
+    }
 
     const skill = skills.get(skillId);
     if (!skill) return sendError(reply, 404, "SKILL_NOT_FOUND", "Skill not found.");
@@ -101,6 +105,28 @@ export async function routeRunRoutes(server: FastifyInstance) {
       }
     }
 
+    let delegation_id: string | undefined;
+    let collar_id: string | undefined;
+
+    if (agent_id) {
+      const delegation = Array.from(agentDelegations.values()).find(
+        (d) => d.user_id === MOCK_USER_ID && d.status === "active" &&
+          (d.agent_name === agent_id || d.id === agent_id)
+      );
+      if (delegation) {
+        const mode = delegation.skill_access_mode ?? "all";
+        const ids = delegation.skill_access_skill_ids ?? [];
+        if (mode === "exclude" && ids.includes(skillId)) {
+          return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
+        }
+        if (mode === "only" && !ids.includes(skillId)) {
+          return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
+        }
+        delegation_id = delegation.id;
+        collar_id = delegation.default_collar_id;
+      }
+    }
+
     const run: RouteRun = {
       run_id: newId("run"),
       skill_id: skill.skill_id,
@@ -112,6 +138,8 @@ export async function routeRunRoutes(server: FastifyInstance) {
       created_at: new Date().toISOString(),
       ...(agent_id ? { agent_id } : {}),
       ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+      ...(delegation_id ? { delegation_id } : {}),
+      ...(collar_id ? { collar_id } : {}),
     };
 
     routeRuns.set(run.run_id, run);

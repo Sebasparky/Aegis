@@ -54,6 +54,11 @@ export default function DelegationsPage() {
   const [shownToken, setShownToken] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 
+  const [editingPolicyId, setEditingPolicyId] = useState<string | null>(null);
+  const [policyMode, setPolicyMode] = useState<string>("all");
+  const [policySkillIds, setPolicySkillIds] = useState<string>("");
+  const [policyError, setPolicyError] = useState<string | null>(null);
+
   useEffect(() => {
     Promise.all([listDelegations(), listCollars()])
       .then(([dels, cols]) => {
@@ -83,6 +88,31 @@ export default function DelegationsPage() {
       setCreateError(err.message ?? "Failed to create delegation.");
     } finally {
       setCreating(false);
+    }
+  }
+
+  function startEditPolicy(d: AgentDelegation) {
+    setEditingPolicyId(d.id);
+    setPolicyMode(d.skill_access_mode ?? "all");
+    setPolicySkillIds((d.skill_access_skill_ids ?? []).join(", "));
+    setPolicyError(null);
+  }
+
+  async function handleSavePolicy(delegationId: string) {
+    setPolicyError(null);
+    try {
+      const skill_ids = policySkillIds.split(",").map((s) => s.trim()).filter(Boolean);
+      const res = await fetch(`/api/delegations/${delegationId}/skill-access`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: policyMode, skill_ids }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error?.message ?? "Failed to save policy.");
+      setDelegations((prev) => prev.map((d) => (d.id === delegationId ? json.data : d)));
+      setEditingPolicyId(null);
+    } catch (err: any) {
+      setPolicyError(err.message ?? "Failed to save policy.");
     }
   }
 
@@ -302,15 +332,92 @@ export default function DelegationsPage() {
                         )}
                       </div>
                     </div>
-                    {d.status === "active" && (
-                      <button
-                        onClick={() => handleRevoke(d.id)}
-                        className="shrink-0 text-xs px-3 py-1.5 rounded-md border border-red-800 text-red-400 hover:bg-red-950 transition-colors"
-                      >
-                        Revoke
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {d.status === "active" && editingPolicyId !== d.id && (
+                        <button
+                          onClick={() => startEditPolicy(d)}
+                          className="text-xs px-3 py-1.5 rounded-md border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 transition-colors"
+                        >
+                          Skills
+                        </button>
+                      )}
+                      {d.status === "active" && (
+                        <button
+                          onClick={() => handleRevoke(d.id)}
+                          className="shrink-0 text-xs px-3 py-1.5 rounded-md border border-red-800 text-red-400 hover:bg-red-950 transition-colors"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {/* Skill access summary */}
+                  {editingPolicyId !== d.id && (
+                    <div className="mt-2 text-xs text-gray-600">
+                      Skills:{" "}
+                      <span className="text-gray-400">
+                        {d.skill_access_mode === "exclude"
+                          ? `All except ${(d.skill_access_skill_ids ?? []).length > 0 ? (d.skill_access_skill_ids ?? []).join(", ") : "none listed"}`
+                          : d.skill_access_mode === "only"
+                          ? (d.skill_access_skill_ids ?? []).length > 0
+                            ? `Only: ${(d.skill_access_skill_ids ?? []).join(", ")}`
+                            : "Only (none — blocks all)"
+                          : "All installed skills"}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Skill access policy editor */}
+                  {editingPolicyId === d.id && (
+                    <div className="mt-3 pt-3 border-t border-gray-800 space-y-3">
+                      <p className="text-xs text-gray-500 font-medium">Skill access policy</p>
+                      <div className="flex gap-3 flex-wrap items-end">
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">Mode</label>
+                          <select
+                            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                            value={policyMode}
+                            onChange={(e) => setPolicyMode(e.target.value)}
+                          >
+                            <option value="all">All installed skills</option>
+                            <option value="exclude">All except selected</option>
+                            <option value="only">Only selected</option>
+                          </select>
+                        </div>
+                        {policyMode !== "all" && (
+                          <div className="flex-1 min-w-48">
+                            <label className="block text-xs text-gray-600 mb-1">
+                              Skill IDs (comma-separated)
+                            </label>
+                            <input
+                              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                              value={policySkillIds}
+                              onChange={(e) => setPolicySkillIds(e.target.value)}
+                              placeholder="skill_demo_wikipedia_001"
+                            />
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleSavePolicy(d.id)}
+                            className="text-xs px-3 py-1.5 rounded-md bg-indigo-700 hover:bg-indigo-600 text-white transition-colors"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={() => setEditingPolicyId(null)}
+                            className="text-xs px-3 py-1.5 rounded-md border border-gray-700 text-gray-400 hover:text-white transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                      {policyError && (
+                        <p className="text-xs text-red-400">{policyError}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

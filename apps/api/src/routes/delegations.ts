@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { FastifyInstance } from "fastify";
-import type { AgentDelegation, AgentDelegationChannel } from "@aegis/types";
+import type { AgentDelegation, AgentDelegationChannel, SkillAccessMode } from "@aegis/types";
 import {
   agentDelegations,
   passes,
@@ -120,6 +120,33 @@ export async function delegationRoutes(server: FastifyInstance) {
       return { ok: true, data: { delegation, delegation_token: pass.token } };
     }
   );
+
+  // PATCH /api/delegations/:delegationId/skill-access
+  server.patch<{
+    Params: { delegationId: string };
+    Body: { mode: SkillAccessMode; skill_ids?: string[] };
+  }>("/api/delegations/:delegationId/skill-access", async (req, reply) => {
+    const delegation = agentDelegations.get(req.params.delegationId);
+    if (!delegation || delegation.user_id !== MOCK_USER_ID) {
+      return sendError(reply, 404, "NOT_FOUND", "Delegation not found.");
+    }
+    if (delegation.status !== "active") {
+      return sendError(reply, 400, "INVALID_STATE", `Delegation is already ${delegation.status}.`);
+    }
+
+    const { mode, skill_ids = [] } = req.body ?? {};
+    const validModes: SkillAccessMode[] = ["all", "exclude", "only"];
+    if (!validModes.includes(mode)) {
+      return sendError(reply, 400, "VALIDATION_ERROR", `mode must be one of: ${validModes.join(", ")}.`);
+    }
+
+    delegation.skill_access_mode = mode;
+    delegation.skill_access_skill_ids = skill_ids;
+    delegation.updated_at = new Date().toISOString();
+
+    schedulePersist();
+    return { ok: true, data: delegation };
+  });
 
   // POST /api/delegations/:delegationId/revoke
   server.post<{ Params: { delegationId: string } }>(

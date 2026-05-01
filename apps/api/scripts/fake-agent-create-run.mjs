@@ -3,6 +3,10 @@
  *
  * Usage:
  *   node apps/api/scripts/fake-agent-create-run.mjs
+ *     → uses agent_demo_001 (skill_access_mode: "all" — succeeds)
+ *
+ *   AGENT_ID=agent_demo_restricted node apps/api/scripts/fake-agent-create-run.mjs
+ *     → uses agent_demo_restricted (skill_access_mode: "only", empty list — 403 SKILL_ACCESS_DENIED)
  *
  * Requires the Aegis API to be running on localhost:4000.
  * Requires the Wikipedia Search skill (skill_demo_wikipedia_001) to be installed.
@@ -11,6 +15,7 @@
 
 const API = "http://localhost:4000";
 const SKILL_ID = "skill_demo_wikipedia_001";
+const AGENT_ID = process.env.AGENT_ID ?? "agent_demo_001";
 
 async function request(method, path, body) {
   const hasBody = body !== undefined;
@@ -37,9 +42,9 @@ async function main() {
   console.log(`   Found: "${skill.name}" (${skill.skill_id})\n`);
 
   // Step 2: Create a run
-  console.log(`2. Requesting RouteRun for skill "${skill.name}"...`);
+  console.log(`2. Requesting RouteRun for skill "${skill.name}" as agent "${AGENT_ID}"...`);
   const createRes = await request("POST", `/api/skills/${SKILL_ID}/runs`, {
-    agent_id: "agent_demo_001",
+    agent_id: AGENT_ID,
     variables: { query: "Michigan" },
   });
 

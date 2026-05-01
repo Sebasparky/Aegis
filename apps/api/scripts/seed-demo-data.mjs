@@ -462,14 +462,51 @@ const store = {
     ]
   ],
   agentTasks: [],
-  agentDelegations: [],
+  agentDelegations: [
+    [
+      "delg_demo_001",
+      {
+        id: "delg_demo_001",
+        user_id: "user_001",
+        user_aegis_id: "aid_user_001",
+        agent_name: "agent_demo_001",
+        agent_platform: "api",
+        channel: "api",
+        default_collar_id: "collar_demo_starter",
+        status: "active",
+        token_id: "pass_demo_001",
+        skill_access_mode: "all",
+        skill_access_skill_ids: [],
+        created_at: "2026-04-30T12:00:00.000Z",
+        updated_at: "2026-04-30T12:00:00.000Z"
+      }
+    ],
+    [
+      "delg_demo_restricted",
+      {
+        id: "delg_demo_restricted",
+        user_id: "user_001",
+        user_aegis_id: "aid_user_001",
+        agent_name: "agent_demo_restricted",
+        agent_platform: "api",
+        channel: "api",
+        default_collar_id: "collar_demo_starter",
+        status: "active",
+        token_id: "pass_demo_002",
+        skill_access_mode: "only",
+        skill_access_skill_ids: [],
+        created_at: "2026-04-30T12:00:01.000Z",
+        updated_at: "2026-04-30T12:00:01.000Z"
+      }
+    ]
+  ],
   routes,
   skills,
   installedSkills: []
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 4 routes, 1 marketplace skill written.");
+console.log("Demo data seeded. 4 routes, 1 marketplace skill, 2 delegations written.");
 console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved)");
 console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");

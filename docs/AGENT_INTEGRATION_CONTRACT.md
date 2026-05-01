@@ -14,14 +14,13 @@ An agent holds a **Delegation Token** bound to a user's active delegation. It ca
 
 ## Agent Autonomy Model
 
-Aegis is not the agent's general browsing or research layer. Agents remain fully autonomous above Aegis — using their own tools for reading pages, searching, summarizing, planning, and reasoning.
+Agents remain fully autonomous above Aegis — using their own tools for reading pages, searching, summarizing, planning, and reasoning. Aegis is not a general browsing layer.
 
-Aegis is invoked selectively when the agent needs:
-- A **trusted installed workflow** (verified route) on a domain
-- A **credentialed or approval-gated action** the user has pre-authorized
-- An **auditable execution path** with a receipt
+Aegis is invoked selectively when the agent needs one of two things:
 
-For non-sensitive reading, searching, or summarization, agents should use their own tools. Aegis governs trust-sensitive execution below the agent — it does not replace the agent's autonomy above it.
+**Agent-runnable skills (`execution_mode: "agent_runnable"`):** Aegis has a verified, Aegis-tested route recipe for a routine workflow (browsing, searching, reading). The agent calls `get_agent_runnable_workflow` to retrieve the step-by-step recipe and executes it in its own browser session. The agent keeps full browser control. No extension handoff. No RouteRun. Aegis contributes tested locators and variable bindings so the agent does not need to re-plan from scratch.
+
+**Aegis-controlled skills (`execution_mode: "aegis_controlled"`):** The workflow involves credentials, payments, personal data, approvals, or sensitive side effects. The agent calls `request_skill_run`, and Aegis takes custody of the execution — via the Chrome extension, collar enforcement, and the approval flow. The agent waits for a receipt.
 
 ---
 
@@ -31,14 +30,14 @@ Every skill returned by `discover_installed_skills` carries two fields that tell
 
 | Field | Values | Meaning |
 |---|---|---|
-| `execution_mode` | `"agent_runnable"` | The workflow is routine. A capable agent may perform the equivalent task with its own tools (e.g. a native web search). Requesting a RouteRun through Aegis is optional. |
-| `execution_mode` | `"aegis_controlled"` | The workflow is sensitive. The agent **must** use `request_skill_run` — Aegis handles execution, credential injection, collar enforcement, and the audit receipt. |
-| `sensitivity_level` | `"routine"` | Browsing, searching, reading — no secrets, no side effects, no approval required. |
-| `sensitivity_level` | `"sensitive"` | Credentials, payments, personal data disclosure, public posting, form submission, account changes, or any action requiring an audit trail. |
+| `execution_mode` | `"agent_runnable"` | Aegis has a verified route recipe for this workflow. Call `get_agent_runnable_workflow(skill_id)` to retrieve the steps and execute them in the agent's own browser session. The agent stays in control — no extension handoff, no RouteRun. |
+| `execution_mode` | `"aegis_controlled"` | The workflow is sensitive. The agent **must** use `request_skill_run` — Aegis takes execution custody, handles credential injection and collar enforcement, and produces an audit receipt. |
+| `sensitivity_level` | `"routine"` | Browsing, searching, reading — no secrets, no side effects, no approval required. Agent can execute in its own browser. |
+| `sensitivity_level` | `"sensitive"` | Credentials, payments, personal data disclosure, public posting, form submission, account changes, or any action requiring an audit trail. Aegis must execute. |
 
 **Decision rule:** check `execution_mode` first.
-- `agent_runnable` → use your own tools, or optionally route through Aegis for the audit trail.
-- `aegis_controlled` → call `request_skill_run`; do not attempt to replicate the workflow with your own browser tools.
+- `agent_runnable` → call `get_agent_runnable_workflow`, then execute the recipe with your browser tools.
+- `aegis_controlled` → call `request_skill_run`; do not attempt to replicate the workflow yourself.
 
 ### Demo skill reference
 
@@ -68,7 +67,8 @@ Every skill returned by `discover_installed_skills` carries two fields that tell
 ### Agents may
 
 - Discover installed skills visible to their delegation token
-- Request a RouteRun against an installed skill (with variables)
+- Fetch the route recipe for an agent-runnable skill and execute it in their own browser session
+- Request a RouteRun against an aegis_controlled skill (with variables)
 - Poll run status until it reaches a terminal state
 - Read the receipt after a run completes or fails
 
@@ -149,7 +149,62 @@ An empty array means either no skills are installed for this domain or the deleg
 
 ---
 
-### Step 2 — Request a RouteRun
+### Step 1b — (Agent-runnable) Fetch the route recipe and execute in your own browser
+
+If `execution_mode` is `"agent_runnable"`, retrieve the route recipe instead of creating a RouteRun:
+
+```
+GET /api/routes/:routeId
+```
+
+No auth required. `routeId` is the `route_id` from Step 1's skill object.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "route_id": "route_demo_wikipedia_001",
+    "workflow_name": "Wikipedia Search",
+    "domain": "en.wikipedia.org",
+    "trust_tier": "aegis_scanned",
+    "variables": [
+      { "name": "query", "label": "Search query", "type": "text", "default_value": "Michigan" }
+    ],
+    "steps": [
+      {
+        "order": 1,
+        "action": "fill",
+        "intent": "search_wikipedia",
+        "target": {
+          "preferred_locator": { "type": "label", "name": "Search Wikipedia" },
+          "fallback_locators": [
+            { "type": "placeholder", "value": "Search Wikipedia" },
+            { "type": "css", "value": "[name=\"search\"]" }
+          ]
+        },
+        "variable_binding": "query"
+      },
+      {
+        "order": 2,
+        "action": "click",
+        "intent": "search",
+        "target": {
+          "preferred_locator": { "type": "label", "name": "Search" },
+          "fallback_locators": [{ "type": "role", "role": "button", "name": "Search" }]
+        }
+      }
+    ]
+  }
+}
+```
+
+Execute each step in order in your own browser session. Use `preferred_locator` first; try `fallback_locators` in order if needed. For steps with `variable_binding`, substitute the runtime value the user supplied. No RouteRun, no extension, no receipt — the agent is in control.
+
+---
+
+### Step 2 — (Aegis-controlled) Request a RouteRun
 
 ```
 POST /api/skills/:skillId/runs

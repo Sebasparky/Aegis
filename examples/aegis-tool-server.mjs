@@ -82,6 +82,67 @@ async function discoverInstalledSkills({ domain }) {
   return { skills };
 }
 
+async function getAgentRunnableWorkflow({ skill_id }) {
+  // Resolve skill via installed skills (respects delegation policy)
+  const skillsRes = await request("GET", `/api/skills?installed=true`);
+  if (!skillsRes.ok) {
+    return {
+      error: skillsRes.error?.code ?? "UNKNOWN_ERROR",
+      message: skillsRes.error?.message ?? "Failed to fetch installed skills.",
+    };
+  }
+
+  const skill = skillsRes.data.find((s) => s.skill_id === skill_id);
+  if (!skill) {
+    return {
+      error: "SKILL_NOT_FOUND",
+      message: `Skill "${skill_id}" was not found among installed skills visible to this delegation.`,
+    };
+  }
+
+  if (skill.execution_mode !== "agent_runnable") {
+    return {
+      error: "NOT_AGENT_RUNNABLE",
+      message: `"${skill.name}" has execution_mode="${skill.execution_mode ?? "aegis_controlled"}". This workflow must be executed by Aegis, not by the agent. Call request_skill_run instead.`,
+      execution_mode: skill.execution_mode ?? "aegis_controlled",
+      sensitivity_level: skill.sensitivity_level ?? null,
+    };
+  }
+
+  // Fetch the route recipe — this endpoint requires no auth
+  let routeRes;
+  try {
+    const raw = await fetch(`${API_BASE}/api/routes/${skill.route_id}`);
+    routeRes = await raw.json();
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: `Failed to fetch route: ${err.message}` };
+  }
+
+  if (!routeRes.ok) {
+    return {
+      error: routeRes.error?.code ?? "ROUTE_NOT_FOUND",
+      message: routeRes.error?.message ?? `Route "${skill.route_id}" not found.`,
+    };
+  }
+
+  const route = routeRes.data;
+
+  return {
+    skill_id: skill.skill_id,
+    skill_name: skill.name,
+    domain: skill.domain,
+    execution_mode: "agent_runnable",
+    sensitivity_level: skill.sensitivity_level ?? "routine",
+    route_id: route.route_id,
+    workflow_name: route.workflow_name,
+    workflow_description: route.workflow_description,
+    trust_tier: route.trust_tier,
+    variables: route.variables ?? [],
+    steps: route.steps ?? [],
+    guidance: `Execute these steps in your own browser session on ${skill.domain}. Navigate to the domain first if not already there. For each step, use the preferred_locator; fall back to fallback_locators in order if the preferred one is not found. For steps with a variable_binding, substitute the corresponding value from the variables you supply at runtime. Do not request a RouteRun for this workflow — execute it directly with your browser tools.`,
+  };
+}
+
 async function requestSkillRun({ skill_id, variables = {} }) {
   const res = await request("POST", `/api/skills/${skill_id}/runs`, { variables });
   if (!res.ok) {
@@ -176,7 +237,7 @@ const TOOLS = [
   {
     name: "discover_installed_skills",
     description:
-      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. execution_mode='agent_runnable' means the equivalent workflow is routine (browsing, searching, reading) and a capable agent may perform it with its own tools instead of going through Aegis. execution_mode='aegis_controlled' means the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and must be executed via request_skill_run. Use this to check which Aegis-governed paths exist before deciding how to act.",
+      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. execution_mode='agent_runnable' means Aegis has a verified route recipe the agent can fetch with get_agent_runnable_workflow and execute in its own browser session — no extension handoff, no RouteRun. execution_mode='aegis_controlled' means the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and execution must be delegated to Aegis via request_skill_run. Use this first to understand which Aegis-governed paths exist and how to invoke them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -189,9 +250,24 @@ const TOOLS = [
     },
   },
   {
+    name: "get_agent_runnable_workflow",
+    description:
+      "Retrieve the step-by-step route recipe for an agent-runnable skill so the agent can execute it in its own browser session. Returns skill metadata, route steps with locators, variable definitions, and execution guidance. Only works for skills with execution_mode='agent_runnable'. For aegis_controlled skills this tool returns an error — use request_skill_run instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_id: {
+          type: "string",
+          description: "The skill_id from discover_installed_skills. Must be an agent_runnable skill.",
+        },
+      },
+      required: ["skill_id"],
+    },
+  },
+  {
     name: "request_skill_run",
     description:
-      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail. For agent_runnable / routine skills (browsing, searching, reading), a capable agent may instead perform the equivalent workflow with its own tools. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly.",
+      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this only for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail and Aegis custody. For agent_runnable skills, call get_agent_runnable_workflow instead to get the route recipe and execute it in your own browser session. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -259,6 +335,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   switch (name) {
     case "discover_installed_skills":
       result = await discoverInstalledSkills(a);
+      break;
+    case "get_agent_runnable_workflow":
+      result = await getAgentRunnableWorkflow(a);
       break;
     case "request_skill_run":
       result = await requestSkillRun(a);

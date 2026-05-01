@@ -496,6 +496,26 @@ export interface RecordingPayload {
   events: SemanticRecordingEvent[];
 }
 
+// ─── Aegis Rails — RouteRun ───────────────────────────────────────────────────
+
+export type RouteRunStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+
+export interface RouteRun {
+  run_id: string;
+  skill_id: string;
+  route_id: string;
+  installed_skill_id: string;
+  agent_id?: string;
+  user_id: string;
+  domain: string;
+  status: RouteRunStatus;
+  variables?: Record<string, string>;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+  error?: string;
+}
+
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────
 
 export type ActionDecision = 'allow' | 'block' | 'approval_required' | 'pause';

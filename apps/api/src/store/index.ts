@@ -11,6 +11,7 @@ import type {
   AegisRoute,
   Skill,
   InstalledSkill,
+  RouteRun,
 } from "@aegis/types";
 
 // In-memory Maps are the runtime source of truth.
@@ -94,6 +95,8 @@ export const routes = new Map<string, AegisRoute>();
 export const skills = new Map<string, Skill>();
 
 export const installedSkills = new Map<string, InstalledSkill>();
+
+export const routeRuns = new Map<string, RouteRun>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

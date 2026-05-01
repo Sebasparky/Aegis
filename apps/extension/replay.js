@@ -161,85 +161,99 @@ if (window.__aegisReplayActive) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async function replaySteps(steps) {
-    for (let i = 0; i < steps.length; i++) {
-      const step   = steps[i];
-      const label  = `Step ${i + 1}/${steps.length}: ${step.intent.replace(/_/g, ' ')}`;
+  async function replaySteps(steps, variables, run_id) {
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        const step   = steps[i];
+        const label  = `Step ${i + 1}/${steps.length}: ${step.intent.replace(/_/g, ' ')}`;
 
-      chrome.runtime.sendMessage({
-        action: 'replay_progress',
-        step: i + 1,
-        total: steps.length,
-        intent: step.intent,
-      });
-
-      if (!['fill', 'click', 'submit'].includes(step.action)) {
-        await sleep(200);
-        continue;
-      }
-
-      showToast(label + '…');
-
-      const { el } = findElementWithFallback(step);
-      if (!el) {
-        showToast(`⚠ ${label} — element not found`);
         chrome.runtime.sendMessage({
           action: 'replay_progress',
           step: i + 1,
           total: steps.length,
           intent: step.intent,
-          error: 'Element not found',
         });
-        await sleep(1200);
-        continue;
-      }
 
-      const isFill = step.action === 'fill';
-      highlight(el, isFill);
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await sleep(600);
-
-      if (isFill) {
-        const vp = step.value_policy;
-        if (vp?.type === 'sensitive_redacted' || vp?.type === 'runtime_variable') {
-          showToast(`${label} — requires user input`);
-          await sleep(1500);
-        } else if (vp?.type === 'safe_literal' && vp.value) {
-          el.focus();
-          // Clear existing value
-          el.value = '';
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          // Type character by character for visual effect
-          for (const char of vp.value) {
-            el.value += char;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            await sleep(50);
-          }
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          showToast(`${label} — filled "${vp.value}"`);
-          await sleep(400);
+        if (!['fill', 'click', 'submit'].includes(step.action)) {
+          await sleep(200);
+          continue;
         }
-      } else {
-        // click / submit
-        showToast(`${label} — clicking`);
-        await sleep(300);
-        el.click();
-        // Don't sleep after click — may navigate away immediately.
+
+        showToast(label + '…');
+
+        const { el } = findElementWithFallback(step);
+        if (!el) {
+          showToast(`⚠ ${label} — element not found`);
+          chrome.runtime.sendMessage({
+            action: 'replay_progress',
+            step: i + 1,
+            total: steps.length,
+            intent: step.intent,
+            error: 'Element not found',
+          });
+          await sleep(1200);
+          continue;
+        }
+
+        const isFill = step.action === 'fill';
+        highlight(el, isFill);
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(600);
+
+        if (isFill) {
+          const vp = step.value_policy;
+          if (vp?.type === 'sensitive_redacted' || vp?.type === 'runtime_variable') {
+            showToast(`${label} — requires user input`);
+            await sleep(1500);
+          } else if (vp?.type === 'safe_literal') {
+            // Resolve fill value: variable_binding > query fallback > stored literal
+            let fillValue = vp.value ?? '';
+            if (step.variable_binding && variables[step.variable_binding]) {
+              fillValue = variables[step.variable_binding];
+            } else if (variables.query) {
+              fillValue = variables.query;
+            }
+
+            if (fillValue) {
+              el.focus();
+              el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              for (const char of fillValue) {
+                el.value += char;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                await sleep(50);
+              }
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              showToast(`${label} — filled "${fillValue}"`);
+              await sleep(400);
+            }
+          }
+        } else {
+          // click / submit
+          showToast(`${label} — clicking`);
+          await sleep(300);
+          el.click();
+          // Don't sleep after click — may navigate away immediately.
+        }
+
+        unhighlight(el);
       }
 
-      unhighlight(el);
+      chrome.runtime.sendMessage({ action: 'replay_done', run_id });
+      showToast('✓ Replay complete');
+      setTimeout(removeToast, 3000);
+    } catch (err) {
+      chrome.runtime.sendMessage({ action: 'replay_failed', run_id, error: err.message });
+      showToast('⚠ Replay failed: ' + err.message);
+      setTimeout(removeToast, 4000);
     }
-
-    chrome.runtime.sendMessage({ action: 'replay_done' });
-    showToast('✓ Replay complete');
-    setTimeout(removeToast, 3000);
   }
 
   // ── Message listener ─────────────────────────────────────────────────────────
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'start_replay') {
-      replaySteps(msg.route.steps);
+      replaySteps(msg.route.steps, msg.variables ?? {}, msg.run_id ?? null);
     }
   });
 

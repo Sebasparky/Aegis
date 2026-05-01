@@ -198,9 +198,100 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
 
-      case 'replay_progress':
+      case 'replay_progress': {
+        await chrome.storage.session.set({ aegisReplayStatus: msg });
+        sendResponse({ ok: true });
+        break;
+      }
+
       case 'replay_done': {
         await chrome.storage.session.set({ aegisReplayStatus: msg });
+        if (msg.run_id) {
+          fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/complete`, { method: 'POST' })
+            .catch(() => {});
+        }
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'replay_failed': {
+        await chrome.storage.session.set({ aegisReplayStatus: msg });
+        if (msg.run_id) {
+          fetch(`http://localhost:4000/api/route-runs/${msg.run_id}/fail`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ error: msg.error ?? 'Replay failed' }),
+          }).catch(() => {});
+        }
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'list_pending_runs_for_domain': {
+        const { domain: runDomain } = msg;
+        try {
+          const res = await fetch(
+            `http://localhost:4000/api/route-runs?domain=${encodeURIComponent(runDomain)}&status=pending`
+          );
+          const json = await res.json();
+          if (json.ok) {
+            sendResponse({ ok: true, runs: json.data });
+          } else {
+            sendResponse({ ok: false, error: json.error?.message ?? 'API error' });
+          }
+        } catch (_) {
+          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
+        }
+        break;
+      }
+
+      case 'start_route_run': {
+        const { run, tabId: runTabId } = msg;
+        let route;
+        try {
+          const res = await fetch(`http://localhost:4000/api/routes/${run.route_id}`);
+          const body = await res.json();
+          if (!res.ok || !body.ok) {
+            sendResponse({ ok: false, error: body?.error?.message ?? 'Route not found.' });
+            break;
+          }
+          route = body.data;
+        } catch (_) {
+          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
+          break;
+        }
+
+        try {
+          const tab = await chrome.tabs.get(runTabId);
+          const tabHostname = new URL(tab.url).hostname;
+          if (route.domain !== tabHostname) {
+            sendResponse({ ok: false, error: `Route domain "${route.domain}" does not match current tab "${tabHostname}".` });
+            break;
+          }
+        } catch (err) {
+          sendResponse({ ok: false, error: 'Could not read tab URL: ' + err.message });
+          break;
+        }
+
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: runTabId }, files: ['replay.js'] });
+        } catch (err) {
+          sendResponse({ ok: false, error: 'Failed to inject replay script: ' + err.message });
+          break;
+        }
+
+        try {
+          await chrome.tabs.sendMessage(runTabId, {
+            action: 'start_replay',
+            route,
+            variables: run.variables ?? {},
+            run_id: run.run_id,
+          });
+        } catch (err) {
+          sendResponse({ ok: false, error: 'Failed to start replay: ' + err.message });
+          break;
+        }
+
         sendResponse({ ok: true });
         break;
       }

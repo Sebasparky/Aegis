@@ -293,6 +293,49 @@
     .skill-risk-medium   { color: #fbbf24; }
     .skill-risk-high     { color: #fb923c; }
     .skill-risk-critical { color: #f87171; }
+
+    /* ── Pending agent runs section ── */
+
+    .run-item {
+      padding: 8px 0;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .run-item:last-child { border-bottom: none; }
+
+    .run-skill-name { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+
+    .run-meta {
+      font-size: 10px;
+      color: #64748b;
+      margin-top: 2px;
+    }
+
+    .run-vars {
+      font-size: 10px;
+      color: #94a3b8;
+      font-family: ui-monospace, monospace;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .start-run-btn {
+      margin-top: 5px;
+      width: auto;
+      padding: 4px 12px;
+      background: #1d4ed8;
+      color: #eff6ff;
+      border: 1px solid #2563eb;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .start-run-btn:hover:not(:disabled) { background: #2563eb; }
+    .start-run-btn:disabled { opacity: 0.6; cursor: default; }
   </style>
 </head>
 <body>
@@ -326,6 +369,8 @@
   </div>
 
   <div id="skill-section"></div>
+
+  <div id="pending-run-section"></div>
 
   <div id="event-list"></div>
 

@@ -122,6 +122,68 @@ function renderInstalledSkills(domain, resp) {
   section.innerHTML = header + items;
 }
 
+// ── Pending agent runs ────────────────────────────────────────────────────────
+
+function renderPendingRuns(domain, resp) {
+  const section = document.getElementById('pending-run-section');
+  if (!section) return;
+
+  const header =
+    '<div class="skill-divider"></div>' +
+    '<div class="skill-label">Pending agent runs</div>';
+
+  if (!resp || !resp.ok) {
+    section.innerHTML = '';
+    return;
+  }
+
+  const runs = resp.runs ?? [];
+  if (runs.length === 0) {
+    section.innerHTML = '';
+    return;
+  }
+
+  const items = runs.map(run => {
+    const skillName = escHtml(run.skill_summary?.name ?? run.skill_id);
+    const agentId   = escHtml(run.agent_id ?? '—');
+    const vars      = run.variables && Object.keys(run.variables).length > 0
+      ? Object.entries(run.variables).map(([k, v]) => k + '=' + v).join(', ')
+      : '';
+    const runJson   = escHtml(JSON.stringify(run));
+    return (
+      '<div class="run-item">' +
+        '<div class="run-skill-name">' + skillName + '</div>' +
+        '<div class="run-meta">Agent: ' + agentId + '</div>' +
+        (vars ? '<div class="run-vars">' + escHtml(vars) + '</div>' : '') +
+        '<button class="start-run-btn" data-run-id="' + escHtml(run.run_id) + '" data-run=\'' + runJson + '\'>Start Run</button>' +
+      '</div>'
+    );
+  }).join('');
+
+  section.innerHTML = header + items;
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.matches('.start-run-btn')) return;
+  const btn = e.target;
+  let run;
+  try { run = JSON.parse(btn.dataset.run); } catch (_) { return; }
+
+  btn.textContent = 'Starting…';
+  btn.disabled = true;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (!tab?.id) { btn.textContent = 'Error'; btn.disabled = false; return; }
+    chrome.runtime.sendMessage({ action: 'start_route_run', tabId: tab.id, run }, (resp) => {
+      if (!resp?.ok) {
+        btn.textContent = 'Error';
+        btn.disabled = false;
+      }
+      // Completion feedback arrives via aegisReplayStatus watcher
+    });
+  });
+});
+
 // ── Storage reads ─────────────────────────────────────────────────────────────
 
 chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) => {
@@ -145,6 +207,10 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
         { action: 'list_installed_skills_for_domain', domain: u.hostname },
         (resp) => renderInstalledSkills(u.hostname, resp)
       );
+      chrome.runtime.sendMessage(
+        { action: 'list_pending_runs_for_domain', domain: u.hostname },
+        (resp) => renderPendingRuns(u.hostname, resp)
+      );
     } catch (_) {}
   }
 })();
@@ -158,6 +224,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (s?.action === 'replay_done') {
       previewResult.textContent = '✓ Replay complete';
       previewResult.className = 'result-ok';
+    }
+    if (s?.action === 'replay_done' || s?.action === 'replay_failed') {
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        if (!tab?.url) return;
+        try {
+          const hostname = new URL(tab.url).hostname;
+          chrome.runtime.sendMessage(
+            { action: 'list_pending_runs_for_domain', domain: hostname },
+            (resp) => renderPendingRuns(hostname, resp)
+          );
+        } catch (_) {}
+      });
     }
   }
 });

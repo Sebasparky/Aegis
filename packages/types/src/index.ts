@@ -428,6 +428,7 @@ export interface AegisRoute {
   review_note?: string;
   execution_mode?: ExecutionMode;
   sensitivity_level?: SensitivityLevel;
+  url_match?: { hostname?: string; path_prefix?: string };
 }
 
 export interface Skill {
@@ -550,6 +551,8 @@ export interface RouteRun {
   delegation_id?: string;
   collar_id?: string;
   approval_required_permissions?: string[];
+  approved_at?: string;
+  approved_permissions?: string[];
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

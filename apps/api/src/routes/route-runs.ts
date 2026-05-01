@@ -247,6 +247,8 @@ export async function routeRunRoutes(server: FastifyInstance) {
                   workflow_name: route.workflow_name,
                   trust_tier: route.trust_tier,
                   step_count: route.steps.length,
+                  domain: route.domain,
+                  url_match: route.url_match ?? null,
                 }
               : null,
           };
@@ -336,6 +338,8 @@ export async function routeRunRoutes(server: FastifyInstance) {
         return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
       }
       run.status = "pending";
+      run.approved_at = new Date().toISOString();
+      run.approved_permissions = run.approval_required_permissions ?? [];
       routeRuns.set(run.run_id, run);
       schedulePersist();
       return { ok: true, data: run };

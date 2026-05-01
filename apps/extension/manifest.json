@@ -3,8 +3,8 @@
   "name": "Aegis Recorder",
   "version": "0.1.0",
   "description": "Record workflows on external websites for Aegis Rails.",
-  "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://localhost:4000/*", "https://*.wikipedia.org/*"],
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
+  "host_permissions": ["http://localhost:4000/*", "http://localhost:3000/*", "https://*.wikipedia.org/*"],
   "background": {
     "service_worker": "background.js"
   },

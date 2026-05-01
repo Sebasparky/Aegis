@@ -11,8 +11,34 @@ function sleep(ms) {
 }
 
 // Returns null on success, an error string on failure.
-// Only Wikipedia Search outcome verification is implemented; other domains pass through.
 async function verifyTabOutcome(tabId, domain, variables) {
+  // Demo login: verify the page navigated to /demo-login/success.
+  // Uses URL polling — works with Next.js client-side navigation where replay_done
+  // fires before the URL update propagates to the background context.
+  // Bails out immediately if the URL is not on a /demo-login path, so other
+  // localhost routes (e.g. the demo banking workflow at localhost:3001) pass through.
+  if (domain === 'localhost') {
+    const deadline = Date.now() + 6000;
+    await sleep(200);
+    while (Date.now() < deadline) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        const url = tab.url ?? '';
+        if (url.includes('/demo-login/success')) return null;
+        if (!url.includes('/demo-login')) return null; // not a login flow, pass through
+      } catch (_) {
+        return 'outcome verification failed: tab not accessible';
+      }
+      await sleep(200);
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return `outcome verification failed: expected /demo-login/success, current URL: ${tab?.url ?? 'unknown'}`;
+    } catch (_) {
+      return 'outcome verification failed: tab not accessible after timeout';
+    }
+  }
+
   if (domain !== 'en.wikipedia.org' || !variables?.query) return null;
 
   const rawQuery   = variables.query.trim();
@@ -140,9 +166,12 @@ async function executeRunOnTab(run, tabId) {
 
   try {
     const tab = await chrome.tabs.get(tabId);
-    const tabHostname = getHostname(tab.url);
-    if (route.domain !== tabHostname) {
-      return { ok: false, error: `Route domain "${route.domain}" does not match current tab "${tabHostname}".` };
+    if (!doesTabMatchRoute(tab.url, route)) {
+      const tabParsed = new URL(tab.url);
+      const expected = route.url_match?.path_prefix
+        ? `${route.url_match.hostname ?? route.domain}${route.url_match.path_prefix}`
+        : route.domain;
+      return { ok: false, error: `Route requires ${expected} but current tab is ${tabParsed.hostname}${tabParsed.pathname}.` };
     }
   } catch (err) {
     return { ok: false, error: 'Could not read tab URL: ' + err.message };
@@ -193,7 +222,43 @@ async function executeRunOnTab(run, tabId) {
   return { ok: true };
 }
 
+// ─── Route URL matching ───────────────────────────────────────────────────────
+
+// Returns true if tabUrl satisfies the route's domain + optional path constraint.
+// route may be a full AegisRoute or the route_summary shape from GET /api/route-runs.
+function doesTabMatchRoute(tabUrl, route) {
+  try {
+    const u = new URL(tabUrl);
+    const expectedHostname = route.url_match?.hostname ?? route.domain;
+    if (u.hostname !== expectedHostname) return false;
+    if (route.url_match?.path_prefix) return u.pathname.startsWith(route.url_match.path_prefix);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ─── Background auto-run ─────────────────────────────────────────────────────
+
+function isEligibleForBackgroundAutoRun(r, startedIds) {
+  if (r.status !== 'pending') return false;
+  if (startedIds.has(r.run_id)) return false;
+  if (r.skill_summary?.risk_level === 'low') return true;
+  if (r.approved_at && r.approved_permissions?.length > 0) return true;
+  return false;
+}
+
+async function syncAutoRunAlarm() {
+  try {
+    const { aegisAutoRunAllowed } = await chrome.storage.local.get('aegisAutoRunAllowed');
+    if (aegisAutoRunAllowed) {
+      // ~10 second polling interval to catch approvals on already-active tabs
+      chrome.alarms.create('aegisAutoRunPoll', { periodInMinutes: 10 / 60 });
+    } else {
+      chrome.alarms.clear('aegisAutoRunPoll');
+    }
+  } catch (_) {}
+}
 
 async function maybeAutoRunForTab(tab) {
   if (!tab?.id || !tab?.url) return;
@@ -219,11 +284,9 @@ async function maybeAutoRunForTab(tab) {
 
   const startedIds = await getAutoStartedRunIds();
 
-  const eligible = runs.filter(r =>
-    r.status === 'pending' &&
-    r.skill_summary?.risk_level === 'low' &&
-    !startedIds.has(r.run_id)
-  );
+  const eligible = runs
+    .filter(r => isEligibleForBackgroundAutoRun(r, startedIds))
+    .filter(r => doesTabMatchRoute(tab.url, r.route_summary ?? { domain: r.domain }));
 
   if (eligible.length !== 1) return;
 
@@ -510,6 +573,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ─── Background auto-run listeners ──────────────────────────────────────────
 
+// Sync alarm on service worker startup
+syncAutoRunAlarm();
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'aegisAutoRunPoll') return;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab) await maybeAutoRunForTab(tab);
+  } catch (_) {}
+});
+
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -528,6 +602,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'local') return;
+  if (!('aegisAutoRunAllowed' in changes)) return;
+  await syncAutoRunAlarm();
   if (!changes.aegisAutoRunAllowed?.newValue) return;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

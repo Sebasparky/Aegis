@@ -211,6 +211,113 @@ const PENDING_VERIFICATION = {
   }))
 };
 
+// Demo login — fake local credentials, aegis_controlled execution path.
+// Uses safe_literal value policies so replay.js fills the demo credentials
+// automatically. This is not real credential custody — it is a demo only.
+const LOGIN_STEPS = [
+  {
+    step_id: "step_login_1",
+    order: 1,
+    action: "fill",
+    intent: "fill_username",
+    description: "fill Username",
+    target: {
+      preferred_locator: { type: "label", name: "Username" },
+      fallback_locators: [
+        { type: "placeholder", value: "Username" },
+        { type: "css", value: "input[name=\"username\"]" },
+        { type: "role", role: "textbox", name: "Username" }
+      ],
+      confidence: 0.9
+    },
+    value_policy: { type: "safe_literal", value: "demo_user", store_value: true },
+    variable_binding: "username",
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_login_2",
+    order: 2,
+    action: "fill",
+    intent: "fill_password",
+    description: "fill Password",
+    target: {
+      preferred_locator: { type: "label", name: "Password" },
+      fallback_locators: [
+        { type: "placeholder", value: "Password" },
+        { type: "css", value: "input[type=\"password\"]" },
+        { type: "css", value: "input[name=\"password\"]" }
+      ],
+      confidence: 0.9
+    },
+    value_policy: { type: "safe_literal", value: "demo_pass", store_value: false },
+    variable_binding: "password",
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_login_3",
+    order: 3,
+    action: "click",
+    intent: "submit_login",
+    description: "click Sign In",
+    target: {
+      preferred_locator: { type: "role", role: "button", name: "Sign In" },
+      fallback_locators: [
+        { type: "css", value: "button[type=\"submit\"]" },
+        { type: "role", role: "button", name: "Login" }
+      ],
+      confidence: 0.9
+    },
+    approval_required: false,
+    confidence_required: 0.7
+  }
+];
+
+const LOGIN_VERIFICATION = {
+  route_id: "route_demo_login_001",
+  started_at: "2026-04-30T11:00:00.000Z",
+  completed_at: "2026-04-30T11:00:02.000Z",
+  passed: true,
+  step_results: [
+    {
+      step_id: "step_login_1",
+      order: 1,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "Username" }, found: true }],
+      selected_locator: { type: "label", name: "Username" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    },
+    {
+      step_id: "step_login_2",
+      order: 2,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "Password" }, found: true }],
+      selected_locator: { type: "label", name: "Password" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    },
+    {
+      step_id: "step_login_3",
+      order: 3,
+      action: "click",
+      locator_attempts: [{ locator: { type: "role", role: "button", name: "Sign In" }, found: true }],
+      selected_locator: { type: "role", role: "button", name: "Sign In" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    }
+  ],
+  errors: [],
+  promoted_trust_tier: "aegis_scanned"
+};
+
 const routes = [
   [
     "route_demo_banking_001",
@@ -384,6 +491,54 @@ const routes = [
       execution_mode: "aegis_controlled",
       sensitivity_level: "sensitive"
     }
+  ],
+  [
+    "route_demo_login_001",
+    {
+      route_id: "route_demo_login_001",
+      version: "1.0.0",
+      created_at: "2026-04-30T11:00:00.000Z",
+      last_verified_at: "2026-04-30T11:00:02.000Z",
+      creator_aegis_id: "aid_user_001",
+      trust_tier: "aegis_scanned",
+      domain: "localhost",
+      url_match: { hostname: "localhost", path_prefix: "/demo-login" },
+      workflow_name: "Demo Login",
+      workflow_description: "Fill username and password and click Sign In on the Aegis demo login page. Uses fake demo credentials. Proves aegis_controlled execution path with approval gating and outcome verification.",
+      risk_level: "high",
+      required_permissions: ["login"],
+      allowed_actions: ["login"],
+      forbidden_actions: [],
+      approval_gates: [],
+      confidence_threshold: 0.7,
+      steps: LOGIN_STEPS,
+      variables: [
+        {
+          name: "username",
+          label: "Username",
+          type: "text",
+          default_value: "demo_user",
+          step_id: "step_login_1"
+        },
+        {
+          name: "password",
+          label: "Password",
+          type: "text",
+          default_value: "demo_pass",
+          step_id: "step_login_2"
+        }
+      ],
+      run_count: 0,
+      success_rate: 0,
+      incident_count: 0,
+      verification_report: LOGIN_VERIFICATION,
+      marketplace_status: "approved",
+      submitted_for_review_at: "2026-04-30T11:30:00.000Z",
+      reviewed_at: "2026-04-30T11:30:00.000Z",
+      review_note: "Demo login workflow with fake local credentials. Aegis-controlled execution only — agents cannot fetch the recipe.",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
   ]
 ];
 
@@ -441,6 +596,25 @@ const skills = [
       approval_gates: [],
       created_at: "2026-04-30T12:20:00.000Z",
       published_at: "2026-04-30T12:20:00.000Z",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
+  ],
+  [
+    "skill_demo_login_001",
+    {
+      skill_id: "skill_demo_login_001",
+      route_id: "route_demo_login_001",
+      name: "Demo Login",
+      summary: "Log in to the Aegis demo login page using fake local credentials. Proves aegis_controlled execution: approval gating, Aegis-controlled fill, outcome verification, receipt.",
+      domain: "localhost",
+      risk_level: "high",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["login"],
+      forbidden_actions: [],
+      approval_gates: [],
+      created_at: "2026-04-30T11:30:00.000Z",
+      published_at: "2026-04-30T11:30:00.000Z",
       execution_mode: "aegis_controlled",
       sensitivity_level: "sensitive"
     }
@@ -604,9 +778,11 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 6 routes, 3 skills, 2 delegations written.");
+console.log("Demo data seeded. 7 routes, 4 skills, 2 delegations written.");
 console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
-console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved)");
+console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
 console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");
 console.log("  route_demo_pending_001   — Wikipedia Topic Lookup      (en.wikipedia.org, aegis_scanned, pending_review)");
-console.log("  skill_demo_wikipedia_001 — Wikipedia Search (Skill)    (/marketplace — install to add to Skill Library)");
+console.log("  route_demo_login_001     — Demo Login                  (localhost, aegis_scanned, approved, aegis_controlled)");
+console.log("  skill_demo_wikipedia_001 — Wikipedia Search (Skill)    (agent_runnable/routine — install to add to Skill Library)");
+console.log("  skill_demo_login_001     — Demo Login (Skill)          (aegis_controlled/sensitive — install to test approval + receipt flow)");

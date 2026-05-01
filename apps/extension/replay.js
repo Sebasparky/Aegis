@@ -155,6 +155,27 @@ if (window.__aegisReplayActive) {
     el.classList.remove('aegis-highlight', 'aegis-highlight-fill');
   }
 
+  // ── Value resolution ─────────────────────────────────────────────────────────
+
+  // Resolves the fill value for a step in priority order:
+  // 1. Runtime variable via variable_binding (e.g. variables.username)
+  // 2. Legacy query fallback for routes without explicit variable_binding
+  // 3. Safe literal default from the route definition
+  // Does not expose sensitive_redacted or runtime_variable policy values —
+  // those are handled separately by the caller.
+  function resolveFillValue(step, variables) {
+    if (step.variable_binding && variables[step.variable_binding]) {
+      return variables[step.variable_binding];
+    }
+    if (variables.query) {
+      return variables.query;
+    }
+    if (step.value_policy?.type === 'safe_literal') {
+      return step.value_policy.value ?? '';
+    }
+    return '';
+  }
+
   // ── Replay ───────────────────────────────────────────────────────────────────
 
   function sleep(ms) {
@@ -258,13 +279,7 @@ if (window.__aegisReplayActive) {
             showToast(`${label} — requires user input`);
             await sleep(1500);
           } else if (vp?.type === 'safe_literal') {
-            // Resolve fill value: variable_binding > query fallback > stored literal
-            let fillValue = vp.value ?? '';
-            if (step.variable_binding && variables[step.variable_binding]) {
-              fillValue = variables[step.variable_binding];
-            } else if (variables.query) {
-              fillValue = variables.query;
-            }
+            const fillValue = resolveFillValue(step, variables);
 
             if (fillValue) {
               el.focus();

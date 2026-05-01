@@ -33,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <NavLink href="/counterparty-agent" label="Agent Verification" />
           <NavLink href="/tasks" label="Agent Tasks" />
           <NavLink href="/delegations" label="Delegations" />
+          <NavLink href="/route-run-approvals" label="Run Approvals" />
         </aside>
         <main className="flex-1 overflow-auto p-8">{children}</main>
       </body>

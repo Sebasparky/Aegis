@@ -20,6 +20,7 @@ import type {
   Skill,
   InstalledSkill,
   RouteRunReceipt,
+  RouteRun,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -228,6 +229,26 @@ export const uninstallSkill = (skillId: string) =>
   request<{ uninstalled: boolean }>(`/api/skills/${skillId}/install`, { method: "DELETE" });
 export const listInstalledSkills = () =>
   request<(InstalledSkill & { skill: Skill })[]>("/api/installed-skills");
+
+// Route Runs
+export type RouteRunWithSummary = RouteRun & {
+  skill_summary: { skill_id: string; name: string; domain: string } | null;
+  route_summary: { route_id: string; workflow_name: string; trust_tier: string; step_count: number } | null;
+};
+export const listRouteRuns = (params?: { domain?: string; status?: string }) => {
+  const entries: [string, string][] = [];
+  if (params?.domain) entries.push(["domain", params.domain]);
+  if (params?.status) entries.push(["status", params.status]);
+  const qs = entries.length ? "?" + new URLSearchParams(entries).toString() : "";
+  return request<RouteRunWithSummary[]>(`/api/route-runs${qs}`);
+};
+export const approveRouteRun = (runId: string) =>
+  request<RouteRun>(`/api/route-runs/${runId}/approve`, { method: "POST", body: JSON.stringify({}) });
+export const rejectRouteRun = (runId: string, reason?: string) =>
+  request<RouteRun>(`/api/route-runs/${runId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "Rejected from approval queue." }),
+  });
 
 // Action API
 export const requestAction = (body: ActionRequest) =>

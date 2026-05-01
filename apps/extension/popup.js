@@ -1,3 +1,4 @@
+const autoRunToggle  = document.getElementById('auto-run-toggle');
 const dot            = document.getElementById('dot');
 const statusText     = document.getElementById('status-text');
 const domainText     = document.getElementById('domain-text');
@@ -163,6 +164,47 @@ function renderPendingRuns(domain, resp) {
   section.innerHTML = header + items;
 }
 
+// ── Auto-run ─────────────────────────────────────────────────────────────────
+
+async function maybeAutoRun(runs, tab) {
+  if (!tab?.id) return;
+
+  const localResult = await chrome.storage.local.get('aegisAutoRunAllowed');
+  if (!localResult.aegisAutoRunAllowed) return;
+
+  const stored = await chrome.storage.session.get('aegisAutoStartedRunIds');
+  const startedIds = new Set(stored.aegisAutoStartedRunIds ?? []);
+
+  const eligible = (runs ?? []).filter(r =>
+    r.status === 'pending' &&
+    r.skill_summary?.risk_level === 'low' &&
+    !startedIds.has(r.run_id)
+  );
+
+  const section = document.getElementById('pending-run-section');
+
+  if (eligible.length === 0) return;
+
+  if (eligible.length > 1) {
+    const note = document.createElement('div');
+    note.className = 'auto-run-note multi';
+    note.textContent = 'Multiple pending runs found. Choose one manually.';
+    section?.appendChild(note);
+    return;
+  }
+
+  const run = eligible[0];
+  startedIds.add(run.run_id);
+  await chrome.storage.session.set({ aegisAutoStartedRunIds: [...startedIds] });
+
+  const note = document.createElement('div');
+  note.className = 'auto-run-note';
+  note.textContent = 'Auto-starting trusted run…';
+  section?.insertBefore(note, section.firstChild);
+
+  chrome.runtime.sendMessage({ action: 'start_route_run', tabId: tab.id, run });
+}
+
 document.addEventListener('click', (e) => {
   if (!e.target.matches('.start-run-btn')) return;
   const btn = e.target;
@@ -191,6 +233,10 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
   renderEvents(result.aegisRecorderEvents ?? []);
 });
 
+chrome.storage.local.get('aegisAutoRunAllowed', (res) => {
+  if (autoRunToggle) autoRunToggle.checked = res.aegisAutoRunAllowed === true;
+});
+
 // Show preview section when popup is on a Wikipedia tab; pre-fill route_id from URL hash.
 // Also query installed skills for the current domain on every popup open.
 (async () => {
@@ -209,7 +255,10 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
       );
       chrome.runtime.sendMessage(
         { action: 'list_pending_runs_for_domain', domain: u.hostname },
-        (resp) => renderPendingRuns(u.hostname, resp)
+        (resp) => {
+          renderPendingRuns(u.hostname, resp);
+          maybeAutoRun(resp?.runs ?? [], tab);
+        }
       );
     } catch (_) {}
   }
@@ -302,6 +351,12 @@ previewBtn.addEventListener('click', async () => {
     previewResult.className = 'result-err';
   }
 });
+
+if (autoRunToggle) {
+  autoRunToggle.addEventListener('change', () => {
+    chrome.storage.local.set({ aegisAutoRunAllowed: autoRunToggle.checked });
+  });
+}
 
 copyBtn.addEventListener('click', async () => {
   const result = await chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents']);

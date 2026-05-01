@@ -14,6 +14,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT re-implement Delegation Token Auth. Bearer token enforcement on `POST /api/skills/:skillId/runs` is complete. `agent_id` is resolved server-side from the token — do not accept it from the request body.**
 >
 > **Also: do NOT rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification. All are complete. Do not re-plan, re-implement, or recreate any part of the extension auto-run or replay reliability work.**
+>
+> **Also: do NOT rebuild the agent-runnable recipe path or the controlled sensitive login path. Both are complete. Do not re-plan or re-implement `get_agent_runnable_workflow`, `NOT_AGENT_RUNNABLE` refusal, or the Demo Login approval/auto-run flow.**
 
 ---
 
@@ -141,6 +143,26 @@ Everything below is implemented and working.
 - The user/agent must still navigate to or activate the matching domain tab in the current prototype
 - Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
 
+### Agent-Runnable Workflow Recipe Path
+- `execution_mode: "agent_runnable"` skills expose a route recipe via `GET /api/routes/:routeId`
+- MCP tool `get_agent_runnable_workflow(skill_id)` fetches the recipe and returns it to the agent
+- Agent executes the recipe steps (fill, click, navigate) in its own browser session — no RouteRun, no extension handoff, no receipt
+- `aegis_controlled` skills return `{ ok: false, error: { code: "NOT_AGENT_RUNNABLE" } }` when `get_agent_runnable_workflow` is called — agent must use `request_skill_run` instead
+- Wikipedia Search demonstrated end-to-end: Claude Code discovered skill, fetched recipe, executed via Playwright, reached search results page
+- **Validated 2026-05-01**
+- Do not rebuild unless explicitly requested
+
+### Controlled Sensitive Execution Path (Demo Login)
+- Demo Login skill: `execution_mode: "aegis_controlled"`, `sensitivity_level: "sensitive"`, domain `localhost:3000`, `url_match: "/demo-login"`
+- `get_agent_runnable_workflow` refuses with `NOT_AGENT_RUNNABLE` (correct — agent must not handle credentials directly)
+- `request_skill_run` creates `status: pending_approval` (login permission is approval-required in the collar)
+- User approves in `/route-run-approvals` UI → status transitions to `pending`
+- Extension auto-runs the approved run only when the active tab matches domain AND `url_match` (`/demo-login`) — prevents execution on wrong localhost pages (e.g., `/route-run-approvals`)
+- Run completed at `/demo-login/success`; receipt `rrreceipt_d5614360e907`, run `run_054ca6e8022b`
+- Demo Login uses fake seeded credentials — real credential custody/pass vault is NOT implemented
+- **Validated 2026-05-01**
+- Do not rebuild unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -181,6 +203,10 @@ Session rules:
 Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01. Low-risk pending RouteRuns execute automatically when the matching domain tab is active, with atomic fill verification and browser outcome verification before marking completed.
 
 External Agent Integration Hardening is also **complete** — validated via the Aegis MCP Tool Server on 2026-05-01.
+
+Agent-runnable workflow recipe path is **complete** — validated 2026-05-01. `execution_mode="agent_runnable"` skills surface a tested route recipe via `get_agent_runnable_workflow`; agents execute it in their own browser session without a RouteRun or extension handoff.
+
+Aegis-controlled sensitive execution path is **complete** — validated 2026-05-01. `execution_mode="aegis_controlled"` skills refuse recipe access with `NOT_AGENT_RUNNABLE`; agents use `request_skill_run`; approval-gated runs require user sign-off before the extension auto-runs only on the matching route context (`url_match` enforced). Demo Login receipt `rrreceipt_d5614360e907` confirms the full path.
 
 **Candidate next milestones:**
 

@@ -111,6 +111,10 @@ The agent receives tools from the environment. It does not need to know about Ae
 
 **Execution mode:** Each skill returned by `discover_installed_skills` includes `execution_mode` and `sensitivity_level`. If `execution_mode` is `"agent_runnable"`, Aegis has a verified route recipe the agent can fetch with `get_agent_runnable_workflow(skill_id)` and execute in its own browser session — no extension handoff, no RouteRun, agent stays in control. If `execution_mode` is `"aegis_controlled"`, the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and the agent must call `request_skill_run` — Aegis takes execution custody and produces an audit receipt.
 
+**Validated execution paths (2026-05-01):**
+- `agent_runnable` path: Claude Code discovered Wikipedia Search, fetched the recipe via `get_agent_runnable_workflow`, executed it via Playwright in its own browser session. No RouteRun or extension handoff.
+- `aegis_controlled` path: Claude Code encountered Demo Login (`execution_mode: "aegis_controlled"`), correctly received `NOT_AGENT_RUNNABLE` on recipe fetch, used `request_skill_run`, waited for user approval in `/route-run-approvals`, and received receipt `rrreceipt_d5614360e907` after the extension auto-ran the approved run at `/demo-login`.
+
 ### How it works
 
 1. Agent runtime connects to the server via stdio
@@ -161,7 +165,7 @@ claude mcp add aegis -- node /path/to/aegis/examples/aegis-tool-server.mjs
 | Tool | Description |
 |---|---|
 | `discover_installed_skills` | Find skills available to this agent on a domain; includes `execution_mode` |
-| `get_agent_runnable_workflow` | Fetch the route recipe for an `agent_runnable` skill to execute in your own browser |
+| `get_agent_runnable_workflow` | Fetch the route recipe for an `agent_runnable` skill to execute in your own browser; returns `NOT_AGENT_RUNNABLE` if the skill is `aegis_controlled` — call `request_skill_run` instead |
 | `request_skill_run` | Ask Aegis to execute an `aegis_controlled` workflow (extension handoff) |
 | `get_route_run_status` | Poll run status until terminal |
 | `get_route_run_receipt` | Read the audit record after completion |
@@ -179,3 +183,6 @@ claude mcp add aegis -- node /path/to/aegis/examples/aegis-tool-server.mjs
 - Calls only public Aegis HTTP APIs. Does not import internal Aegis modules.
 - Does not execute browser actions. Execution is driven by the Aegis Chrome extension after a run is requested — automatically via background auto-run (when enabled and conditions are met) or manually via the popup Start Run button.
 - The user or agent must still navigate to or activate the matching domain tab in the current prototype.
+- `get_agent_runnable_workflow` returns `NOT_AGENT_RUNNABLE` for `aegis_controlled` skills — the agent must call `request_skill_run` for those workflows, not attempt browser execution directly.
+- Route context matching for `aegis_controlled` runs uses domain + optional `url_match`. The extension will not execute a controlled run on the wrong page (e.g., a run scoped to `/demo-login` will not fire on `/route-run-approvals`).
+- Demo Login uses fake seeded credentials for demo purposes. Real credential custody is not implemented.

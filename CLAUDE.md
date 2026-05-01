@@ -147,12 +147,18 @@ Aegis records what authority was granted, what route was followed, what actions 
 - Delegation token auth (v1): `POST /api/skills/:skillId/runs` requires `Authorization: Bearer <token>`; token is `AgentDelegation.token_id`; missing token → `AUTH_REQUIRED`; invalid token → `INVALID_TOKEN`; `agent_id`, `delegation_id`, `collar_id` derived from resolved delegation (never trusted from request body); `fake-agent-create-run.mjs` uses `AEGIS_AGENT_TOKEN` env var
 - Aegis MCP Tool Server: `examples/aegis-tool-server.mjs` exposes `discover_installed_skills`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt` as MCP tools; connect via `claude mcp add aegis -- node /path/to/aegis-tool-server.mjs`; first successful end-to-end test completed 2026-05-01 (Claude Code discovered Wikipedia Search, requested RouteRun for query Wisconsin, user started run via extension, Claude Code polled to completion, read receipt `rrreceipt_20b593b94de7`); do not rebuild unless explicitly requested
 - Background auto-run (reliable, opt-in): extension background service worker watches the active tab for low-risk `status=pending` RouteRuns; executes one eligible run automatically without opening the popup; fill values set atomically via native HTMLInputElement setter and verified before proceeding; Wikipedia search submit uses `findBestSearchInput` + `form.requestSubmit()` to ensure the submitted form field holds `variables.query`; `background.js` verifies final tab URL/title before marking a run `completed` (navigation-based routes cannot send `replay_done` — the watcher resolves this); bad outcomes fail instead of producing incorrect completed receipts; validated 2026-05-01 (Wisconsin → `rrreceipt_d9a6ca5ae205`, Alan Turing → `rrreceipt_8f11681c5ab1`); do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
+- Agent-runnable workflow recipe path (complete, validated 2026-05-01): `execution_mode="agent_runnable"` skills return a route recipe via `get_agent_runnable_workflow`; agent executes the recipe in its own browser session; no RouteRun, no extension handoff; Wikipedia Search demonstrated end-to-end (Claude Code + Playwright); do not rebuild unless explicitly requested
+- Controlled sensitive execution path (complete, validated 2026-05-01): `execution_mode="aegis_controlled"` skills refuse `get_agent_runnable_workflow` with `NOT_AGENT_RUNNABLE`; agent calls `request_skill_run`; runs requiring sensitive permissions create `pending_approval`; user approves in `/route-run-approvals`; extension auto-runs only on matching route context (domain + `url_match`); Demo Login validated at `/demo-login/success` (receipt `rrreceipt_d5614360e907`, run `run_054ca6e8022b`); Demo Login uses fake seeded credentials only — real credential custody is not implemented; do not rebuild unless explicitly requested
 
 ## Next Near-Term Milestone
 
 Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01. Low-risk pending RouteRuns execute automatically when the matching domain tab is active, with fill verification and outcome verification before marking completed.
 
 External Agent Integration Hardening is also **complete** — validated via the Aegis MCP Tool Server on 2026-05-01. The full external-agent flow works: third-party agent runtime → MCP tool discovery → Aegis HTTP contract → delegated token → policy enforcement → extension execution → receipt.
+
+Agent-runnable workflow recipe path is **complete** — validated 2026-05-01. `execution_mode="agent_runnable"` skills surface a tested route recipe via `get_agent_runnable_workflow`; agents execute it in their own browser session without a RouteRun or extension handoff.
+
+Aegis-controlled sensitive execution path is **complete** — validated 2026-05-01. `execution_mode="aegis_controlled"` skills refuse recipe access; agents use `request_skill_run`; approval-gated runs require user sign-off before the extension auto-runs only on the matching route context (`url_match` enforced). Demo Login receipt `rrreceipt_d5614360e907` confirms the full path.
 
 Candidate next milestones:
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
@@ -175,6 +181,9 @@ Before making any changes:
 - Keep domain logic separate from UI
 - Preserve all existing service boundaries: CollarService, PassService, BrowserSessionService, SensitiveActionDetector, PolicyService, ApprovalService, RunnerService, ReceiptService, ReputationService
 - Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
+- Do not rebuild the agent-runnable recipe path or the controlled sensitive login path unless explicitly requested
+- Do not treat `execution_mode: "agent_runnable"` as permission to skip Aegis — it means call `get_agent_runnable_workflow` to get the Aegis-tested route recipe, then execute it in the agent's own browser
+- Do not run `aegis_controlled` routes based on domain alone — route context matching uses domain + optional `url_match`; a controlled route must not execute on the wrong page (e.g., `/route-run-approvals` instead of `/demo-login`)
 
 ## Terminology — Always Use
 
@@ -233,6 +242,8 @@ Before making any changes:
 - Store raw typed values from recording without a value policy classification — sensitive fields must produce `sensitive_redacted` or `runtime_variable`
 - Use raw coordinates or XPath as the primary locator in compiled routes — prefer role, label, or placeholder locators
 - Claim that Aegis removes all risk or guarantees agent safety
+- Treat `execution_mode: "agent_runnable"` as "ignore Aegis" — agent_runnable means fetch and follow the Aegis route recipe, not bypass Aegis entirely
+- Claim Demo Login demonstrates real credential custody — it uses fake seeded demo credentials; real credential custody/pass vault is not implemented
 
 ## Core Lines
 

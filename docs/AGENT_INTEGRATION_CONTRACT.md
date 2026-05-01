@@ -46,6 +46,7 @@ Every skill returned by `discover_installed_skills` carries two fields that tell
 | Wikipedia Search | `en.wikipedia.org` | `agent_runnable` | `routine` |
 | Demo Purchase Skill | `test.aegis.local` | `aegis_controlled` | `sensitive` |
 | Demo Blocked Skill | `test.aegis.local` | `aegis_controlled` | `sensitive` |
+| Demo Login | `localhost:3000` | `aegis_controlled` | `sensitive` |
 
 ---
 
@@ -201,6 +202,20 @@ No auth required. `routeId` is the `route_id` from Step 1's skill object.
 ```
 
 Execute each step in order in your own browser session. Use `preferred_locator` first; try `fallback_locators` in order if needed. For steps with `variable_binding`, substitute the runtime value the user supplied. No RouteRun, no extension, no receipt — the agent is in control.
+
+**Error: called on an `aegis_controlled` skill**
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "NOT_AGENT_RUNNABLE",
+    "message": "This skill requires Aegis-controlled execution. Use request_skill_run instead."
+  }
+}
+```
+
+If you receive `NOT_AGENT_RUNNABLE`, the skill's `execution_mode` is `aegis_controlled`. Do not attempt to replicate the workflow yourself. Call `request_skill_run` (Step 2).
 
 ---
 
@@ -458,6 +473,7 @@ An agent only observes status changes — it never drives them.
 
 - User has enabled the auto-run toggle in the extension popup (opt-in, off by default)
 - The active tab domain matches the run's domain
+- The active tab URL matches the run's `url_match` pattern (if set on the route) — domain alone is not sufficient for routes that specify a URL context; a `url_match: "/demo-login"` route will not execute on `/route-run-approvals`
 - The run has `risk_level === "low"`
 - Exactly one eligible pending run exists for that domain (multiple eligible runs require manual choice)
 - The run is not `pending_approval` (those require explicit user approval first)
@@ -518,3 +534,4 @@ AEGIS_AUTO_START=true node apps/api/scripts/fake-agent-create-run.mjs
 - This is not production-ready. Token management, key rotation, rate limiting, and multi-user auth are not implemented.
 - Routes are not arbitrary executable scripts. They are declarative, inspectable, versioned workflow objects reviewed before publication.
 - This is not a general browsing or web research layer. For non-sensitive reading, searching, and summarization, agents should use their own tools.
+- This is not a credential custody or pass vault system. Demo Login uses fake seeded credentials for demo purposes only. Real credential injection is not implemented.

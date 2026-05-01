@@ -15,36 +15,63 @@ function sleep(ms) {
 async function verifyTabOutcome(tabId, domain, variables) {
   if (domain !== 'en.wikipedia.org' || !variables?.query) return null;
 
-  const expected     = variables.query.trim();
-  const expectedLow  = expected.toLowerCase();
-  const encExpected  = encodeURIComponent(expected);
-  const deadline     = Date.now() + 3000;
+  const rawQuery   = variables.query.trim();
+  const normalized = rawQuery.toLowerCase().replace(/\s+/g, ' ');
+  const deadline   = Date.now() + 8000;
 
-  await sleep(500); // let navigation start before first check
+  await sleep(300); // brief pause to let navigation begin
 
   while (Date.now() < deadline) {
     try {
       const tab = await chrome.tabs.get(tabId);
+      const url  = tab.url ?? '';
+
+      // Check URL as soon as navigation starts — tab.url is set even during 'loading'.
+      try {
+        const parsed = new URL(url);
+        if (parsed.hostname === 'en.wikipedia.org') {
+          if (parsed.pathname.startsWith('/wiki/')) {
+            // Article URL: decode slug, normalize spaces/underscores, compare exactly.
+            const slug = decodeURIComponent(parsed.pathname.slice(6))
+              .replace(/_/g, ' ')
+              .toLowerCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (slug === normalized) return null;
+          } else if (parsed.pathname === '/w/index.php') {
+            // Search results URL: empty search param is a definitive failure.
+            const searchParam = parsed.searchParams.get('search') ?? '';
+            if (!searchParam.trim()) {
+              return `outcome verification failed: form submitted with empty search (url=${url})`;
+            }
+            const searchNorm = searchParam.toLowerCase().replace(/\s+/g, ' ').trim();
+            if (searchNorm === normalized || searchNorm.includes(normalized)) return null;
+          }
+        }
+      } catch (_) {
+        // Unparseable URL — keep polling.
+      }
+
+      // Secondary check via tab title once page is fully loaded.
       if (tab.status === 'complete') {
-        const url   = tab.url  ?? '';
-        const title = (tab.title ?? '').toLowerCase();
-        const match =
-          (url.includes('/wiki/') && title.includes(expectedLow)) ||
-          url.toLowerCase().includes(`search=${expectedLow}`) ||
-          url.includes(`search=${encExpected}`);
-        if (match) return null;
+        const titleCore = (tab.title ?? '')
+          .replace(/ [-–—] Wikipedia$/, '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (titleCore === normalized || titleCore.includes(normalized)) return null;
       }
     } catch (_) {
-      return `outcome verification failed: tab not accessible after navigating for "${expected}"`;
+      return `outcome verification failed: tab not accessible after navigating for "${rawQuery}"`;
     }
     await sleep(150);
   }
 
   try {
     const tab = await chrome.tabs.get(tabId);
-    return `outcome verification failed: expected Wikipedia result for "${expected}", url=${tab.url ?? 'unknown'}, title=${tab.title ?? 'unknown'}`;
+    return `outcome verification failed: expected Wikipedia result for "${rawQuery}", url=${tab.url ?? 'unknown'}, title=${tab.title ?? 'unknown'}`;
   } catch (_) {
-    return `outcome verification failed: expected Wikipedia result for "${expected}"`;
+    return `outcome verification failed: expected Wikipedia result for "${rawQuery}"`;
   }
 }
 

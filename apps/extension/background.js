@@ -273,6 +273,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
         }
 
+        // Transition run from pending → running before injecting replay
+        try {
+          const startRes = await fetch(`http://localhost:4000/api/route-runs/${run.run_id}/start`, { method: 'POST' });
+          const startBody = await startRes.json();
+          if (!startRes.ok || !startBody.ok) {
+            sendResponse({ ok: false, error: startBody?.error?.message ?? 'Failed to start run.' });
+            break;
+          }
+        } catch (_) {
+          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
+          break;
+        }
+
         try {
           await chrome.scripting.executeScript({ target: { tabId: runTabId }, files: ['replay.js'] });
         } catch (err) {

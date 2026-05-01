@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { RouteRun, RouteRunReceipt } from "@aegis/types";
+import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
 import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
@@ -36,6 +36,10 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
     ...(error ? { error } : {}),
   };
   return receipt;
+}
+
+function isTerminalStatus(status: RouteRunStatus): boolean {
+  return status === "completed" || status === "failed" || status === "blocked";
 }
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost"]);
@@ -259,8 +263,11 @@ export async function routeRunRoutes(server: FastifyInstance) {
     async (req, reply) => {
       const run = routeRuns.get(req.params.runId);
       if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
-      if (run.status === "completed" || run.status === "failed") {
+      if (isTerminalStatus(run.status)) {
         return sendError(reply, 409, "ALREADY_TERMINAL", `Run is already in terminal status "${run.status}".`);
+      }
+      if (run.status !== "running") {
+        return sendError(reply, 409, "INVALID_STATE", `Run cannot be completed from status "${run.status}". Expected "running".`);
       }
 
       run.status = "completed";
@@ -289,8 +296,11 @@ export async function routeRunRoutes(server: FastifyInstance) {
   }>("/api/route-runs/:runId/fail", async (req, reply) => {
     const run = routeRuns.get(req.params.runId);
     if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
-    if (run.status === "completed" || run.status === "failed") {
+    if (isTerminalStatus(run.status)) {
       return sendError(reply, 409, "ALREADY_TERMINAL", `Run is already in terminal status "${run.status}".`);
+    }
+    if (run.status !== "running") {
+      return sendError(reply, 409, "INVALID_STATE", `Run cannot be failed from status "${run.status}". Expected "running".`);
     }
 
     run.status = "failed";
@@ -349,4 +359,26 @@ export async function routeRunRoutes(server: FastifyInstance) {
     schedulePersist();
     return { ok: true, data: run };
   });
+
+  /**
+   * POST /api/route-runs/:runId/start
+   *
+   * Transition a pending run to running. Called by the extension
+   * before injecting replay.js.
+   */
+  server.post<{ Params: { runId: string } }>(
+    "/api/route-runs/:runId/start",
+    async (req, reply) => {
+      const run = routeRuns.get(req.params.runId);
+      if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
+      if (run.status !== "pending") {
+        return sendError(reply, 409, "INVALID_STATE", `Run cannot be started from status "${run.status}". Expected "pending".`);
+      }
+      run.status = "running";
+      run.started_at = new Date().toISOString();
+      routeRuns.set(run.run_id, run);
+      schedulePersist();
+      return { ok: true, data: run };
+    }
+  );
 }

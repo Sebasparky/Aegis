@@ -130,17 +130,60 @@ export async function routeRunRoutes(server: FastifyInstance) {
     if (collar_id) {
       const collar = collars.get(collar_id);
       if (collar && collar.status === "active") {
-        const blocked = route.required_permissions.filter(
-          (perm) => !collar.allowed_actions.includes(perm as any)
-        );
-        if (blocked.length > 0) {
+        const needsApproval: string[] = [];
+        const hardBlocked: string[] = [];
+
+        for (const perm of route.required_permissions) {
+          if (collar.blocked_actions.includes(perm as any)) {
+            hardBlocked.push(perm);
+          } else if (
+            !collar.allowed_actions.includes(perm as any) &&
+            !collar.approval_required_actions.includes(perm as any)
+          ) {
+            hardBlocked.push(perm);
+          } else if (collar.approval_required_actions.includes(perm as any)) {
+            needsApproval.push(perm);
+          }
+          // else: in allowed_actions — fine
+        }
+
+        if (hardBlocked.length > 0) {
           return sendError(
             reply,
             403,
             "COLLAR_BLOCKED",
             "This agent's collar does not allow this route.",
-            `Required permission(s) not in collar allowed_actions: ${blocked.join(", ")}.`
+            `Permission(s) blocked or unknown: ${hardBlocked.join(", ")}.`
           );
+        }
+
+        if (needsApproval.length > 0) {
+          const run: RouteRun = {
+            run_id: newId("run"),
+            skill_id: skill.skill_id,
+            route_id: route.route_id,
+            installed_skill_id: installedSkill.installed_skill_id,
+            user_id: MOCK_USER_ID,
+            domain: skill.domain,
+            status: "pending_approval",
+            approval_required_permissions: needsApproval,
+            created_at: new Date().toISOString(),
+            ...(agent_id ? { agent_id } : {}),
+            ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+            ...(delegation_id ? { delegation_id } : {}),
+            ...(collar_id ? { collar_id } : {}),
+          };
+          routeRuns.set(run.run_id, run);
+          schedulePersist();
+          return {
+            ok: true,
+            data: {
+              run,
+              approval_required: true,
+              approval_required_permissions: needsApproval,
+              message: `This run requires approval for: ${needsApproval.join(", ")}.`,
+            },
+          };
         }
       }
     }
@@ -262,6 +305,47 @@ export async function routeRunRoutes(server: FastifyInstance) {
       routeRunReceipts.set(receipt.receipt_id, receipt);
     }
 
+    schedulePersist();
+    return { ok: true, data: run };
+  });
+
+  /**
+   * POST /api/route-runs/:runId/approve
+   *
+   * Approve a pending_approval run, making it executable by the extension.
+   */
+  server.post<{ Params: { runId: string } }>(
+    "/api/route-runs/:runId/approve",
+    async (req, reply) => {
+      const run = routeRuns.get(req.params.runId);
+      if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
+      if (run.status !== "pending_approval") {
+        return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
+      }
+      run.status = "pending";
+      routeRuns.set(run.run_id, run);
+      schedulePersist();
+      return { ok: true, data: run };
+    }
+  );
+
+  /**
+   * POST /api/route-runs/:runId/reject
+   *
+   * Reject a pending_approval run, blocking execution.
+   */
+  server.post<{
+    Params: { runId: string };
+    Body: { reason?: string };
+  }>("/api/route-runs/:runId/reject", async (req, reply) => {
+    const run = routeRuns.get(req.params.runId);
+    if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
+    if (run.status !== "pending_approval") {
+      return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
+    }
+    run.status = "blocked";
+    run.error = req.body?.reason ?? "Rejected by user.";
+    routeRuns.set(run.run_id, run);
     schedulePersist();
     return { ok: true, data: run };
   });

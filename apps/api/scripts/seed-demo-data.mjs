@@ -352,6 +352,32 @@ const routes = [
       incident_count: 0,
       marketplace_status: "private"
     }
+  ],
+  [
+    "route_demo_blocked_001",
+    {
+      route_id: "route_demo_blocked_001",
+      version: "1.0.0",
+      created_at: "2026-04-30T12:20:00.000Z",
+      last_verified_at: "2026-04-30T12:20:01.000Z",
+      creator_aegis_id: "aid_user_001",
+      trust_tier: "aegis_scanned",
+      domain: "en.wikipedia.org",
+      workflow_name: "Demo Blocked Route",
+      workflow_description: "Demo route requiring identity_disclosure — used to test hard collar blocking.",
+      risk_level: "critical",
+      required_permissions: ["identity_disclosure"],
+      allowed_actions: ["identity_disclosure"],
+      forbidden_actions: [],
+      approval_gates: [],
+      confidence_threshold: 0.7,
+      steps: [],
+      variables: [],
+      run_count: 0,
+      success_rate: 0,
+      incident_count: 0,
+      marketplace_status: "private"
+    }
   ]
 ];
 
@@ -388,6 +414,23 @@ const skills = [
       approval_gates: [],
       created_at: "2026-04-30T12:10:00.000Z",
       published_at: "2026-04-30T12:10:00.000Z"
+    }
+  ],
+  [
+    "skill_demo_blocked_001",
+    {
+      skill_id: "skill_demo_blocked_001",
+      route_id: "route_demo_blocked_001",
+      name: "Demo Blocked Skill",
+      summary: "Demo skill requiring identity_disclosure — used to test hard collar blocking.",
+      domain: "en.wikipedia.org",
+      risk_level: "critical",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["identity_disclosure"],
+      forbidden_actions: [],
+      approval_gates: [],
+      created_at: "2026-04-30T12:20:00.000Z",
+      published_at: "2026-04-30T12:20:00.000Z"
     }
   ]
 ];
@@ -549,7 +592,7 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 5 routes, 2 skills, 2 delegations written.");
+console.log("Demo data seeded. 6 routes, 3 skills, 2 delegations written.");
 console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved)");
 console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");

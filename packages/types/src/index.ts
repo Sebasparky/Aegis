@@ -524,7 +524,7 @@ export interface RouteRunReceipt {
 
 // ─── Aegis Rails — RouteRun ───────────────────────────────────────────────────
 
-export type RouteRunStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+export type RouteRunStatus = "pending" | "pending_approval" | "running" | "completed" | "failed" | "blocked";
 
 export interface RouteRun {
   run_id: string;
@@ -542,6 +542,7 @@ export interface RouteRun {
   error?: string;
   delegation_id?: string;
   collar_id?: string;
+  approval_required_permissions?: string[];
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

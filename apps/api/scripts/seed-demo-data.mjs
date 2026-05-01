@@ -15,6 +15,20 @@ if (existsSync(STORE_PATH)) {
   console.log("Backed up existing store to aegis-store.backup.json");
 }
 
+// Dev-only demo vault pass. Uses fake seeded credentials only.
+// The actual secret value lives in devSecretVault in store/index.ts — NOT here.
+const DEMO_VAULT_PASS = {
+  pass_id: "pass_vault_demo_login_001",
+  user_id: "user_001",
+  label: "Demo Login Account",
+  kind: "login_password",
+  domain: "localhost",
+  username: "demo_user",
+  secret_ref: "devvault://demo-login-password",
+  created_at: "2026-04-30T12:00:00.000Z",
+  updated_at: "2026-04-30T12:00:00.000Z"
+};
+
 const BANKING_STEPS = [
   {
     step_id: "step_seed_b1",
@@ -230,7 +244,7 @@ const LOGIN_STEPS = [
       ],
       confidence: 0.9
     },
-    value_policy: { type: "safe_literal", value: "demo_user", store_value: true },
+    value_policy: { type: "pass_field", pass_id: "pass_vault_demo_login_001", field: "username", store_value: false },
     variable_binding: "username",
     approval_required: false,
     confidence_required: 0.7
@@ -250,7 +264,7 @@ const LOGIN_STEPS = [
       ],
       confidence: 0.9
     },
-    value_policy: { type: "safe_literal", value: "demo_pass", store_value: false },
+    value_policy: { type: "secret_ref", pass_id: "pass_vault_demo_login_001", field: "password", store_value: false },
     variable_binding: "password",
     approval_required: false,
     confidence_required: 0.7
@@ -524,7 +538,7 @@ const routes = [
           name: "password",
           label: "Password",
           type: "text",
-          default_value: "demo_pass",
+          default_value: "",
           step_id: "step_login_2"
         }
       ],
@@ -774,7 +788,8 @@ const store = {
   ],
   routes,
   skills,
-  installedSkills: []
+  installedSkills: [],
+  aegisVaultPasses: [["pass_vault_demo_login_001", DEMO_VAULT_PASS]]
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));

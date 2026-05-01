@@ -157,23 +157,36 @@ if (window.__aegisReplayActive) {
 
   // ── Value resolution ─────────────────────────────────────────────────────────
 
-  // Resolves the fill value for a step in priority order:
-  // 1. Runtime variable via variable_binding (e.g. variables.username)
-  // 2. Legacy query fallback for routes without explicit variable_binding
-  // 3. Safe literal default from the route definition
+  // Resolves the fill value for a step. Returns { value, redacted }.
+  // For pass_field and secret_ref: calls the Aegis API (run must be in running state).
+  // For runtime variables and safe_literal: resolves locally.
   // Does not expose sensitive_redacted or runtime_variable policy values —
   // those are handled separately by the caller.
-  function resolveFillValue(step, variables) {
+  async function resolveFillValue(step, variables, run_id) {
+    const vp = step.value_policy;
+    if (vp?.type === 'pass_field' || vp?.type === 'secret_ref') {
+      if (!run_id || !vp.pass_id || !step.step_id) {
+        throw new Error('Missing context for pass value resolution');
+      }
+      const resp = await fetch(`http://localhost:4000/api/route-runs/${run_id}/resolve-value`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ step_id: step.step_id }),
+      });
+      const json = await resp.json();
+      if (!json.ok) throw new Error(`resolve-value failed: ${json.error?.code ?? 'unknown'}`);
+      return { value: json.data.value, redacted: json.data.redacted };
+    }
     if (step.variable_binding && variables[step.variable_binding]) {
-      return variables[step.variable_binding];
+      return { value: variables[step.variable_binding], redacted: false };
     }
     if (variables.query) {
-      return variables.query;
+      return { value: variables.query, redacted: false };
     }
-    if (step.value_policy?.type === 'safe_literal') {
-      return step.value_policy.value ?? '';
+    if (vp?.type === 'safe_literal') {
+      return { value: vp.value ?? '', redacted: false };
     }
-    return '';
+    return { value: '', redacted: false };
   }
 
   // ── Replay ───────────────────────────────────────────────────────────────────
@@ -278,8 +291,8 @@ if (window.__aegisReplayActive) {
           if (vp?.type === 'sensitive_redacted' || vp?.type === 'runtime_variable') {
             showToast(`${label} — requires user input`);
             await sleep(1500);
-          } else if (vp?.type === 'safe_literal') {
-            const fillValue = resolveFillValue(step, variables);
+          } else {
+            const { value: fillValue, redacted } = await resolveFillValue(step, variables, run_id);
 
             if (fillValue) {
               el.focus();
@@ -288,11 +301,14 @@ if (window.__aegisReplayActive) {
               setInputValue(el, fillValue);
               const verified = await waitForValue(el, fillValue, 1000);
               if (!verified) {
+                if (redacted) {
+                  throw new Error('fill verification failed for secure value');
+                }
                 throw new Error(`fill verification failed: expected "${fillValue}", got "${el.value}"`);
               }
-              showToast(`${label} — filled "${fillValue}"`);
+              showToast(redacted ? `${label} — filled secure value` : `${label} — filled "${fillValue}"`);
               await sleep(400);
-              lastFilled = { element: el, value: fillValue };
+              lastFilled = { element: el, value: redacted ? '[secure]' : fillValue };
             }
           }
         } else {

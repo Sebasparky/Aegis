@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, devSecretVault, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
@@ -34,6 +34,11 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
     ...(run.agent_id ? { agent_id: run.agent_id } : {}),
     ...(run.variables && Object.keys(run.variables).length > 0 ? { variables: run.variables } : {}),
     ...(error ? { error } : {}),
+    ...(run.credential_used ? {
+      credential_used: true,
+      pass_ids_used: run.pass_ids_used ?? [],
+      secret_values_revealed_to_agent: false as const,
+    } : {}),
   };
   return receipt;
 }
@@ -107,11 +112,17 @@ export async function routeRunRoutes(server: FastifyInstance) {
     }
 
     if (route.variables && route.variables.length > 0) {
+      // Value policy types resolved internally — never required from the agent.
+      const internalValuePolicyTypes = new Set(["pass_field", "secret_ref", "safe_literal"]);
+
       const missingRequired: string[] = [];
       for (const v of route.variables) {
         const hasDefault = v.default_value !== undefined && v.default_value !== "";
         const supplied = variables && v.name in variables;
-        if (!hasDefault && !supplied) {
+        // Skip if the bound step resolves the value internally (pass, secret, or literal).
+        const boundStep = route.steps.find((s) => s.step_id === v.step_id);
+        const isInternallyResolved = boundStep?.value_policy && internalValuePolicyTypes.has(boundStep.value_policy.type);
+        if (!hasDefault && !supplied && !isInternallyResolved) {
           missingRequired.push(v.name);
         }
       }
@@ -388,4 +399,73 @@ export async function routeRunRoutes(server: FastifyInstance) {
       return { ok: true, data: run };
     }
   );
+
+  /**
+   * POST /api/route-runs/:runId/resolve-value
+   *
+   * Extension-only: resolve a pass_field or secret_ref value during an approved running RouteRun.
+   * Secret values are never returned to agents — only the Aegis extension calls this endpoint.
+   */
+  server.post<{
+    Params: { runId: string };
+    Body: { step_id: string };
+  }>("/api/route-runs/:runId/resolve-value", async (req, reply) => {
+    const { runId } = req.params;
+    const { step_id } = req.body ?? {};
+
+    const run = routeRuns.get(runId);
+    if (!run) return sendError(reply, 404, "NOT_FOUND", "Run not found.");
+
+    if (run.status !== "running")
+      return sendError(reply, 409, "INVALID_STATE", `Run is not in running state (status: ${run.status}).`);
+
+    const route = routes.get(run.route_id);
+    if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+    const step = route.steps.find((s) => s.step_id === step_id);
+    if (!step) return sendError(reply, 404, "NOT_FOUND", "Step not found.");
+
+    const vp = step.value_policy;
+    if (!vp || (vp.type !== "pass_field" && vp.type !== "secret_ref"))
+      return sendError(reply, 400, "NOT_PASS_STEP", "Step does not have a pass_field or secret_ref value policy.");
+
+    const pass = aegisVaultPasses.get(vp.pass_id!);
+    if (!pass || pass.user_id !== run.user_id)
+      return sendError(reply, 404, "NOT_FOUND", "Pass not found.");
+
+    if (pass.domain !== route.domain)
+      return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Pass domain does not match route domain.");
+
+    if (vp.type === "secret_ref" && route.execution_mode !== "aegis_controlled")
+      return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Secret resolution requires aegis_controlled execution mode.");
+
+    if (run.approval_required_permissions && run.approval_required_permissions.length > 0 && !run.approved_at)
+      return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Run requires approval before secret can be resolved.");
+
+    let value: string;
+    let redacted: boolean;
+
+    if (vp.type === "pass_field") {
+      if (vp.field === "username" && pass.username) {
+        value = pass.username;
+        redacted = false;
+      } else {
+        return sendError(reply, 404, "NOT_FOUND", "Requested pass field is not available.");
+      }
+    } else {
+      const secret = devSecretVault.get(pass.secret_ref);
+      if (!secret) return sendError(reply, 404, "SECRET_NOT_AVAILABLE", "Secret not available in vault.");
+      value = secret;
+      redacted = true;
+    }
+
+    // Track pass usage on the run — receipt will include this metadata
+    run.credential_used = true;
+    run.secret_values_revealed_to_agent = false;
+    run.pass_ids_used = Array.from(new Set([...(run.pass_ids_used ?? []), pass.pass_id]));
+    routeRuns.set(runId, run);
+    schedulePersist();
+
+    return reply.send({ ok: true, data: { value, value_source: vp.type, pass_id: pass.pass_id, redacted } });
+  });
 }

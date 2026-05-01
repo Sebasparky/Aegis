@@ -527,6 +527,52 @@ AEGIS_AUTO_START=true node apps/api/scripts/fake-agent-create-run.mjs
 
 ---
 
+## Secret Vault / Pass Custody v1
+
+**Status:** Implemented (dev prototype only — not production-grade encryption).
+
+### Model
+
+Credentials are split into two layers:
+
+- **`AegisVaultPass`** — metadata object (pass_id, label, domain, username, secret_ref). Persisted to disk. Never contains the raw secret value.
+- **`devSecretVault`** — dev-only in-memory map keyed by `secret_ref` (e.g. `"devvault://demo-login-password"`). Initialized at server startup. Never persisted to disk. Never returned via any agent-facing endpoint.
+
+Route steps reference credentials by ID using `value_policy.type`:
+- `"pass_field"` — resolves a non-secret field (e.g. username) from the vault pass metadata.
+- `"secret_ref"` — resolves the secret value (e.g. password) from `devSecretVault`. Requires `aegis_controlled` execution mode.
+
+### Resolve-Value Endpoint
+
+`POST /api/route-runs/:runId/resolve-value` — called by the Aegis extension during replay, never by agents.
+
+**Validation:** run must be `running`; if `approval_required_permissions` is non-empty, `approved_at` must be set; pass domain must match route domain; `secret_ref` requires `aegis_controlled`.
+
+**Response:**
+```json
+{ "ok": true, "data": { "value": "...", "value_source": "secret_ref", "pass_id": "pass_vault_demo_login_001", "redacted": true } }
+```
+
+**Errors:** `NOT_FOUND`, `INVALID_STATE`, `SECRET_NOT_ALLOWED`, `SECRET_NOT_AVAILABLE`, `NOT_PASS_STEP`.
+
+### Receipt Metadata
+
+When resolve-value is called, the run is updated with:
+- `credential_used: true`
+- `pass_ids_used: ["pass_vault_demo_login_001"]`
+- `secret_values_revealed_to_agent: false`
+
+These fields appear in the receipt. The secret value itself is never stored.
+
+### What This Is Not
+
+- Not production-grade encryption or KMS/HSM.
+- Not real Gmail, bank, or OAuth credential custody.
+- Demo Login uses fake seeded credentials only.
+- Agents never receive secret values through MCP tools or any other agent-facing API.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

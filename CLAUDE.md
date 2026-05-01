@@ -160,6 +160,8 @@ Agent-runnable workflow recipe path is **complete** — validated 2026-05-01. `e
 
 Aegis-controlled sensitive execution path is **complete** — validated 2026-05-01. `execution_mode="aegis_controlled"` skills refuse recipe access; agents use `request_skill_run`; approval-gated runs require user sign-off before the extension auto-runs only on the matching route context (`url_match` enforced). Demo Login receipt `rrreceipt_d5614360e907` confirms the full path.
 
+Secret Vault / Pass Custody v1 is **complete** — implemented 2026-05-01. `AegisVaultPass` holds credential metadata; `devSecretVault` holds secrets (never persisted, never exposed to agents); Demo Login route steps use `pass_field`/`secret_ref` value policy types (raw password removed from route); `POST /api/route-runs/:runId/resolve-value` endpoint resolves credentials only during approved running RouteRuns; receipts record `credential_used`, `pass_ids_used`, `secret_values_revealed_to_agent: false`. Dev prototype only — not production KMS.
+
 Candidate next milestones:
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
@@ -182,6 +184,8 @@ Before making any changes:
 - Preserve all existing service boundaries: CollarService, PassService, BrowserSessionService, SensitiveActionDetector, PolicyService, ApprovalService, RunnerService, ReceiptService, ReputationService
 - Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
 - Do not rebuild the agent-runnable recipe path or the controlled sensitive login path unless explicitly requested
+- Do not rebuild Secret Vault v1 (`AegisVaultPass`, `devSecretVault`, `resolve-value`, `pass_field`/`secret_ref`) unless explicitly requested
+- Do not expose `devSecretVault` through any public API, MCP tool, or persistence layer — it is dev-only and initialized only at server startup
 - Do not treat `execution_mode: "agent_runnable"` as permission to skip Aegis — it means call `get_agent_runnable_workflow` to get the Aegis-tested route recipe, then execute it in the agent's own browser
 - Do not run `aegis_controlled` routes based on domain alone — route context matching uses domain + optional `url_match`; a controlled route must not execute on the wrong page (e.g., `/route-run-approvals` instead of `/demo-login`)
 

@@ -16,6 +16,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification. All are complete. Do not re-plan, re-implement, or recreate any part of the extension auto-run or replay reliability work.**
 >
 > **Also: do NOT rebuild the agent-runnable recipe path or the controlled sensitive login path. Both are complete. Do not re-plan or re-implement `get_agent_runnable_workflow`, `NOT_AGENT_RUNNABLE` refusal, or the Demo Login approval/auto-run flow.**
+>
+> **Also: do NOT rebuild Secret Vault / Pass Custody v1. It is complete. Do not re-implement `AegisVaultPass`, `devSecretVault`, `resolve-value` endpoint, or the `pass_field`/`secret_ref` value policy types.**
 
 ---
 
@@ -161,6 +163,19 @@ Everything below is implemented and working.
 - Run completed at `/demo-login/success`; receipt `rrreceipt_d5614360e907`, run `run_054ca6e8022b`
 - Demo Login uses fake seeded credentials — real credential custody/pass vault is NOT implemented
 - **Validated 2026-05-01**
+- Do not rebuild unless explicitly requested
+
+### Secret Vault / Pass Custody v1
+- `AegisVaultPass` — credential metadata type in `packages/types/src/index.ts`; separate from the existing `AegisPass` (agent auth token type)
+- `aegisVaultPasses` — persisted in-memory Map in `apps/api/src/store/index.ts`; included in persistence
+- `devSecretVault` — dev-only in-memory Map initialized at server startup; never persisted, never exposed to agents
+- Demo vault pass seeded: `pass_vault_demo_login_001` (domain: localhost, username: demo_user, secret_ref: `devvault://demo-login-password`)
+- Demo Login route steps now use `value_policy.type: "pass_field"` (username) and `"secret_ref"` (password) — raw credential removed from route
+- `POST /api/route-runs/:runId/resolve-value` — extension-only endpoint; resolves pass field or secret during an approved running RouteRun; validates run state, domain match, approval, and execution mode; updates run with `credential_used`, `pass_ids_used`, `secret_values_revealed_to_agent`
+- `replay.js` — `resolveFillValue` is now async; calls resolve-value API for pass/secret steps; toast shows "filled secure value" instead of the actual value; error message is redacted for secret fills
+- Receipt includes `credential_used: true`, `pass_ids_used`, `secret_values_revealed_to_agent: false` when a pass was used
+- Dev prototype only — not production KMS/HSM; not real Gmail/bank credential custody
+- **Implemented 2026-05-01**
 - Do not rebuild unless explicitly requested
 
 ### Demo tooling

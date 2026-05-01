@@ -174,6 +174,21 @@ export interface AegisPass {
   created_at: string;
 }
 
+export type AegisPassKind = "login_password";
+
+// Dev prototype only — credential vault metadata. Secret values are stored separately in devSecretVault.
+export interface AegisVaultPass {
+  pass_id: string;
+  user_id: string;
+  label: string;
+  kind: AegisPassKind;
+  domain: string;
+  username?: string;
+  secret_ref: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProtectedSession {
   id: string;
   user_id: string;
@@ -365,10 +380,12 @@ export interface ElementTarget {
 
 // Routes must never store raw sensitive values typed during recording.
 export interface ValuePolicy {
-  type: 'runtime_variable' | 'sensitive_redacted' | 'safe_literal' | 'enum_selection' | 'user_approval_required';
+  type: 'runtime_variable' | 'sensitive_redacted' | 'safe_literal' | 'enum_selection' | 'user_approval_required' | 'pass_field' | 'secret_ref';
   name?: string;
-  value?: string;   // Only set for safe_literal and enum_selection
-  store_value: boolean; // Always false for sensitive_redacted and runtime_variable
+  value?: string;      // Only set for safe_literal and enum_selection
+  pass_id?: string;    // Set when type is pass_field or secret_ref
+  field?: string;      // "username" or "password"
+  store_value: boolean; // Always false for sensitive_redacted, runtime_variable, pass_field, secret_ref
 }
 
 export interface ApprovalGate {
@@ -528,6 +545,9 @@ export interface RouteRunReceipt {
   created_at: string;
   completed_at?: string;
   error?: string;
+  credential_used?: boolean;
+  pass_ids_used?: string[];
+  secret_values_revealed_to_agent?: false;
 }
 
 // ─── Aegis Rails — RouteRun ───────────────────────────────────────────────────
@@ -553,6 +573,9 @@ export interface RouteRun {
   approval_required_permissions?: string[];
   approved_at?: string;
   approved_permissions?: string[];
+  credential_used?: boolean;
+  pass_ids_used?: string[];
+  secret_values_revealed_to_agent?: false;
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type {
   Collar,
   AegisPass,
+  AegisVaultPass,
   ProtectedSession,
   ApprovalRequest,
   Receipt,
@@ -100,6 +101,15 @@ export const installedSkills = new Map<string, InstalledSkill>();
 export const routeRuns = new Map<string, RouteRun>();
 
 export const routeRunReceipts = new Map<string, RouteRunReceipt>();
+
+// Credential vault metadata — dev prototype only, not production-grade encryption.
+export const aegisVaultPasses = new Map<string, AegisVaultPass>();
+
+// Dev-only secret store. Values are NEVER persisted to disk or returned to agents.
+// Local prototype only — not production encryption.
+export const devSecretVault = new Map<string, string>();
+// Initialize dev vault at module load — never from persisted data
+devSecretVault.set("devvault://demo-login-password", "demo_pass");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

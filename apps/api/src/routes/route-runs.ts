@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
@@ -40,8 +40,8 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost"]);
 
-function sendError(reply: any, status: number, code: string, message: string) {
-  return reply.status(status).send({ ok: false, error: { code, message } });
+function sendError(reply: any, status: number, code: string, message: string, details?: string) {
+  return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
 }
 
 export async function routeRunRoutes(server: FastifyInstance) {
@@ -124,6 +124,24 @@ export async function routeRunRoutes(server: FastifyInstance) {
         }
         delegation_id = delegation.id;
         collar_id = delegation.default_collar_id;
+      }
+    }
+
+    if (collar_id) {
+      const collar = collars.get(collar_id);
+      if (collar && collar.status === "active") {
+        const blocked = route.required_permissions.filter(
+          (perm) => !collar.allowed_actions.includes(perm as any)
+        );
+        if (blocked.length > 0) {
+          return sendError(
+            reply,
+            403,
+            "COLLAR_BLOCKED",
+            "This agent's collar does not allow this route.",
+            `Required permission(s) not in collar allowed_actions: ${blocked.join(", ")}.`
+          );
+        }
       }
     }
 

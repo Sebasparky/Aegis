@@ -326,6 +326,32 @@ const routes = [
       marketplace_status: "pending_review",
       submitted_for_review_at: "2026-04-30T18:00:00.000Z"
     }
+  ],
+  [
+    "route_demo_purchase_001",
+    {
+      route_id: "route_demo_purchase_001",
+      version: "1.0.0",
+      created_at: "2026-04-30T12:10:00.000Z",
+      last_verified_at: "2026-04-30T12:10:01.000Z",
+      creator_aegis_id: "aid_user_001",
+      trust_tier: "aegis_scanned",
+      domain: "en.wikipedia.org",
+      workflow_name: "Demo Purchase Route",
+      workflow_description: "Demo route requiring purchase permission — used to test collar enforcement.",
+      risk_level: "high",
+      required_permissions: ["purchase"],
+      allowed_actions: ["purchase"],
+      forbidden_actions: [],
+      approval_gates: [],
+      confidence_threshold: 0.7,
+      steps: [],
+      variables: [],
+      run_count: 0,
+      success_rate: 0,
+      incident_count: 0,
+      marketplace_status: "private"
+    }
   ]
 ];
 
@@ -345,6 +371,23 @@ const skills = [
       approval_gates: [],
       created_at: "2026-04-30T12:00:00.000Z",
       published_at: "2026-04-30T12:00:00.000Z"
+    }
+  ],
+  [
+    "skill_demo_purchase_001",
+    {
+      skill_id: "skill_demo_purchase_001",
+      route_id: "route_demo_purchase_001",
+      name: "Demo Purchase Skill",
+      summary: "Demo skill requiring purchase permission — used to test collar enforcement.",
+      domain: "en.wikipedia.org",
+      risk_level: "high",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["purchase"],
+      forbidden_actions: [],
+      approval_gates: [],
+      created_at: "2026-04-30T12:10:00.000Z",
+      published_at: "2026-04-30T12:10:00.000Z"
     }
   ]
 ];
@@ -506,7 +549,7 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 4 routes, 1 marketplace skill, 2 delegations written.");
+console.log("Demo data seeded. 5 routes, 2 skills, 2 delegations written.");
 console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved)");
 console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");

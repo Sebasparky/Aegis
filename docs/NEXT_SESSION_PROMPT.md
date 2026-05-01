@@ -106,6 +106,10 @@ Everything below is implemented and working.
 - `fake-agent-create-run.mjs` updated: reads `AEGIS_AGENT_TOKEN` env var, sends `Authorization` header
 - Existing skill-access policy, collar enforcement, approval gates, lifecycle hardening, extension pickup, and receipts still work
 
+### Agent Integration Contract
+- `docs/AGENT_INTEGRATION_CONTRACT.md` — canonical agent-facing API reference
+- Covers: authentication, skill discovery, run creation, all response variants (pending / pending_approval / blocked / error codes), polling, receipt lookup, status lifecycle diagram, curl examples for all three paths (happy / approval-required / denied), executable harness reference, and security notes
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script

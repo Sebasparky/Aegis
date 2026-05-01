@@ -68,7 +68,18 @@ async function discoverInstalledSkills({ domain }) {
       skills: [],
     };
   }
-  return { skills: res.data };
+  const skills = res.data.map((s) => ({
+    skill_id: s.skill_id,
+    name: s.name,
+    summary: s.summary,
+    domain: s.domain,
+    risk_level: s.risk_level,
+    trust_tier: s.trust_tier,
+    required_permissions: s.required_permissions,
+    execution_mode: s.execution_mode ?? null,
+    sensitivity_level: s.sensitivity_level ?? null,
+  }));
+  return { skills };
 }
 
 async function requestSkillRun({ skill_id, variables = {} }) {
@@ -165,7 +176,7 @@ const TOOLS = [
   {
     name: "discover_installed_skills",
     description:
-      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Returns a list of skills the agent can request to execute. Use this when you need a trusted installed workflow, credentialed action, or auditable execution path on a domain — not for general browsing, reading, or research, which should use your normal tools.",
+      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. execution_mode='agent_runnable' means the equivalent workflow is routine (browsing, searching, reading) and a capable agent may perform it with its own tools instead of going through Aegis. execution_mode='aegis_controlled' means the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and must be executed via request_skill_run. Use this to check which Aegis-governed paths exist before deciding how to act.",
     inputSchema: {
       type: "object",
       properties: {
@@ -180,7 +191,7 @@ const TOOLS = [
   {
     name: "request_skill_run",
     description:
-      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is always controlled by Aegis, never by the agent directly.",
+      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail. For agent_runnable / routine skills (browsing, searching, reading), a capable agent may instead perform the equivalent workflow with its own tools. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly.",
     inputSchema: {
       type: "object",
       properties: {

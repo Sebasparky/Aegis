@@ -109,6 +109,8 @@ The agent receives tools from the environment. It does not need to know about Ae
 
 **Agent autonomy model:** Agents should use their own browsing, reading, searching, and reasoning tools for normal tasks. Aegis tools are invoked selectively — only when the agent needs a trusted installed workflow, a credentialed or approval-gated action, or an auditable execution receipt. Aegis does not replace the agent's general tools.
 
+**Execution mode:** Each skill returned by `discover_installed_skills` includes `execution_mode` and `sensitivity_level`. If `execution_mode` is `"agent_runnable"`, the skill is routine (browsing, searching, reading) and the agent may perform the equivalent task with its own tools. If `execution_mode` is `"aegis_controlled"`, the skill is sensitive (credentials, payments, personal data, form submission, account changes) and the agent must call `request_skill_run` — Aegis handles execution and the audit trail.
+
 ### How it works
 
 1. Agent runtime connects to the server via stdio

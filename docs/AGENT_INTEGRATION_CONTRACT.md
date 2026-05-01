@@ -25,6 +25,31 @@ For non-sensitive reading, searching, or summarization, agents should use their 
 
 ---
 
+## Routine vs Sensitive Workflows
+
+Every skill returned by `discover_installed_skills` carries two fields that tell the agent how to act:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `execution_mode` | `"agent_runnable"` | The workflow is routine. A capable agent may perform the equivalent task with its own tools (e.g. a native web search). Requesting a RouteRun through Aegis is optional. |
+| `execution_mode` | `"aegis_controlled"` | The workflow is sensitive. The agent **must** use `request_skill_run` — Aegis handles execution, credential injection, collar enforcement, and the audit receipt. |
+| `sensitivity_level` | `"routine"` | Browsing, searching, reading — no secrets, no side effects, no approval required. |
+| `sensitivity_level` | `"sensitive"` | Credentials, payments, personal data disclosure, public posting, form submission, account changes, or any action requiring an audit trail. |
+
+**Decision rule:** check `execution_mode` first.
+- `agent_runnable` → use your own tools, or optionally route through Aegis for the audit trail.
+- `aegis_controlled` → call `request_skill_run`; do not attempt to replicate the workflow with your own browser tools.
+
+### Demo skill reference
+
+| Skill | Domain | `execution_mode` | `sensitivity_level` |
+|---|---|---|---|
+| Wikipedia Search | `en.wikipedia.org` | `agent_runnable` | `routine` |
+| Demo Purchase Skill | `test.aegis.local` | `aegis_controlled` | `sensitive` |
+| Demo Blocked Skill | `test.aegis.local` | `aegis_controlled` | `sensitive` |
+
+---
+
 ## Core Model
 
 | Concept | What it is |

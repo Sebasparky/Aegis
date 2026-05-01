@@ -271,6 +271,8 @@ const routes = [
       incident_count: 0,
       verification_report: { ...WIKIPEDIA_VERIFICATION_BASE, route_id: "route_demo_wikipedia_001" },
       marketplace_status: "approved",
+      execution_mode: "agent_runnable",
+      sensitivity_level: "routine",
       submitted_for_review_at: "2026-04-30T12:00:00.000Z",
       reviewed_at: "2026-04-30T12:00:00.000Z",
       review_note: "Standard search workflow. Locators verified. No sensitive data."
@@ -350,7 +352,9 @@ const routes = [
       run_count: 0,
       success_rate: 0,
       incident_count: 0,
-      marketplace_status: "private"
+      marketplace_status: "private",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
     }
   ],
   [
@@ -376,7 +380,9 @@ const routes = [
       run_count: 0,
       success_rate: 0,
       incident_count: 0,
-      marketplace_status: "private"
+      marketplace_status: "private",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
     }
   ]
 ];
@@ -396,7 +402,9 @@ const skills = [
       forbidden_actions: [],
       approval_gates: [],
       created_at: "2026-04-30T12:00:00.000Z",
-      published_at: "2026-04-30T12:00:00.000Z"
+      published_at: "2026-04-30T12:00:00.000Z",
+      execution_mode: "agent_runnable",
+      sensitivity_level: "routine"
     }
   ],
   [
@@ -413,7 +421,9 @@ const skills = [
       forbidden_actions: [],
       approval_gates: [],
       created_at: "2026-04-30T12:10:00.000Z",
-      published_at: "2026-04-30T12:10:00.000Z"
+      published_at: "2026-04-30T12:10:00.000Z",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
     }
   ],
   [
@@ -430,7 +440,9 @@ const skills = [
       forbidden_actions: [],
       approval_gates: [],
       created_at: "2026-04-30T12:20:00.000Z",
-      published_at: "2026-04-30T12:20:00.000Z"
+      published_at: "2026-04-30T12:20:00.000Z",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
     }
   ]
 ];

@@ -239,7 +239,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
           return {
             ...run,
             skill_summary: skill
-              ? { skill_id: skill.skill_id, name: skill.name, domain: skill.domain, risk_level: skill.risk_level ?? null }
+              ? { skill_id: skill.skill_id, name: skill.name, domain: skill.domain, risk_level: skill.risk_level ?? null, execution_mode: skill.execution_mode ?? null, sensitivity_level: skill.sensitivity_level ?? null }
               : null,
             route_summary: route
               ? {

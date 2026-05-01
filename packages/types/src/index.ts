@@ -331,6 +331,9 @@ export type RouteTrustTier =
   | 'run_verified'
   | 'business_official';
 
+export type ExecutionMode = 'agent_runnable' | 'aegis_controlled';
+export type SensitivityLevel = 'routine' | 'sensitive';
+
 export type StepActionType =
   | 'navigate'
   | 'click'
@@ -423,6 +426,8 @@ export interface AegisRoute {
   submitted_for_review_at?: string;
   reviewed_at?: string;
   review_note?: string;
+  execution_mode?: ExecutionMode;
+  sensitivity_level?: SensitivityLevel;
 }
 
 export interface Skill {
@@ -438,6 +443,8 @@ export interface Skill {
   approval_gates: ApprovalGate[];
   created_at: string;
   published_at: string;
+  execution_mode?: ExecutionMode;
+  sensitivity_level?: SensitivityLevel;
 }
 
 export interface InstalledSkill {

@@ -70,9 +70,14 @@ async function request(method, path, body, extraHeaders = {}) {
 async function discoverSkill() {
   const res = await request("GET", `/api/skills?domain=${DOMAIN}&installed=true`, undefined, authHeader);
 
-  if (!res.ok || !Array.isArray(res.data) || res.data.length === 0) {
-    console.error(`[ERROR] No installed skills found for domain "${DOMAIN}".`);
-    console.error("        Run `npm run seed:demo` and install the skill via the browser UI, then retry.");
+  if (!res.ok || !Array.isArray(res.data)) {
+    console.error(`[ERROR] Skill discovery failed: ${res.error?.code ?? "unknown"}: ${res.error?.message ?? ""}`);
+    process.exit(1);
+  }
+  if (res.data.length === 0) {
+    console.error(`[ERROR] No discoverable skills for token ${TOKEN} on domain "${DOMAIN}".`);
+    console.error("        The delegation's skill-access policy may deny all installed skills.");
+    console.error("        Patch the delegation or use a different token, then retry.");
     process.exit(1);
   }
 

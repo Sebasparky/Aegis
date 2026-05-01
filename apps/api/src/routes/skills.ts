@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import type { InstalledSkill } from "@aegis/types";
-import { skills, installedSkills, MOCK_USER_ID, newId } from "../store/index.js";
+import type { AgentDelegation, InstalledSkill } from "@aegis/types";
+import { skills, installedSkills, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
@@ -18,8 +18,28 @@ export async function skillRoutes(server: FastifyInstance) {
    */
   server.get<{ Querystring: { domain?: string; installed?: string } }>(
     "/api/skills",
-    async (req) => {
+    async (req, reply) => {
       const { domain, installed } = req.query;
+
+      // Resolve optional bearer token for agent-scoped skill discovery.
+      // No token → existing web UI behavior, no auth required.
+      const rawAuth = (req.headers["authorization"] as string | undefined) ?? "";
+      const bearerMatch = rawAuth.match(/^Bearer (.+)$/i);
+      const token = bearerMatch?.[1]?.trim();
+
+      let delegation: AgentDelegation | undefined;
+      if (token) {
+        delegation = Array.from(agentDelegations.values()).find(
+          (d) => d.user_id === MOCK_USER_ID && d.status === "active" && d.token_id === token
+        );
+        if (!delegation) {
+          return reply.status(401).send({
+            ok: false,
+            error: { code: "INVALID_TOKEN", message: "Token does not match an active delegation." },
+          });
+        }
+      }
+
       let list = Array.from(skills.values());
 
       if (domain) list = list.filter((s) => s.domain === domain);
@@ -32,6 +52,18 @@ export async function skillRoutes(server: FastifyInstance) {
 
       if (installed === "true") {
         list = list.filter((s) => installedSkillIds.has(s.skill_id));
+      }
+
+      // Apply delegation skill-access policy when a valid token is present.
+      // Only applies to installed-skill queries — marketplace browsing is unscoped.
+      if (delegation && installed === "true") {
+        const mode = delegation.skill_access_mode ?? "all";
+        const ids = delegation.skill_access_skill_ids ?? [];
+        list = list.filter((s) => {
+          if (mode === "exclude") return !ids.includes(s.skill_id);
+          if (mode === "only") return ids.includes(s.skill_id);
+          return true; // "all" — no restriction
+        });
       }
 
       const result = list

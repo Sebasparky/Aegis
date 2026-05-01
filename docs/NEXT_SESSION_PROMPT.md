@@ -10,10 +10,12 @@ Read this before starting any new session. Update it when the baseline changes.
 The items below are **fully implemented and committed**. Do not re-implement, re-plan, or recreate any of them.
 
 > **Specifically: do NOT rerun or recreate the Agent Delegation Skill-Access Policy plan. It is complete. Do not treat "skill-access policy" or "delegation API" as a pending task.**
+>
+> **Also: do NOT re-implement Delegation Token Auth. Bearer token enforcement on `POST /api/skills/:skillId/runs` is complete. `agent_id` is resolved server-side from the token — do not accept it from the request body.**
 
 ---
 
-## Completed Increments (as of 2026-04-30)
+## Completed Increments (as of 2026-05-01)
 
 Everything below is implemented and working.
 
@@ -95,6 +97,15 @@ Everything below is implemented and working.
 - Reject button → `POST /api/route-runs/:id/reject` → run becomes `blocked`
 - Approved/rejected runs are removed from the list immediately on success
 
+### Delegation Token Auth (Agent API Authentication v1)
+- `POST /api/skills/:skillId/runs` requires `Authorization: Bearer <token>`
+- Token is `AgentDelegation.token_id`; missing token → `AUTH_REQUIRED`; invalid token → `INVALID_TOKEN`
+- `agent_id`, `delegation_id`, `collar_id` derived from token-resolved delegation (never trusted from request body)
+- `pass_demo_001` resolves to `delg_demo_001 / agent_demo_001`
+- `pass_demo_002` resolves to `delg_demo_restricted / agent_demo_restricted`
+- `fake-agent-create-run.mjs` updated: reads `AEGIS_AGENT_TOKEN` env var, sends `Authorization` header
+- Existing skill-access policy, collar enforcement, approval gates, lifecycle hardening, extension pickup, and receipts still work
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -129,19 +140,20 @@ Session rules:
 
 ---
 
-## Current Next Task — State Alignment / Next Milestone Selection
+## Current Next Task — External Agent Integration Hardening
 
-This documentation pass (updating handoff docs to match the current implementation) is the current task. After it lands, the next technical milestone should be chosen fresh at the start of the next session.
+Delegation Token / Agent API Auth v1 is complete. The next milestone is **External Agent Integration Hardening**: make `apps/api/scripts/fake-agent-create-run.mjs` a realistic end-to-end scenario covering:
+- Agent queries installed skills using token-scoped access
+- Agent requests route run with variables
+- Handles `pending`, `pending_approval`, `blocked`, `completed`, `failed` states
+- Polls run status until terminal
+- Reads receipt after completion
+- Does not use raw browser control
 
-**Candidate next technical milestones (pick one):**
+**Other candidate milestones (lower priority):**
 
-1. **End-to-end integration hardening** *(recommended)* — fake third-party agent script (`apps/api/scripts/fake-agent.mjs`): request delegation → query installed skills for domain → trigger route run → hit `pending_approval` → approve via Route Run Approvals UI → confirm extension pickup → verify receipt. This is the first real integration test of the full delegation → execution → approval → audit loop.
-
-2. **Run lifecycle state machine + idempotency** — stricter state transitions (guard against double-approve, double-reject, invalid transitions), idempotency keys on run creation, clear error responses for invalid state changes.
-
-3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy (all / exclude / only), and approval gating logic. Particularly important before opening the delegation API to external callers.
-
-4. **Agent delegation token / API authentication v1** — API key or signed token so third-party agents can authenticate to the Delegation API without relying on the mock user context.
+1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation, clear error responses for invalid state changes
+2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy (all / exclude / only), and approval gating logic
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

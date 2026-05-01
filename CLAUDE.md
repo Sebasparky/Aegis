@@ -143,17 +143,23 @@ Aegis records what authority was granted, what route was followed, what actions 
 - Collar enforcement for RouteRuns: allowed permissions create pending runs; blocked/unknown return `COLLAR_BLOCKED`
 - Approval-gated RouteRuns: approval-required permissions create `pending_approval` runs; approve/reject API; extension only sees `status=pending`
 - Route Run Approvals page (`/route-run-approvals`): UI for approving/rejecting `pending_approval` runs
+- Delegation token auth (v1): `POST /api/skills/:skillId/runs` requires `Authorization: Bearer <token>`; token is `AgentDelegation.token_id`; missing token → `AUTH_REQUIRED`; invalid token → `INVALID_TOKEN`; `agent_id`, `delegation_id`, `collar_id` derived from resolved delegation (never trusted from request body); `fake-agent-create-run.mjs` uses `AEGIS_AGENT_TOKEN` env var
 
-## Next Near-Term Milestone: Integration Hardening
+## Next Near-Term Milestone: External Agent Integration Hardening
 
-The Third-Party Agent Delegation API milestone is complete (delegation API, RouteRun API, skill-access policy, collar enforcement, approval-gated runs, run receipts, approvals UI). The next milestone is integration hardening and test coverage.
+The Delegation Token / Agent API Auth v1 milestone is complete (bearer token on RouteRun API, token resolves delegation, `agent_id` / `delegation_id` / `collar_id` derived server-side, `AUTH_REQUIRED` / `INVALID_TOKEN` errors). The next milestone is external agent integration hardening.
 
-Candidate next tasks (choose one at the start of the next session):
+**Next milestone: External Agent Integration Hardening** — make the fake external agent script (`apps/api/scripts/fake-agent-create-run.mjs`) a realistic end-to-end integration scenario:
+- Agent queries installed skills using token-scoped access
+- Agent requests route run with variables
+- Handles `pending`, `pending_approval`, `blocked`, `completed`, `failed` states
+- Polls run status until terminal
+- Reads receipt after completion
+- Does not use raw browser control
 
-1. **End-to-end integration hardening** — fake third-party agent script: delegation → route query → run trigger → `pending_approval` → UI approval → extension pickup → receipt
-2. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
-3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
-4. **Agent delegation token / API authentication v1** — API key or signed token for third-party agents
+Other candidate tasks:
+1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
+2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.

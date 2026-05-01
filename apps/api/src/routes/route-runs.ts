@@ -42,7 +42,7 @@ function isTerminalStatus(status: RouteRunStatus): boolean {
   return status === "completed" || status === "failed" || status === "blocked";
 }
 
-const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost"]);
+const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
 function sendError(reply: any, status: number, code: string, message: string, details?: string) {
   return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
@@ -57,14 +57,30 @@ export async function routeRunRoutes(server: FastifyInstance) {
    */
   server.post<{
     Params: { skillId: string };
-    Body: { agent_id?: string; variables?: Record<string, string> }; // agent_id required at runtime; optional in type for graceful 400
+    Body: { variables?: Record<string, string> };
   }>("/api/skills/:skillId/runs", async (req, reply) => {
     const { skillId } = req.params;
-    const { agent_id, variables } = req.body ?? {};
+    const { variables } = req.body ?? {};
 
-    if (!agent_id || typeof agent_id !== "string" || agent_id.trim() === "") {
-      return sendError(reply, 400, "VALIDATION_ERROR", "agent_id is required for route runs.");
+    const authHeader = (req.headers["authorization"] as string | undefined) ?? "";
+    const bearerMatch = authHeader.match(/^Bearer (.+)$/i);
+    const token = bearerMatch?.[1]?.trim();
+
+    if (!token) {
+      return sendError(reply, 401, "AUTH_REQUIRED", "Authorization: Bearer <token> is required.");
     }
+
+    const delegation = Array.from(agentDelegations.values()).find(
+      (d) => d.user_id === MOCK_USER_ID && d.status === "active" && d.token_id === token
+    );
+
+    if (!delegation) {
+      return sendError(reply, 401, "INVALID_TOKEN", "Token does not match an active delegation.");
+    }
+
+    const agent_id = delegation.agent_name;
+    const delegation_id = delegation.id;
+    const collar_id = delegation.default_collar_id;
 
     const skill = skills.get(skillId);
     if (!skill) return sendError(reply, 404, "SKILL_NOT_FOUND", "Skill not found.");
@@ -109,26 +125,13 @@ export async function routeRunRoutes(server: FastifyInstance) {
       }
     }
 
-    let delegation_id: string | undefined;
-    let collar_id: string | undefined;
-
-    if (agent_id) {
-      const delegation = Array.from(agentDelegations.values()).find(
-        (d) => d.user_id === MOCK_USER_ID && d.status === "active" &&
-          (d.agent_name === agent_id || d.id === agent_id)
-      );
-      if (delegation) {
-        const mode = delegation.skill_access_mode ?? "all";
-        const ids = delegation.skill_access_skill_ids ?? [];
-        if (mode === "exclude" && ids.includes(skillId)) {
-          return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
-        }
-        if (mode === "only" && !ids.includes(skillId)) {
-          return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
-        }
-        delegation_id = delegation.id;
-        collar_id = delegation.default_collar_id;
-      }
+    const mode = delegation.skill_access_mode ?? "all";
+    const ids = delegation.skill_access_skill_ids ?? [];
+    if (mode === "exclude" && ids.includes(skillId)) {
+      return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
+    }
+    if (mode === "only" && !ids.includes(skillId)) {
+      return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
     }
 
     if (collar_id) {

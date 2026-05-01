@@ -94,7 +94,7 @@ function renderInstalledSkills(domain, resp) {
 
   const header =
     '<div class="skill-divider"></div>' +
-    '<div class="skill-label">Installed skills available</div>';
+    '<div class="skill-label">Installed skills — reusable</div>';
 
   if (!resp || !resp.ok) {
     const msg = resp?.error ?? 'Aegis API unavailable at localhost:4000.';
@@ -130,7 +130,7 @@ function renderPendingRuns(domain, resp) {
 
   const header =
     '<div class="skill-divider"></div>' +
-    '<div class="skill-label">Pending agent runs</div>';
+    '<div class="skill-label">Pending agent runs — one-time</div>';
 
   if (!resp || !resp.ok) {
     section.innerHTML = '';

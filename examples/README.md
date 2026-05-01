@@ -92,3 +92,78 @@ AEGIS_QUERY="Alan Turing" AEGIS_TIMEOUT_MS=120000 node examples/external-agent-h
 ### Approval-gated run
 
 If the collar requires approval for a permission used by the skill, the script prints the approval URL and keeps polling. Open `http://localhost:3000/route-run-approvals`, approve the run, then trigger extension execution as normal.
+
+---
+
+## `aegis-tool-server.mjs` — MCP Tool Server
+
+An MCP stdio server that wraps Aegis skill execution as standard tools. Connect any MCP-compatible agent runtime (Claude Desktop, Claude Code, or any MCP client) and it can discover and invoke Aegis capabilities without Aegis-specific client code baked in.
+
+The agent receives tools from the environment. It does not need to know about Aegis. Aegis remains the trust and execution layer beneath.
+
+### How it works
+
+1. Agent runtime connects to the server via stdio
+2. Agent calls `discover_installed_skills` to find what Aegis can do on a domain
+3. Agent calls `request_skill_run` to ask Aegis to execute a workflow
+4. Agent polls `get_route_run_status` until the run reaches a terminal state
+5. Agent calls `get_route_run_receipt` to read the audit record
+
+Execution is always controlled by Aegis — the agent never receives a browser handle or raw capability.
+
+### Prerequisites
+
+Same as `external-agent-http-client.mjs` above. No additional dependencies — `@modelcontextprotocol/sdk` is already installed in the monorepo.
+
+### Run
+
+```sh
+node examples/aegis-tool-server.mjs
+```
+
+This is a **stdio server** — it does not listen on a port. Connect it via your agent runtime's MCP configuration.
+
+### Claude Desktop configuration
+
+```json
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "node",
+      "args": ["examples/aegis-tool-server.mjs"],
+      "cwd": "/path/to/aegis",
+      "env": {
+        "AEGIS_AGENT_TOKEN": "pass_demo_001"
+      }
+    }
+  }
+}
+```
+
+### Claude Code configuration
+
+```sh
+claude mcp add aegis -- node /path/to/aegis/examples/aegis-tool-server.mjs
+```
+
+### Tools exposed
+
+| Tool | Description |
+|---|---|
+| `discover_installed_skills` | Find skills available to this agent on a domain |
+| `request_skill_run` | Ask Aegis to execute a verified workflow route |
+| `get_route_run_status` | Poll run status until terminal |
+| `get_route_run_receipt` | Read the audit record after completion |
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AEGIS_API_BASE` | `http://localhost:4000` | API base URL |
+| `AEGIS_AGENT_TOKEN` | `pass_demo_001` | Bearer delegation token |
+
+### Limitations
+
+- Local and prototype-only. Not production-ready.
+- Calls only public Aegis HTTP APIs. Does not import internal Aegis modules.
+- Does not execute browser actions. Execution is driven by the Aegis Chrome extension after a run is requested.

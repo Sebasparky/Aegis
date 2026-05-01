@@ -253,6 +253,46 @@
       color: #64748b;
       margin-left: 6px;
     }
+
+    /* ── Installed skills section ── */
+
+    .skill-divider { height: 1px; background: #1e293b; margin: 12px 0 10px; }
+
+    .skill-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #475569;
+      margin-bottom: 8px;
+    }
+
+    .skill-unavailable,
+    .skill-empty { font-size: 11px; color: #475569; font-style: italic; }
+
+    .skill-item {
+      padding: 7px 0;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .skill-item:last-child { border-bottom: none; }
+
+    .skill-name { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+
+    .skill-summary {
+      font-size: 11px;
+      color: #64748b;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .skill-meta { display: flex; gap: 8px; margin-top: 3px; font-size: 10px; }
+    .skill-tier { color: #67e8f9; }
+    .skill-risk-low      { color: #4ade80; }
+    .skill-risk-medium   { color: #fbbf24; }
+    .skill-risk-high     { color: #fb923c; }
+    .skill-risk-critical { color: #f87171; }
   </style>
 </head>
 <body>
@@ -284,6 +324,8 @@
     <button id="preview-btn">Start Preview</button>
     <div id="preview-result"></div>
   </div>
+
+  <div id="skill-section"></div>
 
   <div id="event-list"></div>
 

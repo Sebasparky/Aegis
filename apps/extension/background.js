@@ -205,6 +205,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
 
+      case 'list_installed_skills_for_domain': {
+        const { domain } = msg;
+        try {
+          const res = await fetch(
+            `http://localhost:4000/api/skills?domain=${encodeURIComponent(domain)}&installed=true`
+          );
+          const json = await res.json();
+          if (json.ok) {
+            sendResponse({ ok: true, skills: json.data });
+          } else {
+            sendResponse({ ok: false, error: json.error?.message ?? 'API error' });
+          }
+        } catch (_) {
+          sendResponse({ ok: false, error: 'Aegis API unavailable at localhost:4000.' });
+        }
+        break;
+      }
+
       default:
         sendResponse({ ok: false, error: 'unknown action' });
     }

@@ -86,6 +86,42 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// ── Installed skills ──────────────────────────────────────────────────────────
+
+function renderInstalledSkills(domain, resp) {
+  const section = document.getElementById('skill-section');
+  if (!section) return;
+
+  const header =
+    '<div class="skill-divider"></div>' +
+    '<div class="skill-label">Installed skills available</div>';
+
+  if (!resp || !resp.ok) {
+    const msg = resp?.error ?? 'Aegis API unavailable at localhost:4000.';
+    section.innerHTML = header + '<div class="skill-unavailable">' + escHtml(msg) + '</div>';
+    return;
+  }
+
+  const skills = resp.skills ?? [];
+  if (skills.length === 0) {
+    section.innerHTML = header + '<div class="skill-empty">No installed skills for this site.</div>';
+    return;
+  }
+
+  const items = skills.map(s =>
+    '<div class="skill-item">' +
+      '<div class="skill-name">' + escHtml(s.name) + '</div>' +
+      (s.summary ? '<div class="skill-summary">' + escHtml(s.summary) + '</div>' : '') +
+      '<div class="skill-meta">' +
+        '<span class="skill-tier">' + escHtml(s.trust_tier) + '</span>' +
+        '<span class="skill-risk-' + escHtml(s.risk_level) + '">' + escHtml(s.risk_level) + ' risk</span>' +
+      '</div>' +
+    '</div>'
+  ).join('');
+
+  section.innerHTML = header + items;
+}
+
 // ── Storage reads ─────────────────────────────────────────────────────────────
 
 chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) => {
@@ -94,6 +130,7 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
 });
 
 // Show preview section when popup is on a Wikipedia tab; pre-fill route_id from URL hash.
+// Also query installed skills for the current domain on every popup open.
 (async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.url) {
@@ -104,6 +141,10 @@ chrome.storage.session.get(['aegisRecorder', 'aegisRecorderEvents'], (result) =>
         const match = u.hash.match(/aegis-preview=([^&]+)/);
         if (match) routeIdInput.value = decodeURIComponent(match[1]);
       }
+      chrome.runtime.sendMessage(
+        { action: 'list_installed_skills_for_domain', domain: u.hostname },
+        (resp) => renderInstalledSkills(u.hostname, resp)
+      );
     } catch (_) {}
   }
 })();

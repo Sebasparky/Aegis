@@ -172,10 +172,13 @@ Natural-language credential selection v1 is **complete** — implemented 2026-05
 
 Controlled tab launch for approved runs is **complete** — implemented 2026-05-01. `start_url?: string` added to `AegisRoute` type and seed for `route_demo_login_001` (`http://localhost:3000/demo-login`). `start_url` included in `route_summary` from GET /api/route-runs. Extension `background.js` has new `maybeAutoLaunchApprovedRun()` function called on every alarm poll (after `maybeAutoRunForTab`): finds exactly one approved pending run with a `start_url`; if a matching tab exists uses it; otherwise opens a new tab, calls `waitForTabToMatchRoute` (polls 300ms up to 5s), then executes. `markAutoStarted` is called before `chrome.tabs.create` so `onUpdated` cannot double-execute. Approval is still required; `pending_approval` runs are never touched.
 
+Immutable + Signed Receipts v1 is **complete** — implemented 2026-05-02. `receipt_hash` covers `{ previous_receipt_hash, receipt_json }` (SHA-256 chain). `receipt_jws` is an EdDSA/Ed25519 CompactSign JWS over metadata only (no secrets). Supabase receipts use INSERT; append-only DB trigger blocks UPDATE/DELETE. Verify endpoint: `GET /api/route-run-receipts/:receiptId/verify`.
+
 Candidate next milestones:
 1. **Real cloud KMS provider** — AWS KMS / GCP KMS / Azure Key Vault (add provider to `lib/kms.ts`, change `AEGIS_KMS_PROVIDER`)
 2. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
+4. **Website/agent verification** — AegisID for agents; public key publication; receipt verification by third parties
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -213,6 +216,10 @@ Before making any changes:
 - Do not run `aegis_controlled` routes based on domain alone — route context matching uses domain + optional `url_match`; a controlled route must not execute on the wrong page (e.g., `/route-run-approvals` instead of `/demo-login`)
 - Do not rebuild credential session context binding v1 (`target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` extension helper, `session_context` in GET /api/credential-fill-requests response) unless explicitly requested
 - Field-level credential fill is context-bound: domain-only matching is unsafe for multi-path sites; use `target_url` when creating a credential session to bind fills to a specific login page; extension leaves fill requests pending (not failed) when active tab doesn't match url_match
+- Do not rebuild Immutable + Signed Receipts v1 (`receiptSigning.ts`, `generate-receipt-keypair.mjs`, `002_signed_immutable_receipts.sql`, `UnsignedDevModeError`, `verifyReceipt`, `GET /api/route-run-receipts/:receiptId/verify`) unless explicitly requested
+- `receipt_hash` and `receipt_jws` are Supabase row metadata — they are NOT fields on `RouteRunReceipt` and must not be added to the type
+- Supabase `createReceipt` uses INSERT (not upsert) — receipts are append-only; the DB trigger blocks UPDATE/DELETE; never bypass it
+- Pass `previousReceiptHash` to `hashReceipt` in the Supabase path — calling it without the previous hash produces a broken chain
 
 ## Terminology — Always Use
 
@@ -273,6 +280,8 @@ Before making any changes:
 - Claim that Aegis removes all risk or guarantees agent safety
 - Treat `execution_mode: "agent_runnable"` as "ignore Aegis" — agent_runnable means fetch and follow the Aegis route recipe, not bypass Aegis entirely
 - Claim Demo Login demonstrates real credential custody — it uses fake seeded demo credentials; real credential custody/pass vault is not implemented
+- Expose `AEGIS_RECEIPT_JWS_PRIVATE_JWK` in any API response, log line, or front-end import — it must remain in `apps/api` env only
+- Include plaintext passwords, credential values, or secrets in `receipt_jws` payload — the JWS covers only metadata (receipt_id, receipt_hash, previous_receipt_hash, issuer, issued_at)
 
 ## Core Lines
 

@@ -44,4 +44,22 @@ export async function receiptRoutes(server: FastifyInstance) {
       return { ok: true, data: receipt };
     }
   );
+
+  /**
+   * GET /api/route-run-receipts/:receiptId/verify
+   *
+   * Verify the cryptographic integrity of a receipt.
+   * Returns hash validity, JWS signature validity, and hash chain link status.
+   * Does not re-execute the route or expose any secrets.
+   */
+  server.get<{ Params: { receiptId: string } }>(
+    "/api/route-run-receipts/:receiptId/verify",
+    async (req, reply) => {
+      const result = await getReceiptRepository().verifyReceipt(req.params.receiptId);
+      if (!result) {
+        return sendError(reply, 404, "NOT_FOUND", "Receipt not found.");
+      }
+      return { ok: true, data: result };
+    }
+  );
 }

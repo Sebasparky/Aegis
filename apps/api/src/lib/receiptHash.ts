@@ -2,10 +2,17 @@ import { createHash } from "crypto";
 import type { RouteRunReceipt } from "@aegis/types";
 
 // SHA-256 of stable (sorted-key) JSON for tamper-evidence fingerprinting.
-// Two receipts with the same field values produce the same hash regardless of
-// JS object insertion order. Stored in aegis_receipts.receipt_hash at insert time.
-export function hashReceipt(receipt: RouteRunReceipt): string {
-  const stable = JSON.stringify(receipt, sortedReplacer);
+// Wraps { previous_receipt_hash, receipt_json } so the hash chain is included.
+// Two calls with the same receipt and previous hash always produce the same result.
+export function hashReceipt(
+  receipt: RouteRunReceipt,
+  previousReceiptHash?: string | null
+): string {
+  const payload = {
+    previous_receipt_hash: previousReceiptHash ?? null,
+    receipt_json: receipt,
+  };
+  const stable = JSON.stringify(payload, sortedReplacer);
   return createHash("sha256").update(stable, "utf8").digest("hex");
 }
 

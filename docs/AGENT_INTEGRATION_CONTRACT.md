@@ -792,6 +792,102 @@ Upserts the demo vault pass and encrypted secret (for `pass_vault_demo_login_001
 
 ---
 
+## Immutable + Signed Receipts v1
+
+Receipts are tamper-evident audit objects. Each receipt row in `aegis_receipts` includes a hash chain link and an EdDSA/Ed25519 JWS signature.
+
+### Receipt hash
+
+```
+receipt_hash = SHA-256(stable_sorted_json({ previous_receipt_hash, receipt_json }))
+```
+
+`previous_receipt_hash` is the `receipt_hash` of the most recently created receipt for the same `user_id` (null for the first receipt). This links each receipt into a chain: mutating any field changes the hash, breaking the chain.
+
+`receipt_hash` and `receipt_jws` are Supabase row metadata — they are **not** fields on the `RouteRunReceipt` type.
+
+### JWS signature
+
+`receipt_jws` is a CompactSign EdDSA/Ed25519 JWS with:
+
+- Protected header: `{ alg: "EdDSA", typ: "aegis-receipt+jws" }`
+- Payload:
+  ```json
+  {
+    "typ": "aegis.receipt.v1",
+    "receipt_id": "...",
+    "receipt_hash": "...",
+    "previous_receipt_hash": "..." | null,
+    "issuer": "...",
+    "issued_at": "..."
+  }
+  ```
+
+The JWS payload contains **no secrets** — no passwords, no credential values, no private keys.
+
+### Verify endpoint
+
+```
+GET /api/route-run-receipts/:receiptId/verify
+```
+
+Returns:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "receipt_id": "...",
+    "valid": true,
+    "hash_valid": true,
+    "signature_valid": true,
+    "chain_previous_exists": true,
+    "receipt_hash": "...",
+    "recomputed_hash": "...",
+    "previous_receipt_hash": "..." | null,
+    "jws_payload": { "typ": "aegis.receipt.v1", ... }
+  }
+}
+```
+
+`valid = hash_valid && signature_valid && (chain_previous_exists if applicable)`.
+
+Returns 404 if the receipt does not exist.
+
+### Append-only enforcement
+
+A PostgreSQL `BEFORE` trigger on `aegis_receipts` raises an exception for UPDATE and DELETE. This applies to all clients including the service role. Receipts can only be created, never mutated or deleted. To truncate in dev: drop the trigger, truncate, re-run `002_signed_immutable_receipts.sql`.
+
+### Key setup
+
+```bash
+node apps/api/scripts/generate-receipt-keypair.mjs
+# or
+npm run generate:receipt-keypair --workspace=apps/api
+```
+
+Prints two lines; paste into `.env`:
+
+```
+AEGIS_RECEIPT_ISSUER=aegis-dev
+AEGIS_RECEIPT_JWS_PRIVATE_JWK='{"kty":"OKP","crv":"Ed25519","d":"...","x":"..."}'
+AEGIS_RECEIPT_JWS_PUBLIC_JWK='{"kty":"OKP","crv":"Ed25519","x":"..."}'
+```
+
+`AEGIS_RECEIPT_JWS_PRIVATE_JWK` must never be exposed outside `apps/api`.
+
+### Local dev mode
+
+In local mode (`AEGIS_PERSISTENCE_PROVIDER=local`), signing is best-effort: all signing errors are swallowed and `receipt_jws` is null. `valid` is `hash_valid` only when unsigned. This allows local development and tests to run without keys configured.
+
+For Supabase mode with no keys: set `AEGIS_RECEIPT_ALLOW_UNSIGNED_DEV=true` to allow unsigned inserts (not recommended for production). The verify endpoint will return `signature_valid: false, error: "NO_JWS"` for unsigned receipts.
+
+### This is not blockchain
+
+Receipts are portable signed audit evidence — no distributed ledger, no consensus, no token. The chain and signature are verifiable by any party with the Aegis public key.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

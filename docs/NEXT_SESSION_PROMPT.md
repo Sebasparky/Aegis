@@ -24,10 +24,12 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Supabase Persistence v1. `getVaultRepository()`, `getReceiptRepository()`, `AEGIS_PERSISTENCE_PROVIDER` feature flag, `lib/supabase.ts`, `lib/receiptHash.ts`, `docs/supabase/001_vault_and_receipts.sql`, and `seed-supabase-demo.mjs` are complete. Do not re-implement direct Map access in vault-passes.ts or receipts.ts.**
 >
 > **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
+>
+> **Also: do NOT rebuild Immutable + Signed Receipts v1. It is complete. Do not re-implement `receiptSigning.ts`, `generate-receipt-keypair.mjs`, `002_signed_immutable_receipts.sql`, `verifyReceipt`, or `GET /api/route-run-receipts/:receiptId/verify`.**
 
 ---
 
-## Completed Increments (as of 2026-05-01)
+## Completed Increments (as of 2026-05-02)
 
 Everything below is implemented and working.
 
@@ -365,6 +367,34 @@ Implementation:
 Supabase vault repository dual-writes to local Maps as a temporary bridge so non-migrated routes (credential-sessions.ts, route-runs.ts pass validation) continue working. Long-term: all vault/secret reads should migrate to repository-backed access.
 
 Local mode (`AEGIS_PERSISTENCE_PROVIDER=local`, the default) is unchanged.
+
+Do not rebuild unless explicitly requested.
+
+### Immutable + Signed Receipts v1 — hash chain + JWS signatures
+
+**Completed 2026-05-02.** Receipts are now tamper-evident and cryptographically signed.
+
+- `receipt_hash` covers `{ previous_receipt_hash, receipt_json }` (SHA-256, stable sorted JSON)
+- `previous_receipt_hash` links each receipt to the previous one for the same user
+- `receipt_jws` is an EdDSA/Ed25519 CompactSign JWS over `{ typ, receipt_id, receipt_hash, previous_receipt_hash, issuer, issued_at }` — no secrets in the payload
+- Supabase receipts use INSERT (not upsert) — append-only enforced by DB trigger
+- Verify endpoint: `GET /api/route-run-receipts/:receiptId/verify`
+
+Implementation:
+- `apps/api/src/lib/receiptHash.ts` — updated to accept `previousReceiptHash`
+- `apps/api/src/lib/receiptSigning.ts` — `signReceiptJws`, `verifyReceiptJws`, `UnsignedDevModeError`
+- `apps/api/src/repositories/receiptRepository.ts` — `ReceiptVerificationResult`, `verifyReceipt`, hash chain + JWS in `createReceipt`
+- `apps/api/src/routes/receipts.ts` — verify endpoint
+- `docs/supabase/002_signed_immutable_receipts.sql` — columns + indexes + append-only triggers
+- `apps/api/scripts/generate-receipt-keypair.mjs` — prints Ed25519 JWK pair to stdout
+
+Key env vars:
+- `AEGIS_RECEIPT_ISSUER` — defaults to `"aegis-dev"`
+- `AEGIS_RECEIPT_JWS_PRIVATE_JWK` — EdDSA private key JWK (generate with `npm run generate:receipt-keypair`)
+- `AEGIS_RECEIPT_JWS_PUBLIC_JWK` — EdDSA public key JWK
+- `AEGIS_RECEIPT_ALLOW_UNSIGNED_DEV=true` — allow unsigned receipts (Supabase mode dev opt-in; local mode always allows unsigned)
+
+Local mode: signing is best-effort (all signing errors swallowed). `valid` is based on hash integrity only when unsigned.
 
 Do not rebuild unless explicitly requested.
 

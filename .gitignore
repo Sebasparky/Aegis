@@ -9,3 +9,7 @@ build
 !.env.example
 apps/api/.data
 .DS_Store
+
+.claude/settings.json
+.playwright-mcp/
+apps/web/tsconfig.tsbuildinfo

@@ -517,6 +517,7 @@ const routes = [
       trust_tier: "aegis_scanned",
       domain: "localhost",
       url_match: { hostname: "localhost", path_prefix: "/demo-login" },
+      start_url: "http://localhost:3000/demo-login",
       workflow_name: "Demo Login",
       workflow_description: "Fill username and password and click Sign In on the Aegis demo login page. Uses fake demo credentials. Proves aegis_controlled execution path with approval gating and outcome verification.",
       risk_level: "high",

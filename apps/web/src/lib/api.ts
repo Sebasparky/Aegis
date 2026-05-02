@@ -250,9 +250,73 @@ export const rejectRouteRun = (runId: string, reason?: string) =>
     body: JSON.stringify({ reason: reason ?? "Rejected from approval queue." }),
   });
 
+// Vault Passes (dev-only credential custody — login_password bundles)
+export interface VaultPassView {
+  pass_id: string;
+  user_id: string;
+  label: string;
+  kind: "login_password";
+  domain: string;
+  username?: string;
+  created_at: string;
+  updated_at: string;
+  has_password: boolean;
+}
+export const listVaultPasses = () => request<VaultPassView[]>("/api/vault-passes");
+export const createVaultPass = (body: { label: string; kind: "login_password"; domain: string; username: string; password: string }) =>
+  request<VaultPassView>("/api/vault-passes", { method: "POST", body: JSON.stringify(body) });
+export const deleteVaultPass = (passId: string) =>
+  request<{ ok: boolean }>(`/api/vault-passes/${passId}`, { method: "DELETE" });
+
+// Route Pass Bindings
+export interface RoutePassBinding {
+  binding_id: string;
+  user_id: string;
+  route_id: string;
+  pass_id: string;
+  purpose: "login_password";
+  created_at: string;
+  updated_at: string;
+}
+export const listRoutePassBindings = (route_id?: string) => {
+  const qs = route_id ? `?route_id=${encodeURIComponent(route_id)}` : "";
+  return request<RoutePassBinding[]>(`/api/route-pass-bindings${qs}`);
+};
+export const setRoutePassBinding = (body: { route_id: string; pass_id: string; purpose?: "login_password" }) =>
+  request<RoutePassBinding>("/api/route-pass-bindings", { method: "POST", body: JSON.stringify(body) });
+export const clearRoutePassBinding = (route_id: string, purpose: "login_password" = "login_password") =>
+  request<{ ok: boolean }>("/api/route-pass-bindings", { method: "DELETE", body: JSON.stringify({ route_id, purpose }) });
+
 // Action API
 export const requestAction = (body: ActionRequest) =>
   request<ActionDecisionResponse>("/api/action/request", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+
+// Credential Sessions (field-level credential delegation — dev prototype only)
+export interface CredentialSessionView {
+  session_id: string;
+  user_id: string;
+  agent_id?: string;
+  pass_id: string;
+  pass_label?: string;
+  pass_username?: string;
+  domain: string;
+  status: "pending_approval" | "active" | "completed" | "failed" | "expired";
+  allowed_fields: Array<"username" | "password">;
+  fields_filled: Array<{ field: string; filled_at: string; tab_url?: string }>;
+  approved_at?: string;
+  expires_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+export const listCredentialSessions = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<CredentialSessionView[]>(`/api/credential-sessions${qs}`);
+};
+export const approveCredentialSession = (sessionId: string) =>
+  request<CredentialSessionView>(`/api/credential-sessions/${sessionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({}),
   });

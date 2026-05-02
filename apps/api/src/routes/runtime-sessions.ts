@@ -31,12 +31,16 @@ export async function runtimeSessionRoutes(server: FastifyInstance) {
         return sendError(reply, 409, "RUN_ALREADY_TERMINAL", `Run is already in terminal state: ${run.status}.`);
       }
 
-      // If already running, return the existing session if one exists
-      if (run.status === "running") {
+      // If already running or claimed, return the existing session if one exists
+      if (run.status === "running" || run.claimed_execution_surface === "aegis_playwright") {
         const existing = Array.from(runtimeSessions.values()).find(
           (s) => s.run_id === runId && s.execution_surface === "aegis_playwright"
         );
         if (existing) return reply.send({ ok: true, data: existing });
+        if (run.status === "running") {
+          return sendError(reply, 409, "RUN_ALREADY_RUNNING", "Run is already executing in the Aegis Playwright runtime.");
+        }
+        // Claimed but Playwright hasn't started yet — allow fallback
       }
 
       let session;

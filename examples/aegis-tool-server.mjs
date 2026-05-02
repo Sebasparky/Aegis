@@ -399,7 +399,7 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
       next_tool: "request_skill_run",
       suggested_request: { skill_id: matchedSkill.skill_id, variables: {} },
       post_approval_next_tool: "start_playwright_route_run",
-      post_approval_note: "After the user approves the pending run, call start_playwright_route_run with the run_id returned by request_skill_run. Aegis will open the page and execute the workflow in its own browser session. Do not ask the user to manually open the target page.",
+      post_approval_note: "Aegis will auto-start the Playwright runtime immediately after the user approves. Poll get_route_run_status — the run should transition from pending to running and then completed without any manual step. If the run remains pending, call start_playwright_route_run as a fallback.",
       explanation:
         "This is a sensitive workflow requiring Aegis control. Call request_skill_run to create the run. If approval is required, direct the user to /route-run-approvals and poll until status is no longer pending_approval. Then call start_playwright_route_run — do not rely on the Chrome extension or ask the user to open a tab.",
     };

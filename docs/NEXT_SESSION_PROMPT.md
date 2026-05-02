@@ -32,6 +32,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Execution Surface Recenter v1. It is complete. Do not rewrite MCP tool descriptions, `plan_aegis_action` post-approval fields, README Execution Surfaces section, or contract architecture note to be extension-first. `aegis_playwright` is the primary autonomous-agent execution surface. Chrome extension is optional local/debug/recording companion.**
 >
 > **Also: do NOT rebuild Sensitive Workflow Detection v1. It is complete. Do not re-implement `RuntimeEvent`, `RuntimeEventType`, `RuntimeEventSensitivity`, `RuntimeCoverageStatus`, `RuntimeCoverageSummary`, `runtimeEvents` Map, `getCoverageSummary`, coverage window logic in `playwrightRuntime.ts`, or `GET /api/runtime/sessions/:id/events`. Detection is metadata-only — never store field values.**
+>
+> **Also: do NOT rebuild Auto-start Playwright Runs v1. It is complete. Do not re-implement `claimed_execution_surface` on `RouteRun`, the fire-and-forget Playwright auto-start in the approval endpoint, or the `isEligibleForBackgroundAutoRun` guard for `claimed_execution_surface` in the extension. Approval of an `aegis_controlled` run automatically triggers Playwright — do not instruct the agent to call `start_playwright_route_run` after approval unless the run remains pending (fallback only).**
 
 ---
 
@@ -289,6 +291,17 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Auto-start Playwright Runs v1
+- `claimed_execution_surface?: AegisExecutionSurface` added to `RouteRun` in `packages/types/src/index.ts` — set to `"aegis_playwright"` when approval auto-triggers Playwright; prevents extension from racing on the same run
+- Approval endpoint (`POST /api/route-runs/:runId/approve`) in `route-runs.ts` auto-starts Playwright via fire-and-forget when `route.execution_mode === "aegis_controlled" && route.start_url` — uses dynamic `import("../runtime/playwrightRuntime.js")` to avoid circular dependency
+- Extension `isEligibleForBackgroundAutoRun` in `background.js` skips runs where `claimed_execution_surface === "aegis_playwright"` — extension never races against an auto-started Playwright session
+- Manual `POST /api/runtime/route-runs/:runId/playwright/start` remains as fallback — handles `claimed_execution_surface` gracefully (returns existing session if present)
+- MCP tool `post_approval_note` updated in `examples/aegis-tool-server.mjs`: all 4 `aegis_controlled_run` return paths now say "Aegis will auto-start the Playwright runtime immediately after the user approves. Poll get_route_run_status — the run should transition without any manual step. If the run remains pending, call start_playwright_route_run as a fallback."
+- `docs/AGENT_INTEGRATION_CONTRACT.md` Recommended Agent Flow updated: step 3 explains auto-start, step 4 is poll-to-completion, step 5 is fallback, step 6 is verify
+- Status Lifecycle table updated to show Playwright runtime as driver of `pending → running` and `running → completed/failed`
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Playwright Runtime v1
 - `apps/api/src/runtime/aegisRuntime.ts` — `RuntimeSession`, `RuntimeEvent` types; ephemeral `runtimeSessions` Map (not persisted — receipts are the durable audit record)
 - `apps/api/src/runtime/playwrightRuntime.ts` — `executeRouteRunWithPlaywright(runId)`: launches headless Chromium, navigates to `route.start_url`, executes route steps, resolves credentials via KMS vault, instruments sensitive events, emits signed receipt with `execution_surface: "aegis_playwright"`, marks run completed
@@ -354,6 +367,8 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 **Execution Surface Recenter v1 is complete** — implemented 2026-05-02. `aegis_playwright` is now the primary autonomous-agent execution surface in all MCP tool guidance, docs, and planning tools. Chrome extension is framed as optional local/debug/recording companion. See "Execution Surface Recenter v1" in Completed Increments.
 
 **Sensitive Workflow Detection v1 is complete** — implemented 2026-05-02. Aegis Playwright runtime now instruments sessions for sensitive field interactions, button clicks, and form submissions with coverage classification. See "Sensitive Workflow Detection v1" in Completed Increments.
+
+**Auto-start Playwright Runs v1 is complete** — implemented 2026-05-02. Approval of an `aegis_controlled` run now automatically triggers the Playwright runtime via fire-and-forget. The extension skips claimed runs. Manual `start_playwright_route_run` remains as a fallback. See "Auto-start Playwright Runs v1" in Completed Increments.
 
 **Candidate next milestones:**
 

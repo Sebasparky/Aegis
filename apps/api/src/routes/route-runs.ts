@@ -376,8 +376,8 @@ export async function routeRunRoutes(server: FastifyInstance) {
    * POST /api/route-runs/:runId/approve
    *
    * Approve a pending_approval run, transitioning it to pending status.
-   * After approval, execute via POST /api/runtime/route-runs/:runId/playwright/start
-   * (or the Chrome extension for local/debug use).
+   * For aegis_controlled routes with a start_url, auto-starts the Playwright runtime
+   * immediately after approval — no manual start command needed.
    */
   server.post<{ Params: { runId: string } }>(
     "/api/route-runs/:runId/approve",
@@ -390,8 +390,30 @@ export async function routeRunRoutes(server: FastifyInstance) {
       run.status = "pending";
       run.approved_at = new Date().toISOString();
       run.approved_permissions = run.approval_required_permissions ?? [];
+
+      const route = routes.get(run.route_id);
+      const canAutoStart = route?.execution_mode === "aegis_controlled" && !!route.start_url;
+
+      if (canAutoStart) {
+        run.claimed_execution_surface = "aegis_playwright";
+      }
+
       routeRuns.set(run.run_id, run);
       schedulePersist();
+
+      if (canAutoStart) {
+        // Fire-and-forget: auto-start Playwright runtime after approval.
+        // Dynamic import avoids circular dependency (playwrightRuntime imports buildReceipt from this file).
+        void (async () => {
+          try {
+            const { executeRouteRunWithPlaywright } = await import("../runtime/playwrightRuntime.js");
+            await executeRouteRunWithPlaywright(run.run_id);
+          } catch (err: any) {
+            console.error("[auto-playwright] Failed to execute approved run", run.run_id, "—", err?.message);
+          }
+        })();
+      }
+
       return { ok: true, data: run };
     }
   );

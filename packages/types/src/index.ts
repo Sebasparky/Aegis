@@ -613,6 +613,9 @@ export interface RouteRun {
   credential_used?: boolean;
   pass_ids_used?: string[];
   secret_values_revealed_to_agent?: false;
+  // Set when an execution surface claims the run before starting it.
+  // Prevents other surfaces (e.g. Chrome extension) from racing.
+  claimed_execution_surface?: AegisExecutionSurface;
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

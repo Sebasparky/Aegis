@@ -58,9 +58,10 @@ The Chrome extension is retained as a local debugging companion and workflow rec
 
 1. **Discover / plan** — `plan_aegis_action` returns `post_approval_next_tool: "start_playwright_route_run"` for controlled skills.
 2. **Create run** — `request_skill_run` (or `POST /api/skills/:skillId/runs`) → `run_id`.
-3. **Handle approval** — if `status=pending_approval`, direct user to `/route-run-approvals`; poll until `pending`.
-4. **Execute** — `start_playwright_route_run` (or `POST /api/runtime/route-runs/:runId/playwright/start`). **Do not ask the user to open a browser tab.**
-5. **Verify** — `get_route_run_receipt` → confirm `execution_surface: "aegis_playwright"`, `signature_valid: true`.
+3. **Handle approval** — if `status=pending_approval`, direct user to `/route-run-approvals`. **Aegis automatically starts the Playwright runtime immediately after the user approves.** Poll `get_route_run_status` — the run should transition from `pending_approval` → `pending` → `running` → `completed` without any agent action.
+4. **Poll to completion** — poll every ~3s until the run reaches a terminal state. The run is auto-started by Aegis; **do not ask the user to open a browser tab and do not call `start_playwright_route_run` unless the run remains `pending` after approval** (fallback for edge cases only).
+5. **Fallback** — if the run does not transition to `running` within ~15s of approval, call `start_playwright_route_run` as a manual trigger.
+6. **Verify** — `get_route_run_receipt` → confirm `execution_surface: "aegis_playwright"`, `signature_valid: true`.
 
 ### Architecture Note
 
@@ -569,9 +570,9 @@ curl -s -X POST \
 |---|---|
 | `pending_approval` → `pending` | User (via `/route-run-approvals` UI or `POST .../approve`) |
 | `pending_approval` → `blocked` | User (reject) |
-| `pending` → `running` | Aegis Chrome extension — automatically when background auto-run is enabled and exactly one low-risk pending run exists for the active tab domain, or manually via the popup Start Run button |
-| `running` → `completed` | Aegis Chrome extension, after verifying the final browser outcome matches the expected result |
-| `running` → `failed` | Aegis Chrome extension (on replay error, fill verification failure, or outcome mismatch) |
+| `pending` → `running` | **Aegis Playwright runtime** — triggered automatically after user approval for `aegis_controlled` skills (primary path for autonomous agents); OR Aegis Chrome extension — automatically when background auto-run is enabled and exactly one low-risk pending run exists for the active tab domain, or manually via the popup Start Run button |
+| `running` → `completed` | Aegis Playwright runtime (after headless Chromium execution completes); OR Aegis Chrome extension, after verifying the final browser outcome matches the expected result |
+| `running` → `failed` | Aegis Playwright runtime (on navigation error, locator failure, credential resolution failure); OR Aegis Chrome extension (on replay error, fill verification failure, or outcome mismatch) |
 
 An agent only observes status changes — it never drives them.
 

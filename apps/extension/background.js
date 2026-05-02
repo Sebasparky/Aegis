@@ -243,6 +243,8 @@ function doesTabMatchRoute(tabUrl, route) {
 function isEligibleForBackgroundAutoRun(r, startedIds) {
   if (r.status !== 'pending') return false;
   if (startedIds.has(r.run_id)) return false;
+  // Skip runs claimed by Aegis Playwright runtime — it executes without user-opened tab.
+  if (r.claimed_execution_surface === 'aegis_playwright') return false;
   if (r.skill_summary?.risk_level === 'low') return true;
   if (r.approved_at && r.approved_permissions?.length > 0) return true;
   return false;

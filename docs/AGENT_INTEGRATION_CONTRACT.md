@@ -20,7 +20,27 @@ Aegis is invoked selectively when the agent needs one of two things:
 
 **Agent-runnable skills (`execution_mode: "agent_runnable"`):** Aegis has a verified, Aegis-tested route recipe for a routine workflow (browsing, searching, reading). The agent calls `get_agent_runnable_workflow` to retrieve the step-by-step recipe and executes it in its own browser session. The agent keeps full browser control. No extension handoff. No RouteRun. Aegis contributes tested locators and variable bindings so the agent does not need to re-plan from scratch.
 
-**Aegis-controlled skills (`execution_mode: "aegis_controlled"`):** The workflow involves credentials, payments, personal data, approvals, or sensitive side effects. The agent calls `request_skill_run`, and Aegis takes custody of the execution — via the Chrome extension, collar enforcement, and the approval flow. The agent waits for a receipt.
+**Aegis-controlled skills (`execution_mode: "aegis_controlled"`):** The workflow involves credentials, payments, personal data, approvals, or sensitive side effects. The agent calls `request_skill_run`, and Aegis takes custody of the execution — via a controlled execution surface, collar enforcement, and the approval flow. The agent waits for a receipt.
+
+---
+
+## Aegis Execution Surfaces
+
+When Aegis executes a controlled run, it uses one of two execution surfaces. The receipt records which surface was used via `execution_surface`.
+
+| Surface | Value | When Used |
+|---|---|---|
+| Chrome extension | `"chrome_extension"` | Local prototype. The user must have a matching tab open. The extension picks up `status=pending` runs and replays the route. Suitable for interactive demos and local development. |
+| Aegis Playwright runtime | `"aegis_playwright"` | API-started controlled runtime. Aegis launches a headless Chromium session, navigates to the route `start_url`, resolves credentials from the KMS vault, and executes route steps. The user does not need to have a browser tab open. Suitable for autonomous agent workflows. |
+
+**For autonomous agents**, prefer the Playwright runtime:
+1. Create the run: `POST /api/skills/:skillId/runs` → get `run_id`.
+2. If `pending_approval`, direct the user to `/route-run-approvals` and poll until `status` changes to `pending`.
+3. Start Playwright execution: `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`).
+4. Poll `get_route_run_status` until terminal.
+5. Read receipt — `execution_surface` will be `"aegis_playwright"`.
+
+**Agents never receive raw credentials in either surface.** The Chrome extension resolves secrets via the `resolve-value` endpoint (extension-only). The Playwright runtime resolves secrets internally via the KMS vault. In both cases `secret_values_revealed_to_agent: false` is set on the receipt.
 
 ---
 

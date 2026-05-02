@@ -289,6 +289,26 @@ function scoreSkills(skills, taskLower) {
   return bestScore > 0 ? best : null;
 }
 
+async function startPlaywrightRouteRun({ run_id } = {}) {
+  if (!run_id) return { error: "MISSING_RUN_ID", message: "run_id is required." };
+  const res = await request("POST", `/api/runtime/route-runs/${encodeURIComponent(run_id)}/playwright/start`);
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to start Playwright run.",
+    };
+  }
+  return {
+    runtime_session_id: res.data?.runtime_session_id,
+    run_id: res.data?.run_id,
+    status: res.data?.status,
+    execution_surface: res.data?.execution_surface,
+    completed_at: res.data?.completed_at ?? null,
+    error: res.data?.error ?? null,
+    runtime_events_count: (res.data?.runtime_events ?? []).length,
+  };
+}
+
 async function planAegisAction({ task, domain, credential_hint } = {}) {
   const taskLower = (task ?? "").toLowerCase();
 
@@ -693,6 +713,21 @@ const TOOLS = [
     },
   },
   {
+    name: "start_playwright_route_run",
+    description:
+      "Start an approved Aegis-controlled route run in the Aegis Playwright runtime. Aegis opens a headless Chromium session, navigates to the route start URL, resolves credentials from the KMS vault, and executes the route steps — the user does not need to have a browser tab open. Use this for autonomous agent flows where the agent should not manage browser execution directly. Refuses runs that are pending_approval — the user must approve first via /route-run-approvals before calling this. Returns the runtime session including status and any instrumented sensitive events.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The run_id returned by request_skill_run. Run must be in pending status (approved, not pending_approval).",
+        },
+      },
+      required: ["run_id"],
+    },
+  },
+  {
     name: "plan_aegis_action",
     description:
       "Analyze a task description and return a structured recommendation for how to execute it using Aegis — without executing anything. Resolves the relevant domain, matches installed skills by keyword heuristics, and recommends either get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run (Aegis-controlled sensitive workflows), or normal agent tools (no matching skill). For aegis_controlled skills, optionally resolves a vault credential by hint and includes a suggested pass_overrides argument. Call this first when you have a task description but haven't yet identified the skill or credential to use.",
@@ -762,6 +797,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_credential_session_status":
       result = await getCredentialSessionStatus(a);
+      break;
+    case "start_playwright_route_run":
+      result = await startPlaywrightRouteRun(a);
       break;
     case "plan_aegis_action":
       result = await planAegisAction(a);

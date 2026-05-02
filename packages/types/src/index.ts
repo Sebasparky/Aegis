@@ -527,6 +527,8 @@ export interface RecordingPayload {
 
 // ─── Aegis Rails — RouteRunReceipt ───────────────────────────────────────────
 
+export type AegisExecutionSurface = "chrome_extension" | "aegis_playwright";
+
 export interface RouteRunReceipt {
   receipt_id: string;
   run_id: string;
@@ -539,7 +541,7 @@ export interface RouteRunReceipt {
   status: "completed" | "failed";
   variables?: Record<string, string>;
   allowed_reason: string;
-  execution_surface: "chrome_extension";
+  execution_surface: AegisExecutionSurface;
   route_trust_tier: string;
   skill_name: string;
   route_name: string;

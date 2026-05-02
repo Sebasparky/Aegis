@@ -28,6 +28,7 @@ import { actionRoutes } from "./routes/action.js";
 import { vaultPassRoutes } from "./routes/vault-passes.js";
 import { routePassBindingRoutes } from "./routes/route-pass-bindings.js";
 import { credentialSessionRoutes } from "./routes/credential-sessions.js";
+import { runtimeSessionRoutes } from "./routes/runtime-sessions.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -75,6 +76,7 @@ async function main() {
   await server.register(vaultPassRoutes);
   await server.register(routePassBindingRoutes);
   await server.register(credentialSessionRoutes);
+  await server.register(runtimeSessionRoutes);
 
   if (process.env.NODE_ENV !== "production") {
     await server.register(devRoutes);

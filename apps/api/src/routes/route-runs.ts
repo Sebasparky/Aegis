@@ -1,11 +1,17 @@
 import type { FastifyInstance } from "fastify";
-import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
+import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface } from "@aegis/types";
 import { skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
+import { resolveRouteStepValue } from "../lib/secretResolution.js";
 
-function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
+export function buildReceipt(
+  run: RouteRun,
+  status: "completed" | "failed",
+  error?: string,
+  executionSurface: AegisExecutionSurface = "chrome_extension"
+): RouteRunReceipt {
   const skill = skills.get(run.skill_id);
   const route = routes.get(run.route_id);
   const skillName = skill?.name ?? run.skill_id;
@@ -13,9 +19,13 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
   const trustTier = route?.trust_tier ?? "unknown";
   const now = new Date().toISOString();
 
+  const surfaceLabel = executionSurface === "aegis_playwright"
+    ? "the Aegis Playwright runtime"
+    : "the Aegis browser extension";
+
   const allowed_reason = status === "completed"
-    ? `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was completed through the Aegis browser extension.`
-    : `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was attempted through the Aegis browser extension but failed: ${error ?? "unknown error"}.`;
+    ? `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was completed through ${surfaceLabel}.`
+    : `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was attempted through ${surfaceLabel} but failed: ${error ?? "unknown error"}.`;
 
   const receipt: RouteRunReceipt = {
     receipt_id: newId("rrreceipt"),
@@ -27,7 +37,7 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
     domain: run.domain,
     status,
     allowed_reason,
-    execution_surface: "chrome_extension",
+    execution_surface: executionSurface,
     route_trust_tier: trustTier,
     skill_name: skillName,
     route_name: routeName,
@@ -456,60 +466,27 @@ export async function routeRunRoutes(server: FastifyInstance) {
     if (!vp || (vp.type !== "pass_field" && vp.type !== "secret_ref"))
       return sendError(reply, 400, "NOT_PASS_STEP", "Step does not have a pass_field or secret_ref value policy.");
 
-    // Precedence: (1) per-run override, (2) persistent route-pass binding, (3) route step default.
-    const bindingKey = `${run.user_id}:${run.route_id}:login_password`;
-    const binding = routePassBindings.get(bindingKey);
-    const effectivePassId = run.pass_overrides?.["login_password"] ?? binding?.pass_id ?? vp.pass_id!;
-
-    const pass = aegisVaultPasses.get(effectivePassId);
-    if (!pass || pass.user_id !== run.user_id)
-      return sendError(reply, 404, "NOT_FOUND", "Pass not found.");
-
-    if (pass.domain !== route.domain)
-      return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Pass domain does not match route domain.");
-
     if (vp.type === "secret_ref" && route.execution_mode !== "aegis_controlled")
       return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Secret resolution requires aegis_controlled execution mode.");
 
     if (run.approval_required_permissions && run.approval_required_permissions.length > 0 && !run.approved_at)
       return sendError(reply, 403, "SECRET_NOT_ALLOWED", "Run requires approval before secret can be resolved.");
 
-    let value: string;
-    let redacted: boolean;
-
-    if (vp.type === "pass_field") {
-      if (vp.field === "username" && pass.username) {
-        value = pass.username;
-        redacted = false;
-      } else {
-        return sendError(reply, 404, "NOT_FOUND", "Requested pass field is not available.");
-      }
-    } else {
-      const blob = encryptedSecretVault.get(pass.secret_ref);
-      if (!blob) return sendError(reply, 404, "SECRET_NOT_AVAILABLE", "Secret not available in vault.");
-      try {
-        const kms = getKmsProvider();
-        const kmsContext: KmsContext = {
-          user_id: pass.user_id,
-          pass_id: pass.pass_id,
-          domain: pass.domain,
-          purpose: "login_password",
-        };
-        value = await kms.decryptSecret(blob, kmsContext);
-      } catch {
-        console.error("[route-runs] Decrypt failed for pass", pass.pass_id, "— wrong key or tampered blob");
-        return sendError(reply, 500, "SECRET_DECRYPT_FAILED", "Failed to decrypt credential. Check KMS configuration.");
-      }
-      redacted = true;
+    let resolved: { value: string; redacted: boolean; pass_id: string };
+    try {
+      resolved = await resolveRouteStepValue(run, step);
+    } catch (err: any) {
+      console.error("[route-runs] resolve-value failed:", err?.message);
+      return sendError(reply, 400, "RESOLVE_FAILED", err?.message ?? "Failed to resolve credential.");
     }
 
     // Track pass usage on the run — receipt will include this metadata
     run.credential_used = true;
     run.secret_values_revealed_to_agent = false;
-    run.pass_ids_used = Array.from(new Set([...(run.pass_ids_used ?? []), pass.pass_id]));
+    run.pass_ids_used = Array.from(new Set([...(run.pass_ids_used ?? []), resolved.pass_id]));
     routeRuns.set(runId, run);
     schedulePersist();
 
-    return reply.send({ ok: true, data: { value, value_source: vp.type, pass_id: pass.pass_id, redacted } });
+    return reply.send({ ok: true, data: { value: resolved.value, value_source: vp.type, pass_id: resolved.pass_id, redacted: resolved.redacted } });
   });
 }

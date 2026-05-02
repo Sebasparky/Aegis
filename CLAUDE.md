@@ -220,6 +220,8 @@ Before making any changes:
 - `receipt_hash` and `receipt_jws` are Supabase row metadata — they are NOT fields on `RouteRunReceipt` and must not be added to the type
 - Supabase `createReceipt` uses INSERT (not upsert) — receipts are append-only; the DB trigger blocks UPDATE/DELETE; never bypass it
 - Pass `previousReceiptHash` to `hashReceipt` in the Supabase path — calling it without the previous hash produces a broken chain
+- Do not assume user has a browser tab open for autonomous-agent flows — the Chrome extension is one execution surface, not the final architecture; use `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`) for headless/agent-requested controlled runs
+- Do not rebuild Playwright Runtime v1 (`aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run`) unless explicitly requested; `execution_surface: "aegis_playwright"` receipts are signed and verified through the same pipeline as extension receipts
 
 ## Terminology — Always Use
 

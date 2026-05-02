@@ -26,6 +26,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
 >
 > **Also: do NOT rebuild Immutable + Signed Receipts v1. It is complete. Do not re-implement `receiptSigning.ts`, `generate-receipt-keypair.mjs`, `002_signed_immutable_receipts.sql`, `verifyReceipt`, or `GET /api/route-run-receipts/:receiptId/verify`.**
+>
+> **Also: do NOT rebuild Playwright Runtime v1. It is complete. Do not re-implement `aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run` MCP tool, or `AegisExecutionSurface`. Do not assume a user-opened browser tab is required for autonomous agent flows — use `POST /api/runtime/route-runs/:runId/playwright/start` instead.**
 
 ---
 
@@ -253,6 +255,21 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Playwright Runtime v1
+- `apps/api/src/runtime/aegisRuntime.ts` — `RuntimeSession`, `RuntimeEvent` types; ephemeral `runtimeSessions` Map (not persisted — receipts are the durable audit record)
+- `apps/api/src/runtime/playwrightRuntime.ts` — `executeRouteRunWithPlaywright(runId)`: launches headless Chromium, navigates to `route.start_url`, executes route steps, resolves credentials via KMS vault, instruments sensitive events, emits signed receipt with `execution_surface: "aegis_playwright"`, marks run completed
+- `apps/api/src/lib/secretResolution.ts` — `resolveRouteStepValue(run, step)` extracted from `resolve-value` endpoint; handles pass_overrides → binding → step default → vault → KMS decrypt precedence; never logs plaintext
+- `POST /api/runtime/route-runs/:runId/playwright/start` — start approved run in Playwright runtime; 409 APPROVAL_REQUIRED if pending_approval; synchronous v1 (awaits completion before responding)
+- `GET /api/runtime/sessions` / `GET /api/runtime/sessions/:runtimeSessionId` — list/read runtime sessions
+- MCP tool `start_playwright_route_run` in `examples/aegis-tool-server.mjs` — agents call this to execute without a user tab
+- `AegisExecutionSurface` type added to `packages/types/src/index.ts`; `RouteRunReceipt.execution_surface` changed from `"chrome_extension"` literal to `AegisExecutionSurface` union
+- `buildReceipt` in `route-runs.ts` now accepts optional `executionSurface` param (defaults to `"chrome_extension"` — extension path unchanged)
+- Chrome extension path fully preserved; both surfaces coexist
+- Sensitive event instrumentation: page init script detects password fields, sensitive button clicks, form submits; stores metadata only (no field values) in `session.runtime_events`
+- `docs/AGENT_INTEGRATION_CONTRACT.md` updated with "Aegis Execution Surfaces" section
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -290,18 +307,22 @@ Session rules:
 
 ## Current Next Task
 
-Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01. Low-risk pending RouteRuns execute automatically when the matching domain tab is active, with atomic fill verification and browser outcome verification before marking completed.
+Background Auto-Run (Reliable, Opt-In) is **complete** — validated 2026-05-01.
 
-External Agent Integration Hardening is also **complete** — validated via the Aegis MCP Tool Server on 2026-05-01.
+External Agent Integration Hardening is **complete** — validated via the Aegis MCP Tool Server on 2026-05-01.
 
-Agent-runnable workflow recipe path is **complete** — validated 2026-05-01. `execution_mode="agent_runnable"` skills surface a tested route recipe via `get_agent_runnable_workflow`; agents execute it in their own browser session without a RouteRun or extension handoff.
+Agent-runnable workflow recipe path is **complete** — validated 2026-05-01.
 
-Aegis-controlled sensitive execution path is **complete** — validated 2026-05-01. `execution_mode="aegis_controlled"` skills refuse recipe access with `NOT_AGENT_RUNNABLE`; agents use `request_skill_run`; approval-gated runs require user sign-off before the extension auto-runs only on the matching route context (`url_match` enforced). Demo Login receipt `rrreceipt_d5614360e907` confirms the full path.
+Aegis-controlled sensitive execution path (via extension) is **complete** — validated 2026-05-01.
+
+**Playwright Runtime v1 is complete** — implemented 2026-05-02. Agents can now execute approved controlled runs without a user-opened browser tab. See "Playwright Runtime v1" in Completed Increments below.
 
 **Candidate next milestones:**
 
-1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation, clear error responses for invalid state changes
-2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy (all / exclude / only), and approval gating logic
+1. **Coverage Monitor hardening** — surface runtime events from Playwright sessions in the UI; distinguish covered vs. uncovered sensitive fields
+2. **Delegation Passport v1** — structured delegation manifest agents can carry across API calls without per-call token lookup
+3. **Action Authorization Receipt v1** — per-action receipt events (not just run-level); enables finer-grained audit for multi-step sensitive workflows
+4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

@@ -311,7 +311,7 @@ export interface CredentialSessionView {
   created_at: string;
   updated_at: string;
 }
-export const listCredentialSessions = (status?: string) => {
+export const listCredentialSessions = (status?: CredentialSessionView["status"]) => {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return request<CredentialSessionView[]>(`/api/credential-sessions${qs}`);
 };

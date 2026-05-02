@@ -1,5 +1,5 @@
 import type { RouteRun, RouteStep } from "@aegis/types";
-import { aegisVaultPasses, routePassBindings } from "../store/index.js";
+import { aegisVaultPasses, routePassBindings, makePassBindingKey } from "../store/index.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
 import { getKmsProvider, type KmsContext } from "./kms.js";
 
@@ -9,14 +9,6 @@ export interface ResolvedValue {
   pass_id: string;
 }
 
-/**
- * Resolve a pass_field (username) or secret_ref (password) value for a route step.
- *
- * Precedence: (1) per-run pass_overrides, (2) persistent route-pass binding,
- * (3) route step default pass_id.
- *
- * Never logs the decrypted value. Throws on any resolution failure.
- */
 export async function resolveRouteStepValue(
   run: RouteRun,
   step: RouteStep
@@ -26,8 +18,7 @@ export async function resolveRouteStepValue(
     throw new Error("Step does not have a pass_field or secret_ref value policy.");
   }
 
-  const bindingKey = `${run.user_id}:${run.route_id}:login_password`;
-  const binding = routePassBindings.get(bindingKey);
+  const binding = routePassBindings.get(makePassBindingKey(run.user_id, run.route_id, "login_password"));
   const effectivePassId = run.pass_overrides?.["login_password"] ?? binding?.pass_id ?? vp.pass_id!;
 
   const vaultRepo = getVaultRepository();

@@ -185,3 +185,7 @@ export const MOCK_USER_ID = "user_001";
 export function newId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
+
+export function makePassBindingKey(user_id: string, route_id: string, purpose: string): string {
+  return `${user_id}:${route_id}:${purpose}`;
+}

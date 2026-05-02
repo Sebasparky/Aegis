@@ -58,7 +58,6 @@ export default function RouteRunApprovalsPage() {
 
   return (
     <div className="max-w-3xl space-y-12">
-      {/* ─── Route Run Approvals ─────────────────────────────────────────────── */}
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-semibold text-white">Route Run Approvals</h1>
@@ -157,7 +156,6 @@ export default function RouteRunApprovalsPage() {
         )}
       </div>
 
-      {/* ─── Credential Session Requests ──────────────────────────────────────── */}
       <div className="space-y-6 border-t border-gray-800 pt-8">
         <div>
           <h2 className="text-2xl font-semibold text-blue-300">Credential Session Requests</h2>
@@ -168,9 +166,9 @@ export default function RouteRunApprovalsPage() {
           </p>
         </div>
 
-        {!loading && credSessions.length === 0 ? (
+        {loading ? null : credSessions.length === 0 ? (
           <p className="text-gray-600 text-sm">No credential sessions waiting for approval.</p>
-        ) : !loading ? (
+        ) : (
           <div className="space-y-4">
             {credSessions.map((session) => (
               <div
@@ -235,7 +233,7 @@ export default function RouteRunApprovalsPage() {
               </div>
             ))}
           </div>
-        ) : null}
+        )}
       </div>
     </div>
   );

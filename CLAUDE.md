@@ -162,6 +162,14 @@ Aegis-controlled sensitive execution path is **complete** — validated 2026-05-
 
 Secret Vault / Pass Custody v1 is **complete** — implemented 2026-05-01. `AegisVaultPass` holds credential metadata; `devSecretVault` holds secrets (never persisted, never exposed to agents); Demo Login route steps use `pass_field`/`secret_ref` value policy types (raw password removed from route); `POST /api/route-runs/:runId/resolve-value` endpoint resolves credentials only during approved running RouteRuns; receipts record `credential_used`, `pass_ids_used`, `secret_values_revealed_to_agent: false`. Dev prototype only — not production KMS.
 
+Route-to-Pass Binding v1 is **complete** — implemented 2026-05-01. `RoutePassBinding` type + `routePassBindings` map (persisted). `/api/route-pass-bindings` GET/POST/DELETE. `resolve-value` checks binding before route-step default. "Credential Assignments" UI on `/passes` page.
+
+Secret Vault UI v1 is **complete** — implemented 2026-05-01. `/passes` page has a "Credential Vault" section for creating and listing `login_password` bundles. API at `/api/vault-passes` (GET/POST/DELETE). Password never returned after creation. `has_password: false` when server restarts (expected v1 limitation). Dev-only warning displayed.
+
+Natural-language credential selection v1 is **complete** — implemented 2026-05-01. `pass_overrides?: Record<string, string>` added to `RouteRun` type (key = purpose, value = pass_id). Validated at run creation time (purpose supported, pass exists, user owns it, kind matches, domain matches, secret loaded in devSecretVault). `resolve-value` precedence updated: (1) `run.pass_overrides["login_password"]`, (2) `RoutePassBinding`, (3) route step default. MCP `list_vault_passes` tool added (GET /api/vault-passes + client-side filter by domain/kind/query; returns metadata only, never passwords). `request_skill_run` MCP tool updated to accept and forward `pass_overrides`. Agents can now select a user-named credential without opening the Passes UI.
+
+Controlled tab launch for approved runs is **complete** — implemented 2026-05-01. `start_url?: string` added to `AegisRoute` type and seed for `route_demo_login_001` (`http://localhost:3000/demo-login`). `start_url` included in `route_summary` from GET /api/route-runs. Extension `background.js` has new `maybeAutoLaunchApprovedRun()` function called on every alarm poll (after `maybeAutoRunForTab`): finds exactly one approved pending run with a `start_url`; if a matching tab exists uses it; otherwise opens a new tab, calls `waitForTabToMatchRoute` (polls 300ms up to 5s), then executes. `markAutoStarted` is called before `chrome.tabs.create` so `onUpdated` cannot double-execute. Approval is still required; `pending_approval` runs are never touched.
+
 Candidate next milestones:
 1. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 2. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
@@ -185,7 +193,13 @@ Before making any changes:
 - Do not rebuild popup auto-run, background auto-run, replay fill reliability, or Wikipedia outcome verification unless explicitly requested
 - Do not rebuild the agent-runnable recipe path or the controlled sensitive login path unless explicitly requested
 - Do not rebuild Secret Vault v1 (`AegisVaultPass`, `devSecretVault`, `resolve-value`, `pass_field`/`secret_ref`) unless explicitly requested
+- Do not rebuild Secret Vault UI v1 (`/api/vault-passes`, `vault-passes.ts`, Credential Vault section in passes page) unless explicitly requested
 - Do not expose `devSecretVault` through any public API, MCP tool, or persistence layer — it is dev-only and initialized only at server startup
+- `login_password` passes are a username + password bundle — username is metadata, password is held in devSecretVault and never returned after creation
+- Do not rebuild Route-to-Pass Binding v1 (`RoutePassBinding`, `routePassBindings`, `/api/route-pass-bindings`, Credential Assignments UI) unless explicitly requested
+- Do not rebuild natural-language credential selection v1 (`pass_overrides` on `RouteRun`, `list_vault_passes` MCP tool, `request_skill_run` `pass_overrides` forwarding, validation in POST /api/skills/:skillId/runs, resolve-value precedence) unless explicitly requested
+- Do not rebuild controlled tab launch (`start_url` on `AegisRoute`, `maybeAutoLaunchApprovedRun`, `waitForTabToMatchRoute`, `start_url` in `route_summary`) unless explicitly requested
+- `resolve-value` binding lookup key is `${user_id}:${route_id}:login_password` — binding overrides `vp.pass_id`; seeded pass is the fallback when no binding exists
 - Do not treat `execution_mode: "agent_runnable"` as permission to skip Aegis — it means call `get_agent_runnable_workflow` to get the Aegis-tested route recipe, then execute it in the agent's own browser
 - Do not run `aegis_controlled` routes based on domain alone — route context matching uses domain + optional `url_match`; a controlled route must not execute on the wrong page (e.g., `/route-run-approvals` instead of `/demo-login`)
 

@@ -573,6 +573,59 @@ These fields appear in the receipt. The secret value itself is never stored.
 
 ---
 
+## Natural-Language Pass Selection (v1)
+
+**Status:** Implemented.
+
+Users can tell their agent "use my Test Login credential" without opening the Passes UI. Two MCP tools work together:
+
+1. **`list_vault_passes`** — returns vault pass metadata (pass_id, label, username, domain, kind, has_password). Never returns passwords or `secret_ref`.
+2. **`request_skill_run`** — now accepts an optional `pass_overrides` field: `Record<string, string>` where the key is the credential purpose (`"login_password"`) and the value is a `pass_id` from `list_vault_passes`.
+
+### Resolution precedence at resolve-value time
+
+When the Aegis extension resolves a credential during run execution:
+
+1. `run.pass_overrides["login_password"]` — per-run override (highest priority)
+2. `RoutePassBinding` for `user_id:route_id:login_password` — persistent UI-set binding
+3. `step.value_policy.pass_id` — default baked into the route
+
+### Typical agent flow
+
+```
+user: "log in using my Test Login credential"
+
+agent calls: list_vault_passes({ query: "test login" })
+→ returns: [{ pass_id: "pass_vault_abc", label: "Test Login", domain: "localhost", username: "test_user", has_password: true }]
+
+agent calls: request_skill_run({
+  skill_id: "skill_demo_login_001",
+  pass_overrides: { "login_password": "pass_vault_abc" }
+})
+→ Aegis validates the override at run creation, creates the run with pass_overrides stored
+→ Extension resolves credential using "Test Login" pass, not the route default
+→ Receipt records: pass_ids_used: ["pass_vault_abc"]
+```
+
+### Validation at run creation
+
+`pass_overrides` entries are validated before any run is created. The server returns `400 INVALID_PASS_OVERRIDE` if:
+- The purpose key is not `"login_password"` (v1 only supports this purpose)
+- The `pass_id` does not exist in the vault
+- The pass belongs to a different user
+- The pass `kind` does not match the purpose key
+- The pass `domain` does not match the route's `domain`
+- The pass has no secret loaded in `devSecretVault` (server may have restarted — re-enter the password in the Passes UI)
+
+### Security invariants
+
+- `list_vault_passes` never exposes `secret_ref` or any secret value. Metadata only.
+- `pass_overrides` is validated at creation time and stored on the run; secret resolution at the extension still checks ownership and domain as defense-in-depth.
+- `secret_values_revealed_to_agent: false` on run receipts is unchanged.
+- Persistent route-pass bindings are unaffected; per-run override is an additive, non-destructive path.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

@@ -446,6 +446,7 @@ export interface AegisRoute {
   execution_mode?: ExecutionMode;
   sensitivity_level?: SensitivityLevel;
   url_match?: { hostname?: string; path_prefix?: string };
+  start_url?: string;
 }
 
 export interface Skill {
@@ -550,6 +551,20 @@ export interface RouteRunReceipt {
   secret_values_revealed_to_agent?: false;
 }
 
+// ─── Aegis Rails — RoutePassBinding ──────────────────────────────────────────
+
+// Binds a specific vault pass to a route for a given purpose.
+// Overrides the default pass_id in route step value_policy at resolve-value time.
+export interface RoutePassBinding {
+  binding_id: string;
+  user_id: string;
+  route_id: string;
+  pass_id: string;
+  purpose: "login_password";
+  created_at: string;
+  updated_at: string;
+}
+
 // ─── Aegis Rails — RouteRun ───────────────────────────────────────────────────
 
 export type RouteRunStatus = "pending" | "pending_approval" | "running" | "completed" | "failed" | "blocked";
@@ -564,6 +579,7 @@ export interface RouteRun {
   domain: string;
   status: RouteRunStatus;
   variables?: Record<string, string>;
+  pass_overrides?: Record<string, string>;
   created_at: string;
   started_at?: string;
   completed_at?: string;

@@ -295,6 +295,92 @@ async function maybeAutoRunForTab(tab) {
   await executeRunOnTab(run, tab.id);
 }
 
+// Poll up to timeoutMs for a tab to finish loading and match the route's url_match/domain.
+async function waitForTabToMatchRoute(tabId, route, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete' && doesTabMatchRoute(tab.url, route)) return true;
+    } catch (_) {
+      return false; // tab was closed
+    }
+    await sleep(300);
+  }
+  return false;
+}
+
+// For approved sensitive runs whose route has a start_url: if no matching tab exists,
+// open one and execute there. If a matching tab already exists, execute on it directly.
+// This completes the approval → execution loop without manual navigation.
+async function maybeAutoLaunchApprovedRun() {
+  const { aegisAutoRunAllowed } = await chrome.storage.local.get('aegisAutoRunAllowed');
+  if (!aegisAutoRunAllowed) return;
+
+  let runs;
+  try {
+    const res = await fetch('http://localhost:4000/api/route-runs?status=pending');
+    const json = await res.json();
+    if (!json.ok) return;
+    runs = json.data ?? [];
+  } catch (_) {
+    return;
+  }
+
+  const startedIds = await getAutoStartedRunIds();
+
+  // Only approved runs that have a start_url — low-risk runs are already handled by maybeAutoRunForTab.
+  const eligible = runs.filter(r =>
+    isEligibleForBackgroundAutoRun(r, startedIds) &&
+    r.approved_at &&
+    r.route_summary?.start_url
+  );
+
+  // Safety: never open multiple tabs or run multiple credentials at once.
+  if (eligible.length !== 1) return;
+
+  const run = eligible[0];
+  const routeSummary = run.route_summary;
+
+  // Check for an existing tab at exactly start_url (not a subpath like /demo-login/success).
+  // Using doesTabMatchRoute here would reuse a previous run's outcome page, skipping credential fill.
+  const allTabs = await chrome.tabs.query({});
+  const matchingTab = allTabs.find(tab => {
+    if (!tab.url || !routeSummary?.start_url) return false;
+    try {
+      const tabU = new URL(tab.url);
+      const startU = new URL(routeSummary.start_url);
+      return tabU.hostname === startU.hostname &&
+             tabU.port === startU.port &&
+             tabU.pathname === startU.pathname;
+    } catch (_) { return false; }
+  });
+
+  if (matchingTab?.id) {
+    // Existing matching tab — use it directly.
+    await markAutoStarted(run.run_id);
+    await executeRunOnTab(run, matchingTab.id);
+    return;
+  }
+
+  // No matching tab — create one at start_url.
+  // Mark as started BEFORE creating the tab so the onUpdated listener won't double-execute.
+  await markAutoStarted(run.run_id);
+
+  let newTab;
+  try {
+    newTab = await chrome.tabs.create({ url: routeSummary.start_url, active: true });
+  } catch (_) {
+    return;
+  }
+  if (!newTab?.id) return;
+
+  const matched = await waitForTabToMatchRoute(newTab.id, routeSummary, 5000);
+  if (!matched) return;
+
+  await executeRunOnTab(run, newTab.id);
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     switch (msg.action) {
@@ -581,6 +667,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) await maybeAutoRunForTab(tab);
+    await maybeAutoLaunchApprovedRun();
   } catch (_) {}
 });
 

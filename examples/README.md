@@ -166,7 +166,8 @@ claude mcp add aegis -- node /path/to/aegis/examples/aegis-tool-server.mjs
 |---|---|
 | `discover_installed_skills` | Find skills available to this agent on a domain; includes `execution_mode` |
 | `get_agent_runnable_workflow` | Fetch the route recipe for an `agent_runnable` skill to execute in your own browser; returns `NOT_AGENT_RUNNABLE` if the skill is `aegis_controlled` — call `request_skill_run` instead |
-| `request_skill_run` | Ask Aegis to execute an `aegis_controlled` workflow (extension handoff) |
+| `list_vault_passes` | List vault credential metadata (label, username, domain, kind, pass_id, has_password). Never returns passwords. Use when the user names a specific credential so you can look up the `pass_id` and supply it in `pass_overrides` when calling `request_skill_run` |
+| `request_skill_run` | Ask Aegis to execute an `aegis_controlled` workflow (extension handoff). Accepts optional `pass_overrides: { "login_password": "<pass_id>" }` for per-run credential selection without changing persistent bindings |
 | `get_route_run_status` | Poll run status until terminal |
 | `get_route_run_receipt` | Read the audit record after completion |
 

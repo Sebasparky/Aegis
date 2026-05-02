@@ -143,8 +143,42 @@ async function getAgentRunnableWorkflow({ skill_id }) {
   };
 }
 
-async function requestSkillRun({ skill_id, variables = {} }) {
-  const res = await request("POST", `/api/skills/${skill_id}/runs`, { variables });
+async function listVaultPasses({ domain, kind, query } = {}) {
+  let res;
+  try {
+    res = await request("GET", "/api/vault-passes");
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to fetch vault passes." };
+
+  let passes = res.data;
+  if (domain) passes = passes.filter((p) => p.domain === domain);
+  if (kind) passes = passes.filter((p) => p.kind === kind);
+  if (query) {
+    const q = query.toLowerCase();
+    passes = passes.filter((p) =>
+      p.label.toLowerCase().includes(q) ||
+      (p.username && p.username.toLowerCase().includes(q)) ||
+      p.domain.toLowerCase().includes(q)
+    );
+  }
+  return {
+    passes: passes.map((p) => ({
+      pass_id: p.pass_id,
+      label: p.label,
+      kind: p.kind,
+      domain: p.domain,
+      username: p.username ?? null,
+      has_password: p.has_password,
+    })),
+  };
+}
+
+async function requestSkillRun({ skill_id, variables = {}, pass_overrides }) {
+  const body = { variables };
+  if (pass_overrides && Object.keys(pass_overrides).length > 0) body.pass_overrides = pass_overrides;
+  const res = await request("POST", `/api/skills/${skill_id}/runs`, body);
   if (!res.ok) {
     return {
       error: res.error?.code ?? "UNKNOWN_ERROR",
@@ -265,9 +299,23 @@ const TOOLS = [
     },
   },
   {
+    name: "list_vault_passes",
+    description:
+      "List Aegis vault credential metadata available to this delegated user. Returns labels, usernames, domains, kinds, and pass_ids only — never passwords or secret values. Use this when the user names a credential ('use my Test Login account', 'use the staging credentials') so you can identify the correct pass_id and supply it in pass_overrides when calling request_skill_run. Optionally filter by domain, kind, or a free-text query matching label/username/domain.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: { type: "string", description: "Filter to passes for a specific domain, e.g. 'localhost'." },
+        kind: { type: "string", description: "Filter to a credential kind. Only 'login_password' is supported in v1." },
+        query: { type: "string", description: "Free-text search across label, username, and domain (case-insensitive substring)." },
+      },
+      required: [],
+    },
+  },
+  {
     name: "request_skill_run",
     description:
-      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this only for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail and Aegis custody. For agent_runnable skills, call get_agent_runnable_workflow instead to get the route recipe and execute it in your own browser session. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly.",
+      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this only for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail and Aegis custody. For agent_runnable skills, call get_agent_runnable_workflow instead to get the route recipe and execute it in your own browser session. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly. If the user named a specific credential, call list_vault_passes first to find the pass_id, then supply it in pass_overrides.",
     inputSchema: {
       type: "object",
       properties: {
@@ -280,6 +328,12 @@ const TOOLS = [
           description:
             "Runtime variables required by the skill (e.g. { \"query\": \"Michigan\" } for a search skill). Check skill metadata for required variable names.",
           additionalProperties: true,
+        },
+        pass_overrides: {
+          type: "object",
+          description:
+            "Optional per-run credential override. Key = purpose (only \"login_password\" in v1), value = pass_id from list_vault_passes. Example: { \"login_password\": \"pass_vault_abc123\" }. Use when the user specifies a credential by name. Omit to fall back to persistent route binding or route default.",
+          additionalProperties: { type: "string" },
         },
       },
       required: ["skill_id"],
@@ -338,6 +392,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_agent_runnable_workflow":
       result = await getAgentRunnableWorkflow(a);
+      break;
+    case "list_vault_passes":
+      result = await listVaultPasses(a);
       break;
     case "request_skill_run":
       result = await requestSkillRun(a);

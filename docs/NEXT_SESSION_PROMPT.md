@@ -178,6 +178,48 @@ Everything below is implemented and working.
 - **Implemented 2026-05-01**
 - Do not rebuild unless explicitly requested
 
+### Route-to-Pass Binding v1
+- `RoutePassBinding` type in `packages/types/src/index.ts`
+- `routePassBindings` Map in `apps/api/src/store/index.ts`; key `${user_id}:${route_id}:login_password` for upsert; persisted in `aegis-store.json`
+- `GET /api/route-pass-bindings[?route_id=]` — list bindings; `POST` — upsert binding (validates pass ownership, kind, domain match); `DELETE` — remove binding (restores route default)
+- `resolve-value` checks binding first: `routePassBindings.get(user_id:route_id:login_password)`, uses `binding.pass_id` if present, falls back to `vp.pass_id` from route step
+- Receipt `pass_ids_used` reflects whichever pass was actually used (bound or default)
+- API client: `listRoutePassBindings`, `setRoutePassBinding`, `clearRoutePassBinding` in `apps/web/src/lib/api.ts`
+- "Credential Assignments" section on `/passes` page: shows all `aegis_controlled` routes, per-route dropdown of domain-matching `login_password` passes, Save button; disabled when not dirty; clears binding on `— route default —` selection
+- Do not rebuild unless explicitly requested
+
+### Secret Vault UI v1
+- Passes page (`/passes`) extended with a "Credential Vault" section for managing `login_password` credential bundles
+- `GET /api/vault-passes` — lists `AegisVaultPass` metadata; never returns password; includes `has_password: true/false`
+- `POST /api/vault-passes` — creates `AegisVaultPass` + `devSecretVault` entry; validates label/domain/username/password; returns metadata only
+- `DELETE /api/vault-passes/:passId` — removes pass metadata and dev vault secret
+- Route: `apps/api/src/routes/vault-passes.ts`; registered in `apps/api/src/index.ts`
+- API client: `listVaultPasses`, `createVaultPass`, `deleteVaultPass` in `apps/web/src/lib/api.ts`
+- `login_password` means username + password bundle; username may be shown; password is masked as `••••••••` and never returned after creation
+- Seeded demo pass (`pass_vault_demo_login_001`) shows "seeded demo" badge in the UI
+- `has_password: false` shown when server was restarted (secret lost — expected v1 limitation)
+- Dev-only warning prominently shown; not production-grade encryption; no real credentials
+- Do not rebuild unless explicitly requested
+
+### Natural-Language Credential Selection v1
+- `pass_overrides?: Record<string, string>` added to `RouteRun` interface in `packages/types/src/index.ts`; key = purpose (`"login_password"`), value = pass_id
+- Validated at POST `/api/skills/:skillId/runs` before run is created: purpose supported, pass exists, user owns it, `pass.kind === purpose`, `pass.domain === route.domain`, `devSecretVault.has(pass.secret_ref)`; returns `400 INVALID_PASS_OVERRIDE` on failure
+- Stored on both `pending` and `pending_approval` run objects
+- `resolve-value` precedence updated: (1) `run.pass_overrides?.["login_password"]`, (2) `RoutePassBinding`, (3) route step `vp.pass_id`
+- Receipt `pass_ids_used` reflects the actual pass used (override, binding, or default)
+- MCP tool `list_vault_passes` in `examples/aegis-tool-server.mjs`: `GET /api/vault-passes` + client-side filter by `domain`/`kind`/`query`; returns `pass_id`, `label`, `kind`, `domain`, `username`, `has_password` only — never passwords
+- `request_skill_run` MCP tool updated to accept and forward `pass_overrides` to the API
+- Persistent route-pass bindings remain intact; per-run override is additive and non-destructive
+- Do not rebuild unless explicitly requested
+
+### Controlled Tab Launch for Approved Runs
+- `start_url?: string` added to `AegisRoute` type in `packages/types/src/index.ts`
+- `route_demo_login_001` seeded with `start_url: "http://localhost:3000/demo-login"` in `apps/api/scripts/seed-demo-data.mjs`
+- `start_url` included in `route_summary` from GET `/api/route-runs` (route-runs.ts)
+- `waitForTabToMatchRoute(tabId, route, timeoutMs)` — polls 300ms intervals up to timeoutMs (5s default) for tab to reach `complete` status and pass `doesTabMatchRoute`
+- `maybeAutoLaunchApprovedRun()` — called on every alarm poll after `maybeAutoRunForTab`; finds exactly one approved pending run with a `start_url`; uses an existing matching tab if found, otherwise creates a new tab at `start_url`; calls `markAutoStarted` BEFORE `chrome.tabs.create` to prevent `onUpdated` double-execution; only acts on `pending` runs with `approved_at` — never touches `pending_approval` runs
+- Safety invariants preserved: exactly-one guard, `aegisAutoStartedRunIds` dedup, url_match enforcement, `pending_approval` untouched, secrets resolve only after `running` status
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script

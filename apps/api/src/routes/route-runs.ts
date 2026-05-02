@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, devSecretVault, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, devSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
@@ -34,11 +34,9 @@ function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: str
     ...(run.agent_id ? { agent_id: run.agent_id } : {}),
     ...(run.variables && Object.keys(run.variables).length > 0 ? { variables: run.variables } : {}),
     ...(error ? { error } : {}),
-    ...(run.credential_used ? {
-      credential_used: true,
-      pass_ids_used: run.pass_ids_used ?? [],
-      secret_values_revealed_to_agent: false as const,
-    } : {}),
+    credential_used: run.credential_used ?? false,
+    pass_ids_used: run.pass_ids_used ?? [],
+    secret_values_revealed_to_agent: false as const,
   };
   return receipt;
 }
@@ -62,10 +60,10 @@ export async function routeRunRoutes(server: FastifyInstance) {
    */
   server.post<{
     Params: { skillId: string };
-    Body: { variables?: Record<string, string> };
+    Body: { variables?: Record<string, string>; pass_overrides?: Record<string, string> };
   }>("/api/skills/:skillId/runs", async (req, reply) => {
     const { skillId } = req.params;
-    const { variables } = req.body ?? {};
+    const { variables, pass_overrides } = req.body ?? {};
 
     const authHeader = (req.headers["authorization"] as string | undefined) ?? "";
     const bearerMatch = authHeader.match(/^Bearer (.+)$/i);
@@ -109,6 +107,30 @@ export async function routeRunRoutes(server: FastifyInstance) {
         "DOMAIN_NOT_SUPPORTED",
         `RouteRun is not supported for domain "${skill.domain}". Supported: ${[...ALLOWED_DOMAINS].join(", ")}.`
       );
+    }
+
+    const SUPPORTED_PURPOSES = new Set(["login_password"]);
+    let validatedPassOverrides: Record<string, string> | undefined;
+
+    if (pass_overrides && Object.keys(pass_overrides).length > 0) {
+      const errors: string[] = [];
+      validatedPassOverrides = {};
+      for (const [purpose, passId] of Object.entries(pass_overrides)) {
+        if (!SUPPORTED_PURPOSES.has(purpose)) {
+          errors.push(`Unsupported purpose "${purpose}".`);
+          continue;
+        }
+        const vaultPass = aegisVaultPasses.get(passId);
+        if (!vaultPass) { errors.push(`Pass "${passId}" not found.`); continue; }
+        if (vaultPass.user_id !== MOCK_USER_ID) { errors.push(`Pass "${passId}" does not belong to this user.`); continue; }
+        if (vaultPass.kind !== purpose) { errors.push(`Pass "${passId}" has kind "${vaultPass.kind}" but purpose is "${purpose}".`); continue; }
+        if (vaultPass.domain !== route.domain) { errors.push(`Pass "${passId}" domain "${vaultPass.domain}" does not match route domain "${route.domain}".`); continue; }
+        if (!devSecretVault.has(vaultPass.secret_ref)) { errors.push(`Pass "${passId}" has no secret loaded (server may have restarted).`); continue; }
+        validatedPassOverrides[purpose] = passId;
+      }
+      if (errors.length > 0) {
+        return sendError(reply, 400, "INVALID_PASS_OVERRIDE", errors.join(" "));
+      }
     }
 
     if (route.variables && route.variables.length > 0) {
@@ -188,6 +210,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
             created_at: new Date().toISOString(),
             ...(agent_id ? { agent_id } : {}),
             ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+            ...(validatedPassOverrides && Object.keys(validatedPassOverrides).length > 0 ? { pass_overrides: validatedPassOverrides } : {}),
             ...(delegation_id ? { delegation_id } : {}),
             ...(collar_id ? { collar_id } : {}),
           };
@@ -217,6 +240,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
       created_at: new Date().toISOString(),
       ...(agent_id ? { agent_id } : {}),
       ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+      ...(validatedPassOverrides && Object.keys(validatedPassOverrides).length > 0 ? { pass_overrides: validatedPassOverrides } : {}),
       ...(delegation_id ? { delegation_id } : {}),
       ...(collar_id ? { collar_id } : {}),
     };
@@ -260,6 +284,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
                   step_count: route.steps.length,
                   domain: route.domain,
                   url_match: route.url_match ?? null,
+                  start_url: route.start_url ?? null,
                 }
               : null,
           };
@@ -429,7 +454,12 @@ export async function routeRunRoutes(server: FastifyInstance) {
     if (!vp || (vp.type !== "pass_field" && vp.type !== "secret_ref"))
       return sendError(reply, 400, "NOT_PASS_STEP", "Step does not have a pass_field or secret_ref value policy.");
 
-    const pass = aegisVaultPasses.get(vp.pass_id!);
+    // Precedence: (1) per-run override, (2) persistent route-pass binding, (3) route step default.
+    const bindingKey = `${run.user_id}:${run.route_id}:login_password`;
+    const binding = routePassBindings.get(bindingKey);
+    const effectivePassId = run.pass_overrides?.["login_password"] ?? binding?.pass_id ?? vp.pass_id!;
+
+    const pass = aegisVaultPasses.get(effectivePassId);
     if (!pass || pass.user_id !== run.user_id)
       return sendError(reply, 404, "NOT_FOUND", "Pass not found.");
 

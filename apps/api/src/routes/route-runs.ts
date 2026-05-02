@@ -375,7 +375,9 @@ export async function routeRunRoutes(server: FastifyInstance) {
   /**
    * POST /api/route-runs/:runId/approve
    *
-   * Approve a pending_approval run, making it executable by the extension.
+   * Approve a pending_approval run, transitioning it to pending status.
+   * After approval, execute via POST /api/runtime/route-runs/:runId/playwright/start
+   * (or the Chrome extension for local/debug use).
    */
   server.post<{ Params: { runId: string } }>(
     "/api/route-runs/:runId/approve",

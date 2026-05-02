@@ -174,11 +174,15 @@ Controlled tab launch for approved runs is **complete** — implemented 2026-05-
 
 Immutable + Signed Receipts v1 is **complete** — implemented 2026-05-02. `receipt_hash` covers `{ previous_receipt_hash, receipt_json }` (SHA-256 chain). `receipt_jws` is an EdDSA/Ed25519 CompactSign JWS over metadata only (no secrets). Supabase receipts use INSERT; append-only DB trigger blocks UPDATE/DELETE. Verify endpoint: `GET /api/route-run-receipts/:receiptId/verify`.
 
+Playwright Runtime v1 is **complete** — implemented 2026-05-02. Agents can execute approved controlled runs via `POST /api/runtime/route-runs/:runId/playwright/start` or MCP tool `start_playwright_route_run`. Aegis launches an isolated headless Chromium session, resolves credentials via KMS vault, instruments sensitive events, and emits signed receipts with `execution_surface: "aegis_playwright"`. No user-opened tab required.
+
+**`aegis_playwright` is the primary controlled execution surface for autonomous agents.** `chrome_extension` is retained as an optional local/debug/recording companion. Future autonomous-agent features should target `aegis_playwright` first.
+
 Candidate next milestones:
-1. **Real cloud KMS provider** — AWS KMS / GCP KMS / Azure Key Vault (add provider to `lib/kms.ts`, change `AEGIS_KMS_PROVIDER`)
-2. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
-3. **Capability/collar policy test coverage** — unit and integration tests for collar enforcement, skill-access policy, and approval gating
-4. **Website/agent verification** — AegisID for agents; public key publication; receipt verification by third parties
+1. **Coverage Monitor hardening** — surface runtime events from Playwright sessions in the UI
+2. **Delegation Passport v1** — structured delegation manifest agents carry across API calls
+3. **Action Authorization Receipt v1** — per-action receipt events for finer-grained audit
+4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -220,8 +224,10 @@ Before making any changes:
 - `receipt_hash` and `receipt_jws` are Supabase row metadata — they are NOT fields on `RouteRunReceipt` and must not be added to the type
 - Supabase `createReceipt` uses INSERT (not upsert) — receipts are append-only; the DB trigger blocks UPDATE/DELETE; never bypass it
 - Pass `previousReceiptHash` to `hashReceipt` in the Supabase path — calling it without the previous hash produces a broken chain
-- Do not assume user has a browser tab open for autonomous-agent flows — the Chrome extension is one execution surface, not the final architecture; use `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`) for headless/agent-requested controlled runs
+- Do not assume user has a browser tab open for autonomous-agent flows — the Chrome extension is an optional local/debug/recording companion, not the primary execution architecture; use `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`) for controlled runs; do not instruct agents to manually open target pages when `aegis_playwright` is available
 - Do not rebuild Playwright Runtime v1 (`aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run`) unless explicitly requested; `execution_surface: "aegis_playwright"` receipts are signed and verified through the same pipeline as extension receipts
+- Do not rebuild Execution Surface Recenter v1 (MCP tool descriptions, `plan_aegis_action` post_approval fields, README Execution Surfaces section, contract architecture note) unless explicitly requested
+- New sensitive workflow features (coverage monitoring, delegation passports, action authorization receipts) should target `aegis_playwright` first; Chrome extension support can follow as a companion surface — do not design new autonomous-agent features around requiring an active browser tab
 
 ## Terminology — Always Use
 

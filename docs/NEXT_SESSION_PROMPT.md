@@ -28,6 +28,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Immutable + Signed Receipts v1. It is complete. Do not re-implement `receiptSigning.ts`, `generate-receipt-keypair.mjs`, `002_signed_immutable_receipts.sql`, `verifyReceipt`, or `GET /api/route-run-receipts/:receiptId/verify`.**
 >
 > **Also: do NOT rebuild Playwright Runtime v1. It is complete. Do not re-implement `aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run` MCP tool, or `AegisExecutionSurface`. Do not assume a user-opened browser tab is required for autonomous agent flows — use `POST /api/runtime/route-runs/:runId/playwright/start` instead.**
+>
+> **Also: do NOT rebuild Execution Surface Recenter v1. It is complete. Do not rewrite MCP tool descriptions, `plan_aegis_action` post-approval fields, README Execution Surfaces section, or contract architecture note to be extension-first. `aegis_playwright` is the primary autonomous-agent execution surface. Chrome extension is optional local/debug/recording companion.**
 
 ---
 
@@ -255,6 +257,18 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Execution Surface Recenter v1
+- `aegis_playwright` is now the primary autonomous-agent controlled execution surface; `chrome_extension` demoted to optional local/debug/recording companion
+- MCP tool `request_skill_run` description updated: creates run but does not execute; agents should call `start_playwright_route_run` after approval
+- MCP tool `start_playwright_route_run` description updated: marked as preferred autonomous-agent surface; no user tab required; extension not involved
+- MCP tool `plan_aegis_action` description updated: now mentions `post_approval_next_tool: "start_playwright_route_run"` for controlled flows
+- `planAegisAction` function in `aegis-tool-server.mjs`: all `aegis_controlled_run` return paths now include `post_approval_next_tool: "start_playwright_route_run"` and `post_approval_note` with explicit instruction not to ask user to open a tab
+- `examples/README.md` updated: new "Execution Surfaces" table, "Recommended autonomous-agent flow" steps, tools table updated, Limitations section updated
+- `docs/AGENT_INTEGRATION_CONTRACT.md` updated: Execution Surfaces section rewritten with surface-by-surface breakdown, recommended agent flow, and architecture note (future features target Playwright first)
+- `CLAUDE.md` updated: session rules + implementation state updated to reflect Playwright as primary surface
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Playwright Runtime v1
 - `apps/api/src/runtime/aegisRuntime.ts` — `RuntimeSession`, `RuntimeEvent` types; ephemeral `runtimeSessions` Map (not persisted — receipts are the durable audit record)
 - `apps/api/src/runtime/playwrightRuntime.ts` — `executeRouteRunWithPlaywright(runId)`: launches headless Chromium, navigates to `route.start_url`, executes route steps, resolves credentials via KMS vault, instruments sensitive events, emits signed receipt with `execution_surface: "aegis_playwright"`, marks run completed
@@ -316,6 +330,8 @@ Agent-runnable workflow recipe path is **complete** — validated 2026-05-01.
 Aegis-controlled sensitive execution path (via extension) is **complete** — validated 2026-05-01.
 
 **Playwright Runtime v1 is complete** — implemented 2026-05-02. Agents can now execute approved controlled runs without a user-opened browser tab. See "Playwright Runtime v1" in Completed Increments below.
+
+**Execution Surface Recenter v1 is complete** — implemented 2026-05-02. `aegis_playwright` is now the primary autonomous-agent execution surface in all MCP tool guidance, docs, and planning tools. Chrome extension is framed as optional local/debug/recording companion. See "Execution Surface Recenter v1" in Completed Increments.
 
 **Candidate next milestones:**
 

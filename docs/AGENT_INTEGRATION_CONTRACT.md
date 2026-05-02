@@ -28,19 +28,45 @@ Aegis is invoked selectively when the agent needs one of two things:
 
 When Aegis executes a controlled run, it uses one of two execution surfaces. The receipt records which surface was used via `execution_surface`.
 
-| Surface | Value | When Used |
-|---|---|---|
-| Chrome extension | `"chrome_extension"` | Local prototype. The user must have a matching tab open. The extension picks up `status=pending` runs and replays the route. Suitable for interactive demos and local development. |
-| Aegis Playwright runtime | `"aegis_playwright"` | API-started controlled runtime. Aegis launches a headless Chromium session, navigates to the route `start_url`, resolves credentials from the KMS vault, and executes route steps. The user does not need to have a browser tab open. Suitable for autonomous agent workflows. |
+### `aegis_playwright` — Primary Autonomous-Agent Surface
 
-**For autonomous agents**, prefer the Playwright runtime:
-1. Create the run: `POST /api/skills/:skillId/runs` → get `run_id`.
-2. If `pending_approval`, direct the user to `/route-run-approvals` and poll until `status` changes to `pending`.
-3. Start Playwright execution: `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`).
-4. Poll `get_route_run_status` until terminal.
-5. Read receipt — `execution_surface` will be `"aegis_playwright"`.
+| Property | Value |
+|---|---|
+| Who starts it | Agent or API caller — `POST /api/runtime/route-runs/:runId/playwright/start` |
+| Browser | Isolated headless Chromium launched by Aegis |
+| User action required | None — no tab to open, no extension to activate |
+| Credentials | Resolved inside Aegis runtime via KMS vault; never exposed to agent |
+| Receipt | `execution_surface: "aegis_playwright"`, signed EdDSA JWS, chained hash |
+| Best for | Autonomous agents, API-driven pipelines, headless environments |
 
-**Agents never receive raw credentials in either surface.** The Chrome extension resolves secrets via the `resolve-value` endpoint (extension-only). The Playwright runtime resolves secrets internally via the KMS vault. In both cases `secret_values_revealed_to_agent: false` is set on the receipt.
+**This is the recommended execution surface for autonomous agent workflows.** Agents do not need the Chrome extension running. Aegis manages the full browser lifecycle.
+
+### `chrome_extension` — Optional Local/Browser Companion
+
+| Property | Value |
+|---|---|
+| Who starts it | Extension background service worker (auto-run) or user clicking "Start Run" |
+| Browser | User's Chrome profile with extension installed |
+| User action required | Active tab must match route domain + `url_match`; extension must be running |
+| Credentials | Resolved via extension `resolve-value` endpoint (never returned to agent) |
+| Receipt | `execution_surface: "chrome_extension"`, same signing pipeline |
+| Best for | Local interactive demos, workflow recording, user-visible session monitoring |
+
+The Chrome extension is retained as a local debugging companion and workflow recording surface. It is not the recommended default for autonomous agent workflows — agents should use the Playwright runtime so they do not depend on the user's browser state.
+
+### Recommended Agent Flow for `aegis_controlled` Skills
+
+1. **Discover / plan** — `plan_aegis_action` returns `post_approval_next_tool: "start_playwright_route_run"` for controlled skills.
+2. **Create run** — `request_skill_run` (or `POST /api/skills/:skillId/runs`) → `run_id`.
+3. **Handle approval** — if `status=pending_approval`, direct user to `/route-run-approvals`; poll until `pending`.
+4. **Execute** — `start_playwright_route_run` (or `POST /api/runtime/route-runs/:runId/playwright/start`). **Do not ask the user to open a browser tab.**
+5. **Verify** — `get_route_run_receipt` → confirm `execution_surface: "aegis_playwright"`, `signature_valid: true`.
+
+### Architecture Note
+
+Future Aegis features — coverage monitoring, delegation passports, action authorization receipts, liability proof — should target the Playwright runtime first. The Chrome extension can follow as a companion surface. No new autonomous-agent feature should require a user-opened browser tab as a prerequisite.
+
+**Agents never receive raw credentials in either surface.** The Chrome extension resolves secrets via the extension-only `resolve-value` endpoint. The Playwright runtime resolves secrets internally via the KMS vault. Both surfaces set `secret_values_revealed_to_agent: false` on the receipt.
 
 ---
 

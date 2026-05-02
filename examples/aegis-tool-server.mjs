@@ -398,8 +398,10 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
       matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
       next_tool: "request_skill_run",
       suggested_request: { skill_id: matchedSkill.skill_id, variables: {} },
+      post_approval_next_tool: "start_playwright_route_run",
+      post_approval_note: "After the user approves the pending run, call start_playwright_route_run with the run_id returned by request_skill_run. Aegis will open the page and execute the workflow in its own browser session. Do not ask the user to manually open the target page.",
       explanation:
-        "This is a sensitive workflow requiring Aegis control. Call request_skill_run with the suggested_request. If a specific credential is needed, call list_vault_passes first and add pass_overrides.",
+        "This is a sensitive workflow requiring Aegis control. Call request_skill_run to create the run. If approval is required, direct the user to /route-run-approvals and poll until status is no longer pending_approval. Then call start_playwright_route_run — do not rely on the Chrome extension or ask the user to open a tab.",
     };
   }
 
@@ -438,6 +440,8 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
       credential_resolution: "not_found",
       next_tool: "request_skill_run",
       suggested_request: { skill_id: matchedSkill.skill_id, variables: {} },
+      post_approval_next_tool: "start_playwright_route_run",
+      post_approval_note: "After approval, call start_playwright_route_run with the run_id. Aegis opens the page and executes in its own Chromium session. Do not ask the user to manually open the target page.",
       explanation: credential_hint
         ? `No vault pass matching "${credential_hint}" was found for domain "${matchedSkill.domain}". Call request_skill_run without pass_overrides to use the route default, or call list_vault_passes to browse available passes.`
         : `No vault passes found for domain "${matchedSkill.domain}". Call request_skill_run without pass_overrides to use the route default.`,
@@ -451,6 +455,8 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
       credential_resolution: "needs_clarification",
       needs_clarification: true,
       candidates: candidates.map(passMetadata),
+      post_approval_next_tool: "start_playwright_route_run",
+      post_approval_note: "After clarifying the credential and approving the run, call start_playwright_route_run with the run_id.",
       explanation:
         "Multiple vault credentials matched. Ask the user which one to use, then re-call plan_aegis_action with a more specific credential_hint, or call request_skill_run directly with the chosen pass_id in pass_overrides.",
     };
@@ -467,8 +473,10 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
       variables: {},
       pass_overrides: { login_password: matched_pass.pass_id },
     },
+    post_approval_next_tool: "start_playwright_route_run",
+    post_approval_note: "After the user approves the pending run (if approval is required), call start_playwright_route_run with the run_id returned by request_skill_run. Aegis opens the target page and executes the workflow in its own Chromium session — credentials resolved from the KMS vault. Do not ask the user to manually open the target page.",
     explanation:
-      "This is a sensitive workflow requiring Aegis control. Your selected credential will be resolved server-side — no passwords are exposed.",
+      "This is a sensitive workflow requiring Aegis control. Your selected credential will be resolved server-side by the Aegis Playwright runtime — no passwords are exposed to the agent.",
   };
 }
 
@@ -595,7 +603,7 @@ const TOOLS = [
   {
     name: "request_skill_run",
     description:
-      "Request Aegis to execute an installed skill (a verified workflow route) on behalf of this agent. Use this only for aegis_controlled / sensitive skills — credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail and Aegis custody. For agent_runnable skills, call get_agent_runnable_workflow instead to get the route recipe and execute it in your own browser session. Returns a run_id and initial status. If approval_required is true, the run is gated by human approval — direct the user to the approval UI and poll get_route_run_status until status changes. Execution is controlled by Aegis, never by the agent directly. If the user named a specific credential, call list_vault_passes first to find the pass_id, then supply it in pass_overrides.",
+      "Create an Aegis-controlled route run for a sensitive skill (credentials, payments, personal data, form submission, account changes, or any action requiring an audit trail). This tool creates and validates the run — it does NOT execute it. For agent_runnable skills, call get_agent_runnable_workflow instead. Returns a run_id and initial status. If status is pending_approval, direct the user to /route-run-approvals and poll get_route_run_status until status changes to pending. Once pending (approved), call start_playwright_route_run to execute the run in the Aegis Playwright runtime — do not rely on the Chrome extension or ask the user to open a browser tab. If the user named a specific credential, call list_vault_passes first to find the pass_id, then supply it in pass_overrides.",
     inputSchema: {
       type: "object",
       properties: {
@@ -715,7 +723,7 @@ const TOOLS = [
   {
     name: "start_playwright_route_run",
     description:
-      "Start an approved Aegis-controlled route run in the Aegis Playwright runtime. Aegis opens a headless Chromium session, navigates to the route start URL, resolves credentials from the KMS vault, and executes the route steps — the user does not need to have a browser tab open. Use this for autonomous agent flows where the agent should not manage browser execution directly. Refuses runs that are pending_approval — the user must approve first via /route-run-approvals before calling this. Returns the runtime session including status and any instrumented sensitive events.",
+      "Execute an approved Aegis-controlled route run using the Aegis Playwright runtime. This is the preferred execution surface for autonomous agents. Aegis opens an isolated headless Chromium session, navigates to the route start URL, resolves credentials from the KMS vault without exposing secrets to the agent, executes the route steps, instruments sensitive events, and emits a signed receipt with execution_surface='aegis_playwright'. The user does NOT need to have a browser tab open. Call this after request_skill_run returns a run in pending status (i.e., approved). Refuses runs that are still pending_approval — user must approve at /route-run-approvals first. The Chrome extension is not involved and does not need to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -730,7 +738,7 @@ const TOOLS = [
   {
     name: "plan_aegis_action",
     description:
-      "Analyze a task description and return a structured recommendation for how to execute it using Aegis — without executing anything. Resolves the relevant domain, matches installed skills by keyword heuristics, and recommends either get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run (Aegis-controlled sensitive workflows), or normal agent tools (no matching skill). For aegis_controlled skills, optionally resolves a vault credential by hint and includes a suggested pass_overrides argument. Call this first when you have a task description but haven't yet identified the skill or credential to use.",
+      "Analyze a task description and return a structured execution plan without executing anything. Matches installed skills and recommends: get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run + start_playwright_route_run (Aegis-controlled sensitive workflows), or normal agent tools. For aegis_controlled skills, the response includes post_approval_next_tool='start_playwright_route_run' — after the run is created with request_skill_run and approved (if required), call start_playwright_route_run to execute via the Aegis Playwright runtime. Optionally resolves a vault credential by hint and includes a ready-to-use suggested_request. Call this first when you have a task description but haven't yet identified the skill or execution path.",
     inputSchema: {
       type: "object",
       properties: {

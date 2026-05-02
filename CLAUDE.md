@@ -189,7 +189,8 @@ Before making any changes:
 - Inspect only files relevant to the requested task
 - Do not broad-refactor; the /demo flow is fragile to architectural changes
 - Do not introduce real secrets, real card numbers, or real payment submission
-- Do not add Supabase, real auth, or real LLM API calls unless that milestone is explicitly requested
+- Supabase Persistence v1 is **complete** — `AEGIS_PERSISTENCE_PROVIDER=supabase` enables durable storage for vault passes, encrypted secrets, and receipts. Do not add Supabase to routes/skills/delegations/sessions/reputation unless that milestone is explicitly requested
+- Do not add real auth or real LLM API calls unless that milestone is explicitly requested
 - Keep Aegis Guard (detector, policy, approval) separate from browser automation
 - Keep domain logic separate from UI
 - Preserve all existing service boundaries: CollarService, PassService, BrowserSessionService, SensitiveActionDetector, PolicyService, ApprovalService, RunnerService, ReceiptService, ReputationService
@@ -199,6 +200,10 @@ Before making any changes:
 - Do not rebuild Secret Vault UI v1 (`/api/vault-passes`, `vault-passes.ts`, Credential Vault section in passes page) unless explicitly requested
 - Do not rebuild KMS Abstraction v1 (`encryptedSecretVault`, `LocalDevKmsProvider`, `EncryptedSecretBlob`, `getKmsProvider`, async `seedDefaultData/loadStore/resetStoreForDemo`) unless explicitly requested
 - Do not write to or read from `devSecretVault` — it is deprecated; use `encryptedSecretVault + kms.decryptSecret()` for all password resolution
+- Do not rebuild Supabase Persistence v1 (`getVaultRepository`, `getReceiptRepository`, `docs/supabase/001_vault_and_receipts.sql`, `seed-supabase-demo.mjs`, `lib/supabase.ts`, `lib/receiptHash.ts`, `lib/persistenceProvider.ts`) unless explicitly requested
+- Do not directly access `aegisVaultPasses`, `encryptedSecretVault`, or `routeRunReceipts` Maps in vault-passes.ts or receipts.ts — use `getVaultRepository()` / `getReceiptRepository()` instead
+- The Supabase vault repository dual-writes to local Maps (temporary bridge for non-migrated routes). Long-term: all vault/secret reads should migrate to repository-backed access; dual-write will be removed once complete
+- Do not expose `SUPABASE_SERVICE_ROLE_KEY` outside `apps/api` — it must never be imported in `apps/web` or `apps/extension`
 - `login_password` passes are a username + password bundle — username is metadata, password is encrypted in `encryptedSecretVault` and never returned after creation
 - Do not rebuild Route-to-Pass Binding v1 (`RoutePassBinding`, `routePassBindings`, `/api/route-pass-bindings`, Credential Assignments UI) unless explicitly requested
 - Do not rebuild natural-language credential selection v1 (`pass_overrides` on `RouteRun`, `list_vault_passes` MCP tool, `request_skill_run` `pass_overrides` forwarding, validation in POST /api/skills/:skillId/runs, resolve-value precedence) unless explicitly requested

@@ -21,6 +21,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 >
 > **Also: do NOT rebuild KMS Abstraction v1. `encryptedSecretVault`, `LocalDevKmsProvider`, `EncryptedSecretBlob`, `getKmsProvider`, and async `seedDefaultData/loadStore/resetStoreForDemo` are complete. Do not re-implement the old plaintext `devSecretVault` storage. Use `encryptedSecretVault + kms.decryptSecret()` for all password resolution.**
 >
+> **Also: do NOT rebuild Supabase Persistence v1. `getVaultRepository()`, `getReceiptRepository()`, `AEGIS_PERSISTENCE_PROVIDER` feature flag, `lib/supabase.ts`, `lib/receiptHash.ts`, `docs/supabase/001_vault_and_receipts.sql`, and `seed-supabase-demo.mjs` are complete. Do not re-implement direct Map access in vault-passes.ts or receipts.ts.**
+>
 > **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
 
 ---
@@ -344,21 +346,34 @@ Then confirm:
 
 **Completed.** See `examples/aegis-tool-server.mjs` and the "Aegis MCP Tool Server" entry in Completed Increments above. Do not rebuild unless explicitly requested.
 
-### Persistence (Supabase or SQLite)
+### Supabase Persistence v1 — vault passes, encrypted secrets, receipts
 
-Do not implement until explicitly requested.
+**Completed 2026-05-02.** `AEGIS_PERSISTENCE_PROVIDER=supabase` activates durable storage for:
+- `aegis_vault_passes` — vault pass metadata
+- `aegis_encrypted_secrets` — KMS-encrypted blobs (ciphertext only, no plaintext)
+- `aegis_receipts` — route run receipts with `receipt_json` JSONB + `receipt_hash` SHA-256
 
-```
-Task: Move the in-memory store to persistent storage.
+Implementation:
+- `apps/api/src/lib/persistenceProvider.ts` — feature flag
+- `apps/api/src/lib/supabase.ts` — service-role admin client (apps/api only)
+- `apps/api/src/lib/receiptHash.ts` — stable JSON SHA-256 fingerprint
+- `apps/api/src/repositories/vaultRepository.ts` — interface + local + Supabase impls
+- `apps/api/src/repositories/receiptRepository.ts` — interface + local + Supabase impls
+- `docs/supabase/001_vault_and_receipts.sql` — schema migration (apply manually)
+- `apps/api/scripts/seed-supabase-demo.mjs` — Supabase demo seed script
 
-The current store is in apps/api/src/store/index.ts.
-Entities: collars, passes, sessions, approvals, receipts, runners, routes, agentTasks, agentDelegations.
+Supabase vault repository dual-writes to local Maps as a temporary bridge so non-migrated routes (credential-sessions.ts, route-runs.ts pass validation) continue working. Long-term: all vault/secret reads should migrate to repository-backed access.
+
+Local mode (`AEGIS_PERSISTENCE_PROVIDER=local`, the default) is unchanged.
+
+Do not rebuild unless explicitly requested.
+
+### Persistence — remaining routes (future)
+
+The following are still in-memory only: route runs (active state), credential sessions, skills, delegations, routes, marketplace, reputation, users. Migrate to Supabase in a future session when explicitly requested.
 
 Constraints:
 - All existing API routes must behave identically after migration.
 - Do not store raw secrets, card numbers, CVVs, or passwords.
 - Do not add auth before persistence is complete.
-- Do not modify apps/web unless a frontend data-fetch change is strictly required.
 - Preserve the /demo flow end-to-end.
-- Seed the default collar, demo user, and 4 demo routes on first run (equivalent to npm run seed:demo).
-```

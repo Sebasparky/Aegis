@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
+import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
 
@@ -316,10 +317,10 @@ export async function routeRunRoutes(server: FastifyInstance) {
       run.completed_at = new Date().toISOString();
       routeRuns.set(run.run_id, run);
 
-      const existingReceipt = Array.from(routeRunReceipts.values()).find((r) => r.run_id === run.run_id);
+      const existingReceipt = await getReceiptRepository().findByRunId(run.run_id);
       if (!existingReceipt) {
         const receipt = buildReceipt(run, "completed");
-        routeRunReceipts.set(receipt.receipt_id, receipt);
+        await getReceiptRepository().createReceipt(receipt);
       }
 
       schedulePersist();
@@ -351,10 +352,10 @@ export async function routeRunRoutes(server: FastifyInstance) {
     if (failError) run.error = failError;
     routeRuns.set(run.run_id, run);
 
-    const existingReceipt = Array.from(routeRunReceipts.values()).find((r) => r.run_id === run.run_id);
+    const existingReceipt = await getReceiptRepository().findByRunId(run.run_id);
     if (!existingReceipt) {
       const receipt = buildReceipt(run, "failed", failError);
-      routeRunReceipts.set(receipt.receipt_id, receipt);
+      await getReceiptRepository().createReceipt(receipt);
     }
 
     schedulePersist();

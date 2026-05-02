@@ -755,6 +755,43 @@ plan_aegis_action({
 
 ---
 
+## Supabase Persistence v1
+
+Vault passes, encrypted secrets, and route run receipts can be durably persisted in Supabase by setting `AEGIS_PERSISTENCE_PROVIDER=supabase` in the API environment.
+
+### What is stored in Supabase
+
+| Table | Contents |
+|---|---|
+| `aegis_vault_passes` | Vault pass metadata (pass_id, label, domain, username, kind, secret_ref). No passwords. |
+| `aegis_encrypted_secrets` | KMS-encrypted blobs (nonce_b64, ciphertext_b64, tag_b64). No plaintext column exists. |
+| `aegis_receipts` | Immutable route run audit records with `receipt_json` (full object) + `receipt_hash` (SHA-256). |
+
+### Security boundaries
+
+- Supabase stores **ciphertext only**. Decryption happens inside `apps/api` via the KMS layer.
+- The `SUPABASE_SERVICE_ROLE_KEY` is backend-only. It must never be exposed to `apps/web` or `apps/extension`.
+- Row-Level Security is enabled on all three tables with deny-by-default (no anon policies). The service role bypasses RLS.
+- `secret_values_revealed_to_agent: false` is enforced in every receipt regardless of persistence mode.
+
+### Local mode (default)
+
+`AEGIS_PERSISTENCE_PROVIDER=local` (the default) uses the existing in-memory Maps + JSON file store. No Supabase interaction occurs.
+
+### Dual-write bridge (temporary)
+
+When Supabase mode is active, vault pass and secret writes go to both Supabase and the local in-memory Maps. This is a temporary bridge so non-migrated routes continue to work. The long-term path is full repository-backed access; the dual-write will be removed in a future session.
+
+### Seed script
+
+```bash
+node apps/api/scripts/seed-supabase-demo.mjs
+```
+
+Upserts the demo vault pass and encrypted secret (for `pass_vault_demo_login_001`) into Supabase. Safe to re-run.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

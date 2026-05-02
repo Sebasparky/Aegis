@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import type { AegisVaultPass, AegisPassKind } from "@aegis/types";
-import { aegisVaultPasses, encryptedSecretVault, MOCK_USER_ID, newId } from "../store/index.js";
+import { MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
+import { getVaultRepository } from "../repositories/vaultRepository.js";
 
 interface CreateVaultPassBody {
   label: string;
@@ -25,7 +26,7 @@ interface VaultPassView {
   has_password: boolean;
 }
 
-function toView(pass: AegisVaultPass): VaultPassView {
+async function toView(pass: AegisVaultPass): Promise<VaultPassView> {
   return {
     pass_id: pass.pass_id,
     user_id: pass.user_id,
@@ -35,7 +36,7 @@ function toView(pass: AegisVaultPass): VaultPassView {
     username: pass.username,
     created_at: pass.created_at,
     updated_at: pass.updated_at,
-    has_password: encryptedSecretVault.has(pass.secret_ref),
+    has_password: await getVaultRepository().hasEncryptedSecret(pass.secret_ref),
   };
 }
 
@@ -46,17 +47,17 @@ export async function vaultPassRoutes(server: FastifyInstance) {
    * Never returns password or secret_ref value.
    */
   server.get("/api/vault-passes", async () => {
-    const result = Array.from(aegisVaultPasses.values())
-      .filter((p) => p.user_id === MOCK_USER_ID)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
-      .map(toView);
+    const passes = await getVaultRepository().listVaultPasses(MOCK_USER_ID);
+    const result = await Promise.all(
+      passes.sort((a, b) => a.created_at.localeCompare(b.created_at)).map(toView)
+    );
     return { ok: true, data: result };
   });
 
   /**
    * POST /api/vault-passes
    * Create a login_password credential bundle.
-   * Stores metadata in aegisVaultPasses and the encrypted secret in encryptedSecretVault via KMS.
+   * Stores metadata and the encrypted secret via the vault repository.
    * Password is never returned after this response.
    */
   server.post<{ Body: CreateVaultPassBody }>("/api/vault-passes", async (req, reply) => {
@@ -89,8 +90,7 @@ export async function vaultPassRoutes(server: FastifyInstance) {
       updated_at: now,
     };
 
-    aegisVaultPasses.set(pass_id, pass);
-
+    let blob;
     try {
       const kms = getKmsProvider();
       const kmsContext: KmsContext = {
@@ -99,17 +99,22 @@ export async function vaultPassRoutes(server: FastifyInstance) {
         domain: domain.trim(),
         purpose: "login_password",
       };
-      const blob = await kms.encryptSecret(password, kmsContext);
-      encryptedSecretVault.set(secret_ref, blob);
+      blob = await kms.encryptSecret(password, kmsContext);
     } catch (err) {
-      aegisVaultPasses.delete(pass_id);
       console.error("[vault-passes] Encryption failed:", err);
       return reply.status(500).send({ ok: false, error: { code: "KMS_ERROR", message: "Failed to encrypt credential. Check KMS configuration." } });
     }
 
+    try {
+      await getVaultRepository().createVaultPass(pass, blob);
+    } catch (err) {
+      console.error("[vault-passes] Repository createVaultPass failed:", err);
+      return reply.status(500).send({ ok: false, error: { code: "STORAGE_ERROR", message: "Failed to store credential." } });
+    }
+
     schedulePersist();
 
-    return reply.status(201).send({ ok: true, data: toView(pass) });
+    return reply.status(201).send({ ok: true, data: await toView(pass) });
   });
 
   /**
@@ -117,13 +122,12 @@ export async function vaultPassRoutes(server: FastifyInstance) {
    * Delete a vault pass and its corresponding secret.
    */
   server.delete<{ Params: { passId: string } }>("/api/vault-passes/:passId", async (req, reply) => {
-    const pass = aegisVaultPasses.get(req.params.passId);
+    const pass = await getVaultRepository().getVaultPass(req.params.passId);
     if (!pass || pass.user_id !== MOCK_USER_ID) {
       return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Vault pass not found." } });
     }
 
-    encryptedSecretVault.delete(pass.secret_ref);
-    aegisVaultPasses.delete(pass.pass_id);
+    await getVaultRepository().deleteVaultPass(pass.pass_id);
     schedulePersist();
 
     return { ok: true };

@@ -33,6 +33,13 @@ import { devRoutes } from "./routes/dev.js";
 async function main() {
   await loadStore();
 
+  // Validate Supabase credentials at startup when supabase persistence is enabled.
+  if (process.env.AEGIS_PERSISTENCE_PROVIDER === "supabase") {
+    const { getSupabaseAdminClient } = await import("./lib/supabase.js");
+    getSupabaseAdminClient();
+    console.log("[startup] Supabase persistence provider active.");
+  }
+
   const server = Fastify({ logger: { level: "info" } });
 
   await server.register(cors, {

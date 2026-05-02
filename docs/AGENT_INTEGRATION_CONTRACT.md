@@ -527,20 +527,35 @@ AEGIS_AUTO_START=true node apps/api/scripts/fake-agent-create-run.mjs
 
 ---
 
-## Secret Vault / Pass Custody v1
+## Secret Vault / Pass Custody v1 (KMS)
 
-**Status:** Implemented (dev prototype only — not production-grade encryption).
+**Status:** Implemented. KMS Abstraction v1 complete — AES-256-GCM encrypted at rest via provider interface.
+
+### KMS Provider Interface
+
+The `KmsProvider` interface is the stable boundary. Swapping from `local_dev` to a cloud KMS provider (AWS KMS, GCP KMS, Azure Key Vault, HSM) requires only adding a provider class and updating `AEGIS_KMS_PROVIDER` in `.env`. All vault APIs and secret resolution code remain unchanged.
+
+```
+AEGIS_KMS_PROVIDER=local_dev           # temporary dev/MVP provider
+AEGIS_LOCAL_KMS_KEY_B64=<base64 key>   # 32-byte (256-bit) AES key
+```
+
+The `local_dev` provider uses AES-256-GCM:
+- 96-bit random nonce per encryption
+- 128-bit GCM authentication tag
+- AAD = `${user_id}|${pass_id}|${domain}|${purpose}` — tampered context fails GCM auth
+- Key must decode to exactly 32 bytes; missing or wrong-size key throws a clear error
 
 ### Model
 
 Credentials are split into two layers:
 
 - **`AegisVaultPass`** — metadata object (pass_id, label, domain, username, secret_ref). Persisted to disk. Never contains the raw secret value.
-- **`devSecretVault`** — dev-only in-memory map keyed by `secret_ref` (e.g. `"devvault://demo-login-password"`). Initialized at server startup. Never persisted to disk. Never returned via any agent-facing endpoint.
+- **`encryptedSecretVault`** — map keyed by `secret_ref` containing `EncryptedSecretBlob` (ciphertext, nonce, tag). Persisted to disk as `encryptedSecretVaultEntries`. Blobs are decrypted only at the extension injection point — never returned via any agent-facing endpoint.
 
 Route steps reference credentials by ID using `value_policy.type`:
 - `"pass_field"` — resolves a non-secret field (e.g. username) from the vault pass metadata.
-- `"secret_ref"` — resolves the secret value (e.g. password) from `devSecretVault`. Requires `aegis_controlled` execution mode.
+- `"secret_ref"` — decrypts the secret value (e.g. password) from `encryptedSecretVault` via KMS. Requires `aegis_controlled` execution mode.
 
 ### Resolve-Value Endpoint
 
@@ -553,7 +568,7 @@ Route steps reference credentials by ID using `value_policy.type`:
 { "ok": true, "data": { "value": "...", "value_source": "secret_ref", "pass_id": "pass_vault_demo_login_001", "redacted": true } }
 ```
 
-**Errors:** `NOT_FOUND`, `INVALID_STATE`, `SECRET_NOT_ALLOWED`, `SECRET_NOT_AVAILABLE`, `NOT_PASS_STEP`.
+**Errors:** `NOT_FOUND`, `INVALID_STATE`, `SECRET_NOT_ALLOWED`, `SECRET_NOT_AVAILABLE` (blob missing), `SECRET_DECRYPT_FAILED` (wrong key or tampered data), `NOT_PASS_STEP`.
 
 ### Receipt Metadata
 
@@ -566,7 +581,7 @@ These fields appear in the receipt. The secret value itself is never stored.
 
 ### What This Is Not
 
-- Not production-grade encryption or KMS/HSM.
+- Not production HSM/KMS. `local_dev` provider is a temporary AES-256-GCM bridge.
 - Not real Gmail, bank, or OAuth credential custody.
 - Demo Login uses fake seeded credentials only.
 - Agents never receive secret values through MCP tools or any other agent-facing API.
@@ -615,7 +630,7 @@ agent calls: request_skill_run({
 - The pass belongs to a different user
 - The pass `kind` does not match the purpose key
 - The pass `domain` does not match the route's `domain`
-- The pass has no secret loaded in `devSecretVault` (server may have restarted — re-enter the password in the Passes UI)
+- The pass has no encrypted secret in `encryptedSecretVault` (re-enter the password in the Passes UI — old plaintext secrets from pre-KMS store are not migrated)
 
 ### Security invariants
 

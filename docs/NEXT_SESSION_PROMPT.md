@@ -19,6 +19,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 >
 > **Also: do NOT rebuild Secret Vault / Pass Custody v1. It is complete. Do not re-implement `AegisVaultPass`, `devSecretVault`, `resolve-value` endpoint, or the `pass_field`/`secret_ref` value policy types.**
 >
+> **Also: do NOT rebuild KMS Abstraction v1. `encryptedSecretVault`, `LocalDevKmsProvider`, `EncryptedSecretBlob`, `getKmsProvider`, and async `seedDefaultData/loadStore/resetStoreForDemo` are complete. Do not re-implement the old plaintext `devSecretVault` storage. Use `encryptedSecretVault + kms.decryptSecret()` for all password resolution.**
+>
 > **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
 
 ---
@@ -170,14 +172,28 @@ Everything below is implemented and working.
 ### Secret Vault / Pass Custody v1
 - `AegisVaultPass` — credential metadata type in `packages/types/src/index.ts`; separate from the existing `AegisPass` (agent auth token type)
 - `aegisVaultPasses` — persisted in-memory Map in `apps/api/src/store/index.ts`; included in persistence
-- `devSecretVault` — dev-only in-memory Map initialized at server startup; never persisted, never exposed to agents
+- `devSecretVault` — **deprecated**; replaced by `encryptedSecretVault + KmsProvider`. See KMS Abstraction v1 below.
 - Demo vault pass seeded: `pass_vault_demo_login_001` (domain: localhost, username: demo_user, secret_ref: `devvault://demo-login-password`)
 - Demo Login route steps now use `value_policy.type: "pass_field"` (username) and `"secret_ref"` (password) — raw credential removed from route
 - `POST /api/route-runs/:runId/resolve-value` — extension-only endpoint; resolves pass field or secret during an approved running RouteRun; validates run state, domain match, approval, and execution mode; updates run with `credential_used`, `pass_ids_used`, `secret_values_revealed_to_agent`
 - `replay.js` — `resolveFillValue` is now async; calls resolve-value API for pass/secret steps; toast shows "filled secure value" instead of the actual value; error message is redacted for secret fills
 - Receipt includes `credential_used: true`, `pass_ids_used`, `secret_values_revealed_to_agent: false` when a pass was used
-- Dev prototype only — not production KMS/HSM; not real Gmail/bank credential custody
+- Dev prototype only — not real Gmail/bank credential custody
 - **Implemented 2026-05-01**
+- Do not rebuild unless explicitly requested
+
+### KMS Abstraction v1
+- `apps/api/src/lib/kms.ts` — new module; `KmsProvider` interface, `KmsContext`, `EncryptedSecretBlob`, `getKmsProvider()` factory
+- `local_dev` provider — AES-256-GCM, 96-bit random nonce, 128-bit GCM auth tag, AAD = `user_id|pass_id|domain|purpose`; key from `AEGIS_LOCAL_KMS_KEY_B64` (must be 32-byte base64); lazy key read (not at module load)
+- `encryptedSecretVault: Map<string, EncryptedSecretBlob>` added to `store/index.ts`; persisted as `encryptedSecretVaultEntries` (ciphertext only — never plaintext)
+- `devSecretVault` deprecated; no longer written to or read from in any route handler
+- `seedDefaultData()`, `loadStore()`, `resetStoreForDemo()` are now async (return `Promise<void>`)
+- `loadStore()` includes self-healing: if demo pass exists but encrypted secret is missing, encrypts it automatically (handles post-`seed:demo` startup without manual intervention)
+- `vault-passes.ts` POST encrypts via `kms.encryptSecret()`; DELETE removes from `encryptedSecretVault`; `has_password` checks `encryptedSecretVault.has()`
+- `route-runs.ts` and `credential-sessions.ts` resolve-value use `kms.decryptSecret()`; error codes: `SECRET_NOT_AVAILABLE` (blob missing), `SECRET_DECRYPT_FAILED` (wrong key or tampered data)
+- Dotenv loaded at top of `apps/api/src/index.ts` from repo root `.env` before `loadStore()`
+- To swap to cloud KMS: extend `KmsProviderName`, add a provider class, add a case in `getKmsProvider()`; vault APIs and resolve-value code unchanged
+- **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
 ### Route-to-Pass Binding v1
@@ -193,19 +209,19 @@ Everything below is implemented and working.
 ### Secret Vault UI v1
 - Passes page (`/passes`) extended with a "Credential Vault" section for managing `login_password` credential bundles
 - `GET /api/vault-passes` — lists `AegisVaultPass` metadata; never returns password; includes `has_password: true/false`
-- `POST /api/vault-passes` — creates `AegisVaultPass` + `devSecretVault` entry; validates label/domain/username/password; returns metadata only
-- `DELETE /api/vault-passes/:passId` — removes pass metadata and dev vault secret
+- `POST /api/vault-passes` — creates `AegisVaultPass` + encrypts secret into `encryptedSecretVault` via KMS; validates label/domain/username/password; returns metadata only
+- `DELETE /api/vault-passes/:passId` — removes pass metadata and encrypted blob from `encryptedSecretVault`
 - Route: `apps/api/src/routes/vault-passes.ts`; registered in `apps/api/src/index.ts`
 - API client: `listVaultPasses`, `createVaultPass`, `deleteVaultPass` in `apps/web/src/lib/api.ts`
 - `login_password` means username + password bundle; username may be shown; password is masked as `••••••••` and never returned after creation
 - Seeded demo pass (`pass_vault_demo_login_001`) shows "seeded demo" badge in the UI
-- `has_password: false` shown when server was restarted (secret lost — expected v1 limitation)
+- `has_password: false` shown when the encrypted blob is absent (e.g., pass created before KMS migration — re-enter password)
 - Dev-only warning prominently shown; not production-grade encryption; no real credentials
 - Do not rebuild unless explicitly requested
 
 ### Natural-Language Credential Selection v1
 - `pass_overrides?: Record<string, string>` added to `RouteRun` interface in `packages/types/src/index.ts`; key = purpose (`"login_password"`), value = pass_id
-- Validated at POST `/api/skills/:skillId/runs` before run is created: purpose supported, pass exists, user owns it, `pass.kind === purpose`, `pass.domain === route.domain`, `devSecretVault.has(pass.secret_ref)`; returns `400 INVALID_PASS_OVERRIDE` on failure
+- Validated at POST `/api/skills/:skillId/runs` before run is created: purpose supported, pass exists, user owns it, `pass.kind === purpose`, `pass.domain === route.domain`, `encryptedSecretVault.has(pass.secret_ref)`; returns `400 INVALID_PASS_OVERRIDE` on failure
 - Stored on both `pending` and `pending_approval` run objects
 - `resolve-value` precedence updated: (1) `run.pass_overrides?.["login_password"]`, (2) `RoutePassBinding`, (3) route step `vp.pass_id`
 - Receipt `pass_ids_used` reflects the actual pass used (override, binding, or default)

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding } from "@aegis/types";
 import {
   users,
   collars,
@@ -21,8 +21,14 @@ import {
   routeRuns,
   routeRunReceipts,
   aegisVaultPasses,
+  routePassBindings,
+  encryptedSecretVault,
+  credentialSessions,
+  credentialFillRequests,
 } from "./index.js";
-import type { User, PassWithToken, ReputationEvent, DomainTrustRecord } from "./index.js";
+import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest } from "./index.js";
+import type { EncryptedSecretBlob } from "../lib/kms.js";
+import { getKmsProvider } from "../lib/kms.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const DATA_DIR = join(dirname(__filename), "../../.data");
@@ -30,7 +36,7 @@ const DATA_FILE = join(DATA_DIR, "aegis-store.json");
 
 // ─── Seed Data ────────────────────────────────────────────────────────────────
 
-export function seedDefaultData(): void {
+export async function seedDefaultData(): Promise<void> {
   const NOW = new Date().toISOString();
 
   const MOCK_USER: User = {
@@ -91,6 +97,39 @@ export function seedDefaultData(): void {
   users.set(MOCK_USER.id, MOCK_USER);
   collars.set(STARTER_COLLAR.id, STARTER_COLLAR);
   ensureWebsiteTrustSeeds(NOW);
+
+  // Seed demo vault pass metadata (also needed after resetStoreForDemo clears all maps)
+  if (!aegisVaultPasses.has("pass_vault_demo_login_001")) {
+    const DEMO_VAULT_PASS: AegisVaultPass = {
+      pass_id: "pass_vault_demo_login_001",
+      user_id: "user_001",
+      label: "Demo Login Account",
+      kind: "login_password",
+      domain: "localhost",
+      username: "demo_user",
+      secret_ref: "devvault://demo-login-password",
+      created_at: "2026-04-30T12:00:00.000Z",
+      updated_at: "2026-04-30T12:00:00.000Z",
+    };
+    aegisVaultPasses.set("pass_vault_demo_login_001", DEMO_VAULT_PASS);
+  }
+
+  // Encrypt and store demo password via KMS
+  if (!encryptedSecretVault.has("devvault://demo-login-password")) {
+    try {
+      const kms = getKmsProvider();
+      const blob = await kms.encryptSecret("demo_pass", {
+        user_id: "user_001",
+        pass_id: "pass_vault_demo_login_001",
+        domain: "localhost",
+        purpose: "login_password",
+      });
+      encryptedSecretVault.set("devvault://demo-login-password", blob);
+    } catch (err) {
+      console.error("[persistence] Failed to encrypt demo password — KMS may not be configured:", err);
+      // Server continues in degraded state — demo login will fail with SECRET_NOT_AVAILABLE
+    }
+  }
 }
 
 function ensureWebsiteTrustSeeds(now?: string): void {
@@ -173,6 +212,13 @@ export function persistStore(): void {
       routeRuns: Array.from(routeRuns.entries()),
       routeRunReceipts: Array.from(routeRunReceipts.entries()),
       aegisVaultPasses: Array.from(aegisVaultPasses.entries()),
+      routePassBindings: Array.from(routePassBindings.entries()),
+      credentialSessions: Array.from(credentialSessions.entries()),
+      credentialFillRequests: Array.from(credentialFillRequests.entries()),
+      // Encrypted blobs only — plaintext is never persisted.
+      encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
+      // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
+      // Old aegis-store.json files may contain devSecretVaultEntries; those are silently ignored on load.
     };
     writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
@@ -190,10 +236,10 @@ export function schedulePersist(): void {
   }, 300);
 }
 
-export function loadStore(): void {
+export async function loadStore(): Promise<void> {
   if (!existsSync(DATA_FILE)) {
     console.log("[persistence] No data file found — seeding default data.");
-    seedDefaultData();
+    await seedDefaultData();
     return;
   }
 
@@ -225,6 +271,36 @@ export function loadStore(): void {
     for (const [k, v] of (data.routeRuns ?? [])) routeRuns.set(k, v as RouteRun);
     for (const [k, v] of (data.routeRunReceipts ?? [])) routeRunReceipts.set(k, v as RouteRunReceipt);
     for (const [k, v] of (data.aegisVaultPasses ?? [])) aegisVaultPasses.set(k, v as AegisVaultPass);
+    for (const [k, v] of (data.routePassBindings ?? [])) routePassBindings.set(k, v as RoutePassBinding);
+    for (const [k, v] of (data.credentialSessions ?? [])) credentialSessions.set(k, v as CredentialUseSession);
+    for (const [k, v] of (data.credentialFillRequests ?? [])) credentialFillRequests.set(k, v as CredentialFillRequest);
+
+    // Load encrypted vault blobs (ciphertext only — never plaintext).
+    // Old devSecretVaultEntries from pre-KMS store files are silently ignored.
+    for (const [k, v] of (data.encryptedSecretVaultEntries ?? [])) {
+      encryptedSecretVault.set(k, v as EncryptedSecretBlob);
+    }
+
+    // Self-healing: if the demo pass metadata was loaded but its encrypted secret is missing
+    // (e.g., after npm run seed:demo which doesn't write encryptedSecretVaultEntries),
+    // encrypt it now so the demo works without manual intervention.
+    const demoPass = aegisVaultPasses.get("pass_vault_demo_login_001");
+    if (demoPass && !encryptedSecretVault.has(demoPass.secret_ref)) {
+      console.log("[persistence] Self-healing: demo pass secret missing — encrypting now.");
+      try {
+        const kms = getKmsProvider();
+        const blob = await kms.encryptSecret("demo_pass", {
+          user_id: demoPass.user_id,
+          pass_id: demoPass.pass_id,
+          domain: demoPass.domain,
+          purpose: "login_password",
+        });
+        encryptedSecretVault.set(demoPass.secret_ref, blob);
+        schedulePersist();
+      } catch (err) {
+        console.error("[persistence] Self-healing failed — KMS may not be configured:", err);
+      }
+    }
 
     ensureWebsiteTrustSeeds();
 
@@ -236,11 +312,11 @@ export function loadStore(): void {
     );
   } catch (err) {
     console.error("[persistence] Failed to load store — seeding defaults:", err);
-    seedDefaultData();
+    await seedDefaultData();
   }
 }
 
-export function resetStoreForDemo(): void {
+export async function resetStoreForDemo(): Promise<void> {
   users.clear();
   collars.clear();
   passes.clear();
@@ -258,10 +334,14 @@ export function resetStoreForDemo(): void {
   routeRuns.clear();
   routeRunReceipts.clear();
   aegisVaultPasses.clear();
+  routePassBindings.clear();
+  credentialSessions.clear();
+  credentialFillRequests.clear();
+  encryptedSecretVault.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);
   } catch {}
 
-  seedDefaultData();
+  await seedDefaultData();
 }

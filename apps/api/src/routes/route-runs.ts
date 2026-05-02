@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, devSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, routes, routeRuns, routeRunReceipts, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
+import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function buildReceipt(run: RouteRun, status: "completed" | "failed", error?: string): RouteRunReceipt {
@@ -125,7 +126,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
         if (vaultPass.user_id !== MOCK_USER_ID) { errors.push(`Pass "${passId}" does not belong to this user.`); continue; }
         if (vaultPass.kind !== purpose) { errors.push(`Pass "${passId}" has kind "${vaultPass.kind}" but purpose is "${purpose}".`); continue; }
         if (vaultPass.domain !== route.domain) { errors.push(`Pass "${passId}" domain "${vaultPass.domain}" does not match route domain "${route.domain}".`); continue; }
-        if (!devSecretVault.has(vaultPass.secret_ref)) { errors.push(`Pass "${passId}" has no secret loaded (server may have restarted).`); continue; }
+        if (!encryptedSecretVault.has(vaultPass.secret_ref)) { errors.push(`Pass "${passId}" has no secret available (server may have restarted or KMS not configured).`); continue; }
         validatedPassOverrides[purpose] = passId;
       }
       if (errors.length > 0) {
@@ -483,9 +484,21 @@ export async function routeRunRoutes(server: FastifyInstance) {
         return sendError(reply, 404, "NOT_FOUND", "Requested pass field is not available.");
       }
     } else {
-      const secret = devSecretVault.get(pass.secret_ref);
-      if (!secret) return sendError(reply, 404, "SECRET_NOT_AVAILABLE", "Secret not available in vault.");
-      value = secret;
+      const blob = encryptedSecretVault.get(pass.secret_ref);
+      if (!blob) return sendError(reply, 404, "SECRET_NOT_AVAILABLE", "Secret not available in vault.");
+      try {
+        const kms = getKmsProvider();
+        const kmsContext: KmsContext = {
+          user_id: pass.user_id,
+          pass_id: pass.pass_id,
+          domain: pass.domain,
+          purpose: "login_password",
+        };
+        value = await kms.decryptSecret(blob, kmsContext);
+      } catch {
+        console.error("[route-runs] Decrypt failed for pass", pass.pass_id, "— wrong key or tampered blob");
+        return sendError(reply, 500, "SECRET_DECRYPT_FAILED", "Failed to decrypt credential. Check KMS configuration.");
+      }
       redacted = true;
     }
 

@@ -12,6 +12,7 @@
   "dependencies": {
     "@aegis/types": "*",
     "@fastify/cors": "^9.0.1",
+    "dotenv": "^16.0.0",
     "fastify": "^4.27.0",
     "playwright": "^1.59.1"
   },

@@ -1,3 +1,9 @@
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
+const __filename = fileURLToPath(import.meta.url);
+dotenv.config({ path: resolve(dirname(__filename), "../../../.env") });
+
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { loadStore } from "./store/persistence.js";
@@ -19,10 +25,13 @@ import { routeRoutes } from "./routes/routes.js";
 import { skillRoutes } from "./routes/skills.js";
 import { routeRunRoutes } from "./routes/route-runs.js";
 import { actionRoutes } from "./routes/action.js";
+import { vaultPassRoutes } from "./routes/vault-passes.js";
+import { routePassBindingRoutes } from "./routes/route-pass-bindings.js";
+import { credentialSessionRoutes } from "./routes/credential-sessions.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
-  loadStore();
+  await loadStore();
 
   const server = Fastify({ logger: { level: "info" } });
 
@@ -56,6 +65,9 @@ async function main() {
   await server.register(skillRoutes);
   await server.register(routeRunRoutes);
   await server.register(actionRoutes);
+  await server.register(vaultPassRoutes);
+  await server.register(routePassBindingRoutes);
+  await server.register(credentialSessionRoutes);
 
   if (process.env.NODE_ENV !== "production") {
     await server.register(devRoutes);

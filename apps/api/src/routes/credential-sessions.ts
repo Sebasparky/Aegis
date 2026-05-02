@@ -3,13 +3,14 @@ import {
   aegisVaultPasses,
   credentialSessions,
   credentialFillRequests,
-  devSecretVault,
+  encryptedSecretVault,
   MOCK_USER_ID,
   newId,
   type CredentialUseSession,
   type CredentialFillRequest,
 } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
+import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 
 // Field-level credential delegation — dev prototype only.
 // Production implementation requires proper per-request authentication for the resolve-value endpoint.
@@ -88,8 +89,8 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
     if (sanitizedFields.length === 0)
       return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "allowed_fields must include at least one of: username, password." } });
 
-    if (sanitizedFields.includes("password") && !devSecretVault.has(pass.secret_ref))
-      return reply.status(400).send({ ok: false, error: { code: "SECRET_NOT_LOADED", message: "Password is not loaded for this credential. Re-create the pass or restart the server." } });
+    if (sanitizedFields.includes("password") && !encryptedSecretVault.has(pass.secret_ref))
+      return reply.status(400).send({ ok: false, error: { code: "SECRET_NOT_AVAILABLE", message: "Password is not available for this credential. Re-create the pass or check KMS configuration." } });
 
     const now = new Date().toISOString();
     const session: CredentialUseSession = {
@@ -280,7 +281,7 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
    * Extension calls this to get the actual credential value for field injection.
    *
    * DEV PROTOTYPE ONLY — NOT PRODUCTION-AUTHENTICATED.
-   * This endpoint returns secret material (password) from devSecretVault.
+   * This endpoint returns secret material (password) from encryptedSecretVault via KMS decryption.
    * It is intended exclusively for the Aegis Chrome extension running locally.
    * Production must authenticate the extension caller (e.g., short-lived nonce,
    * mutual TLS, or extension signing) before returning any secret material.
@@ -315,10 +316,22 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
         return reply.status(400).send({ ok: false, error: { code: "NO_USERNAME", message: "This pass has no username." } });
       value = pass.username;
     } else {
-      const secret = devSecretVault.get(pass.secret_ref);
-      if (!secret)
-        return reply.status(400).send({ ok: false, error: { code: "SECRET_NOT_LOADED", message: "Password not loaded. Re-create the pass or restart the server." } });
-      value = secret;
+      const blob = encryptedSecretVault.get(pass.secret_ref);
+      if (!blob)
+        return reply.status(400).send({ ok: false, error: { code: "SECRET_NOT_AVAILABLE", message: "Password not available. Re-create the pass or check KMS configuration." } });
+      try {
+        const kms = getKmsProvider();
+        const kmsContext: KmsContext = {
+          user_id: pass.user_id,
+          pass_id: pass.pass_id,
+          domain: pass.domain,
+          purpose: "login_password",
+        };
+        value = await kms.decryptSecret(blob, kmsContext);
+      } catch {
+        console.error("[credential-sessions] Decrypt failed for pass", pass.pass_id);
+        return reply.status(500).send({ ok: false, error: { code: "SECRET_DECRYPT_FAILED", message: "Failed to decrypt credential." } });
+      }
     }
 
     // Mark as running so duplicate resolve-value calls don't re-enter

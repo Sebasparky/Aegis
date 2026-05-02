@@ -16,6 +16,7 @@ import type {
   RouteRun,
   RouteRunReceipt,
 } from "@aegis/types";
+import type { EncryptedSecretBlob } from "../lib/kms.js";
 
 // In-memory Maps are the runtime source of truth.
 // persistence.ts handles loading from and saving to disk.
@@ -109,12 +110,17 @@ export const aegisVaultPasses = new Map<string, AegisVaultPass>();
 // Route-to-pass bindings. Key: `${user_id}:${route_id}:${purpose}` for upsert semantics.
 export const routePassBindings = new Map<string, RoutePassBinding>();
 
-// Dev-only secret store. Values are returned to the Aegis extension only — NEVER to agents or API callers.
-// Persisted locally in aegis-store.json under devSecretVaultEntries for dev convenience.
-// NOT production-grade — do not store real credentials. Local prototype only.
+// KMS-encrypted secret vault. Key: pass.secret_ref. Replaces devSecretVault for all new writes.
+// Persisted to disk as encryptedSecretVaultEntries (ciphertext only — never plaintext).
+export const encryptedSecretVault = new Map<string, EncryptedSecretBlob>();
+
+/**
+ * @deprecated Replaced by encryptedSecretVault + KmsProvider. No longer written to.
+ * Kept exported for backward compatibility. Will be removed in a future session.
+ * The old devSecretVault.set("devvault://demo-login-password", "demo_pass") seeding
+ * has been removed — demo secret is now encrypted at startup by seedDefaultData().
+ */
 export const devSecretVault = new Map<string, string>();
-// Seeded demo secret always initialized at module load; loadStore() adds persisted user-created secrets on top.
-devSecretVault.set("devvault://demo-login-password", "demo_pass");
 
 // ─── Credential Session types ─────────────────────────────────────────────────
 

@@ -306,6 +306,78 @@ export interface AgentTrustPassport {
   last_updated: string;
 }
 
+export interface DelegationPassport {
+  passport_id: string;
+  issuer: string;
+  issued_at: string;
+  expires_at: string;
+  status: "active" | "expired" | "revoked";
+
+  human_subject: {
+    user_id: string;
+    user_aegis_id: string;
+    identity_level: "dev_verified" | "email_verified" | "payment_verified" | "government_id_verified";
+    liability_acknowledged: boolean;
+    liability_terms_version: string;
+  };
+
+  agent_subject: {
+    agent_id: string;
+    agent_name?: string;
+    agent_platform?: string;
+  };
+
+  delegation: {
+    delegation_id: string;
+    collar_id?: string;
+    allowed_domains?: string[];
+    allowed_actions: string[];
+    blocked_actions: string[];
+    approval_required_for: string[];
+  };
+
+  capability_attestations: {
+    login_credentials_available: boolean;
+    payment_method_available: boolean;
+    identity_profile_available: boolean;
+    credential_domains: string[];
+    max_transaction_amount_usd?: number;
+  };
+
+  secret_custody: {
+    aegis_holds_user_secrets: boolean;
+    agent_receives_raw_credentials: false;
+    agent_receives_raw_payment_data: false;
+    agent_receives_raw_identity_documents: false;
+    release_model: "aegis_controlled_context_bound";
+  };
+
+  aegis_coverage_boundary: {
+    covered_only_when_aegis_authorizes_and_releases_capability: true;
+    covered_actions_require_controlled_runtime: true;
+    covered_actions_require_sensitive_workflow_detection: true;
+    covered_actions_require_signed_receipt: true;
+    out_of_band_secret_use_not_covered: true;
+    aegis_does_not_prove_agent_has_no_out_of_band_secrets: true;
+  };
+
+  evidence_summary: {
+    verified_receipts: number;
+    verified_sensitive_receipts: number;
+    credential_uses: number;
+    covered_sensitive_events: number;
+    uncovered_sensitive_events: number;
+    secrets_revealed_to_agents: number;
+    policy_violations: number;
+    recent_receipt_ids: string[];
+  };
+
+  verification: {
+    passport_hash: string;
+    passport_jws: string;
+  };
+}
+
 export interface PolicyEvalInput {
   collar: Collar;
   session?: ProtectedSession;

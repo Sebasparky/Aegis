@@ -29,6 +29,7 @@ import { vaultPassRoutes } from "./routes/vault-passes.js";
 import { routePassBindingRoutes } from "./routes/route-pass-bindings.js";
 import { credentialSessionRoutes } from "./routes/credential-sessions.js";
 import { runtimeSessionRoutes } from "./routes/runtime-sessions.js";
+import { delegationPassportRoutes } from "./routes/delegation-passports.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -77,6 +78,7 @@ async function main() {
   await server.register(routePassBindingRoutes);
   await server.register(credentialSessionRoutes);
   await server.register(runtimeSessionRoutes);
+  await server.register(delegationPassportRoutes);
 
   if (process.env.NODE_ENV !== "production") {
     await server.register(devRoutes);

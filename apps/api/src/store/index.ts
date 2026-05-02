@@ -15,6 +15,7 @@ import type {
   InstalledSkill,
   RouteRun,
   RouteRunReceipt,
+  DelegationPassport,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -173,6 +174,9 @@ export const credentialSessions = new Map<string, CredentialUseSession>();
 
 // Pending/active field fill requests picked up and executed by the extension.
 export const credentialFillRequests = new Map<string, CredentialFillRequest>();
+
+// Signed delegation passports issued to agents; local JSON persistence only (v1).
+export const delegationPassports = new Map<string, DelegationPassport>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

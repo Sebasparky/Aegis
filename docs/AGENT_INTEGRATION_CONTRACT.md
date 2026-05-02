@@ -995,6 +995,96 @@ Receipts are portable signed audit evidence — no distributed ledger, no consen
 
 ---
 
+## Delegation Passport v1
+
+A **Delegation Passport** is a signed document an agent can carry to prove it operates under Aegis-controlled delegation. It is created by the user (or on behalf of the user via their delegation token) and signed by the Aegis server using EdDSA/Ed25519.
+
+### What the passport proves
+
+- Which verified human user the agent is acting for
+- Which delegation and collar governs the agent's authority
+- What actions are allowed, blocked, and require approval
+- That Aegis holds the user's credentials — the agent never receives raw passwords, payment data, or identity documents
+- That sensitive covered actions require: Aegis authorization and capability release, the Aegis Playwright controlled runtime, sensitive workflow detection, and a signed receipt
+- What capability attestations are available (credential domains, transaction limits)
+- Receipt-backed evidence: number of verified receipts, credential uses, covered/uncovered sensitive events
+
+### What the passport does NOT prove
+
+- **The agent has no out-of-band secrets.** Aegis controls only the execution of actions that go through Aegis workflows. The passport cannot and does not claim the agent is incapable of accessing secrets via other means.
+- That every browser action was Aegis-covered. Only actions that went through `request_skill_run` and the Aegis Playwright runtime are covered.
+- That Aegis removes all liability or risk. Sensitive actions still require user approval.
+
+The field `aegis_coverage_boundary.aegis_does_not_prove_agent_has_no_out_of_band_secrets: true` is present in every passport and must never be removed.
+
+### API endpoints
+
+**Create a passport:**
+```
+POST /api/delegation-passports
+Authorization: Bearer <delegation-token>
+Content-Type: application/json
+
+{ "delegation_id": "delg_demo_001", "expires_in_minutes": 60 }
+```
+
+**Read a passport:**
+```
+GET /api/delegation-passports/:passportId
+```
+
+**Check status:**
+```
+GET /api/delegation-passports/:passportId/status
+
+Response: { passport_id, status, expires_at, active, revoked }
+```
+
+**Verify hash + JWS:**
+```
+GET /api/delegation-passports/:passportId/verify
+
+Response: {
+  valid, hash_valid, signature_valid,
+  active, expired, revoked,
+  passport_hash, recomputed_hash,
+  jws_payload: { typ, passport_id, passport_hash, issuer, issued_at, expires_at, user_aegis_id, agent_id, delegation_id, collar_id }
+}
+```
+
+**Revoke a passport:**
+```
+POST /api/delegation-passports/:passportId/revoke
+```
+
+### MCP tools
+
+`create_delegation_passport(delegation_id, expires_in_minutes?)` — creates and returns a signed passport.
+
+`verify_delegation_passport(passport_id)` — verifies hash, JWS signature, expiry, and revocation. Returns `valid`, `hash_valid`, `signature_valid`, and the JWS payload.
+
+### Verification semantics
+
+1. The passport hash is SHA-256 of the full passport JSON with keys sorted and the `verification` block excluded.
+2. The JWS payload covers: `typ`, `passport_id`, `passport_hash`, `issuer`, `issued_at`, `expires_at`, `user_aegis_id`, `agent_id`, `delegation_id`, `collar_id` — no secrets.
+3. Verification recomputes the hash, verifies the EdDSA signature, cross-checks JWS payload fields, and checks expiry and revocation status.
+4. `valid: true` means all of the above passed. It does NOT mean the agent has no out-of-band secrets.
+
+### Liability framing
+
+The passport makes the accountability boundary explicit:
+
+- **Inside the boundary:** Any sensitive action that went through `request_skill_run`, user approval, the Aegis Playwright runtime, and received a signed receipt is provably Aegis-controlled. The receipt is the binding audit record.
+- **Outside the boundary:** Actions the agent took without Aegis (direct browsing, API calls, any tool not routed through Aegis) are NOT covered. The passport cannot speak to those.
+
+The passport is evidence of constrained, auditable authority — not a claim of perfect agent safety.
+
+### What the passport does not contain
+
+The passport contains no raw secrets, passwords, payment card numbers, secret_refs, ciphertext blobs, or private keys. Only aggregate counts, capability booleans, domains, and receipt IDs.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.
@@ -1003,3 +1093,4 @@ Receipts are portable signed audit evidence — no distributed ledger, no consen
 - Routes are not arbitrary executable scripts. They are declarative, inspectable, versioned workflow objects reviewed before publication.
 - This is not a general browsing or web research layer. For non-sensitive reading, searching, and summarization, agents should use their own tools.
 - This is not a credential custody or pass vault system. Demo Login uses fake seeded credentials for demo purposes only. Real credential injection is not implemented.
+- Delegation Passports do not prove the agent has no out-of-band secrets. They prove only Aegis-covered delegation boundaries.

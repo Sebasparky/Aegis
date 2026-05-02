@@ -180,10 +180,12 @@ Sensitive Workflow Detection v1 is **complete** — implemented 2026-05-02. Aegi
 
 **`aegis_playwright` is the primary controlled execution surface for autonomous agents.** `chrome_extension` is retained as an optional local/debug/recording companion. Future autonomous-agent features should target `aegis_playwright` first.
 
+Delegation Passport v1 is **complete** — implemented 2026-05-02. Agents can create and verify a signed Delegation Passport documenting human subject, agent subject, collar-backed action limits, KMS custody model, Aegis coverage boundary, and receipt-backed evidence. MCP tools `create_delegation_passport` and `verify_delegation_passport` are available. The passport does NOT claim the agent has no out-of-band secrets — it attests only to Aegis-covered delegation boundaries.
+
 Candidate next milestones:
-1. **Coverage Monitor hardening** — surface runtime events from Playwright sessions in the UI
-2. **Delegation Passport v1** — structured delegation manifest agents carry across API calls
-3. **Action Authorization Receipt v1** — per-action receipt events for finer-grained audit
+1. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
+2. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history
+3. **Website Handshake v1** — structured API call where a website can request and verify a Delegation Passport
 4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
@@ -235,6 +237,10 @@ Before making any changes:
 - Do not rebuild Sensitive Workflow Detection v1 (`RuntimeEvent`, `RuntimeEventType`, `RuntimeEventSensitivity`, `RuntimeCoverageStatus`, `RuntimeCoverageSummary`, `runtimeEvents` Map, `getCoverageSummary`, `CoverageWindow`, coverage window logic in `playwrightRuntime.ts`, `GET /api/runtime/sessions/:id/events`) unless explicitly requested
 - Sensitive event detection is Playwright-first and metadata-only — do not store raw field values, passwords, card numbers, CVVs, or any secret in runtime events; `element_hint` is structural metadata only (tag, type, name/id/autocomplete/placeholder — never value)
 - Do not claim Aegis runtime event detection proves no out-of-band secrets exist; it proves whether a sensitive event inside the Aegis session was covered by an Aegis-controlled action
+- Do not rebuild Delegation Passport v1 (`DelegationPassport` type, `delegationPassportSigning.ts`, `delegation-passports.ts` routes, `delegationPassports` Map, `create_delegation_passport`/`verify_delegation_passport` MCP tools, passport persistence) unless explicitly requested
+- Do not claim a Delegation Passport proves the agent has no out-of-band secrets — it attests only to Aegis-covered capability release and controlled runtime behavior; `aegis_coverage_boundary.aegis_does_not_prove_agent_has_no_out_of_band_secrets: true` must remain in every passport
+- Do not put raw secrets, passwords, payment card data, secret_refs, ciphertext, or private keys in a Delegation Passport — only aggregate counts, capability booleans, domains, and receipt IDs
+- Future website handshake features should consume `passport_jws` from the Delegation Passport — do not build a website handshake without first creating and verifying a passport
 
 ## Terminology — Always Use
 

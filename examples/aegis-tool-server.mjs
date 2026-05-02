@@ -480,6 +480,71 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
   };
 }
 
+async function createDelegationPassport({ delegation_id, expires_in_minutes } = {}) {
+  if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
+  const body = { delegation_id };
+  if (expires_in_minutes != null) body.expires_in_minutes = expires_in_minutes;
+  let res;
+  try {
+    res = await request("POST", "/api/delegation-passports", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create delegation passport." };
+  }
+  const passport = res.data;
+  return {
+    passport_id: passport.passport_id,
+    issuer: passport.issuer,
+    issued_at: passport.issued_at,
+    expires_at: passport.expires_at,
+    status: passport.status,
+    human_subject: passport.human_subject,
+    agent_subject: passport.agent_subject,
+    delegation: passport.delegation,
+    capability_attestations: passport.capability_attestations,
+    secret_custody: passport.secret_custody,
+    aegis_coverage_boundary: passport.aegis_coverage_boundary,
+    evidence_summary: passport.evidence_summary,
+    verification: {
+      passport_hash: passport.verification?.passport_hash,
+      passport_jws: passport.verification?.passport_jws,
+    },
+    next_action: `Passport created. Call verify_delegation_passport with passport_id="${passport.passport_id}" to confirm integrity. Present passport_jws to counterparties as a signed Aegis delegation claim.`,
+  };
+}
+
+async function verifyDelegationPassport({ passport_id } = {}) {
+  if (!passport_id) return { error: "VALIDATION_ERROR", message: "passport_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/delegation-passports/${encodeURIComponent(passport_id)}/verify`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to verify delegation passport." };
+  }
+  const v = res.data;
+  return {
+    passport_id,
+    valid: v.valid,
+    hash_valid: v.hash_valid,
+    signature_valid: v.signature_valid,
+    active: v.active,
+    expired: v.expired,
+    revoked: v.revoked,
+    passport_hash: v.passport_hash,
+    recomputed_hash: v.recomputed_hash,
+    jws_payload: v.jws_payload,
+    error: v.error ?? null,
+    interpretation: v.valid
+      ? "Passport is valid and active. The named delegation is Aegis-controlled with the stated custody model, collar limits, and receipt evidence. This does NOT prove the agent has no out-of-band secrets."
+      : `Passport is NOT valid: ${v.error ?? "unknown reason"}. Do not rely on this passport for delegation claims.`,
+  };
+}
+
 async function startCredentialSession({ pass_id, domain, allowed_fields, target_url }) {
   if (!pass_id) return { error: "VALIDATION_ERROR", message: "pass_id is required." };
   if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
@@ -736,6 +801,40 @@ const TOOLS = [
     },
   },
   {
+    name: "create_delegation_passport",
+    description:
+      "Create a signed Aegis Delegation Passport for a given delegation. The passport is a cryptographically signed document that proves: which verified user the agent is acting for, which collar governs it, what actions are allowed/blocked/require approval, that Aegis holds user secrets and the agent does NOT receive raw credentials or payment data, that sensitive covered actions require Aegis authorization + controlled runtime + sensitive workflow detection + signed receipts, and receipt-backed evidence from past runs. The passport does NOT prove the agent has no out-of-band secrets — it claims only that Aegis-covered actions were constrained by user approval, KMS credential custody, and the Aegis Playwright controlled runtime. Present the passport_jws to counterparties as a verifiable Aegis delegation claim.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delegation_id: {
+          type: "string",
+          description: "The delegation_id to issue a passport for (e.g. 'delg_demo_001').",
+        },
+        expires_in_minutes: {
+          type: "number",
+          description: "Optional. How long the passport should be valid in minutes. Defaults to 60.",
+        },
+      },
+      required: ["delegation_id"],
+    },
+  },
+  {
+    name: "verify_delegation_passport",
+    description:
+      "Verify the cryptographic integrity and active status of an Aegis Delegation Passport. Recomputes the passport hash, verifies the EdDSA JWS signature, cross-checks JWS payload fields, and checks expiry/revocation. A valid active result means the passport hash matches, the Aegis signing key authenticated the content, the passport has not expired, and the delegation has not been revoked. A valid passport attests to Aegis-covered delegation boundaries — it does NOT prove the agent has no out-of-band secrets or that every browser action went through Aegis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        passport_id: {
+          type: "string",
+          description: "The passport_id returned by create_delegation_passport.",
+        },
+      },
+      required: ["passport_id"],
+    },
+  },
+  {
     name: "plan_aegis_action",
     description:
       "Analyze a task description and return a structured execution plan without executing anything. Matches installed skills and recommends: get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run + start_playwright_route_run (Aegis-controlled sensitive workflows), or normal agent tools. For aegis_controlled skills, the response includes post_approval_next_tool='start_playwright_route_run' — after the run is created with request_skill_run and approved (if required), call start_playwright_route_run to execute via the Aegis Playwright runtime. Optionally resolves a vault credential by hint and includes a ready-to-use suggested_request. Call this first when you have a task description but haven't yet identified the skill or execution path.",
@@ -808,6 +907,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "start_playwright_route_run":
       result = await startPlaywrightRouteRun(a);
+      break;
+    case "create_delegation_passport":
+      result = await createDelegationPassport(a);
+      break;
+    case "verify_delegation_passport":
+      result = await verifyDelegationPassport(a);
       break;
     case "plan_aegis_action":
       result = await planAegisAction(a);

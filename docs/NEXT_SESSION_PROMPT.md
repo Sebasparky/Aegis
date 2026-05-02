@@ -34,6 +34,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Sensitive Workflow Detection v1. It is complete. Do not re-implement `RuntimeEvent`, `RuntimeEventType`, `RuntimeEventSensitivity`, `RuntimeCoverageStatus`, `RuntimeCoverageSummary`, `runtimeEvents` Map, `getCoverageSummary`, coverage window logic in `playwrightRuntime.ts`, or `GET /api/runtime/sessions/:id/events`. Detection is metadata-only — never store field values.**
 >
 > **Also: do NOT rebuild Auto-start Playwright Runs v1. It is complete. Do not re-implement `claimed_execution_surface` on `RouteRun`, the fire-and-forget Playwright auto-start in the approval endpoint, or the `isEligibleForBackgroundAutoRun` guard for `claimed_execution_surface` in the extension. Approval of an `aegis_controlled` run automatically triggers Playwright — do not instruct the agent to call `start_playwright_route_run` after approval unless the run remains pending (fallback only).**
+>
+> **Also: do NOT rebuild Delegation Passport v1. It is complete. Do not re-implement `DelegationPassport` type, `delegationPassportSigning.ts`, `delegation-passports.ts` routes, `delegationPassports` Map, MCP tools `create_delegation_passport`/`verify_delegation_passport`, or passport persistence. Do not claim a valid passport proves the agent has no out-of-band secrets — it proves only that Aegis-covered sensitive actions were constrained by user approval, KMS credential custody, the Aegis Playwright controlled runtime, and signed receipts.**
 
 ---
 
@@ -317,6 +319,20 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Delegation Passport v1
+- `DelegationPassport` interface added to `packages/types/src/index.ts` — covers `human_subject`, `agent_subject`, `delegation`, `capability_attestations`, `secret_custody`, `aegis_coverage_boundary`, `evidence_summary`, `verification`
+- `apps/api/src/lib/delegationPassportSigning.ts` — `hashDelegationPassport` (SHA-256 of stable sorted JSON excluding verification), `signDelegationPassportJws` (EdDSA/Ed25519 via `AEGIS_RECEIPT_JWS_PRIVATE_JWK`), `verifyDelegationPassportJws`; reuses receipt signing keys for v1 (TODO: split into dedicated passport keypair)
+- `delegationPassports: Map<string, DelegationPassport>` added to `apps/api/src/store/index.ts`; persisted in `aegis-store.json` as `delegationPassports`; cleared on `resetStoreForDemo`
+- `apps/api/src/routes/delegation-passports.ts` — `POST /api/delegation-passports`, `GET /api/delegation-passports/:passportId`, `GET /api/delegation-passports/:passportId/status`, `GET /api/delegation-passports/:passportId/verify`, `POST /api/delegation-passports/:passportId/revoke`
+- Evidence summary built from `getReceiptRepository().listReceipts()` + `verifyReceipt()` per receipt — counts only valid verified receipts; includes `verified_receipts`, `verified_sensitive_receipts`, `credential_uses`, `covered_sensitive_events`, `uncovered_sensitive_events`, `secrets_revealed_to_agents`, `recent_receipt_ids` (last 5)
+- Capability attestations from `getVaultRepository().listVaultPasses()` — `login_credentials_available`, `credential_domains`, `max_transaction_amount_usd` from collar spending limits
+- MCP tools `create_delegation_passport` and `verify_delegation_passport` added to `examples/aegis-tool-server.mjs`
+- `agent_id` in JWS payload is `delegation.agent_name` (temporary fallback — TODO: add stable `agent_id` to `AgentDelegation`)
+- `aegis_coverage_boundary.aegis_does_not_prove_agent_has_no_out_of_band_secrets: true` — must remain in the passport; do not remove or weaken this field
+- Passport contains no raw secrets, passwords, secret_refs, ciphertext, or private keys — only aggregate counts, capability booleans, domains, and receipt IDs
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -370,12 +386,14 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Auto-start Playwright Runs v1 is complete** — implemented 2026-05-02. Approval of an `aegis_controlled` run now automatically triggers the Playwright runtime via fire-and-forget. The extension skips claimed runs. Manual `start_playwright_route_run` remains as a fallback. See "Auto-start Playwright Runs v1" in Completed Increments.
 
+**Delegation Passport v1 is complete** — implemented 2026-05-02. Agents can now create and verify a cryptographically signed Delegation Passport that documents: human subject, agent subject, collar-backed action limits, capability attestations, KMS custody model, Aegis coverage boundary, and receipt-backed evidence. The passport does NOT prove the agent has no out-of-band secrets. See "Delegation Passport v1" in Completed Increments.
+
 **Candidate next milestones:**
 
-1. **Delegation Passport v1** — structured delegation manifest agents carry across API calls; proves identity, scope, and trust tier at each sensitive step
-2. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
-3. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
-4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation
+1. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
+2. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history and policy compliance
+3. **Website Handshake v1** — structured API call where a website can request and verify a Delegation Passport before accepting agent requests
+4. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

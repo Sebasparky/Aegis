@@ -79,7 +79,16 @@ async function discoverInstalledSkills({ domain }) {
     execution_mode: s.execution_mode ?? null,
     sensitivity_level: s.sensitivity_level ?? null,
   }));
-  return { skills };
+  return {
+    skills,
+    ...(skills.length === 0
+      ? {
+          credential_session_available: true,
+          guidance:
+            "No Aegis-controlled skills found for this domain. For generic login tasks (no pre-recorded route needed), use start_credential_session for field-level credential delegation: the agent navigates freely; Aegis fills credentials without exposing them.",
+        }
+      : {}),
+  };
 }
 
 async function getAgentRunnableWorkflow({ skill_id }) {
@@ -265,6 +274,257 @@ async function getRouteRunReceipt({ run_id }) {
   return { receipt };
 }
 
+function scoreSkills(skills, taskLower) {
+  let best = null;
+  let bestScore = -1;
+  for (const skill of skills) {
+    const haystack = `${skill.name} ${skill.summary ?? ""}`.toLowerCase();
+    const words = haystack.split(/\W+/).filter((w) => w.length > 2);
+    let score = 0;
+    for (const word of words) {
+      if (taskLower.includes(word)) score++;
+    }
+    if (score > bestScore) { bestScore = score; best = skill; }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+async function planAegisAction({ task, domain, credential_hint } = {}) {
+  const taskLower = (task ?? "").toLowerCase();
+
+  // Resolve domain from arg or task keywords
+  let resolvedDomain = domain ?? null;
+  if (!resolvedDomain) {
+    if (taskLower.includes("demo") || taskLower.includes("localhost")) {
+      resolvedDomain = "localhost:3000";
+    } else if (taskLower.includes("wikipedia")) {
+      resolvedDomain = "en.wikipedia.org";
+    }
+  }
+
+  const skillsPath = resolvedDomain
+    ? `/api/skills?domain=${encodeURIComponent(resolvedDomain)}&installed=true`
+    : `/api/skills?installed=true`;
+
+  let skillsRes;
+  try {
+    skillsRes = await request("GET", skillsPath);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!skillsRes.ok) {
+    return {
+      error: skillsRes.error?.code ?? "UNKNOWN_ERROR",
+      message: skillsRes.error?.message ?? "Failed to fetch installed skills.",
+    };
+  }
+
+  const skills = skillsRes.data ?? [];
+  const matchedSkill = skills.length > 0 ? scoreSkills(skills, taskLower) : null;
+
+  const SENSITIVE_KEYWORDS = ["buy", "purchase", "payment", "transfer", "delete"];
+  const taskIsSensitive = SENSITIVE_KEYWORDS.some((kw) => taskLower.includes(kw));
+  const LOGIN_SIGNALS = ["log in", "login", "sign in", "signin", "log into", "sign into"];
+  const taskIsLogin = LOGIN_SIGNALS.some((kw) => taskLower.includes(kw));
+
+  if (!matchedSkill) {
+    // No pre-recorded route, but task involves login + user named a credential → recommend field-level credential session
+    if (taskIsLogin && (credential_hint || taskLower.includes("credential") || taskLower.includes("using my"))) {
+      const isLocalDemo = resolvedDomain === "localhost" || resolvedDomain?.startsWith("localhost");
+      return {
+        recommended_path: "credential_session",
+        explanation:
+          "No pre-recorded Aegis skill was found for this login task. Use start_credential_session for field-level credential delegation: the agent navigates the login flow freely, and Aegis fills credentials when needed without exposing secrets.",
+        next_tool: "start_credential_session",
+        note: "Call list_vault_passes first to find the pass_id for the named credential, then call start_credential_session with { pass_id, domain, allowed_fields: [\"username\", \"password\"], target_url } where target_url is the exact login page URL. Providing target_url prevents Aegis from filling credentials on the wrong same-domain page.",
+        suggested_domain: resolvedDomain ?? null,
+        ...(isLocalDemo ? { suggested_target_url: "http://localhost:3000/demo-login" } : {}),
+      };
+    }
+    if (taskIsSensitive) {
+      return {
+        recommended_path: "no_match",
+        explanation:
+          "No matching Aegis workflow found. This task appears sensitive — check the Aegis Skill Library for a verified workflow before proceeding with agent tools.",
+        safety_note:
+          "Sensitive actions (payments, purchases, data deletion) should go through Aegis-verified workflows when available.",
+      };
+    }
+    return {
+      recommended_path: "normal_agent_tools",
+      explanation:
+        "No installed Aegis workflow matched this task. Use your normal agent tools. Note: if this task involves sensitive credentials, payments, or account changes, those actions should be handled through Aegis workflows.",
+    };
+  }
+
+  if (matchedSkill.execution_mode === "agent_runnable") {
+    return {
+      recommended_path: "agent_runnable_recipe",
+      matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
+      next_tool: "get_agent_runnable_workflow",
+      suggested_request: { skill_id: matchedSkill.skill_id },
+      explanation:
+        "This is a routine workflow. Aegis will provide the tested route recipe for you to execute in your own browser session.",
+    };
+  }
+
+  // aegis_controlled branch (also default for unknown execution_mode)
+  const CREDENTIAL_SIGNALS = ["credential", "my account", "my password", "using my", "log in as"];
+  const needsCredential = !!credential_hint || CREDENTIAL_SIGNALS.some((kw) => taskLower.includes(kw));
+
+  if (!needsCredential) {
+    return {
+      recommended_path: "aegis_controlled_run",
+      matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
+      next_tool: "request_skill_run",
+      suggested_request: { skill_id: matchedSkill.skill_id, variables: {} },
+      explanation:
+        "This is a sensitive workflow requiring Aegis control. Call request_skill_run with the suggested_request. If a specific credential is needed, call list_vault_passes first and add pass_overrides.",
+    };
+  }
+
+  let passesRes;
+  try {
+    passesRes = await request("GET", "/api/vault-passes");
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!passesRes.ok) {
+    return {
+      error: passesRes.error?.code ?? "UNKNOWN_ERROR",
+      message: passesRes.error?.message ?? "Failed to fetch vault passes.",
+    };
+  }
+
+  let candidates = passesRes.data ?? [];
+  if (matchedSkill.domain) {
+    candidates = candidates.filter((p) => p.domain === matchedSkill.domain);
+  }
+  if (credential_hint) {
+    const hint = credential_hint.toLowerCase();
+    candidates = candidates.filter(
+      (p) =>
+        p.label.toLowerCase().includes(hint) ||
+        (p.username && p.username.toLowerCase().includes(hint))
+    );
+  }
+
+  const passMetadata = (p) => ({ pass_id: p.pass_id, label: p.label, username: p.username ?? null });
+
+  if (candidates.length === 0) {
+    return {
+      recommended_path: "aegis_controlled_run",
+      matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
+      credential_resolution: "not_found",
+      next_tool: "request_skill_run",
+      suggested_request: { skill_id: matchedSkill.skill_id, variables: {} },
+      explanation: credential_hint
+        ? `No vault pass matching "${credential_hint}" was found for domain "${matchedSkill.domain}". Call request_skill_run without pass_overrides to use the route default, or call list_vault_passes to browse available passes.`
+        : `No vault passes found for domain "${matchedSkill.domain}". Call request_skill_run without pass_overrides to use the route default.`,
+    };
+  }
+
+  if (candidates.length > 1) {
+    return {
+      recommended_path: "aegis_controlled_run",
+      matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
+      credential_resolution: "needs_clarification",
+      needs_clarification: true,
+      candidates: candidates.map(passMetadata),
+      explanation:
+        "Multiple vault credentials matched. Ask the user which one to use, then re-call plan_aegis_action with a more specific credential_hint, or call request_skill_run directly with the chosen pass_id in pass_overrides.",
+    };
+  }
+
+  const matched_pass = candidates[0];
+  return {
+    recommended_path: "aegis_controlled_run",
+    matched_skill: { skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain },
+    matched_pass: passMetadata(matched_pass),
+    next_tool: "request_skill_run",
+    suggested_request: {
+      skill_id: matchedSkill.skill_id,
+      variables: {},
+      pass_overrides: { login_password: matched_pass.pass_id },
+    },
+    explanation:
+      "This is a sensitive workflow requiring Aegis control. Your selected credential will be resolved server-side — no passwords are exposed.",
+  };
+}
+
+async function startCredentialSession({ pass_id, domain, allowed_fields, target_url }) {
+  if (!pass_id) return { error: "VALIDATION_ERROR", message: "pass_id is required." };
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  const body = { pass_id, domain };
+  if (allowed_fields?.length) body.allowed_fields = allowed_fields;
+  if (target_url) body.target_url = target_url;
+  let res;
+  try {
+    res = await request("POST", "/api/credential-sessions", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to start credential session." };
+  }
+  const session = res.data;
+  return {
+    session_id: session.session_id,
+    status: session.status,
+    domain: session.domain,
+    allowed_fields: session.allowed_fields,
+    approval_required: true,
+    next_action: `Approval required. Direct the user to http://localhost:3000/route-run-approvals to approve the credential session under "Credential Session Requests", then poll get_credential_session_status until status is "active".`,
+  };
+}
+
+async function fillCredentialField({ session_id, field }) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  if (!field) return { error: "VALIDATION_ERROR", message: "field is required ('username' or 'password')." };
+  let res;
+  try {
+    res = await request("POST", `/api/credential-sessions/${session_id}/fill`, { field });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request credential fill." };
+  }
+  const data = res.data;
+  return {
+    request_id: data.request_id,
+    session_id: data.session_id,
+    field: data.field,
+    status: data.status,
+    message: data.message,
+    next_action: `Fill request created. Ensure a tab matching the session domain is active and the Aegis extension is enabled. The extension fills the field automatically on the next poll cycle (~10s). Poll get_credential_session_status to confirm the field appears in fields_filled.`,
+  };
+}
+
+async function getCredentialSessionStatus({ session_id }) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/credential-sessions/${session_id}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get credential session status." };
+  }
+  const session = res.data;
+  return {
+    session_id: session.session_id,
+    status: session.status,
+    domain: session.domain,
+    allowed_fields: session.allowed_fields,
+    fields_filled: (session.fields_filled ?? []).map((f) => ({ field: f.field, filled_at: f.filled_at })),
+    expires_at: session.expires_at ?? null,
+    terminal: session.terminal ?? false,
+    next_action: session.next_action,
+  };
+}
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -369,6 +629,95 @@ const TOOLS = [
       required: ["run_id"],
     },
   },
+  {
+    name: "start_credential_session",
+    description:
+      "Start a field-level Aegis credential session for a named vault pass. Use this for generic login flows where no pre-recorded Aegis skill exists — the agent navigates the site freely and calls fill_credential_field when a username or password input is reached. Aegis fills the field via the extension without returning the secret to the agent. Always call list_vault_passes first to identify the correct pass_id. Requires user approval before any fills are allowed. Provide target_url if you know the exact login page URL — this prevents Aegis from filling on the wrong same-domain page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pass_id: {
+          type: "string",
+          description: "The pass_id from list_vault_passes for the credential to use.",
+        },
+        domain: {
+          type: "string",
+          description: "The domain where fills will be performed, e.g. 'linkedin.com'. Must match the pass domain.",
+        },
+        allowed_fields: {
+          type: "array",
+          items: { type: "string", enum: ["username", "password"] },
+          description: "Fields the agent may request fills for. Defaults to [\"username\", \"password\"] if omitted.",
+        },
+        target_url: {
+          type: "string",
+          description: "Optional. The exact login page URL for page-context binding, e.g. 'http://localhost:3000/demo-login' or 'https://www.linkedin.com/login'. If provided, Aegis will only fill fields when the active tab matches this URL/path — preventing fills on wrong same-domain pages like /feed or /checkpoint.",
+        },
+      },
+      required: ["pass_id", "domain"],
+    },
+  },
+  {
+    name: "fill_credential_field",
+    description:
+      "Request Aegis to fill a specific credential field (username or password) on the currently active tab. The Aegis extension resolves the credential value and injects it into the matching input — the value is never returned to the agent. Requires an active credential session (status='active'). Call this once you are on the page with the target input visible. For multi-step login flows, call this separately for username and password as each page appears. Never call this for CAPTCHA, 2FA, or security challenge pages — stop and report manual intervention needed instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session_id from start_credential_session.",
+        },
+        field: {
+          type: "string",
+          enum: ["username", "password"],
+          description: "The credential field to fill. 'username' fills email/username inputs; 'password' fills password inputs.",
+        },
+      },
+      required: ["session_id", "field"],
+    },
+  },
+  {
+    name: "get_credential_session_status",
+    description:
+      "Check the status of a credential session and see which fields have been filled. Poll after fill_credential_field to confirm fill completion. Terminal statuses: 'completed' (all allowed fields filled), 'failed', 'expired' (10-minute window elapsed). Non-terminal: 'pending_approval' (waiting for user), 'active' (ready for fills).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session_id from start_credential_session.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "plan_aegis_action",
+    description:
+      "Analyze a task description and return a structured recommendation for how to execute it using Aegis — without executing anything. Resolves the relevant domain, matches installed skills by keyword heuristics, and recommends either get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run (Aegis-controlled sensitive workflows), or normal agent tools (no matching skill). For aegis_controlled skills, optionally resolves a vault credential by hint and includes a suggested pass_overrides argument. Call this first when you have a task description but haven't yet identified the skill or credential to use.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description:
+            "Natural language description of the task. Examples: 'log into the demo site', 'search Wikipedia for Wisconsin', 'summarize this page'.",
+        },
+        domain: {
+          type: "string",
+          description:
+            "Optional. Target domain to restrict skill discovery (e.g. 'en.wikipedia.org', 'localhost:3000'). Inferred from task keywords if omitted.",
+        },
+        credential_hint: {
+          type: "string",
+          description:
+            "Optional. Substring to match against vault pass labels or usernames (e.g. 'Demo Login Account', 'staging'). Used only when the matched skill is aegis_controlled.",
+        },
+      },
+      required: ["task"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -404,6 +753,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_route_run_receipt":
       result = await getRouteRunReceipt(a);
+      break;
+    case "start_credential_session":
+      result = await startCredentialSession(a);
+      break;
+    case "fill_credential_field":
+      result = await fillCredentialField(a);
+      break;
+    case "get_credential_session_status":
+      result = await getCredentialSessionStatus(a);
+      break;
+    case "plan_aegis_action":
+      result = await planAegisAction(a);
       break;
     default:
       return {

@@ -18,6 +18,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild the agent-runnable recipe path or the controlled sensitive login path. Both are complete. Do not re-plan or re-implement `get_agent_runnable_workflow`, `NOT_AGENT_RUNNABLE` refusal, or the Demo Login approval/auto-run flow.**
 >
 > **Also: do NOT rebuild Secret Vault / Pass Custody v1. It is complete. Do not re-implement `AegisVaultPass`, `devSecretVault`, `resolve-value` endpoint, or the `pass_field`/`secret_ref` value policy types.**
+>
+> **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
 
 ---
 
@@ -219,6 +221,17 @@ Everything below is implemented and working.
 - `waitForTabToMatchRoute(tabId, route, timeoutMs)` — polls 300ms intervals up to timeoutMs (5s default) for tab to reach `complete` status and pass `doesTabMatchRoute`
 - `maybeAutoLaunchApprovedRun()` — called on every alarm poll after `maybeAutoRunForTab`; finds exactly one approved pending run with a `start_url`; uses an existing matching tab if found, otherwise creates a new tab at `start_url`; calls `markAutoStarted` BEFORE `chrome.tabs.create` to prevent `onUpdated` double-execution; only acts on `pending` runs with `approved_at` — never touches `pending_approval` runs
 - Safety invariants preserved: exactly-one guard, `aegisAutoStartedRunIds` dedup, url_match enforcement, `pending_approval` untouched, secrets resolve only after `running` status
+
+### Credential Session Context Binding v1
+- `target_url?: string` and `url_match?: { hostname, path_prefix? }` added to `CredentialUseSession` in `apps/api/src/store/index.ts`
+- `POST /api/credential-sessions` accepts optional `target_url`; parses and validates hostname against `domain`; stores both `target_url` and derived `url_match`; returns `400 INVALID_TARGET_URL` or `400 TARGET_URL_DOMAIN_MISMATCH` on bad input
+- `GET /api/credential-fill-requests` response now includes `session_context: { target_url, url_match }` per request — no secrets
+- `doesTabMatchCredentialSession(tabUrl, fillReq)` helper in `apps/extension/background.js` checks hostname + optional path_prefix
+- `maybeProcessCredentialFills` guards before `resolve-value`: if active tab doesn't match `url_match`, request stays pending for next alarm tick; secret is never resolved on wrong page
+- MCP `start_credential_session` tool accepts `target_url`; `plan_aegis_action` notes `target_url` in `credential_session` path; suggests `"http://localhost:3000/demo-login"` for localhost tasks
+- `docs/AGENT_INTEGRATION_CONTRACT.md` updated with "Credential Session Context Binding" section
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
 
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store

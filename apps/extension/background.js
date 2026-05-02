@@ -662,11 +662,206 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // Sync alarm on service worker startup
 syncAutoRunAlarm();
 
+// ─── Field-level credential fill ─────────────────────────────────────────────
+
+// Pure function injected into the page context via chrome.scripting.executeScript.
+// Must not reference any extension globals — it is serialized and run in the page's world.
+// Returns { success: true } or { success: false, error: string }.
+function injectCredentialFill(field, value) {
+  const SELECTORS = {
+    username: [
+      'input[type="email"]',
+      'input[name*="email" i]',
+      'input[name*="user" i]',
+      'input[name="session_key"]',
+      'input#username',
+      'input[type="text"]',
+    ],
+    password: [
+      'input[type="password"]',
+      'input[name*="password" i]',
+      'input#password',
+    ],
+  };
+
+  function isVisible(el) {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function setNativeValue(el, val) {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, val);
+    else el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  const selectors = SELECTORS[field];
+  if (!selectors) return { success: false, error: 'Unknown field type: ' + field };
+
+  let target = null;
+  for (const sel of selectors) {
+    try {
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        if (isVisible(el)) { target = el; break; }
+      }
+    } catch (_) {}
+    if (target) break;
+  }
+
+  if (!target) return { success: false, error: 'No visible ' + field + ' field found on this page' };
+
+  target.focus();
+  setNativeValue(target, '');
+  setNativeValue(target, value);
+
+  if (target.value !== value) {
+    return { success: false, error: 'Fill verification failed for ' + field + ' field' };
+  }
+  return { success: true };
+}
+
+async function markCredFillComplete(requestId, tabUrl) {
+  try {
+    await fetch(`http://localhost:4000/api/credential-fill-requests/${requestId}/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab_url: tabUrl }),
+    });
+  } catch (_) {}
+}
+
+async function markCredFillFailed(requestId, error) {
+  try {
+    await fetch(`http://localhost:4000/api/credential-fill-requests/${requestId}/fail`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error }),
+    });
+  } catch (_) {}
+}
+
+// Returns true if tabUrl matches the fill request's session context binding.
+// Checks hostname and optional path_prefix from url_match.
+// If no url_match constraint, returns true (hostname-only mode).
+function doesTabMatchCredentialSession(tabUrl, fillReq) {
+  try {
+    const u = new URL(tabUrl);
+    const match = fillReq.session_context?.url_match;
+    if (!match?.hostname) return true;
+    if (u.hostname !== match.hostname) return false;
+    if (match.path_prefix && !u.pathname.startsWith(match.path_prefix)) return false;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Polls for pending field fill requests for the current active tab's domain.
+// Constraint: only fills on active tab that exactly matches the session domain and url_match context.
+// If active tab doesn't match, requests are left as pending for the next cycle.
+async function maybeProcessCredentialFills(hostname) {
+  if (!hostname) return;
+
+  const { aegisAutoRunAllowed } = await chrome.storage.local.get('aegisAutoRunAllowed');
+  if (!aegisAutoRunAllowed) return;
+
+  let fillRequests;
+  try {
+    const res = await fetch(
+      `http://localhost:4000/api/credential-fill-requests?domain=${encodeURIComponent(hostname)}&status=pending`
+    );
+    const json = await res.json();
+    if (!json.ok || !json.data?.length) return;
+    fillRequests = json.data;
+  } catch (_) {
+    return;
+  }
+
+  for (const fillReq of fillRequests) {
+    const mutexKey = `aegisCredFill_${fillReq.request_id}`;
+    const existing = await chrome.storage.session.get(mutexKey);
+    if (existing[mutexKey]) continue;
+    await chrome.storage.session.set({ [mutexKey]: true });
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id || !tab?.url) continue;
+
+      // Verify active tab domain matches the fill request's domain exactly.
+      // Never fill on a mismatched domain — leave as pending for next polling cycle.
+      let tabHostname;
+      try { tabHostname = new URL(tab.url).hostname; } catch (_) { continue; }
+      if (tabHostname !== fillReq.domain) continue;
+
+      // Context binding: check url_match path_prefix before resolving any secret.
+      // Wrong same-domain page (e.g. /route-run-approvals vs /demo-login) stays pending.
+      if (!doesTabMatchCredentialSession(tab.url, fillReq)) {
+        console.log('[aegis credential fill] waiting for matching page context:', tab.url);
+        continue;
+      }
+
+      // Resolve the credential value from the API (marks request as running).
+      // The value is returned to the extension only — never exposed to agents.
+      let resolvedValue, resolvedField;
+      try {
+        const res = await fetch(
+          `http://localhost:4000/api/credential-fill-requests/${fillReq.request_id}/resolve-value`,
+          { method: 'POST' }
+        );
+        const json = await res.json();
+        if (!json.ok) {
+          await markCredFillFailed(fillReq.request_id, json.error?.message ?? 'resolve-value failed');
+          continue;
+        }
+        resolvedValue = json.data.value;
+        resolvedField = json.data.field;
+      } catch (_) {
+        continue;
+      }
+
+      // Inject fill into the active tab's page context.
+      let fillResult;
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: injectCredentialFill,
+          args: [resolvedField, resolvedValue],
+        });
+        fillResult = results?.[0]?.result;
+      } catch (err) {
+        await markCredFillFailed(fillReq.request_id, 'Script injection failed: ' + err.message);
+        continue;
+      }
+
+      if (fillResult?.success) {
+        await markCredFillComplete(fillReq.request_id, tab.url);
+      } else {
+        await markCredFillFailed(fillReq.request_id, fillResult?.error ?? 'fill failed');
+      }
+    } finally {
+      await chrome.storage.session.remove(mutexKey).catch(() => {});
+    }
+  }
+}
+
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'aegisAutoRunPoll') return;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) await maybeAutoRunForTab(tab);
+    if (tab) {
+      await maybeAutoRunForTab(tab);
+      const hostname = getHostname(tab.url);
+      if (hostname) await maybeProcessCredentialFills(hostname);
+    }
     await maybeAutoLaunchApprovedRun();
   } catch (_) {}
 });

@@ -626,6 +626,120 @@ agent calls: request_skill_run({
 
 ---
 
+## Credential Session Context Binding (v1)
+
+**Status:** Implemented.
+
+Domain-only matching is insufficient for sites with multiple paths (e.g. `linkedin.com/login` vs `linkedin.com/feed`). When a credential session is created with `target_url`, Aegis binds fills to that specific page — the extension will not resolve any secret until the active tab matches.
+
+### How it works
+
+- **`target_url`** (optional) — the exact login page URL, e.g. `"http://localhost:3000/demo-login"` or `"https://www.linkedin.com/login"`.
+- **`url_match`** — derived at session creation time; stored on the session. Shape: `{ hostname: string; path_prefix?: string }`.
+  - If `target_url` is provided: `hostname` comes from the URL, `path_prefix` is the pathname (omitted if `/`).
+  - If `target_url` is omitted: `hostname` is the bare domain (port stripped). No `path_prefix`.
+- The Aegis extension checks `url_match` before calling `resolve-value`. If the active tab hostname and path don't match, the fill request remains `pending` — it is not marked failed and is not consumed.
+- On the next extension alarm tick (~10s), if the correct page is now active, the fill proceeds normally.
+
+### No LLM page analysis
+
+Aegis uses deterministic URL checks only. The decision to fill is made by comparing `new URL(tab.url).hostname` and `.pathname` against stored `url_match` values — not by analyzing page content with a model. This keeps the guard layer fast and auditable.
+
+### Agent flow
+
+```
+agent calls: start_credential_session({
+  pass_id: "pass_vault_abc",
+  domain: "localhost",
+  allowed_fields: ["username", "password"],
+  target_url: "http://localhost:3000/demo-login"   ← binds fills to /demo-login only
+})
+
+→ session created; user approves at /route-run-approvals
+→ agent navigates to http://localhost:3000/demo-login
+→ agent calls: fill_credential_field({ session_id, field: "username" })
+→ extension sees active tab = /demo-login → url_match passes → fills username
+→ extension sees active tab = /route-run-approvals → url_match fails → leaves pending
+```
+
+### Backward compatibility
+
+If `target_url` is omitted, the session uses hostname-only matching (previous behavior). No changes to sessions that don't supply `target_url`.
+
+### Errors at session creation
+
+| Code | Cause |
+|---|---|
+| `INVALID_TARGET_URL` | `target_url` is not a parseable URL |
+| `TARGET_URL_DOMAIN_MISMATCH` | `target_url` hostname does not match `domain` |
+
+---
+
+## Planning Tool: `plan_aegis_action` (v1)
+
+**Status:** Implemented.
+
+`plan_aegis_action` is an advisory-only tool. It analyzes a task description, heuristically matches installed skills and vault credentials, and returns a structured recommendation — without executing anything, creating any runs, or calling any POST endpoint.
+
+Call this first when the agent has a task description but has not yet identified which skill or credential to use.
+
+### Inputs
+
+| Field | Required | Description |
+|---|---|---|
+| `task` | Yes | Natural language description of the task |
+| `domain` | No | Target domain to restrict skill discovery; inferred from task keywords if omitted |
+| `credential_hint` | No | Substring to match against vault pass labels or usernames |
+
+**Domain inference:** if `domain` is omitted, the tool infers from task keywords: "demo"/"localhost" → `localhost:3000`, "wikipedia" → `en.wikipedia.org`, otherwise fetches all installed skills.
+
+### Recommended paths returned
+
+| `recommended_path` | Meaning | Agent next step |
+|---|---|---|
+| `agent_runnable_recipe` | Matched skill is routine and agent-executable | Call `get_agent_runnable_workflow` with `suggested_request.skill_id` |
+| `aegis_controlled_run` | Matched skill is sensitive; Aegis must execute | Call `request_skill_run` with `suggested_request` (includes `pass_overrides` if a credential was resolved) |
+| `normal_agent_tools` | No matching skill; task is non-sensitive | Use normal agent tools |
+| `no_match` | No matching skill; task contains sensitive keywords | Surface warning; check Aegis Skill Library before proceeding with agent tools |
+
+### Credential resolution (aegis_controlled skills only)
+
+Triggered when `credential_hint` is supplied or the task contains signals ("my account", "using my", "log in as", "my password", "credential"). The tool calls `GET /api/vault-passes`, filters by skill domain and hint substring, then:
+
+- **1 match:** `suggested_request` includes `pass_overrides: { "login_password": "<pass_id>" }` — ready to pass directly to `request_skill_run`
+- **Multiple matches:** `needs_clarification: true` with `candidates` array — agent should ask the user to clarify, then retry with a more specific `credential_hint`
+- **0 matches:** `credential_resolution: "not_found"` — `suggested_request` omits `pass_overrides`; agent can call `list_vault_passes` to browse manually
+
+### Security invariants
+
+- No passwords, `secret_ref`, or raw secret values are ever returned. `matched_pass` and `candidates` contain only `pass_id`, `label`, and `username`.
+- The tool never calls any POST endpoint and never creates or modifies any resource.
+- `has_password` is also excluded from all responses — presence of a pass in the list already implies it has been configured.
+
+### Example
+
+```
+plan_aegis_action({
+  task: "Log into the demo site using my Demo Login Account credential",
+  credential_hint: "Demo Login Account"
+})
+
+→ {
+    "recommended_path": "aegis_controlled_run",
+    "matched_skill": { "skill_id": "skill_demo_login_001", "name": "Demo Login", "domain": "localhost:3000" },
+    "matched_pass": { "pass_id": "pass_vault_demo_login_001", "label": "Demo Login Account", "username": "demo_user" },
+    "next_tool": "request_skill_run",
+    "suggested_request": {
+      "skill_id": "skill_demo_login_001",
+      "variables": {},
+      "pass_overrides": { "login_password": "pass_vault_demo_login_001" }
+    },
+    "explanation": "This is a sensitive workflow requiring Aegis control. Your selected credential will be resolved server-side — no passwords are exposed."
+  }
+```
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

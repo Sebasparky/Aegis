@@ -202,6 +202,8 @@ Before making any changes:
 - `resolve-value` binding lookup key is `${user_id}:${route_id}:login_password` — binding overrides `vp.pass_id`; seeded pass is the fallback when no binding exists
 - Do not treat `execution_mode: "agent_runnable"` as permission to skip Aegis — it means call `get_agent_runnable_workflow` to get the Aegis-tested route recipe, then execute it in the agent's own browser
 - Do not run `aegis_controlled` routes based on domain alone — route context matching uses domain + optional `url_match`; a controlled route must not execute on the wrong page (e.g., `/route-run-approvals` instead of `/demo-login`)
+- Do not rebuild credential session context binding v1 (`target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` extension helper, `session_context` in GET /api/credential-fill-requests response) unless explicitly requested
+- Field-level credential fill is context-bound: domain-only matching is unsafe for multi-path sites; use `target_url` when creating a credential session to bind fills to a specific login page; extension leaves fill requests pending (not failed) when active tab doesn't match url_match
 
 ## Terminology — Always Use
 

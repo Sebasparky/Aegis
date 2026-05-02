@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { routeRuns } from "../store/index.js";
 import { executeRouteRunWithPlaywright } from "../runtime/playwrightRuntime.js";
-import { runtimeSessions } from "../runtime/aegisRuntime.js";
+import { runtimeSessions, runtimeEvents } from "../runtime/aegisRuntime.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -71,6 +71,26 @@ export async function runtimeSessionRoutes(server: FastifyInstance) {
       const session = runtimeSessions.get(req.params.runtimeSessionId);
       if (!session) return sendError(reply, 404, "NOT_FOUND", "Runtime session not found.");
       return reply.send({ ok: true, data: session });
+    }
+  );
+
+  /**
+   * GET /api/runtime/sessions/:runtimeSessionId/events
+   *
+   * Returns metadata-only runtime events for this session.
+   * Never contains field values or raw credentials.
+   */
+  server.get<{ Params: { runtimeSessionId: string } }>(
+    "/api/runtime/sessions/:runtimeSessionId/events",
+    async (req, reply) => {
+      const { runtimeSessionId } = req.params;
+      if (!runtimeSessions.has(runtimeSessionId)) {
+        return sendError(reply, 404, "NOT_FOUND", "Runtime session not found.");
+      }
+      const events = Array.from(runtimeEvents.values()).filter(
+        (e) => e.runtime_session_id === runtimeSessionId
+      );
+      return reply.send({ ok: true, data: events });
     }
   );
 }

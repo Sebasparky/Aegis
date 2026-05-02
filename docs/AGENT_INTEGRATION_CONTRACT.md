@@ -64,9 +64,69 @@ The Chrome extension is retained as a local debugging companion and workflow rec
 
 ### Architecture Note
 
-Future Aegis features — coverage monitoring, delegation passports, action authorization receipts, liability proof — should target the Playwright runtime first. The Chrome extension can follow as a companion surface. No new autonomous-agent feature should require a user-opened browser tab as a prerequisite.
+Future Aegis features — delegation passports, action authorization receipts, liability proof — should target the Playwright runtime first. The Chrome extension can follow as a companion surface. No new autonomous-agent feature should require a user-opened browser tab as a prerequisite.
 
 **Agents never receive raw credentials in either surface.** The Chrome extension resolves secrets via the extension-only `resolve-value` endpoint. The Playwright runtime resolves secrets internally via the KMS vault. Both surfaces set `secret_values_revealed_to_agent: false` on the receipt.
+
+---
+
+## Sensitive Workflow Detection v1
+
+The Aegis Playwright runtime instruments every controlled browser session for sensitive workflow events. This runs automatically — agents and callers do not configure it.
+
+### What is detected
+
+| Event type | Trigger |
+|---|---|
+| `sensitive_field_focus` | A sensitive input (password, payment, identity, financial) received focus |
+| `sensitive_field_input` | A value was entered in a sensitive input |
+| `sensitive_button_click` | A button with sensitive text (pay, transfer, sign in, delete account, …) was clicked |
+| `sensitive_form_submit` | A form containing a sensitive field was submitted |
+
+### Coverage classification
+
+Each event is classified as one of:
+
+| Status | Meaning |
+|---|---|
+| `covered_by_aegis` | The event occurred inside an Aegis-controlled action window — Aegis initiated the fill or click, resolving secrets from the KMS vault under route authorization |
+| `not_covered_by_aegis` | A high/critical sensitive event occurred outside any Aegis-controlled window — may indicate out-of-band interaction |
+| `unknown` | A low-severity sensitive event whose coverage could not be determined |
+
+### What is never stored
+
+Event metadata is recorded — never field values, passwords, card numbers, CVVs, identity numbers, or any secret. `element_hint` contains safe structural metadata only (tag name, input type, name/id/autocomplete attribute, placeholder — never value).
+
+### Coverage summary
+
+After execution, the runtime session carries a `coverage_summary`:
+
+```json
+{
+  "sensitive_events": 3,
+  "covered_events": 3,
+  "uncovered_events": 0,
+  "unknown_events": 0,
+  "highest_severity": "high",
+  "sensitivities": ["credential"]
+}
+```
+
+The receipt includes `runtime_coverage_summary` when execution used `aegis_playwright`.
+
+### How to access events
+
+```
+GET /api/runtime/sessions/:runtimeSessionId/events
+```
+
+Returns the metadata-only event list for the session.
+
+### What this does and does not prove
+
+**Does prove:** Whether a sensitive event inside the Aegis Playwright runtime session was covered by an Aegis-authorized action (route step execution, KMS credential release).
+
+**Does not prove:** That the agent has no out-of-band browser sessions, OS-level keyloggers, or other means of obtaining secrets. Detection is scoped to the controlled Playwright session.
 
 ---
 

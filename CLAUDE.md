@@ -176,6 +176,8 @@ Immutable + Signed Receipts v1 is **complete** — implemented 2026-05-02. `rece
 
 Playwright Runtime v1 is **complete** — implemented 2026-05-02. Agents can execute approved controlled runs via `POST /api/runtime/route-runs/:runId/playwright/start` or MCP tool `start_playwright_route_run`. Aegis launches an isolated headless Chromium session, resolves credentials via KMS vault, instruments sensitive events, and emits signed receipts with `execution_surface: "aegis_playwright"`. No user-opened tab required.
 
+Sensitive Workflow Detection v1 is **complete** — implemented 2026-05-02. Aegis Playwright runtime instruments every session for sensitive field interactions, button clicks, and form submissions. Events classified as `covered_by_aegis`, `not_covered_by_aegis`, or `unknown` using coverage windows around Aegis-controlled actions. Metadata only — no field values stored. `coverage_summary` attached to session and receipt. Events accessible at `GET /api/runtime/sessions/:id/events`.
+
 **`aegis_playwright` is the primary controlled execution surface for autonomous agents.** `chrome_extension` is retained as an optional local/debug/recording companion. Future autonomous-agent features should target `aegis_playwright` first.
 
 Candidate next milestones:
@@ -227,7 +229,10 @@ Before making any changes:
 - Do not assume user has a browser tab open for autonomous-agent flows — the Chrome extension is an optional local/debug/recording companion, not the primary execution architecture; use `POST /api/runtime/route-runs/:runId/playwright/start` (or MCP tool `start_playwright_route_run`) for controlled runs; do not instruct agents to manually open target pages when `aegis_playwright` is available
 - Do not rebuild Playwright Runtime v1 (`aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run`) unless explicitly requested; `execution_surface: "aegis_playwright"` receipts are signed and verified through the same pipeline as extension receipts
 - Do not rebuild Execution Surface Recenter v1 (MCP tool descriptions, `plan_aegis_action` post_approval fields, README Execution Surfaces section, contract architecture note) unless explicitly requested
-- New sensitive workflow features (coverage monitoring, delegation passports, action authorization receipts) should target `aegis_playwright` first; Chrome extension support can follow as a companion surface — do not design new autonomous-agent features around requiring an active browser tab
+- New sensitive workflow features (delegation passports, action authorization receipts) should target `aegis_playwright` first; Chrome extension support can follow as a companion surface — do not design new autonomous-agent features around requiring an active browser tab
+- Do not rebuild Sensitive Workflow Detection v1 (`RuntimeEvent`, `RuntimeEventType`, `RuntimeEventSensitivity`, `RuntimeCoverageStatus`, `RuntimeCoverageSummary`, `runtimeEvents` Map, `getCoverageSummary`, `CoverageWindow`, coverage window logic in `playwrightRuntime.ts`, `GET /api/runtime/sessions/:id/events`) unless explicitly requested
+- Sensitive event detection is Playwright-first and metadata-only — do not store raw field values, passwords, card numbers, CVVs, or any secret in runtime events; `element_hint` is structural metadata only (tag, type, name/id/autocomplete/placeholder — never value)
+- Do not claim Aegis runtime event detection proves no out-of-band secrets exist; it proves whether a sensitive event inside the Aegis session was covered by an Aegis-controlled action
 
 ## Terminology — Always Use
 

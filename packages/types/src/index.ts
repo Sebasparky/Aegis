@@ -529,6 +529,24 @@ export interface RecordingPayload {
 
 export type AegisExecutionSurface = "chrome_extension" | "aegis_playwright";
 
+export type RuntimeEventSensitivityKind =
+  | "credential"
+  | "payment"
+  | "identity"
+  | "financial"
+  | "destructive"
+  | "account_change"
+  | "unknown_sensitive";
+
+export interface RuntimeCoverageSummary {
+  sensitive_events: number;
+  covered_events: number;
+  uncovered_events: number;
+  unknown_events: number;
+  highest_severity: "info" | "warning" | "high" | "critical";
+  sensitivities: RuntimeEventSensitivityKind[];
+}
+
 export interface RouteRunReceipt {
   receipt_id: string;
   run_id: string;
@@ -551,6 +569,7 @@ export interface RouteRunReceipt {
   credential_used?: boolean;
   pass_ids_used?: string[];
   secret_values_revealed_to_agent?: false;
+  runtime_coverage_summary?: RuntimeCoverageSummary;
 }
 
 // ─── Aegis Rails — RoutePassBinding ──────────────────────────────────────────

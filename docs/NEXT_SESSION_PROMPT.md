@@ -30,6 +30,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Playwright Runtime v1. It is complete. Do not re-implement `aegisRuntime.ts`, `playwrightRuntime.ts`, `secretResolution.ts`, `runtime-sessions.ts`, `executeRouteRunWithPlaywright`, `start_playwright_route_run` MCP tool, or `AegisExecutionSurface`. Do not assume a user-opened browser tab is required for autonomous agent flows — use `POST /api/runtime/route-runs/:runId/playwright/start` instead.**
 >
 > **Also: do NOT rebuild Execution Surface Recenter v1. It is complete. Do not rewrite MCP tool descriptions, `plan_aegis_action` post-approval fields, README Execution Surfaces section, or contract architecture note to be extension-first. `aegis_playwright` is the primary autonomous-agent execution surface. Chrome extension is optional local/debug/recording companion.**
+>
+> **Also: do NOT rebuild Sensitive Workflow Detection v1. It is complete. Do not re-implement `RuntimeEvent`, `RuntimeEventType`, `RuntimeEventSensitivity`, `RuntimeCoverageStatus`, `RuntimeCoverageSummary`, `runtimeEvents` Map, `getCoverageSummary`, coverage window logic in `playwrightRuntime.ts`, or `GET /api/runtime/sessions/:id/events`. Detection is metadata-only — never store field values.**
 
 ---
 
@@ -257,6 +259,24 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Sensitive Workflow Detection v1
+- `RuntimeEventType` (`sensitive_field_focus` | `sensitive_field_input` | `sensitive_button_click` | `sensitive_form_submit`)
+- `RuntimeEventSensitivity` (`credential` | `payment` | `identity` | `financial` | `destructive` | `account_change` | `unknown_sensitive`)
+- `RuntimeCoverageStatus` (`covered_by_aegis` | `not_covered_by_aegis` | `unknown`)
+- `RuntimeEvent` interface with `event_id`, `runtime_session_id`, `run_id`, `user_id`, `domain`, `page_url`, `event_type`, `sensitivity`, `coverage_status`, `severity`, `element_hint`, `reason`, `created_at`
+- `RuntimeCoverageSummary` type exported from `packages/types/src/index.ts`; also exported from `aegisRuntime.ts`; added as optional `runtime_coverage_summary?` field on `RouteRunReceipt`
+- `runtimeEvents: Map<string, RuntimeEvent>` in `aegisRuntime.ts` — ephemeral, indexed by `event_id`
+- `getCoverageSummary(runtimeSessionId)` — scans `runtimeEvents` Map, returns aggregated summary
+- Page instrumentation script in `playwrightRuntime.ts`: listens for `focusin`/`input`/`click`/`submit`; classifies by field type/autocomplete/name/id and button text; never reads `.value`; uses `window.__aegisRuntimeEvents`
+- `CoverageWindow` mechanism: coverage windows opened around each Aegis-controlled fill/click; `convertPageEvents` compares event timestamps to window open/close times to assign `coverage_status`
+- Severity mapping: `payment`/`financial`/`identity`/`destructive` → critical; `credential` → high; `account_change` → high; `unknown_sensitive` → warning
+- Events stored in `runtimeEvents` Map and `session.runtime_events`; `session.coverage_summary` computed after collection
+- `receipt.runtime_coverage_summary` set before `createReceipt` call
+- `GET /api/runtime/sessions/:runtimeSessionId/events` — returns metadata-only events filtered by session
+- `docs/AGENT_INTEGRATION_CONTRACT.md` updated with "Sensitive Workflow Detection v1" section
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Execution Surface Recenter v1
 - `aegis_playwright` is now the primary autonomous-agent controlled execution surface; `chrome_extension` demoted to optional local/debug/recording companion
 - MCP tool `request_skill_run` description updated: creates run but does not execute; agents should call `start_playwright_route_run` after approval
@@ -333,11 +353,13 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Execution Surface Recenter v1 is complete** — implemented 2026-05-02. `aegis_playwright` is now the primary autonomous-agent execution surface in all MCP tool guidance, docs, and planning tools. Chrome extension is framed as optional local/debug/recording companion. See "Execution Surface Recenter v1" in Completed Increments.
 
+**Sensitive Workflow Detection v1 is complete** — implemented 2026-05-02. Aegis Playwright runtime now instruments sessions for sensitive field interactions, button clicks, and form submissions with coverage classification. See "Sensitive Workflow Detection v1" in Completed Increments.
+
 **Candidate next milestones:**
 
-1. **Coverage Monitor hardening** — surface runtime events from Playwright sessions in the UI; distinguish covered vs. uncovered sensitive fields
-2. **Delegation Passport v1** — structured delegation manifest agents can carry across API calls without per-call token lookup
-3. **Action Authorization Receipt v1** — per-action receipt events (not just run-level); enables finer-grained audit for multi-step sensitive workflows
+1. **Delegation Passport v1** — structured delegation manifest agents carry across API calls; proves identity, scope, and trust tier at each sensitive step
+2. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
+3. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
 4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against double-approve/reject, idempotency keys on run creation
 
 Constraints for any of the above:

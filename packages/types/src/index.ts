@@ -816,3 +816,72 @@ export interface ActionDecisionResponse {
   // TODO: wire to ReceiptService when the audit layer is built
   audit_event_id: string | null;
 }
+
+// ─── Delegation Trust Profile ─────────────────────────────────────────────────
+
+export type DelegationTrustTaskCategory =
+  | "login"
+  | "credential_fill"
+  | "purchase"
+  | "payment"
+  | "travel_booking"
+  | "financial_action"
+  | "identity_disclosure"
+  | "account_change"
+  | "destructive_action"
+  | "message_send";
+
+export type DelegationTrustStatus =
+  | "unproven"
+  | "capable_but_unproven"
+  | "proven_limited"
+  | "trusted_for_category"
+  | "caution"
+  | "risky"
+  | "suspended";
+
+export interface DelegationTrustProfile {
+  profile_id: string;
+  generated_at: string;
+  delegation_id: string;
+  user_aegis_id: string;
+  agent_id: string;
+  requested_task_category: DelegationTrustTaskCategory;
+
+  trust_status: DelegationTrustStatus;
+  confidence: "low" | "medium" | "high";
+
+  capability_summary: {
+    login_credentials_available: boolean;
+    payment_method_available: boolean;
+    identity_profile_available: boolean;
+    credential_domains: string[];
+    capable_for_requested_task: boolean;
+    missing_capabilities: string[];
+  };
+
+  coverage_summary: {
+    verified_execution_receipts: number;
+    verified_authorizations: number;
+    covered_sensitive_events: number;
+    uncovered_sensitive_events: number;
+    secret_exposure_events: number;
+    aegis_playwright_executions: number;
+  };
+
+  category_experience: {
+    category: DelegationTrustTaskCategory;
+    fulfilled_authorizations: number;
+    verified_execution_receipts: number;
+    recent_successful_receipt_ids: string[];
+  };
+
+  disqualifying_signals: string[];
+  machine_readable_reasons: string[];
+
+  limitations: {
+    not_a_guarantee: true;
+    out_of_band_secret_use_not_covered: true;
+    based_only_on_aegis_observed_events: true;
+  };
+}

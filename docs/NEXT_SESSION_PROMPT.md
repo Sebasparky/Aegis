@@ -407,11 +407,13 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Action Authorization Receipt v1 is complete** — implemented 2026-05-02. A signed proof is created at approval time before Playwright execution begins. After successful execution, the authorization is marked `fulfilled` and linked to the execution receipt via `authorization_context`. `authorization_hash` excludes `status` and `fulfillment` so the cryptographic proof stays valid throughout the lifecycle. See "Action Authorization Receipt v1" in Completed Increments.
 
+**Delegation Trust Profile v1 is complete** — implemented 2026-05-03. `GET /api/delegation-trust/profile?delegation_id=&task_category=` generates a machine-readable trust profile scoped to a specific task category. Trust is based on fulfilled Aegis authorizations, verified signed receipts, sensitive workflow coverage stats, and KMS custody attestation — NOT generic success count. Low-risk browsing/search tasks do not improve high-risk trust categories. Payment categories cap at `proven_limited` in v1 (payment capability not available). MCP tool `get_delegation_trust_profile` exposes this to agents. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history and policy compliance
-3. **Website Handshake v1** — structured API call where a website can request and verify a Delegation Passport before accepting agent requests
-4. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
+1. **Website Assertion / Handshake v1** — structured API call where a website can request and verify a Delegation Passport + trust profile before accepting agent requests
+2. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always `unproven`/`capable_but_unproven` due to missing payment capability)
+3. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

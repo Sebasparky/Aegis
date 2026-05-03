@@ -1085,6 +1085,138 @@ The passport contains no raw secrets, passwords, payment card numbers, secret_re
 
 ---
 
+## Delegation Trust Profile v1
+
+A machine-readable trust summary that answers: *Has this delegation proven safe Aegis-covered behavior for a specific task category?*
+
+Trust is task-specific and evidence-based. Generic success counts are not trust signals. Low-risk browsing, weather queries, or Wikipedia searches do not improve trust for login, payment, or account-change categories.
+
+### Trust is task-specific
+
+Each profile is scoped to a single `task_category`. The same delegation may be `proven_limited` for `login` and `unproven` for `payment`. Evaluate per task.
+
+### Evidence sources
+
+| Signal | Weight |
+|--------|--------|
+| Fulfilled `ActionAuthorizationReceipt` for the category | Positive |
+| Verified signed execution receipt linked to that authorization | Positive |
+| Covered sensitive events (`runtime_coverage_summary.covered_events`) | Positive |
+| Uncovered sensitive events | Negative — status → `caution` |
+| Secret exposure events | Negative — status → `risky` |
+| Missing capability (no credential, no payment method) | Gates — blocks `trusted_for_category` |
+
+### Trust statuses
+
+| Status | Meaning |
+|--------|---------|
+| `trusted_for_category` | ≥3 fulfilled authorizations, clean coverage, capability confirmed. V1: not reachable for payment categories. |
+| `proven_limited` | ≥1 fulfilled authorization, clean coverage. Some positive history. |
+| `capable_but_unproven` | Capability exists (e.g. vault credential present) but no Aegis-covered execution history yet. |
+| `unproven` | No capability and no history for this category. |
+| `caution` | Uncovered sensitive events detected in execution history — extra approval recommended. |
+| `risky` | Secret exposure events detected — do not proceed with sensitive tasks. |
+| `suspended` | Delegation is not active (revoked or expired). |
+
+### Capability requirements per category (v1)
+
+| Category | Required capability | Available in v1? |
+|----------|--------------------|--------------------|
+| `login`, `credential_fill` | Login credential in vault | Yes — if any `login_password` vault pass exists |
+| `purchase`, `payment`, `travel_booking`, `financial_action` | Payment method | No — always `false` in v1 |
+| `identity_disclosure` | Identity profile | No — always `false` in v1 |
+| `account_change`, `destructive_action`, `message_send` | None | Yes |
+
+### API
+
+```
+GET /api/delegation-trust/profile?delegation_id=delg_demo_001&task_category=login
+
+Response: {
+  "ok": true,
+  "data": {
+    "profile_id": "dtp_...",
+    "generated_at": "2026-05-03T...",
+    "delegation_id": "delg_demo_001",
+    "user_aegis_id": "aegis_user_001",
+    "agent_id": "claude-code-demo",
+    "requested_task_category": "login",
+    "trust_status": "proven_limited",
+    "confidence": "medium",
+    "capability_summary": {
+      "login_credentials_available": true,
+      "payment_method_available": false,
+      "identity_profile_available": false,
+      "credential_domains": ["localhost"],
+      "capable_for_requested_task": true,
+      "missing_capabilities": []
+    },
+    "coverage_summary": {
+      "verified_execution_receipts": 1,
+      "verified_authorizations": 1,
+      "covered_sensitive_events": 2,
+      "uncovered_sensitive_events": 0,
+      "secret_exposure_events": 0,
+      "aegis_playwright_executions": 1
+    },
+    "category_experience": {
+      "category": "login",
+      "fulfilled_authorizations": 1,
+      "verified_execution_receipts": 1,
+      "recent_successful_receipt_ids": ["rrreceipt_..."]
+    },
+    "disqualifying_signals": [],
+    "machine_readable_reasons": [
+      "delegation status: active",
+      "1 fulfilled authorization(s) found for category 'login'",
+      "1 verified execution receipt(s) linked to this delegation",
+      "coverage clean: no uncovered sensitive events or secret exposures",
+      "login credential available in vault"
+    ],
+    "limitations": {
+      "not_a_guarantee": true,
+      "out_of_band_secret_use_not_covered": true,
+      "based_only_on_aegis_observed_events": true
+    }
+  }
+}
+```
+
+Payment category example (always `unproven` in v1):
+```
+GET /api/delegation-trust/profile?delegation_id=delg_demo_001&task_category=payment
+
+Response trust_status: "unproven"
+capability_summary.payment_method_available: false
+capable_for_requested_task: false
+disqualifying_signals: ["payment_capability_unavailable_v1"]
+```
+
+### MCP tool
+
+`get_delegation_trust_profile(delegation_id, task_category)` — returns the full trust profile with an `interpretation` field summarizing the result in plain English.
+
+### Relationship to Delegation Passport and Website Handshake
+
+- **Delegation Passport**: proves *what authority was granted* — capability attestations, collar limits, KMS custody model, and aggregate evidence counts. Created once per session.
+- **Delegation Trust Profile**: proves *whether that authority was exercised safely* for a specific task category. Generated on demand, reflects current history.
+- **Website Handshake (not yet implemented)**: a website will consume `passport_jws` from the Delegation Passport and optionally request a trust profile as part of accepting an agent session. Both inputs together establish both the delegation boundary and its execution history.
+
+### Limitations
+
+Every trust profile includes:
+```json
+{
+  "not_a_guarantee": true,
+  "out_of_band_secret_use_not_covered": true,
+  "based_only_on_aegis_observed_events": true
+}
+```
+
+The profile attests only to Aegis-observed behavior. It cannot detect out-of-band secret use or actions the agent took outside the Aegis controlled runtime.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

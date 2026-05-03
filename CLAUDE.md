@@ -247,6 +247,12 @@ Before making any changes:
 - Do not revoke a fulfilled authorization — the action already ran; revoke only applies to `active` authorizations
 - `authorization_context` on `RouteRunReceipt` links an execution receipt back to the authorization that permitted it — populate in both success and failure receipt paths
 - Action authorization signing requires `AEGIS_RECEIPT_JWS_PRIVATE_JWK` — no unsigned-dev-mode fallback; authorization creation failure in the approve endpoint is non-blocking (logs error, approval proceeds)
+- Delegation Trust Profile v1 is **complete** — do not rebuild `DelegationTrustProfile` type, `DelegationTrustTaskCategory`, `DelegationTrustStatus`, `delegation-trust.ts` routes, or `get_delegation_trust_profile` MCP tool unless explicitly requested
+- Do not implement generic success-count reputation — trust must be based on sensitive Aegis-covered evidence: fulfilled authorizations, verified signed receipts, covered sensitive workflow events, and KMS custody attestation
+- Low-risk browsing, search, or weather tasks do not improve trust for high-risk task categories (login, payment, financial_action, etc.) — trust is task-category-specific
+- Payment/travel/financial categories (`purchase`, `payment`, `travel_booking`, `financial_action`) can never reach `trusted_for_category` in v1 — `payment_method_available` is always `false`; do not change this ceiling without explicitly implementing payment capability
+- Trust profile is advisory, not a guarantee — every profile carries `not_a_guarantee: true`, `out_of_band_secret_use_not_covered: true`, `based_only_on_aegis_observed_events: true`; do not remove these fields or weaken the limitations block
+- Do not include raw receipt JSON, secret_ref values, passwords, private keys, or decrypted credential values in a trust profile response — only aggregate counts, capability booleans, domains, and receipt IDs
 
 ## Terminology — Always Use
 

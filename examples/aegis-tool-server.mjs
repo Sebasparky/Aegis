@@ -545,6 +545,42 @@ async function verifyDelegationPassport({ passport_id } = {}) {
   };
 }
 
+async function getDelegationTrustProfile({ delegation_id, task_category } = {}) {
+  if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
+  if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/delegation-trust/profile?delegation_id=${encodeURIComponent(delegation_id)}&task_category=${encodeURIComponent(task_category)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get delegation trust profile." };
+  }
+  const profile = res.data;
+  return {
+    ...profile,
+    interpretation: interpretTrustProfile(profile),
+  };
+}
+
+function interpretTrustProfile(profile) {
+  const { trust_status, confidence, category_experience, limitations } = profile;
+  const categoryStr = category_experience.category;
+  const base = `Trust status for '${categoryStr}': ${trust_status} (confidence: ${confidence}).`;
+  const caveat = "This profile is advisory only. It does not cover out-of-band secret use and is not a guarantee of safe behavior.";
+  const statusNote = {
+    trusted_for_category: `This delegation has proven safe Aegis-covered behavior for '${categoryStr}' with ${category_experience.fulfilled_authorizations} fulfilled authorization(s) and clean sensitive workflow coverage.`,
+    proven_limited: `This delegation has some positive Aegis-covered history for '${categoryStr}' (${category_experience.fulfilled_authorizations} fulfilled authorization(s)), but not enough for full trust.`,
+    capable_but_unproven: `Capability exists for '${categoryStr}' but no Aegis-covered execution history has been established yet.`,
+    unproven: `No capability or execution history found for '${categoryStr}'. ${profile.disqualifying_signals.join(", ")}.`,
+    caution: `Uncovered sensitive events detected in execution history — proceed with extra approval caution.`,
+    risky: `Secret exposure events detected — this delegation should NOT be used for sensitive tasks without investigation.`,
+    suspended: "Delegation is not active. No trust operations permitted.",
+  }[trust_status] ?? "";
+  return `${base} ${statusNote} ${caveat}`;
+}
+
 async function startCredentialSession({ pass_id, domain, allowed_fields, target_url }) {
   if (!pass_id) return { error: "VALIDATION_ERROR", message: "pass_id is required." };
   if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
@@ -860,6 +896,30 @@ const TOOLS = [
       required: ["task"],
     },
   },
+  {
+    name: "get_delegation_trust_profile",
+    description:
+      "Generate a task-specific Aegis trust profile for a delegation based on signed authorizations, signed execution receipts, sensitive workflow coverage, and custody evidence. Returns trust_status (unproven, capable_but_unproven, proven_limited, trusted_for_category, caution, risky, suspended), confidence level, capability summary, coverage stats, and category-specific execution history. This is not a guarantee and does not cover out-of-band secret use. Use this to assess whether a delegation has proven safe behavior for a specific task before proceeding.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delegation_id: {
+          type: "string",
+          description: "The delegation ID to evaluate (e.g. 'delg_demo_001').",
+        },
+        task_category: {
+          type: "string",
+          enum: [
+            "login", "credential_fill", "purchase", "payment", "travel_booking",
+            "financial_action", "identity_disclosure", "account_change",
+            "destructive_action", "message_send",
+          ],
+          description: "The task category to evaluate trust for.",
+        },
+      },
+      required: ["delegation_id", "task_category"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -916,6 +976,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "plan_aegis_action":
       result = await planAegisAction(a);
+      break;
+    case "get_delegation_trust_profile":
+      result = await getDelegationTrustProfile(a);
       break;
     default:
       return {

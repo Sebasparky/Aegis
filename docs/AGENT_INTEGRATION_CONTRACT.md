@@ -1652,6 +1652,96 @@ No raw secrets, passwords, PAN, CVV, private keys, or decrypted values appear in
 
 ---
 
+## Sensitive Workflow Observation Mode v1
+
+### Why it exists
+
+Aegis should not mediate or redact every normal browser observation. Agents need efficient DOM/AX-style access for speed and low token usage. The protected observation layer activates only when the session enters or is about to enter a sensitive workflow.
+
+### Observation modes
+
+| Mode | When | Agent can see |
+|---|---|---|
+| `open_observation` | Default — routine workflows | Normal page structure; sensitive field values still redacted |
+| `protected_observation` | After sensitivity signals detected | Page structure with all sensitive values redacted, sensitive actions gated |
+
+Once a session enters `protected_observation` it does not revert — protection only escalates.
+
+### Activation signals
+
+Protected mode activates when any of these signals are detected:
+
+| Signal type | Example triggers |
+|---|---|
+| `required_permission_sensitive` | Route has `login`, `payment`, `travel_booking`, `financial_action`, etc. in `required_permissions` |
+| `route_marked_sensitive` | Route has `sensitivity_level: "sensitive"` |
+| `sensitive_url_detected` | Page URL matches `/login`, `/checkout`, `/payment`, `/demo-login`, `/demo-travel`, etc. |
+| `sensitive_dom_detected` | DOM contains `input[type=password]`, `autocomplete=cc-number`, password/card labels, etc. |
+
+### Agent-safe observation snapshot
+
+Elements have these fields (sensitive fields example):
+
+```json
+{
+  "element_id": "el_002",
+  "kind": "field",
+  "label": "Password",
+  "input_type": "password",
+  "sensitive": true,
+  "sensitivity": "credential",
+  "required_capability": "login_credential",
+  "value_redacted": true,
+  "filled": false,
+  "allowed_actions": ["read", "request_fill"],
+  "reason": "Sensitive field (credential) — value protected by Aegis capability release."
+}
+```
+
+### Redaction rules
+
+- Sensitive fields always have `value_redacted: true` with `value` omitted — regardless of mode.
+- `filled: true` means the field has a non-empty value (boolean only — actual value never exposed).
+- `allowed_actions: ["read", "request_fill"]` for sensitive fields; `["read", "request_click"]` for sensitive buttons.
+- Non-sensitive fields: `["read", "fill"]`; non-sensitive buttons: `["read", "click"]`.
+
+### API endpoints
+
+```
+GET /api/runtime-sessions/:sessionId/observation
+GET /api/runtime-sessions/:sessionId/observation-mode
+```
+
+### MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `get_runtime_observation` | Latest agent-safe snapshot with element metadata |
+| `get_runtime_observation_mode` | Current mode + activation reasons + sensitive signals |
+
+### Relationship to Capability Release Gate v1
+
+| Layer | Controls |
+|---|---|
+| **Sensitive Workflow Observation Mode** | What agents SEE — values redacted, sensitive actions flagged |
+| **Capability Release Gate v1** | What sensitive actions can PROCEED — capability releases required |
+
+Observation mode does not weaken or bypass the Capability Release Gate. Sensitive action buttons with `allowed_actions: ["read", "request_click"]` still require a matching capability release before the underlying event counts as `covered_by_aegis`.
+
+### What is never in a snapshot
+
+Raw passwords, card numbers, CVV, PAN, SSN, passport data, `secret_ref` values, `devvault://` references, private keys, ciphertext, or fingerprints.
+
+### Limitations
+
+- Snapshots are point-in-time (not streaming)
+- Deterministic heuristics only — no LLM classification
+- No screenshots in v1 — element metadata only
+- Not a full website reputation system
+- Observation mode does not prove the agent has no out-of-band knowledge
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

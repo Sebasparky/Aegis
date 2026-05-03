@@ -720,6 +720,34 @@ async function verifyWebsiteTrustAssertion({ assertion_id } = {}) {
   };
 }
 
+async function getRuntimeObservation({ session_id } = {}) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/runtime-sessions/${encodeURIComponent(session_id)}/observation`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get observation snapshot." };
+  }
+  return res.data;
+}
+
+async function getRuntimeObservationMode({ session_id } = {}) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/runtime-sessions/${encodeURIComponent(session_id)}/observation-mode`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get observation mode." };
+  }
+  return res.data;
+}
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -1045,6 +1073,36 @@ const TOOLS = [
       required: ["assertion_id"],
     },
   },
+  {
+    name: "get_runtime_observation",
+    description:
+      "Get the latest agent-safe observation snapshot for an Aegis Playwright runtime session. Returns structured page metadata — element labels, placeholders, sensitivity classification, filled state, and allowed_actions — without exposing sensitive values. Sensitive fields (passwords, card numbers, credentials) always have value_redacted=true and their values are omitted. Sensitive action buttons (pay, book, change password, etc.) show allowed_actions=['read','request_click'] indicating they must go through Aegis route steps, not direct agent interaction. Use this to understand the current page state during or after a Playwright session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The runtime_session_id returned by start_playwright_route_run.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "get_runtime_observation_mode",
+    description:
+      "Check the current observation mode of an Aegis Playwright runtime session. Returns mode ('open_observation' or 'protected_observation'), when protected mode was activated, the reasons for activation (route permissions, URL patterns, DOM signals), and the specific signals that triggered it. Protected mode indicates the session is handling credentials, payment, identity, or other sensitive data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The runtime_session_id returned by start_playwright_route_run.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -1110,6 +1168,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "verify_website_trust_assertion":
       result = await verifyWebsiteTrustAssertion(a);
+      break;
+    case "get_runtime_observation":
+      result = await getRuntimeObservation(a);
+      break;
+    case "get_runtime_observation_mode":
+      result = await getRuntimeObservationMode(a);
       break;
     default:
       return {

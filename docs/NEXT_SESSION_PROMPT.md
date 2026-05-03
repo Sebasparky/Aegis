@@ -419,12 +419,14 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Capability Release Gate v1 is complete** — implemented 2026-05-03. Coverage of sensitive runtime events is now provenance-based rather than timing-based. `RuntimeCapabilityRelease` records that Aegis explicitly released a sensitive capability (`login_credential`, `payment_method`, `identity_profile`) for a specific run. `convertPageEvents()` uses `requiredCapabilityForEvent()` to determine required capability type per event; if a capability is required and no matching release exists, the event is `not_covered_by_aegis` regardless of timing windows. Timing windows remain as a fallback only for events with no required capability type (excluding `unknown_sensitive` high/critical events, which are also not covered by timing alone). `login_credential` releases created on `secret_ref` fills only (not `pass_field`/username). `payment_method` releases created only for payment-intent click steps (button name contains Pay/Book/Purchase/etc.) in payment/travel routes, only when the user has a payment method in the `paymentMethods` Map. `capability_ref` is always an opaque ID (pass_id or payment_method_id) — never a secret value. Violation receipts carry `runtime_capability_releases` and `capability_release_summary`. New intervention type: `blocked_sensitive_action_without_capability_release`. Do not rebuild unless explicitly requested.
 
+**Sensitive Workflow Observation Mode v1 is complete** — implemented 2026-05-03. Aegis Playwright runtime now tracks a `RuntimeObservationModeState` per session, starting in `open_observation` and escalating to `protected_observation` when sensitivity signals are detected (route permissions, URL patterns, DOM patterns). An agent-safe observation snapshot is built after `page.goto()` and after each click step — stored in `runtimeObservationSnapshots` Map (ephemeral). Sensitive field values are always omitted (`value_redacted: true`); only `filled: boolean` is exposed. Sensitive elements carry `required_capability` and `allowed_actions: ["read", "request_fill"|"request_click"]`. Two new API endpoints: `GET /api/runtime-sessions/:sessionId/observation` and `GET /api/runtime-sessions/:sessionId/observation-mode`. Two new MCP tools: `get_runtime_observation` and `get_runtime_observation_mode`. All three receipt paths (success, violation, failure) include `observation_mode_summary`. Capability Release Gate v1 is unchanged — observation mode controls what agents see; capability releases control what sensitive actions proceed. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Agent-Safe Observation Layer v1** — structured agent-safe DOM/page description that replaces raw screenshot-based observation
-2. **Website Agent-Safety Profile v1** — a structured machine-readable profile websites publish about their Aegis coverage posture
-3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
-4. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
+1. **Website Agent-Safety Profile v1** — a structured machine-readable profile websites publish about their Aegis coverage posture
+2. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+3. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
+4. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

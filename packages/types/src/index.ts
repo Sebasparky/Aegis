@@ -821,6 +821,73 @@ export interface RouteRunReceipt {
     passport_id?: string;
     passport_hash?: string;
   };
+  observation_mode_summary?: RuntimeObservationModeState;
+}
+
+// ─── Sensitive Workflow Observation Mode v1 ───────────────────────────────────
+
+export type RuntimeObservationMode =
+  | "open_observation"
+  | "protected_observation";
+
+export type RuntimeObservationActivationReason =
+  | "route_marked_sensitive"
+  | "required_permission_sensitive"
+  | "sensitive_url_detected"
+  | "sensitive_dom_detected"
+  | "sensitive_action_detected"
+  | "collar_policy_requires_protection"
+  | "website_policy_requires_protection";
+
+export interface RuntimeObservationModeState {
+  mode: RuntimeObservationMode;
+  activated_at?: string;
+  activation_reasons: RuntimeObservationActivationReason[];
+  sensitive_signals: string[];
+}
+
+export type AgentSafeElementKind =
+  | "field"
+  | "button"
+  | "link"
+  | "text"
+  | "form"
+  | "other";
+
+export interface AgentSafeObservationElement {
+  element_id: string;
+  kind: AgentSafeElementKind;
+  role?: string;
+  label?: string;
+  text?: string;
+  placeholder?: string;
+  input_type?: string;
+  sensitive: boolean;
+  sensitivity?: RuntimeEventSensitivityKind;
+  required_capability?: RuntimeCapabilityType;
+  value_redacted?: boolean;
+  value?: string;
+  filled?: boolean;
+  allowed_actions: Array<"read" | "fill" | "click" | "request_fill" | "request_click" | "none">;
+  reason?: string;
+}
+
+export interface AgentSafeObservationSnapshot {
+  snapshot_id: string;
+  runtime_session_id: string;
+  run_id?: string;
+  user_id: string;
+  domain: string;
+  page_url: string;
+  created_at: string;
+  observation_mode: RuntimeObservationModeState;
+  elements: AgentSafeObservationElement[];
+  summary: {
+    total_elements: number;
+    sensitive_elements: number;
+    redacted_values: number;
+    required_capabilities: RuntimeCapabilityType[];
+  };
 }
 
 // ─── Aegis Rails — RoutePassBinding ──────────────────────────────────────────

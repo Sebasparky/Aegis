@@ -287,6 +287,14 @@ Before making any changes:
 - `raw_secret_revealed_to_agent: false` on `RuntimeCapabilityRelease` is a TypeScript literal type — always write it as the literal `false`, never through a variable
 - Do not fulfill authorizations on missing-capability violations — `ActionAuthorizationReceipt.status` must stay `"active"` when a run fails due to missing capability release
 - Do not include raw secrets, passwords, PAN, CVV, private keys, fingerprints, encrypted blobs, or decrypted values in any `RuntimeCapabilityRelease` or `capability_release_summary`
+- Sensitive Workflow Observation Mode v1 is **complete** — do not rebuild `RuntimeObservationMode`, `RuntimeObservationActivationReason`, `RuntimeObservationModeState`, `AgentSafeElementKind`, `AgentSafeObservationElement`, `AgentSafeObservationSnapshot`, `runtimeObservationSnapshots` Map, `initialObservationModeState`, `activateProtectedObservationMode`, `getObservationModeState`, `storeObservationSnapshot`, `getLatestObservationSnapshot`, `scanPageForSensitivitySignals`, `buildAgentSafeObservationSnapshot`, `SENSITIVE_PERMISSIONS`, `SENSITIVE_URL_PATTERNS`, `runtime-observations.ts` routes, `get_runtime_observation`/`get_runtime_observation_mode` MCP tools, or `observation_mode_summary` on receipts unless explicitly requested
+- Do not activate `protected_observation` globally — it must be triggered only by concrete sensitivity signals (route permissions, URL patterns, or DOM patterns); do not apply it by default to all sessions
+- `AgentSafeObservationSnapshot` never contains raw passwords, card numbers, CVV, PAN, SSN, passport data, `secret_ref` values, `devvault://` references, private keys, ciphertext, or fingerprints — sensitive fields always have `value_redacted: true` with `value` omitted; `filled` is a boolean only
+- Do not expose raw `.value` from password or sensitive input fields in `page.evaluate()` snapshot code — only `.value.length > 0` boolean for `filled` detection; the actual value must never appear in the returned object
+- `page.evaluate()` callbacks in `playwrightRuntime.ts` must use raw JS string IIFEs (not TypeScript arrow functions) — the Node.js tsconfig does not include DOM lib; DOM-only types cause compile errors; match the pattern of `INSTRUMENTATION_SCRIPT` and `scanPageForSensitivitySignals`
+- Observation mode does not weaken Capability Release Gate v1 — observation mode controls what agents SEE in snapshots; capability releases control what sensitive actions can PROCEED
+- Sensitive fields and buttons have `allowed_actions: ["read", "request_fill"]` or `["read", "request_click"]` — they must go through Aegis route steps; agents cannot directly fill or click sensitive elements
+- `observation_mode_summary` on receipts is metadata only — it records what mode was active when the run executed; it does not include snapshots, raw DOM, or field values
 
 ## Terminology — Always Use
 

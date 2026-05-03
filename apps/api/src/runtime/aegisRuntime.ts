@@ -6,6 +6,10 @@ import type {
   RuntimeIntervention,
   RuntimeCapabilityRelease,
   RuntimeCapabilityType,
+  RuntimeObservationMode,
+  RuntimeObservationActivationReason,
+  RuntimeObservationModeState,
+  AgentSafeObservationSnapshot,
 } from "@aegis/types";
 import { newId } from "../store/index.js";
 
@@ -40,6 +44,7 @@ export interface RuntimeEvent {
 }
 
 export type { RuntimeCoverageSummary, RuntimeCapabilityRelease, RuntimeCapabilityType };
+export type { RuntimeObservationMode, RuntimeObservationActivationReason, RuntimeObservationModeState, AgentSafeObservationSnapshot };
 
 export interface RuntimeSession {
   runtime_session_id: string;
@@ -56,6 +61,7 @@ export interface RuntimeSession {
   // Metadata-only event log — never contains field values.
   runtime_events: RuntimeEvent[];
   coverage_summary?: RuntimeCoverageSummary;
+  observation_mode?: RuntimeObservationModeState;
 }
 
 // Ephemeral for v1 — not persisted across API restarts.
@@ -71,6 +77,9 @@ export const runtimeInterventions = new Map<string, RuntimeIntervention>();
 
 // Ephemeral capability releases for v1 — copied into receipts on run completion/failure.
 export const runtimeCapabilityReleases = new Map<string, RuntimeCapabilityRelease>();
+
+// Ephemeral agent-safe observation snapshots — never contain raw secrets or field values.
+export const runtimeObservationSnapshots = new Map<string, AgentSafeObservationSnapshot[]>();
 
 export function createRuntimeCapabilityRelease(
   fields: Omit<RuntimeCapabilityRelease, "capability_release_id" | "created_at" | "expires_at">
@@ -123,6 +132,48 @@ export function createRuntimeIntervention(
   return intervention;
 }
 
+// ─── Observation mode helpers ─────────────────────────────────────────────────
+
+export function initialObservationModeState(): RuntimeObservationModeState {
+  return { mode: "open_observation", activation_reasons: [], sensitive_signals: [] };
+}
+
+export function activateProtectedObservationMode(
+  sessionId: string,
+  reason: RuntimeObservationActivationReason,
+  signal: string
+): RuntimeObservationModeState | undefined {
+  const session = runtimeSessions.get(sessionId);
+  if (!session) return undefined;
+  const state = session.observation_mode ?? initialObservationModeState();
+  const already = state.mode === "protected_observation";
+  const next: RuntimeObservationModeState = {
+    mode: "protected_observation",
+    activated_at: already ? state.activated_at : new Date().toISOString(),
+    activation_reasons: Array.from(new Set([...state.activation_reasons, reason])),
+    sensitive_signals: Array.from(new Set([...state.sensitive_signals, signal])),
+  };
+  session.observation_mode = next;
+  session.updated_at = new Date().toISOString();
+  runtimeSessions.set(sessionId, session);
+  return next;
+}
+
+export function getObservationModeState(sessionId: string): RuntimeObservationModeState | undefined {
+  return runtimeSessions.get(sessionId)?.observation_mode;
+}
+
+export function storeObservationSnapshot(sessionId: string, snapshot: AgentSafeObservationSnapshot): void {
+  const list = runtimeObservationSnapshots.get(sessionId) ?? [];
+  list.push(snapshot);
+  runtimeObservationSnapshots.set(sessionId, list);
+}
+
+export function getLatestObservationSnapshot(sessionId: string): AgentSafeObservationSnapshot | undefined {
+  const list = runtimeObservationSnapshots.get(sessionId);
+  return list?.[list.length - 1];
+}
+
 export function createRuntimeSession(fields: {
   run_id?: string;
   user_id: string;
@@ -135,6 +186,7 @@ export function createRuntimeSession(fields: {
     execution_surface: "aegis_playwright",
     status: "created",
     runtime_events: [],
+    observation_mode: initialObservationModeState(),
     created_at: now,
     updated_at: now,
     ...fields,

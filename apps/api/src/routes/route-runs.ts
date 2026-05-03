@@ -65,6 +65,7 @@ function sendError(reply: any, status: number, code: string, message: string, de
 }
 
 function deriveActionType(permissions: string[]): AuthorizationActionType {
+  if (permissions.includes("travel_booking")) return "travel_booking";
   if (permissions.includes("payment") || permissions.includes("purchase")) return "payment";
   if (permissions.includes("identity_disclosure")) return "identity_disclosure";
   if (permissions.includes("account_deletion") || permissions.includes("delete_account")) return "destructive_action";
@@ -75,7 +76,7 @@ function deriveActionType(permissions: string[]): AuthorizationActionType {
 
 function deriveRiskTier(permissions: string[]): AuthorizationRiskTier {
   if (permissions.some((p) => ["identity_disclosure", "account_deletion", "delete_account"].includes(p))) return "critical";
-  if (permissions.some((p) => ["payment", "purchase", "financial_action"].includes(p))) return "high";
+  if (permissions.some((p) => ["payment", "purchase", "financial_action", "travel_booking"].includes(p))) return "high";
   if (permissions.some((p) => ["login", "credential_fill", "submit_form"].includes(p))) return "medium";
   return "low";
 }
@@ -450,14 +451,23 @@ export async function routeRunRoutes(server: FastifyInstance) {
             requires_user_approval: true,
           },
           constraints: {
-            allowed_domains: collar?.counterparty_rules ? [run.domain] : [run.domain],
+            allowed_domains: [run.domain],
+            ...(["travel_booking", "payment", "purchase"].includes(action_type) && {
+              max_amount_usd: collar?.spending_limits?.max_with_approval ?? 500,
+              currency: "USD",
+              allowed_payment_instrument_types: ["demo_card"],
+            }),
             approval_required_for: permissions,
           },
           approval: {
             approval_method: "user_click" as const,
             approved_at: approvedAt,
             approval_ui_version: "route-run-approvals-v1",
-            approval_text_shown: `Approve ${action_type} on ${run.domain}?`,
+            approval_text_shown: action_type === "travel_booking"
+              ? `Book demo flight on ${run.domain} (max $${collar?.spending_limits?.max_with_approval ?? 500} USD, Aegis Demo Card ending 4242)`
+              : action_type === "payment"
+              ? `Approve payment on ${run.domain} (max $${collar?.spending_limits?.max_with_approval ?? 500} USD, demo card only)`
+              : `Approve ${action_type} on ${run.domain}?`,
             liability_terms_version: "aegis-v1",
             user_liability_acknowledged: true,
           },

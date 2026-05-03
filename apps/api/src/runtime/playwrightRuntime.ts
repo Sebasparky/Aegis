@@ -312,44 +312,60 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
       if (step.action === "fill" && step.value_policy) {
         const vp = step.value_policy;
 
-        // Open coverage window before filling — events during fill are Aegis-controlled
-        const fillSensitivity: RuntimeEventSensitivity =
-          vp.type === "secret_ref" ? "credential" : "credential";
-        openCoverageWindow(
-          coverageWindows,
-          fillSensitivity,
-          ["sensitive_field_focus", "sensitive_field_input"],
-          COVERAGE_DURATION_MS,
-          `Aegis Playwright runtime filling ${vp.type === "secret_ref" ? "secret credential" : "pass field"} via KMS vault — secret resolved server-side, never exposed to agent.`
-        );
+        if (vp.type === "pass_field" || vp.type === "secret_ref") {
+          // Credential fill — open coverage window and resolve via KMS vault.
+          openCoverageWindow(
+            coverageWindows,
+            "credential",
+            ["sensitive_field_focus", "sensitive_field_input"],
+            COVERAGE_DURATION_MS,
+            `Aegis Playwright runtime filling ${vp.type === "secret_ref" ? "secret credential" : "pass field"} via KMS vault — secret resolved server-side, never exposed to agent.`
+          );
 
-        const resolved = await resolveRouteStepValue(run, step);
-        const locator = await tryLocator(page, step.target);
-        await locator.fill(resolved.value);
+          const resolved = await resolveRouteStepValue(run, step);
+          const locator = await tryLocator(page, step.target);
+          await locator.fill(resolved.value);
 
-        run.credential_used = true;
-        run.secret_values_revealed_to_agent = false;
-        run.pass_ids_used = Array.from(new Set([...(run.pass_ids_used ?? []), resolved.pass_id]));
-        routeRuns.set(runId, run);
-        schedulePersist();
+          run.credential_used = true;
+          run.secret_values_revealed_to_agent = false;
+          run.pass_ids_used = Array.from(new Set([...(run.pass_ids_used ?? []), resolved.pass_id]));
+          routeRuns.set(runId, run);
+          schedulePersist();
+
+        } else if (vp.type === "safe_literal" || vp.type === "enum_selection") {
+          // Non-secret literal — use value directly, no KMS resolution needed.
+          const locator = await tryLocator(page, step.target);
+          await locator.fill(vp.value ?? "");
+
+        } else if (vp.type === "runtime_variable" && step.variable_binding) {
+          // Runtime variable bound at run creation time.
+          const locator = await tryLocator(page, step.target);
+          await locator.fill(step.variable_binding);
+        }
+        // user_approval_required and sensitive_redacted: no-op — no value to fill.
 
       } else if (step.action === "click") {
-        // Open coverage window before click — sensitive button click is Aegis-controlled
-        openCoverageWindow(
-          coverageWindows,
-          "credential",
-          ["sensitive_button_click", "sensitive_form_submit"],
-          COVERAGE_DURATION_MS,
-          "Button click / form submit executed by Aegis Playwright runtime under route control."
-        );
+        // Open coverage windows for every sensitivity a button click or form submit could produce.
+        // We can't know ahead of time how the browser will classify the button text, so we cover
+        // all possible classifications. Windows are still time-bounded and only opened here when
+        // Aegis explicitly executes a click step — not weakening global coverage.
+        const clickReason = "Button click / form submit executed by Aegis Playwright runtime under route control.";
+        const buttonSensitivities: RuntimeEventSensitivity[] = [
+          "payment", "financial", "credential", "destructive", "account_change",
+        ];
+        for (const s of buttonSensitivities) {
+          openCoverageWindow(coverageWindows, s, ["sensitive_button_click", "sensitive_form_submit"], COVERAGE_DURATION_MS, clickReason);
+        }
+        // Form submits on pages without a password field are classified as "unknown_sensitive"
+        openCoverageWindow(coverageWindows, "unknown_sensitive", ["sensitive_form_submit"], COVERAGE_DURATION_MS, clickReason);
 
         const locator = await tryLocator(page, step.target);
         await locator.click();
       }
     }
 
-    // Wait for success navigation
-    await page.waitForURL(/demo-login\/success|demo-login\//, { timeout: 10000 }).catch(() => {});
+    // Wait for success navigation (matches any /success URL for demo routes)
+    await page.waitForURL(/\/success/, { timeout: 10000 }).catch(() => {});
 
     // Collect page events and convert with coverage classification
     const rawEvents = await collectRawPageEvents(page);

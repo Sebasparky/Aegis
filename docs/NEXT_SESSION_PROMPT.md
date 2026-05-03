@@ -38,10 +38,12 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Delegation Passport v1. It is complete. Do not re-implement `DelegationPassport` type, `delegationPassportSigning.ts`, `delegation-passports.ts` routes, `delegationPassports` Map, MCP tools `create_delegation_passport`/`verify_delegation_passport`, or passport persistence. Do not claim a valid passport proves the agent has no out-of-band secrets — it proves only that Aegis-covered sensitive actions were constrained by user approval, KMS credential custody, the Aegis Playwright controlled runtime, and signed receipts.**
 >
 > **Also: do NOT rebuild Action Authorization Receipt v1. It is complete. Do not re-implement `ActionAuthorizationReceipt` type, `actionAuthorizationSigning.ts`, `action-authorizations.ts` routes, `actionAuthorizations` Map, or the authorization creation in the approve endpoint. `authorization_hash` excludes `status` and `fulfillment` by design — fulfilled and active authorizations both have valid hashes. Do not revoke a fulfilled authorization. Failed executions leave authorization `active`. No raw secrets, passwords, or private keys in authorization receipts.**
+>
+> **Also: do NOT rebuild Real Payment / Travel Mock Route v1. It is complete. Do not re-implement `PaymentMethodCapability` type, `paymentMethods` Map, `pay_method_demo_001` seed, `route_demo_travel_booking_001`, `skill_demo_travel_booking_001`, `ins_skill_travel_001`, `safe_literal` support in Playwright runtime, or `travel_booking` deriveActionType/deriveRiskTier logic. Do not add raw card numbers, CVV, or PAN. `payment_method_available` now uses a live Map lookup — do not revert to hardcoded `false`.**
 
 ---
 
-## Completed Increments (as of 2026-05-02)
+## Completed Increments (as of 2026-05-03)
 
 Everything below is implemented and working.
 
@@ -407,15 +409,17 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Action Authorization Receipt v1 is complete** — implemented 2026-05-02. A signed proof is created at approval time before Playwright execution begins. After successful execution, the authorization is marked `fulfilled` and linked to the execution receipt via `authorization_context`. `authorization_hash` excludes `status` and `fulfillment` so the cryptographic proof stays valid throughout the lifecycle. See "Action Authorization Receipt v1" in Completed Increments.
 
-**Delegation Trust Profile v1 is complete** — implemented 2026-05-03. `GET /api/delegation-trust/profile?delegation_id=&task_category=` generates a machine-readable trust profile scoped to a specific task category. Trust is based on fulfilled Aegis authorizations, verified signed receipts, sensitive workflow coverage stats, and KMS custody attestation — NOT generic success count. Low-risk browsing/search tasks do not improve high-risk trust categories. Payment categories cap at `proven_limited` in v1 (payment capability not available). MCP tool `get_delegation_trust_profile` exposes this to agents. Do not rebuild unless explicitly requested.
+**Delegation Trust Profile v1 is complete** — implemented 2026-05-03. `GET /api/delegation-trust/profile?delegation_id=&task_category=` generates a machine-readable trust profile scoped to a specific task category. Trust is based on fulfilled Aegis authorizations, verified signed receipts, sensitive workflow coverage stats, and KMS custody attestation — NOT generic success count. Low-risk browsing/search tasks do not improve high-risk trust categories. Payment categories cap at `proven_limited` (payment capability now live via `paymentMethods` Map). MCP tool `get_delegation_trust_profile` exposes this to agents. Do not rebuild unless explicitly requested.
 
 **Website Assertion / Handshake v1 is complete** — implemented 2026-05-03. `POST /api/website-assertions` creates a signed `WebsiteTrustAssertion` combining the Delegation Trust Profile and optional Delegation Passport into a compact machine-readable recommendation (allow / allow_with_approval / step_up_required / deny) with EdDSA JWS signature and hash chain. `GET /api/website-assertions/:id/verify` recomputes hash, verifies JWS, cross-checks payload fields, and checks expiry. MCP tools `create_website_trust_assertion` and `verify_website_trust_assertion` expose this to agents. Assertions require real signing keys — no unsigned fallback. Do not rebuild unless explicitly requested.
 
+**Real Payment / Travel Mock Route v1 is complete** — implemented 2026-05-03. `skill_demo_travel_booking_001` / `route_demo_travel_booking_001` books a mock Detroit → New York flight at `/demo-travel` using `PaymentMethodCapability` (tokenized metadata, no raw card data). `payment_method_available` is now a live Map lookup. `deriveActionType` returns `travel_booking` when permissions include it; authorization receipt carries `max_amount_usd`, `currency: "USD"`, `allowed_payment_instrument_types: ["demo_card"]`. Playwright runtime now handles `safe_literal` steps natively. Trust profile for `travel_booking` advances to `proven_limited` after one successful run; website assertion advances to `allow_with_approval`. No real money processed. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always `unproven`/`capable_but_unproven` due to missing payment capability)
-2. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
-3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+1. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
+2. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+3. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

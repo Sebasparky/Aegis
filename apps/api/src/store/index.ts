@@ -18,6 +18,7 @@ import type {
   DelegationPassport,
   ActionAuthorizationReceipt,
   WebsiteTrustAssertion,
+  PaymentMethodCapability,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -185,6 +186,9 @@ export const actionAuthorizations = new Map<string, ActionAuthorizationReceipt>(
 
 // Signed website trust assertions issued to agents for website handshake; local JSON persistence only (v1).
 export const websiteTrustAssertions = new Map<string, WebsiteTrustAssertion>();
+
+// Tokenized payment method capabilities — metadata only, no raw card data (no PAN, no CVV).
+export const paymentMethods = new Map<string, PaymentMethodCapability>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

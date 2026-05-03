@@ -225,6 +225,166 @@ const PENDING_VERIFICATION = {
   }))
 };
 
+// Demo travel booking — mock flight Detroit → New York, tokenized payment method.
+// All step values are safe_literals — no secrets, no raw card data.
+const TRAVEL_STEPS = [
+  {
+    step_id: "step_travel_001",
+    order: 1,
+    action: "fill",
+    intent: "fill_passenger_name",
+    description: "fill Passenger Name",
+    target: {
+      preferred_locator: { type: "label", name: "Passenger Name" },
+      fallback_locators: [
+        { type: "placeholder", name: "Passenger Name" },
+        { type: "css", value: "input[name=\"passengerName\"]" }
+      ],
+      confidence: 0.9
+    },
+    value_policy: { type: "safe_literal", value: "Demo User", store_value: true },
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_travel_002",
+    order: 2,
+    action: "fill",
+    intent: "fill_from_city",
+    description: "fill From city",
+    target: {
+      preferred_locator: { type: "label", name: "From" },
+      fallback_locators: [
+        { type: "placeholder", name: "From" },
+        { type: "css", value: "input[name=\"from\"]" }
+      ],
+      confidence: 0.9
+    },
+    value_policy: { type: "safe_literal", value: "Detroit, MI (DTW)", store_value: true },
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_travel_003",
+    order: 3,
+    action: "fill",
+    intent: "fill_to_city",
+    description: "fill To city",
+    target: {
+      preferred_locator: { type: "label", name: "To" },
+      fallback_locators: [
+        { type: "placeholder", name: "To" },
+        { type: "css", value: "input[name=\"to\"]" }
+      ],
+      confidence: 0.9
+    },
+    value_policy: { type: "safe_literal", value: "New York, NY (JFK)", store_value: true },
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_travel_004",
+    order: 4,
+    action: "fill",
+    intent: "fill_departure_date",
+    description: "fill Departure Date",
+    target: {
+      preferred_locator: { type: "label", name: "Departure Date" },
+      fallback_locators: [
+        { type: "placeholder", name: "Departure Date" },
+        { type: "css", value: "input[name=\"departureDate\"]" }
+      ],
+      confidence: 0.85
+    },
+    value_policy: { type: "safe_literal", value: "2026-07-15", store_value: true },
+    approval_required: false,
+    confidence_required: 0.7
+  },
+  {
+    step_id: "step_travel_005",
+    order: 5,
+    action: "click",
+    intent: "click_pay_and_book",
+    description: "click Pay & Book button",
+    target: {
+      preferred_locator: { type: "role", role: "button", name: "Pay & Book" },
+      fallback_locators: [
+        { type: "css", value: "button[type=\"submit\"]" },
+        { type: "testid", name: "pay-book-btn" }
+      ],
+      confidence: 0.9
+    },
+    approval_required: false,
+    confidence_required: 0.8
+  }
+];
+
+const TRAVEL_VERIFICATION = {
+  route_id: "route_demo_travel_booking_001",
+  started_at: "2026-04-30T13:00:00.000Z",
+  completed_at: "2026-04-30T13:00:04.000Z",
+  passed: true,
+  step_results: [
+    {
+      step_id: "step_travel_001",
+      order: 1,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "Passenger Name" }, found: true }],
+      selected_locator: { type: "label", name: "Passenger Name" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    },
+    {
+      step_id: "step_travel_002",
+      order: 2,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "From" }, found: true }],
+      selected_locator: { type: "label", name: "From" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    },
+    {
+      step_id: "step_travel_003",
+      order: 3,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "To" }, found: true }],
+      selected_locator: { type: "label", name: "To" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    },
+    {
+      step_id: "step_travel_004",
+      order: 4,
+      action: "fill",
+      locator_attempts: [{ locator: { type: "label", name: "Departure Date" }, found: true }],
+      selected_locator: { type: "label", name: "Departure Date" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.85
+    },
+    {
+      step_id: "step_travel_005",
+      order: 5,
+      action: "click",
+      locator_attempts: [{ locator: { type: "role", role: "button", name: "Pay & Book" }, found: true }],
+      selected_locator: { type: "role", role: "button", name: "Pay & Book" },
+      locator_found: true,
+      action_performed: true,
+      passed: true,
+      confidence: 0.9
+    }
+  ],
+  errors: [],
+  promoted_trust_tier: "aegis_scanned"
+};
+
 // Demo login — fake local credentials, aegis_controlled execution path.
 // Uses safe_literal value policies so replay.js fills the demo credentials
 // automatically. This is not real credential custody — it is a demo only.
@@ -507,6 +667,39 @@ const routes = [
     }
   ],
   [
+    "route_demo_travel_booking_001",
+    {
+      route_id: "route_demo_travel_booking_001",
+      version: "1.0.0",
+      created_at: "2026-04-30T13:00:00.000Z",
+      last_verified_at: "2026-04-30T13:00:04.000Z",
+      creator_aegis_id: "aid_user_001",
+      trust_tier: "aegis_scanned",
+      domain: "localhost",
+      url_match: { hostname: "localhost", path_prefix: "/demo-travel" },
+      start_url: "http://localhost:3000/demo-travel",
+      workflow_name: "Demo Flight Booking",
+      workflow_description: "Books a mock Detroit → New York flight using an Aegis-tokenized demo payment method. No real money processed.",
+      risk_level: "high",
+      required_permissions: ["travel_booking", "payment"],
+      allowed_actions: ["travel_booking", "payment"],
+      forbidden_actions: ["identity_disclosure", "delete_account"],
+      approval_gates: [],
+      confidence_threshold: 0.75,
+      steps: TRAVEL_STEPS,
+      run_count: 0,
+      success_rate: 0,
+      incident_count: 0,
+      verification_report: TRAVEL_VERIFICATION,
+      marketplace_status: "approved",
+      submitted_for_review_at: "2026-04-30T13:30:00.000Z",
+      reviewed_at: "2026-04-30T13:30:00.000Z",
+      review_note: "Mock travel booking workflow with tokenized payment method. Aegis-controlled execution only.",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
+  ],
+  [
     "route_demo_login_001",
     {
       route_id: "route_demo_login_001",
@@ -633,6 +826,61 @@ const skills = [
       execution_mode: "aegis_controlled",
       sensitivity_level: "sensitive"
     }
+  ],
+  [
+    "skill_demo_travel_booking_001",
+    {
+      skill_id: "skill_demo_travel_booking_001",
+      route_id: "route_demo_travel_booking_001",
+      name: "Demo Flight Booking",
+      summary: "Books a mock Detroit → New York flight using an Aegis-tokenized demo payment method. No real money processed. Proves travel_booking authorization, payment coverage, and receipt chain.",
+      domain: "localhost",
+      risk_level: "high",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["travel_booking", "payment"],
+      forbidden_actions: ["identity_disclosure", "delete_account"],
+      approval_gates: [],
+      created_at: "2026-04-30T13:30:00.000Z",
+      published_at: "2026-04-30T13:30:00.000Z",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
+  ]
+];
+
+// Demo payment method capability — metadata only, no PAN, no CVV.
+const DEMO_PAYMENT_METHOD = {
+  payment_method_id: "pay_method_demo_001",
+  user_id: "user_001",
+  label: "Aegis Demo Card",
+  network: "visa",
+  last4: "4242",
+  billing_country: "US",
+  capability_ref: "demo-payment-method",
+  created_at: "2026-04-30T13:00:00.000Z"
+};
+
+// Pre-installed skills so agents can request runs without manual UI installation.
+const installedSkills = [
+  [
+    "ins_skill_login_001",
+    {
+      installed_skill_id: "ins_skill_login_001",
+      skill_id: "skill_demo_login_001",
+      user_id: "user_001",
+      installed_at: "2026-04-30T11:30:00.000Z",
+      enabled: true
+    }
+  ],
+  [
+    "ins_skill_travel_001",
+    {
+      installed_skill_id: "ins_skill_travel_001",
+      skill_id: "skill_demo_travel_booking_001",
+      user_id: "user_001",
+      installed_at: "2026-04-30T13:30:00.000Z",
+      enabled: true
+    }
   ]
 ];
 
@@ -662,7 +910,7 @@ const store = {
         status: "active",
         allowed_actions: ["browse", "search", "read", "compare", "draft", "add_to_cart"],
         approval_required_actions: [
-          "login", "purchase", "payment", "share_email", "share_phone",
+          "login", "purchase", "payment", "travel_booking", "share_email", "share_phone",
           "submit_form", "post_publicly", "upload_file", "send_email", "create_account"
         ],
         blocked_actions: [
@@ -789,16 +1037,20 @@ const store = {
   ],
   routes,
   skills,
-  installedSkills: [],
-  aegisVaultPasses: [["pass_vault_demo_login_001", DEMO_VAULT_PASS]]
+  installedSkills,
+  aegisVaultPasses: [["pass_vault_demo_login_001", DEMO_VAULT_PASS]],
+  paymentMethods: [["pay_method_demo_001", DEMO_PAYMENT_METHOD]]
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 7 routes, 4 skills, 2 delegations written.");
-console.log("  route_demo_banking_001   — Demo Banking Workflow       (localhost, aegis_scanned, private)");
-console.log("  route_demo_wikipedia_001 — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
-console.log("  route_demo_draft_001     — Account Statement Draft     (localhost, unverified_draft)");
-console.log("  route_demo_pending_001   — Wikipedia Topic Lookup      (en.wikipedia.org, aegis_scanned, pending_review)");
-console.log("  route_demo_login_001     — Demo Login                  (localhost, aegis_scanned, approved, aegis_controlled)");
-console.log("  skill_demo_wikipedia_001 — Wikipedia Search (Skill)    (agent_runnable/routine — install to add to Skill Library)");
-console.log("  skill_demo_login_001     — Demo Login (Skill)          (aegis_controlled/sensitive — install to test approval + receipt flow)");
+console.log("Demo data seeded. 8 routes, 5 skills, 2 delegations, 1 payment method written.");
+console.log("  route_demo_banking_001          — Demo Banking Workflow       (localhost, aegis_scanned, private)");
+console.log("  route_demo_wikipedia_001        — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
+console.log("  route_demo_draft_001            — Account Statement Draft     (localhost, unverified_draft)");
+console.log("  route_demo_pending_001          — Wikipedia Topic Lookup      (en.wikipedia.org, aegis_scanned, pending_review)");
+console.log("  route_demo_travel_booking_001   — Demo Flight Booking         (localhost, aegis_scanned, approved, aegis_controlled, high)");
+console.log("  route_demo_login_001            — Demo Login                  (localhost, aegis_scanned, approved, aegis_controlled)");
+console.log("  skill_demo_wikipedia_001        — Wikipedia Search (Skill)    (agent_runnable/routine)");
+console.log("  skill_demo_login_001            — Demo Login (Skill)          (aegis_controlled/sensitive, pre-installed)");
+console.log("  skill_demo_travel_booking_001   — Demo Flight Booking (Skill) (aegis_controlled/sensitive, pre-installed)");
+console.log("  pay_method_demo_001             — Aegis Demo Card             (visa, last4: 4242, metadata only)");

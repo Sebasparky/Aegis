@@ -107,6 +107,7 @@ export type ActionType =
   | "login"
   | "purchase"
   | "payment"
+  | "travel_booking"
   | "subscription"
   | "post_publicly"
   | "comment"
@@ -175,6 +176,18 @@ export interface AegisPass {
 }
 
 export type AegisPassKind = "login_password";
+
+// Tokenized payment method capability — metadata only, no raw card data.
+export interface PaymentMethodCapability {
+  payment_method_id: string;
+  user_id: string;
+  label: string;
+  network: string;
+  last4: string;
+  billing_country: string;
+  capability_ref: string;
+  created_at: string;
+}
 
 // Dev prototype only — credential vault metadata. Secret values are stored separately in devSecretVault.
 export interface AegisVaultPass {
@@ -422,6 +435,7 @@ export interface ActionAuthorizationReceipt {
     allowed_domains: string[];
     max_amount_usd?: number;
     currency?: string;
+    allowed_payment_instrument_types?: string[];
     expires_at?: string;
     approval_required_for: string[];
   };

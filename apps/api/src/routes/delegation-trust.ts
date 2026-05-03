@@ -7,6 +7,7 @@ import type {
 import {
   agentDelegations,
   actionAuthorizations,
+  paymentMethods,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
@@ -24,7 +25,7 @@ const VALID_TASK_CATEGORIES = new Set<DelegationTrustTaskCategory>([
 // Categories that require an Aegis-held login credential.
 const LOGIN_CATEGORIES = new Set<DelegationTrustTaskCategory>(["login", "credential_fill"]);
 
-// Categories that require a payment method (unavailable in v1 — always false).
+// Categories that require a payment method capability.
 const PAYMENT_CATEGORIES = new Set<DelegationTrustTaskCategory>([
   "purchase", "payment", "travel_booking", "financial_action",
 ]);
@@ -165,7 +166,7 @@ export async function computeDelegationTrustProfile(
   // ── Capability summary ───────────────────────────────────────────────────
 
   const loginCredentialAvailable = vaultPasses.some((p) => p.kind === "login_password");
-  const paymentMethodAvailable = false;    // v1: not implemented
+  const paymentMethodAvailable = [...paymentMethods.values()].some((pm) => pm.user_id === delegation.user_id);
   const identityProfileAvailable = false;  // v1: not implemented
   const credentialDomains = [...new Set(vaultPasses.map((p) => p.domain))];
 
@@ -176,8 +177,8 @@ export async function computeDelegationTrustProfile(
     capableForRequestedTask = loginCredentialAvailable;
     if (!loginCredentialAvailable) missingCapabilities.push("login_credential");
   } else if (PAYMENT_CATEGORIES.has(category)) {
-    capableForRequestedTask = false;
-    missingCapabilities.push("payment_method");
+    capableForRequestedTask = paymentMethodAvailable;
+    if (!paymentMethodAvailable) missingCapabilities.push("payment_method");
   } else if (IDENTITY_CATEGORIES.has(category)) {
     capableForRequestedTask = false;
     missingCapabilities.push("identity_profile");
@@ -218,7 +219,7 @@ export async function computeDelegationTrustProfile(
   const disqualifyingSignals: string[] = [];
   if (secretExposureEvents > 0) disqualifyingSignals.push("secret_exposure_detected");
   if (uncoveredEvents > 0) disqualifyingSignals.push("uncovered_sensitive_events_detected");
-  if (PAYMENT_CATEGORIES.has(category)) disqualifyingSignals.push("payment_capability_unavailable_v1");
+  if (PAYMENT_CATEGORIES.has(category) && !paymentMethodAvailable) disqualifyingSignals.push("payment_capability_unavailable_v1");
   if (IDENTITY_CATEGORIES.has(category)) disqualifyingSignals.push("identity_capability_unavailable_v1");
   if (LOGIN_CATEGORIES.has(category) && !loginCredentialAvailable) {
     disqualifyingSignals.push("no_login_credential_for_category");
@@ -235,7 +236,7 @@ export async function computeDelegationTrustProfile(
     reasons.push(loginCredentialAvailable ? "login credential available in vault" : "no login credential found in vault");
   }
   if (PAYMENT_CATEGORIES.has(category)) {
-    reasons.push("payment method not available (v1 limitation — capability gates trusted_for_category)");
+    reasons.push(paymentMethodAvailable ? "payment method available (tokenized demo capability)" : "payment method not available (v1 limitation — capability gates trusted_for_category)");
   }
   if (IDENTITY_CATEGORIES.has(category)) {
     reasons.push("identity profile not available (v1 limitation)");

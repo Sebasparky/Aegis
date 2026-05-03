@@ -1411,6 +1411,67 @@ Assertions expire (default 30 minutes). The verify endpoint checks expiry and re
 
 ---
 
+---
+
+## Real Payment / Travel Mock Route v1
+
+Aegis includes a mock travel booking workflow (`skill_demo_travel_booking_001`) that proves the authorization, coverage, and receipt chain for high-liability payment workflows without processing real money.
+
+### What this demonstrates
+
+- `action_type: "travel_booking"` authorization receipt with monetary constraints
+- `allowed_payment_instrument_types: ["demo_card"]` and `max_amount_usd` in the receipt constraints
+- Sensitive event detection: the "Pay & Book" button triggers `sensitive_button_click` with `payment` sensitivity
+- Coverage window wraps the click — `runtime_coverage_summary.covered_events >= 1`, `uncovered_events: 0`
+- Full authorization chain: `pending_approval → approved → Playwright executes → receipt with `authorization_context``
+- Delegation trust profile for `task_category=travel_booking` advances from `capable_but_unproven` to `proven_limited` after one successful run
+- Website trust assertion for `travel_booking` changes from `step_up_required` (no evidence) to `allow_with_approval` (proven_limited)
+
+### Payment method capability
+
+A `PaymentMethodCapability` Map stores tokenized payment metadata — label, network, last4. No PAN, no CVV, no raw card data. This enables `payment_method_available: true` in the trust profile for users with a seeded demo payment method.
+
+| Field | Value |
+|---|---|
+| `payment_method_id` | `pay_method_demo_001` |
+| `label` | Aegis Demo Card |
+| `network` | visa |
+| `last4` | 4242 |
+| `billing_country` | US |
+
+The `last4` is display metadata only. No full card number exists anywhere in the system.
+
+### Trust profile progression for `travel_booking`
+
+| State | `trust_status` | Website assertion `recommendation` |
+|---|---|---|
+| No payment method, no evidence | `unproven` | `deny` |
+| Payment method present, no evidence | `capable_but_unproven` | `step_up_required` |
+| ≥1 fulfilled authorization, clean coverage | `proven_limited` | `allow_with_approval` |
+| `trusted_for_category` | Unreachable for payment categories | — |
+
+Travel booking evidence is category-specific. Login history does not count toward `travel_booking` trust. Payment-category-specific trust requires `action_type: "payment"` authorizations.
+
+### Route
+
+- **Skill ID**: `skill_demo_travel_booking_001`
+- **Route ID**: `route_demo_travel_booking_001`
+- **URL**: `http://localhost:3000/demo-travel`
+- **Success URL**: `http://localhost:3000/demo-travel/success`
+- **Execution mode**: `aegis_controlled`
+- **Required permissions**: `["travel_booking", "payment"]`
+- **Steps**: fill passenger name, from, to, departure date (all `safe_literal` — no secrets), click "Pay & Book"
+
+### Security
+
+- No real payment gateway is contacted
+- No raw card numbers, CVV, or PAN are stored anywhere
+- `agent_receives_raw_payment_data: false` is set in every authorization receipt custody block
+- The demo payment method label ("Aegis Demo Card ending 4242") is the only payment data visible in receipts and authorizations
+- `secret_values_revealed_to_agent: false` on every execution receipt
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.
@@ -1419,4 +1480,5 @@ Assertions expire (default 30 minutes). The verify endpoint checks expiry and re
 - Routes are not arbitrary executable scripts. They are declarative, inspectable, versioned workflow objects reviewed before publication.
 - This is not a general browsing or web research layer. For non-sensitive reading, searching, and summarization, agents should use their own tools.
 - This is not a credential custody or pass vault system. Demo Login uses fake seeded credentials for demo purposes only. Real credential injection is not implemented.
+- The travel booking demo is not real payment processing. No money changes hands. The workflow demonstrates authorization and audit chain only.
 - Delegation Passports do not prove the agent has no out-of-band secrets. They prove only Aegis-covered delegation boundaries.

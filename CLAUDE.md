@@ -184,10 +184,12 @@ Delegation Passport v1 is **complete** — implemented 2026-05-02. Agents can cr
 
 Website Assertion / Handshake v1 is **complete** — implemented 2026-05-03. `POST /api/website-assertions` creates a signed `WebsiteTrustAssertion` combining trust profile + optional passport into a compact machine-readable recommendation (allow / allow_with_approval / step_up_required / deny) with EdDSA JWS signature. `GET /api/website-assertions/:id/verify` recomputes hash, verifies JWS, cross-checks payload, checks expiry. MCP tools `create_website_trust_assertion` and `verify_website_trust_assertion` expose this to agents. No unsigned fallback.
 
+Real Payment / Travel Mock Route v1 is **complete** — implemented 2026-05-03. Demo travel booking route at `/demo-travel` and `/demo-travel/success`. `PaymentMethodCapability` Map holds metadata only (no PAN, no CVV). `payment_method_available` is now a live Map lookup (`paymentMethods`). Travel booking authorization receipts carry `action_type: "travel_booking"`, `max_amount_usd: 500`, `currency: "USD"`, `allowed_payment_instrument_types: ["demo_card"]`. Trust profile for `travel_booking` advances from `capable_but_unproven` → `proven_limited` after first successful run. Website assertion: `step_up_required` before run → `allow_with_approval` after. Travel history does NOT count toward `payment` trust. `safe_literal` value policies now supported in Playwright runtime.
+
 Candidate next milestones:
-1. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always unproven/capable_but_unproven due to missing payment capability)
-2. **Coverage violation blocking v1** — block or pause run when not_covered_by_aegis event detected above threshold severity
-3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+1. **Coverage violation blocking v1** — block or pause run when not_covered_by_aegis event detected above threshold severity
+2. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+3. **Cloud KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -251,7 +253,7 @@ Before making any changes:
 - Delegation Trust Profile v1 is **complete** — do not rebuild `DelegationTrustProfile` type, `DelegationTrustTaskCategory`, `DelegationTrustStatus`, `delegation-trust.ts` routes, or `get_delegation_trust_profile` MCP tool unless explicitly requested
 - Do not implement generic success-count reputation — trust must be based on sensitive Aegis-covered evidence: fulfilled authorizations, verified signed receipts, covered sensitive workflow events, and KMS custody attestation
 - Low-risk browsing, search, or weather tasks do not improve trust for high-risk task categories (login, payment, financial_action, etc.) — trust is task-category-specific
-- Payment/travel/financial categories (`purchase`, `payment`, `travel_booking`, `financial_action`) can never reach `trusted_for_category` in v1 — `payment_method_available` is always `false`; do not change this ceiling without explicitly implementing payment capability
+- Payment/travel/financial categories (`purchase`, `payment`, `travel_booking`, `financial_action`) can never reach `trusted_for_category` in v1 — maximum is `proven_limited`; do not change this ceiling unless explicitly requested
 - Trust profile is advisory, not a guarantee — every profile carries `not_a_guarantee: true`, `out_of_band_secret_use_not_covered: true`, `based_only_on_aegis_observed_events: true`; do not remove these fields or weaken the limitations block
 - Do not include raw receipt JSON, secret_ref values, passwords, private keys, or decrypted credential values in a trust profile response — only aggregate counts, capability booleans, domains, and receipt IDs
 - Website Assertion / Handshake v1 is **complete** — do not rebuild `WebsiteTrustAssertion` type, `websiteAssertionSigning.ts`, `website-assertions.ts` routes, `websiteTrustAssertions` Map, `create_website_trust_assertion`, or `verify_website_trust_assertion` MCP tools unless explicitly requested
@@ -259,6 +261,12 @@ Before making any changes:
 - Website assertions require `AEGIS_RECEIPT_JWS_PRIVATE_JWK` — no unsigned-dev-mode fallback; missing keys → 500 `SIGNING_NOT_CONFIGURED`; `verification.assertion_jws` is always a real compact JWS string
 - Do not include raw receipt JSON, raw action authorization JSON, secret_ref, devvault:// references, demo_pass values, or private keys in any `WebsiteTrustAssertion` response — aggregate only
 - Website Trust Assertions carry no stronger guarantees than Delegation Passports — they summarize Aegis-observed evidence and do not prove the agent has no out-of-band secrets; `limitations.not_a_guarantee: true` must remain in every assertion
+- Real Payment / Travel Mock Route v1 is **complete** — do not rebuild `PaymentMethodCapability` type, `paymentMethods` Map, `route_demo_travel_booking_001`, `skill_demo_travel_booking_001`, `safe_literal` Playwright runtime support, or the `/demo-travel` pages unless explicitly requested
+- Demo travel route exists at `/demo-travel` (booking form) and `/demo-travel/success` (confirmation); `payment_method_available` is now a live check against the `paymentMethods` Map — not hardcoded `false`
+- Do not add raw card numbers, CVV, PAN, or any payment secret to `PaymentMethodCapability` — it is metadata only (`last4`, `label`, `network`, `billing_country`, `capability_ref`)
+- Do not claim real payment processing — the travel booking flow is a mock workflow; no real money is processed, no real payment gateway is called
+- Travel booking evidence is category-specific — fulfilled `travel_booking` authorizations count toward `travel_booking` trust only; they do NOT improve `payment`, `purchase`, or `financial_action` trust
+- `safe_literal` and `enum_selection` value policies in Playwright runtime use `vp.value` directly — no KMS resolution; `pass_field`/`secret_ref` still go through `resolveRouteStepValue`
 
 ## Terminology — Always Use
 

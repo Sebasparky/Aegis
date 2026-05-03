@@ -1,10 +1,11 @@
 import type { FastifyInstance } from "fastify";
-import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface } from "@aegis/types";
-import { skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, MOCK_USER_ID, newId } from "../store/index.js";
+import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier } from "@aegis/types";
+import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
 import { resolveRouteStepValue } from "../lib/secretResolution.js";
+import { hashActionAuthorization, signActionAuthorizationJws } from "../lib/actionAuthorizationSigning.js";
 
 export function buildReceipt(
   run: RouteRun,
@@ -61,6 +62,22 @@ const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.lo
 
 function sendError(reply: any, status: number, code: string, message: string, details?: string) {
   return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
+}
+
+function deriveActionType(permissions: string[]): AuthorizationActionType {
+  if (permissions.includes("payment") || permissions.includes("purchase")) return "payment";
+  if (permissions.includes("identity_disclosure")) return "identity_disclosure";
+  if (permissions.includes("account_deletion") || permissions.includes("delete_account")) return "destructive_action";
+  if (permissions.includes("credential_fill")) return "credential_fill";
+  if (permissions.includes("login")) return "login";
+  return "login";
+}
+
+function deriveRiskTier(permissions: string[]): AuthorizationRiskTier {
+  if (permissions.some((p) => ["identity_disclosure", "account_deletion", "delete_account"].includes(p))) return "critical";
+  if (permissions.some((p) => ["payment", "purchase", "financial_action"].includes(p))) return "high";
+  if (permissions.some((p) => ["login", "credential_fill", "submit_form"].includes(p))) return "medium";
+  return "low";
 }
 
 export async function routeRunRoutes(server: FastifyInstance) {
@@ -387,9 +404,95 @@ export async function routeRunRoutes(server: FastifyInstance) {
       if (run.status !== "pending_approval") {
         return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
       }
+      const approvedAt = new Date().toISOString();
       run.status = "pending";
-      run.approved_at = new Date().toISOString();
+      run.approved_at = approvedAt;
       run.approved_permissions = run.approval_required_permissions ?? [];
+
+      // Create a signed action authorization receipt at approval time.
+      // This proves the human explicitly approved this specific action before execution began.
+      try {
+        const user = users.get(run.user_id);
+        const delegation = run.delegation_id ? agentDelegations.get(run.delegation_id) : undefined;
+        const collar = run.collar_id ? collars.get(run.collar_id) : undefined;
+
+        // Find the active delegation passport for this delegation (if one was issued)
+        const passport = run.delegation_id
+          ? Array.from(delegationPassports.values()).find(
+              (p) => p.delegation.delegation_id === run.delegation_id && p.status === "active"
+            )
+          : undefined;
+
+        const permissions = run.approval_required_permissions ?? [];
+        const action_type = deriveActionType(permissions);
+        const risk_tier = deriveRiskTier(permissions);
+
+        const authorization_id = newId("authz");
+        const authWithoutVerification = {
+          authorization_id,
+          issuer: "aegis.dev",
+          issued_at: approvedAt,
+          status: "active" as const,
+          user_id: run.user_id,
+          user_aegis_id: user?.aegis_id ?? run.user_id,
+          agent_id: delegation?.agent_name ?? run.agent_id ?? "unknown",
+          delegation_id: run.delegation_id ?? "",
+          passport_id: passport?.passport_id,
+          passport_hash: passport?.verification.passport_hash,
+          run_id: run.run_id,
+          route_id: run.route_id,
+          skill_id: run.skill_id,
+          domain: run.domain,
+          action: {
+            action_type,
+            human_readable_summary: `User approved ${action_type} for ${run.domain} via skill ${run.skill_id ?? run.route_id}`,
+            risk_tier,
+            requires_user_approval: true,
+          },
+          constraints: {
+            allowed_domains: collar?.counterparty_rules ? [run.domain] : [run.domain],
+            approval_required_for: permissions,
+          },
+          approval: {
+            approval_method: "user_click" as const,
+            approved_at: approvedAt,
+            approval_ui_version: "route-run-approvals-v1",
+            approval_text_shown: `Approve ${action_type} on ${run.domain}?`,
+            liability_terms_version: "aegis-v1",
+            user_liability_acknowledged: true,
+          },
+          custody: {
+            agent_receives_raw_credentials: false as const,
+            agent_receives_raw_payment_data: false as const,
+            agent_receives_raw_identity_documents: false as const,
+            capability_release_model: "aegis_controlled_runtime" as const,
+          },
+        };
+
+        const authorization_hash = hashActionAuthorization(authWithoutVerification);
+        const authorization_jws = await signActionAuthorizationJws({
+          typ: "aegis.action_authorization.v1",
+          authorization_id,
+          authorization_hash,
+          issuer: "aegis.dev",
+          issued_at: approvedAt,
+          user_aegis_id: authWithoutVerification.user_aegis_id,
+          agent_id: authWithoutVerification.agent_id,
+          delegation_id: authWithoutVerification.delegation_id,
+          run_id: run.run_id,
+          action_type,
+          risk_tier,
+        });
+
+        const fullAuth = { ...authWithoutVerification, verification: { authorization_hash, authorization_jws } };
+        actionAuthorizations.set(authorization_id, fullAuth);
+        run.authorization_id = authorization_id;
+        run.authorization_hash = authorization_hash;
+      } catch (authErr: any) {
+        // Authorization creation failure does not block approval — log and continue.
+        // The run proceeds without a signed authorization receipt in this case.
+        console.error("[approve] Failed to create action authorization receipt:", authErr?.message);
+      }
 
       const route = routes.get(run.route_id);
       const canAutoStart = route?.execution_mode === "aegis_controlled" && !!route.start_url;

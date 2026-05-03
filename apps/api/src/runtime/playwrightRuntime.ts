@@ -1,6 +1,6 @@
 import { chromium, type Page, type Locator } from "playwright";
 import type { RouteLocator } from "@aegis/types";
-import { routeRuns, routes } from "../store/index.js";
+import { routeRuns, routes, actionAuthorizations } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { resolveRouteStepValue } from "../lib/secretResolution.js";
@@ -375,7 +375,33 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
 
     const receipt = buildReceipt(run, "completed", undefined, "aegis_playwright");
     receipt.runtime_coverage_summary = session.coverage_summary;
+    if (run.authorization_id) {
+      const auth = actionAuthorizations.get(run.authorization_id);
+      receipt.authorization_context = {
+        authorization_id: run.authorization_id,
+        authorization_hash: run.authorization_hash!,
+        passport_id: auth?.passport_id,
+        passport_hash: auth?.passport_hash,
+      };
+    }
     await getReceiptRepository().createReceipt(receipt);
+
+    // Mark the authorization fulfilled after the receipt is committed.
+    if (run.authorization_id) {
+      const auth = actionAuthorizations.get(run.authorization_id);
+      if (auth) {
+        const fulfilledAuth = {
+          ...auth,
+          status: "fulfilled" as const,
+          fulfillment: {
+            execution_receipt_id: receipt.receipt_id,
+            fulfilled_at: now,
+          },
+        };
+        actionAuthorizations.set(run.authorization_id, fulfilledAuth);
+        schedulePersist();
+      }
+    }
 
     session.status = "completed";
     session.completed_at = now;
@@ -416,7 +442,17 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
       if (session.coverage_summary) {
         receipt.runtime_coverage_summary = session.coverage_summary;
       }
+      if (run.authorization_id) {
+        const auth = actionAuthorizations.get(run.authorization_id);
+        receipt.authorization_context = {
+          authorization_id: run.authorization_id,
+          authorization_hash: run.authorization_hash!,
+          passport_id: auth?.passport_id,
+          passport_hash: auth?.passport_hash,
+        };
+      }
       await getReceiptRepository().createReceipt(receipt);
+      // Authorization stays "active" on failure — the action did not complete.
     } catch (receiptErr) {
       console.error("[playwright-runtime] Failed to create failure receipt:", receiptErr);
     }

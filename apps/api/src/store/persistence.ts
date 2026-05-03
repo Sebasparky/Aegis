@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt } from "@aegis/types";
 import {
   users,
   collars,
@@ -26,6 +26,7 @@ import {
   credentialSessions,
   credentialFillRequests,
   delegationPassports,
+  actionAuthorizations,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -217,6 +218,7 @@ export function persistStore(): void {
       credentialSessions: Array.from(credentialSessions.entries()),
       credentialFillRequests: Array.from(credentialFillRequests.entries()),
       delegationPassports: Array.from(delegationPassports.entries()),
+      actionAuthorizations: Array.from(actionAuthorizations.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -277,6 +279,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.credentialSessions ?? [])) credentialSessions.set(k, v as CredentialUseSession);
     for (const [k, v] of (data.credentialFillRequests ?? [])) credentialFillRequests.set(k, v as CredentialFillRequest);
     for (const [k, v] of (data.delegationPassports ?? [])) delegationPassports.set(k, v as DelegationPassport);
+    for (const [k, v] of (data.actionAuthorizations ?? [])) actionAuthorizations.set(k, v as ActionAuthorizationReceipt);
 
     // Load encrypted vault blobs (ciphertext only — never plaintext).
     // Old devSecretVaultEntries from pre-KMS store files are silently ignored.
@@ -342,6 +345,7 @@ export async function resetStoreForDemo(): Promise<void> {
   credentialFillRequests.clear();
   encryptedSecretVault.clear();
   delegationPassports.clear();
+  actionAuthorizations.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

@@ -378,6 +378,82 @@ export interface DelegationPassport {
   };
 }
 
+// ─── Action Authorization Receipt ─────────────────────────────────────────────
+
+export type AuthorizationActionType =
+  | "login"
+  | "credential_fill"
+  | "purchase"
+  | "payment"
+  | "travel_booking"
+  | "financial_action"
+  | "identity_disclosure"
+  | "account_change"
+  | "destructive_action"
+  | "message_send";
+
+export type AuthorizationRiskTier = "low" | "medium" | "high" | "critical";
+
+export interface ActionAuthorizationReceipt {
+  authorization_id: string;
+  issuer: string;
+  issued_at: string;
+  status: "active" | "fulfilled" | "revoked" | "expired";
+
+  user_id: string;
+  user_aegis_id: string;
+  agent_id: string;
+  delegation_id: string;
+  passport_id?: string;
+  passport_hash?: string;
+  run_id: string;
+  route_id: string;
+  skill_id?: string;
+  domain: string;
+
+  action: {
+    action_type: AuthorizationActionType;
+    human_readable_summary: string;
+    risk_tier: AuthorizationRiskTier;
+    requires_user_approval: boolean;
+  };
+
+  constraints: {
+    allowed_domains: string[];
+    max_amount_usd?: number;
+    currency?: string;
+    expires_at?: string;
+    approval_required_for: string[];
+  };
+
+  approval: {
+    approval_method: "user_click";
+    approved_at: string;
+    approval_ui_version: string;
+    approval_text_shown: string;
+    liability_terms_version: string;
+    user_liability_acknowledged: boolean;
+  };
+
+  custody: {
+    agent_receives_raw_credentials: false;
+    agent_receives_raw_payment_data: false;
+    agent_receives_raw_identity_documents: false;
+    capability_release_model: "aegis_controlled_runtime";
+  };
+
+  // Populated after the associated RouteRun completes execution successfully.
+  fulfillment?: {
+    execution_receipt_id?: string;
+    fulfilled_at?: string;
+  };
+
+  verification: {
+    authorization_hash: string;
+    authorization_jws: string;
+  };
+}
+
 export interface PolicyEvalInput {
   collar: Collar;
   session?: ProtectedSession;
@@ -642,6 +718,12 @@ export interface RouteRunReceipt {
   pass_ids_used?: string[];
   secret_values_revealed_to_agent?: false;
   runtime_coverage_summary?: RuntimeCoverageSummary;
+  authorization_context?: {
+    authorization_id: string;
+    authorization_hash: string;
+    passport_id?: string;
+    passport_hash?: string;
+  };
 }
 
 // ─── Aegis Rails — RoutePassBinding ──────────────────────────────────────────
@@ -688,6 +770,8 @@ export interface RouteRun {
   // Set when an execution surface claims the run before starting it.
   // Prevents other surfaces (e.g. Chrome extension) from racing.
   claimed_execution_surface?: AegisExecutionSurface;
+  authorization_id?: string;
+  authorization_hash?: string;
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────

@@ -16,6 +16,7 @@ import type {
   RouteRun,
   RouteRunReceipt,
   DelegationPassport,
+  ActionAuthorizationReceipt,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -177,6 +178,9 @@ export const credentialFillRequests = new Map<string, CredentialFillRequest>();
 
 // Signed delegation passports issued to agents; local JSON persistence only (v1).
 export const delegationPassports = new Map<string, DelegationPassport>();
+
+// Signed action authorization receipts created at approval time; local JSON persistence only (v1).
+export const actionAuthorizations = new Map<string, ActionAuthorizationReceipt>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

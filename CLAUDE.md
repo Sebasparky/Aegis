@@ -241,6 +241,12 @@ Before making any changes:
 - Do not claim a Delegation Passport proves the agent has no out-of-band secrets — it attests only to Aegis-covered capability release and controlled runtime behavior; `aegis_coverage_boundary.aegis_does_not_prove_agent_has_no_out_of_band_secrets: true` must remain in every passport
 - Do not put raw secrets, passwords, payment card data, secret_refs, ciphertext, or private keys in a Delegation Passport — only aggregate counts, capability booleans, domains, and receipt IDs
 - Future website handshake features should consume `passport_jws` from the Delegation Passport — do not build a website handshake without first creating and verifying a passport
+- Action Authorization Receipt v1 is **complete** — do not rebuild `ActionAuthorizationReceipt` type, `actionAuthorizationSigning.ts`, `action-authorizations.ts` routes, `actionAuthorizations` Map, the authorization creation in the approve endpoint, or `authorization_context` on `RouteRunReceipt` unless explicitly requested
+- `authorization_hash` intentionally excludes `status` and `fulfillment` — this is correct; fulfilled and active authorizations both have valid hashes; do not change the hashing strategy
+- Failed executions leave authorization `status: "active"` — do not mark it fulfilled on failure; the action did not complete
+- Do not revoke a fulfilled authorization — the action already ran; revoke only applies to `active` authorizations
+- `authorization_context` on `RouteRunReceipt` links an execution receipt back to the authorization that permitted it — populate in both success and failure receipt paths
+- Action authorization signing requires `AEGIS_RECEIPT_JWS_PRIVATE_JWK` — no unsigned-dev-mode fallback; authorization creation failure in the approve endpoint is non-blocking (logs error, approval proceeds)
 
 ## Terminology — Always Use
 

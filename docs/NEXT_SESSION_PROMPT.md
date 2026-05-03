@@ -36,6 +36,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Auto-start Playwright Runs v1. It is complete. Do not re-implement `claimed_execution_surface` on `RouteRun`, the fire-and-forget Playwright auto-start in the approval endpoint, or the `isEligibleForBackgroundAutoRun` guard for `claimed_execution_surface` in the extension. Approval of an `aegis_controlled` run automatically triggers Playwright — do not instruct the agent to call `start_playwright_route_run` after approval unless the run remains pending (fallback only).**
 >
 > **Also: do NOT rebuild Delegation Passport v1. It is complete. Do not re-implement `DelegationPassport` type, `delegationPassportSigning.ts`, `delegation-passports.ts` routes, `delegationPassports` Map, MCP tools `create_delegation_passport`/`verify_delegation_passport`, or passport persistence. Do not claim a valid passport proves the agent has no out-of-band secrets — it proves only that Aegis-covered sensitive actions were constrained by user approval, KMS credential custody, the Aegis Playwright controlled runtime, and signed receipts.**
+>
+> **Also: do NOT rebuild Action Authorization Receipt v1. It is complete. Do not re-implement `ActionAuthorizationReceipt` type, `actionAuthorizationSigning.ts`, `action-authorizations.ts` routes, `actionAuthorizations` Map, or the authorization creation in the approve endpoint. `authorization_hash` excludes `status` and `fulfillment` by design — fulfilled and active authorizations both have valid hashes. Do not revoke a fulfilled authorization. Failed executions leave authorization `active`. No raw secrets, passwords, or private keys in authorization receipts.**
 
 ---
 
@@ -333,6 +335,21 @@ Everything below is implemented and working.
 - **Implemented 2026-05-02**
 - Do not rebuild unless explicitly requested
 
+### Action Authorization Receipt v1
+- `ActionAuthorizationReceipt` interface added to `packages/types/src/index.ts` — covers `action`, `constraints`, `approval`, `custody`, `fulfillment`, `verification`
+- `apps/api/src/lib/actionAuthorizationSigning.ts` — `hashActionAuthorization` (SHA-256 excluding `status`, `fulfillment`, `verification`), `signActionAuthorizationJws` (EdDSA/Ed25519), `verifyActionAuthorizationJws`; requires `AEGIS_RECEIPT_JWS_PRIVATE_JWK` (no unsigned-dev-mode fallback)
+- `actionAuthorizations: Map<string, ActionAuthorizationReceipt>` added to store; persisted as `actionAuthorizations`; cleared on `resetStoreForDemo`
+- `apps/api/src/routes/action-authorizations.ts` — `GET /api/action-authorizations`, `GET /api/action-authorizations/:id`, `GET /api/action-authorizations/:id/verify`, `POST /api/action-authorizations/:id/revoke`
+- Authorization created in approve endpoint before Playwright fire-and-forget; `run.authorization_id`/`run.authorization_hash` set on `RouteRun`
+- `playwrightRuntime.ts`: `authorization_context` attached to both success and failure receipts; authorization marked `fulfilled` after `createReceipt` on success path only
+- `RouteRunReceipt` has new optional `authorization_context` field linking receipt back to authorization
+- `RouteRun` has new optional `authorization_id`/`authorization_hash` fields
+- Verify semantics: `valid = hash_valid && signature_valid && !revoked && !expired`; fulfilled authorizations remain `valid`; `revoke` fails with 409 if already fulfilled
+- Authorization creation failure in approve endpoint is non-blocking (logs error, run proceeds)
+- No raw secrets, passwords, secret_refs, or private keys in authorization receipts or API responses
+- **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script
@@ -388,10 +405,11 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Delegation Passport v1 is complete** — implemented 2026-05-02. Agents can now create and verify a cryptographically signed Delegation Passport that documents: human subject, agent subject, collar-backed action limits, capability attestations, KMS custody model, Aegis coverage boundary, and receipt-backed evidence. The passport does NOT prove the agent has no out-of-band secrets. See "Delegation Passport v1" in Completed Increments.
 
+**Action Authorization Receipt v1 is complete** — implemented 2026-05-02. A signed proof is created at approval time before Playwright execution begins. After successful execution, the authorization is marked `fulfilled` and linked to the execution receipt via `authorization_context`. `authorization_hash` excludes `status` and `fulfillment` so the cryptographic proof stays valid throughout the lifecycle. See "Action Authorization Receipt v1" in Completed Increments.
+
 **Candidate next milestones:**
 
-1. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
-2. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history and policy compliance
+1. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history and policy compliance
 3. **Website Handshake v1** — structured API call where a website can request and verify a Delegation Passport before accepting agent requests
 4. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
 

@@ -1167,3 +1167,73 @@ export interface WebsiteAgentSafetyProfile {
     not_a_guarantee: true;
   };
 }
+
+// ─── Website .well-known Aegis Policy ─────────────────────────────────────────
+
+export type WebsiteAegisAgentAccess =
+  | "not_supported"
+  | "allowed_with_aegis"
+  | "allowed_with_approval"
+  | "restricted"
+  | "blocked";
+
+export interface WebsiteAegisPolicyWorkflow {
+  workflow_id: string;
+  name: string;
+  task_category: DelegationTrustTaskCategory;
+  path_prefixes: string[];
+  required_capabilities: RuntimeCapabilityType[];
+  requires_user_approval: boolean;
+  max_amount_usd?: number;
+  currency?: string;
+  allowed_payment_instrument_types?: string[];
+  prohibited_capabilities?: RuntimeCapabilityType[];
+  prohibited_actions?: string[];
+  support_path?: string;
+  refund_policy?: string;
+  dispute_policy?: string;
+  notes?: string;
+}
+
+export interface WebsiteAegisPolicy {
+  version: "aegis-policy-v1";
+  domain: string;
+  issued_at: string;
+  agent_access: WebsiteAegisAgentAccess;
+  verification_level: WebsiteVerificationLevel;
+  policy_source: "well_known" | "seeded_demo" | "manual_review";
+  supported_workflows: WebsiteAegisPolicyWorkflow[];
+  global_prohibited_actions: string[];
+  required_assertions: Array<
+    | "delegation_passport_v1"
+    | "website_trust_assertion_v1"
+    | "action_authorization_receipt_v1"
+  >;
+  contact?: {
+    support_url?: string;
+    security_url?: string;
+    terms_url?: string;
+  };
+  limitations: {
+    not_business_verified: boolean;
+    self_asserted_policy: true;
+    not_a_guarantee: true;
+  };
+}
+
+export interface WebsiteAegisPolicyValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  policy?: WebsiteAegisPolicy;
+}
+
+export interface WebsitePolicyCompatibilityResult {
+  compatible: boolean;
+  recommendation: "allow" | "allow_with_approval" | "step_up_required" | "deny";
+  reasons: string[];
+  mismatches: string[];
+  required_capabilities: RuntimeCapabilityType[];
+  required_assertions: string[];
+  matching_workflows: string[];
+}

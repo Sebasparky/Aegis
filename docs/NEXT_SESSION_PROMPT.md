@@ -423,11 +423,14 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Website Agent-Safety Profile v1 is complete** — implemented 2026-05-03. `GET /api/website-agent-safety/profile?domain=&task_category=` returns a `WebsiteAgentSafetyProfile` evaluated from Aegis-observed signals: known routes, verified receipts, runtime coverage violations, interventions, and observation mode. Recommendation (`allow_with_approval` / `step_up_required` / `deny`) is determined deterministically — negative evidence (violation receipts, uncovered events) overrides positive (clean receipts). Does not perform live crawling, does not verify business identity, does not require signing keys. MCP tool `get_website_agent_safety_profile` exposes this to agents. No secrets in responses — aggregate only. Do not rebuild unless explicitly requested.
 
+**Website .well-known Aegis Policy v1 is complete** — implemented 2026-05-03. Demo policy served at `http://localhost:3000/.well-known/aegis-policy.json` (and `/well-known/aegis-policy.json` alias). `WebsiteAegisPolicy` type declares `agent_access`, `verification_level`, `supported_workflows`, `required_assertions`, `limitations`. API endpoints: `GET /api/website-aegis-policy?domain=`, `GET /api/website-aegis-policy/validate?domain=`, `GET /api/website-aegis-policy/compatibility?domain=&task_category=`. Only `localhost` fetch is enabled in v1; non-localhost returns `POLICY_NOT_AVAILABLE`. `computeWebsiteAgentSafetyProfile` now fetches and consumes the policy: `policy_source: "well_known"` in legibility; `well_known_policy_present` and capability constraints enriched in `task_fit`; machine-readable reasons include policy-declared workflow support. Policy alone does NOT upgrade recommendation — clean receipt evidence is still required for `allow_with_approval`. Invalid policy adds `invalid_website_policy` disqualifying signal (`step_up_required`, not `deny`). Three new MCP tools: `get_website_aegis_policy`, `validate_website_aegis_policy`, `check_website_policy_compatibility`. No JWS signing, no business verification, no live internet crawl. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
-2. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
-3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+1. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
+2. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+3. **External Agent Delegation API v1** — REST endpoint for third-party agent runtimes to create delegations programmatically
+4. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

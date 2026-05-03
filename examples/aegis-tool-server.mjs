@@ -589,6 +589,64 @@ function interpretSafetyProfile(profile) {
   return `${base} ${note} ${caveat}`;
 }
 
+async function getWebsiteAegisPolicy({ domain } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-aegis-policy?domain=${encodeURIComponent(domain)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error ?? "POLICY_NOT_AVAILABLE", message: res.message ?? "Policy not available for this domain." };
+  }
+  const { policy, validation } = res.data;
+  return {
+    domain: policy?.domain,
+    version: policy?.version,
+    agent_access: policy?.agent_access,
+    verification_level: policy?.verification_level,
+    policy_source: policy?.policy_source,
+    supported_workflows: policy?.supported_workflows,
+    required_assertions: policy?.required_assertions,
+    limitations: policy?.limitations,
+    validation: {
+      valid: validation?.valid,
+      warnings: validation?.warnings,
+      errors: validation?.errors,
+    },
+  };
+}
+
+async function validateWebsiteAegisPolicy({ domain } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-aegis-policy/validate?domain=${encodeURIComponent(domain)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error ?? "POLICY_NOT_AVAILABLE", message: res.message ?? "Policy not available for this domain." };
+  }
+  return res.data;
+}
+
+async function checkWebsitePolicyCompatibility({ domain, task_category } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-aegis-policy/compatibility?domain=${encodeURIComponent(domain)}&task_category=${encodeURIComponent(task_category)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error ?? "POLICY_NOT_AVAILABLE", message: res.message ?? "Policy not available for this domain." };
+  }
+  return res.data;
+}
+
 async function getDelegationTrustProfile({ delegation_id, task_category } = {}) {
   if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
   if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
@@ -1171,6 +1229,60 @@ const TOOLS = [
       required: ["domain", "task_category"],
     },
   },
+  {
+    name: "get_website_aegis_policy",
+    description:
+      "Fetch and return the Aegis agent policy published by a website at its /.well-known/aegis-policy.json endpoint. The policy declares which agent workflows the site supports, what capabilities are required, what is prohibited, and what assertions agents must provide. Self-asserted in v1 — not business-verified and not signed. Use alongside get_website_agent_safety_profile to get both the site-declared contract and Aegis-observed evidence. Only localhost is supported in v1.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain to fetch the Aegis policy for (e.g. 'localhost', 'localhost:3000').",
+        },
+      },
+      required: ["domain"],
+    },
+  },
+  {
+    name: "validate_website_aegis_policy",
+    description:
+      "Fetch and validate the structural integrity of a website's Aegis policy. Returns validation result with errors (disqualifying) and warnings (non-disqualifying). Use to check whether a policy is well-formed before using it for compatibility or trust decisions. Only localhost is supported in v1.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain whose Aegis policy to validate.",
+        },
+      },
+      required: ["domain"],
+    },
+  },
+  {
+    name: "check_website_policy_compatibility",
+    description:
+      "Check whether a website's declared Aegis policy is compatible with a specific task category. Returns whether the combination is compatible, the recommendation (allow/allow_with_approval/step_up_required/deny), required capabilities, required assertions the agent must provide, and the matching workflow IDs. Use before requesting a skill run to verify the website policy supports the intended task. Only localhost is supported in v1.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain to check compatibility for.",
+        },
+        task_category: {
+          type: "string",
+          enum: [
+            "login", "credential_fill", "purchase", "payment", "travel_booking",
+            "financial_action", "identity_disclosure", "account_change",
+            "destructive_action", "message_send",
+          ],
+          description: "The task category the agent intends to perform.",
+        },
+      },
+      required: ["domain", "task_category"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -1245,6 +1357,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_website_agent_safety_profile":
       result = await getWebsiteAgentSafetyProfile(a);
+      break;
+    case "get_website_aegis_policy":
+      result = await getWebsiteAegisPolicy(a);
+      break;
+    case "validate_website_aegis_policy":
+      result = await validateWebsiteAegisPolicy(a);
+      break;
+    case "check_website_policy_compatibility":
+      result = await checkWebsitePolicyCompatibility(a);
       break;
     default:
       return {

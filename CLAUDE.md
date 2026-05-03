@@ -300,6 +300,15 @@ Before making any changes:
 - `secret_exposure_events` in `WebsiteAgentSafetyProfile` uses `r.secret_values_revealed_to_agent` truthiness check from receipts only — not from intervention types; `blocked_sensitive_action_without_capability_release` means Aegis blocked a missing-capability attempt, not that a secret was exposed
 - Do not include raw receipt JSON, `secret_ref` values, credential values, `devvault://` references, or private keys in any `WebsiteAgentSafetyProfile` response — aggregate only
 
+Website .well-known Aegis Policy v1 is **complete** — do not rebuild `WebsiteAegisPolicy`, `WebsiteAegisPolicyWorkflow`, `WebsiteAegisPolicyValidationResult`, `WebsitePolicyCompatibilityResult`, `WebsiteAegisAgentAccess` types, `website-aegis-policy.ts` routes, `validateWebsiteAegisPolicy`, `getWebsiteAegisPolicyForDomain`, or `get_website_aegis_policy`/`validate_website_aegis_policy`/`check_website_policy_compatibility` MCP tools unless explicitly requested
+- Website Aegis Policy is self-asserted in v1 — do not treat it as business verification; `limitations.self_asserted_policy: true` and `limitations.not_a_guarantee: true` must always be present in any policy response
+- Policy alone must not upgrade recommendation to `allow` or `allow_with_approval` in `WebsiteAgentSafetyProfile` — it enriches legibility, constraints, and machine-readable reasons only; observed clean receipt evidence is still required for `allow_with_approval`
+- Invalid policy adds `invalid_website_policy` disqualifying signal and results in `step_up_required`, not `deny` — in v1, invalid policy is a caution signal, not proof of fraud or malicious intent
+- Valid policy + no receipts → `step_up_required`; valid policy + violation receipts → `step_up_required`; valid policy + clean receipts → `allow_with_approval` (unchanged from pre-policy decision logic)
+- Do not include raw secrets, pass IDs, card numbers, CVV, PAN, private keys, or `secret_ref` values in any `WebsiteAegisPolicy` response
+- The localhost `.well-known` policy is demo-only — do not enable live internet fetching for non-localhost domains unless explicitly requested; non-localhost returns `POLICY_NOT_AVAILABLE` (404) in v1
+- Import direction is one-way: `website-agent-safety.ts` imports from `website-aegis-policy.ts`; do not create a reverse import — that would be circular
+
 ## Terminology — Always Use
 
 | Term | Meaning |

@@ -1853,6 +1853,109 @@ Raw passwords, card numbers, CVV, PAN, SSN, passport data, `secret_ref` values, 
 
 ---
 
+## Website .well-known Aegis Policy v1
+
+### What it is
+
+The Website Aegis Policy is the mirror of the Delegation Passport in the opposite direction:
+
+- **Delegation Passport** says: *"I am an agent acting for this user, with these scoped permissions and constraints."*
+- **Website Aegis Policy** says: *"I am a website that supports agents under these workflows, requirements, limits, and safety rules."*
+
+Together, Aegis compares these two contracts before sensitive execution — negotiating trust between agents and websites, not just watching agents use websites.
+
+### Endpoint
+
+```
+GET /.well-known/aegis-policy.json
+```
+
+Alias (for compatibility):
+```
+GET /well-known/aegis-policy.json
+```
+
+### Difference from Website Agent-Safety Profile
+
+| | Website Aegis Policy | Website Agent-Safety Profile |
+|---|---|---|
+| Source | Website self-declared | Aegis-computed from observed evidence |
+| What it describes | What the website claims it supports | What Aegis has actually observed |
+| Authority | Self-asserted | Evidence-backed |
+| Signing | Not signed in v1 | Not signed |
+| Use | Declare workflows, capabilities, prohibitions | Evaluate safety posture before task |
+
+Agents should check **both**: the policy tells you what the site declares it supports; the profile tells you what Aegis has actually verified.
+
+### Policy fields
+
+```json
+{
+  "version": "aegis-policy-v1",
+  "domain": "localhost",
+  "issued_at": "2026-05-03T00:00:00.000Z",
+  "agent_access": "allowed_with_aegis",
+  "verification_level": "dev_localhost",
+  "policy_source": "well_known",
+  "supported_workflows": [
+    {
+      "workflow_id": "demo_travel_booking",
+      "name": "Demo Travel Booking",
+      "task_category": "travel_booking",
+      "path_prefixes": ["/demo-travel"],
+      "required_capabilities": ["payment_method"],
+      "requires_user_approval": true,
+      "max_amount_usd": 100,
+      "currency": "USD",
+      "allowed_payment_instrument_types": ["demo_card"],
+      "notes": "Mock workflow. No real money is processed."
+    }
+  ],
+  "global_prohibited_actions": ["identity_disclosure", "account_deletion"],
+  "required_assertions": ["delegation_passport_v1", "website_trust_assertion_v1"],
+  "contact": { "support_url": "...", "terms_url": "..." },
+  "limitations": {
+    "not_business_verified": true,
+    "self_asserted_policy": true,
+    "not_a_guarantee": true
+  }
+}
+```
+
+### API endpoints
+
+```
+GET /api/website-aegis-policy?domain=localhost
+GET /api/website-aegis-policy/validate?domain=localhost
+GET /api/website-aegis-policy/compatibility?domain=localhost&task_category=travel_booking
+```
+
+Only `localhost` is supported in v1. Non-localhost returns `POLICY_NOT_AVAILABLE`.
+
+### MCP tools
+
+- `get_website_aegis_policy` — fetch and return the policy for a domain
+- `validate_website_aegis_policy` — validate structural integrity
+- `check_website_policy_compatibility` — check policy compatibility with a task category
+
+### How agents use it
+
+1. Fetch policy with `get_website_aegis_policy`
+2. Check compatibility with `check_website_policy_compatibility` for your task category
+3. Fetch safety profile with `get_website_agent_safety_profile` for Aegis-observed evidence
+4. If compatible + policy valid + evidence sufficient → request skill run with appropriate approval gates
+5. Present `required_assertions` (delegation passport, website trust assertion) to satisfy policy requirements
+
+### What it does NOT prove
+
+- **Not business-verified** — policy is self-asserted; `limitations.not_business_verified: true` is always set in v1
+- **Not signed** — no JWS signature in v1; policy authenticity is not cryptographically guaranteed
+- **Not live reputation** — no crawl-based verification of workflow accuracy
+- **Not a guarantee of fulfillment** — `limitations.not_a_guarantee: true` is always set
+- **Policy alone does not unlock `allow_with_approval`** — clean Aegis-observed receipt evidence is still required
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.
@@ -1863,3 +1966,4 @@ Raw passwords, card numbers, CVV, PAN, SSN, passport data, `secret_ref` values, 
 - This is not a credential custody or pass vault system. Demo Login uses fake seeded credentials for demo purposes only. Real credential injection is not implemented.
 - The travel booking demo is not real payment processing. No money changes hands. The workflow demonstrates authorization and audit chain only.
 - Delegation Passports do not prove the agent has no out-of-band secrets. They prove only Aegis-covered delegation boundaries.
+- Website Aegis Policies are self-asserted in v1 and do not prove business identity, workflow accuracy, or fulfillment.

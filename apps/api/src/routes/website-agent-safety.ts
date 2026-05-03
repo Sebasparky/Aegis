@@ -6,9 +6,12 @@ import type {
   DelegationTrustTaskCategory,
   RuntimeCapabilityType,
   ActionType,
+  WebsiteAegisPolicy,
+  WebsiteAegisPolicyValidationResult,
 } from "@aegis/types";
 import { routes, domainTrust, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
+import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -95,6 +98,19 @@ export async function computeWebsiteAgentSafetyProfile(
   taskCategory: DelegationTrustTaskCategory
 ): Promise<WebsiteAgentSafetyProfile> {
 
+  // 0. Attempt well-known policy fetch (best-effort; errors don't block profile)
+  let wellKnownPolicy: WebsiteAegisPolicy | undefined;
+  let policyValidation: WebsiteAegisPolicyValidationResult | undefined;
+  try {
+    const policyResult = await getWebsiteAegisPolicyForDomain(domain);
+    wellKnownPolicy = policyResult.policy;
+    policyValidation = policyResult.validation;
+  } catch {
+    // best-effort — errors don't block profile
+  }
+  const hasValidWellKnownPolicy =
+    wellKnownPolicy !== undefined && policyValidation?.valid === true;
+
   // 1. Verification level
   const verificationLevel: WebsiteVerificationLevel =
     domain === "localhost" || domain.startsWith("localhost:")
@@ -119,6 +135,12 @@ export async function computeWebsiteAgentSafetyProfile(
         // credential_fill is a sub-case of login — both are supported when login routes exist
         if (perm === "login") supportedCategorySet.add("credential_fill");
       }
+    }
+  }
+  // Augment with task categories declared in well-known policy
+  if (hasValidWellKnownPolicy && wellKnownPolicy) {
+    for (const wf of wellKnownPolicy.supported_workflows) {
+      supportedCategorySet.add(wf.task_category);
     }
   }
   const supportedTaskCategories = Array.from(supportedCategorySet);
@@ -187,9 +209,10 @@ export async function computeWebsiteAgentSafetyProfile(
   );
 
   // 6. Website legibility
-  const hasPolicySource = verificationLevel === "dev_localhost" || domainTrust.has(domain) || hasKnownRoutes;
+  const hasPolicySource = verificationLevel === "dev_localhost" || domainTrust.has(domain) || hasKnownRoutes || hasValidWellKnownPolicy;
   let policySource: "seeded_demo" | "route_metadata" | "well_known" | "manual_review" | undefined;
-  if (verificationLevel === "dev_localhost" && hasKnownRoutes) policySource = "seeded_demo";
+  if (hasValidWellKnownPolicy) policySource = "well_known";
+  else if (verificationLevel === "dev_localhost" && hasKnownRoutes) policySource = "seeded_demo";
   else if (hasKnownRoutes) policySource = "route_metadata";
   else if (domainTrust.has(domain)) policySource = "manual_review";
 
@@ -210,6 +233,24 @@ export async function computeWebsiteAgentSafetyProfile(
     }
     if ((route.forbidden_actions ?? []).length > 0 && !knownConstraints.includes("has_forbidden_actions")) {
       knownConstraints.push("has_forbidden_actions");
+    }
+  }
+
+  // Enrich constraints from well-known policy
+  if (hasValidWellKnownPolicy && wellKnownPolicy) {
+    knownConstraints.push("well_known_policy_present");
+    if (wellKnownPolicy.agent_access === "allowed_with_aegis") {
+      knownConstraints.push("website_declares_agent_access_allowed_with_aegis");
+    }
+    const matchingPolicyWorkflows = wellKnownPolicy.supported_workflows.filter(
+      (w) => w.task_category === taskCategory
+    );
+    if (matchingPolicyWorkflows.some((w) => w.requires_user_approval)) {
+      knownConstraints.push("policy_requires_user_approval");
+    }
+    const policyCaps = new Set(matchingPolicyWorkflows.flatMap((w) => w.required_capabilities));
+    for (const cap of policyCaps) {
+      knownConstraints.push(`policy_requires_capability:${cap}`);
     }
   }
 
@@ -252,6 +293,10 @@ export async function computeWebsiteAgentSafetyProfile(
   if (uncoveredSensitiveEvents > 0) disqualifyingSignals.push("uncovered_sensitive_events_detected");
   if (matchingRoutes.length === 0) disqualifyingSignals.push("no_matching_route_for_task");
   if (validDomainReceipts.length === 0) disqualifyingSignals.push("no_execution_evidence");
+  // Policy was fetched but invalid — caution signal, not a hard deny
+  if (policyValidation !== undefined && !policyValidation.valid) {
+    disqualifyingSignals.push("invalid_website_policy");
+  }
 
   // 10. Machine-readable reasons
   const machineReadableReasons: string[] = [];
@@ -265,6 +310,15 @@ export async function computeWebsiteAgentSafetyProfile(
   if (supportsAegisControlledRuntime) machineReadableReasons.push("supports_aegis_controlled_runtime");
   if (supportsCapabilityReleaseGate) machineReadableReasons.push("capability_release_gate_active");
   if (hasSensitiveWorkflowSupport) machineReadableReasons.push("has_sensitive_workflow_support");
+  if (hasValidWellKnownPolicy) {
+    machineReadableReasons.push("well-known Aegis policy found for domain");
+    const matchingPolicyWorkflows = wellKnownPolicy!.supported_workflows.filter(
+      (w) => w.task_category === taskCategory
+    );
+    if (matchingPolicyWorkflows.length > 0) {
+      machineReadableReasons.push(`policy declares workflow support for ${taskCategory}`);
+    }
+  }
 
   return {
     profile_id: newId("wsasp"),

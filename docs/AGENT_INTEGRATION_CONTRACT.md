@@ -131,6 +131,74 @@ Returns the metadata-only event list for the session.
 
 ---
 
+## Coverage Violation Blocking v1
+
+When Aegis observes a sensitive event classified as `not_covered_by_aegis` during Playwright execution, it blocks the run before issuing a completed receipt.
+
+### What triggers a violation
+
+A sensitive event triggers a violation when:
+- Its coverage status is `not_covered_by_aegis` (high or critical severity, outside all active Aegis coverage windows)
+- Example: a credential form submit fires at page load before any Aegis route step has opened a coverage window
+
+A sensitive event is **not** a violation when:
+- It is classified `covered_by_aegis` (occurred inside a time-bounded coverage window opened by a route step)
+- It is classified `unknown` (low/warning severity — audited but not blocking)
+
+### What Aegis does on violation
+
+1. Creates a `RuntimeIntervention` record for each uncovered event (metadata only — no field values)
+2. Marks the run `status: "failed"` with `error: "VIOLATION_BLOCKED: ..."`
+3. Creates a signed failed receipt with `runtime_interventions` and `runtime_coverage_summary`
+4. Leaves the `ActionAuthorizationReceipt` `status: "active"` — the action did not safely complete
+5. Does **not** mark the authorization `fulfilled`
+6. Does **not** issue a `completed` receipt
+
+### Receipt on violation
+
+```json
+{
+  "status": "failed",
+  "error": "VIOLATION_BLOCKED: 1 uncovered sensitive event(s) detected outside Aegis-controlled windows.",
+  "runtime_coverage_summary": {
+    "sensitive_events": 2,
+    "covered_events": 1,
+    "uncovered_events": 1,
+    "blocked_events": 1,
+    "interventions": 1
+  },
+  "runtime_interventions": [
+    {
+      "intervention_id": "rtintv_...",
+      "type": "blocked_uncovered_sensitive_submit",
+      "sensitivity": "credential",
+      "event_type": "sensitive_form_submit",
+      "page_url": "http://localhost:3000/demo-travel?violation=1",
+      "element_hint": "form",
+      "reason": "Uncovered sensitive sensitive_form_submit (credential) outside Aegis-controlled window — run blocked."
+    }
+  ]
+}
+```
+
+Violation receipts are signed with the same Ed25519/EdDSA chain as successful receipts and verify correctly. They count as negative evidence in the Delegation Trust Profile (`uncovered_events > 0` → `trust_status: "caution"`).
+
+### Trust profile impact
+
+- Violation receipts are scanned for uncovered events even though their authorization is not fulfilled
+- `uncovered_events > 0` → `trust_status: "caution"`, `disqualifying_signals: ["uncovered_sensitive_events_detected"]`
+- Violation runs do **not** count as positive category experience
+- No trust upgrade occurs from a blocked run
+
+### Limitations
+
+- Aegis blocks what it observes inside the controlled Playwright session, not everything
+- Malicious code executing outside the Playwright process is not detected
+- Not a guarantee of complete safety — a claim that observable in-session events were covered or blocked
+- `not_covered_by_aegis` classification applies only to high/critical severity events; low/warning events are `unknown` and audited but not blocking
+
+---
+
 ## Routine vs Sensitive Workflows
 
 Every skill returned by `discover_installed_skills` carries two fields that tell the agent how to act:
@@ -1469,6 +1537,118 @@ Travel booking evidence is category-specific. Login history does not count towar
 - `agent_receives_raw_payment_data: false` is set in every authorization receipt custody block
 - The demo payment method label ("Aegis Demo Card ending 4242") is the only payment data visible in receipts and authorizations
 - `secret_values_revealed_to_agent: false` on every execution receipt
+
+---
+
+## Capability Release Gate v1
+
+### Why timing windows were insufficient
+
+Coverage Violation Blocking v1 classified sensitive events as `covered_by_aegis` if they fell inside a time-bounded window opened around an Aegis-controlled action. Timing is fragile: page hydration, redirects, network delays, and real-website behavior can fire events before or after windows without any security violation occurring. Conversely, a rogue page script could exploit the window to submit an uncovered form submit during the open interval.
+
+Capability Release Gate v1 replaces timing-window-based coverage for sensitive events with **provenance-based coverage**: a sensitive event is `covered_by_aegis` only when the required sensitive capability was explicitly released by Aegis for this specific run, domain, and capability type.
+
+### What a capability release is
+
+A `RuntimeCapabilityRelease` records that Aegis has taken custody of a sensitive capability and released it for use in an Aegis-controlled session. It is ephemeral (in-memory, reset across API restarts) and is copied into receipts at run completion.
+
+| Field | Description |
+|---|---|
+| `capability_release_id` | Unique ID (prefix `caprel`) |
+| `capability_type` | `login_credential`, `payment_method`, or `identity_profile` |
+| `capability_ref` | Opaque ID — `pass_id` for login, `payment_method_id` for payment. Never a secret value. |
+| `run_id` | The RouteRun this release belongs to |
+| `released_to` | Always `"aegis_playwright_runtime"` |
+| `raw_secret_revealed_to_agent` | Always `false` (TypeScript literal type) |
+| `expires_at` | 10 minutes from creation (defense-in-depth) |
+| `constraints` | Inherited from `ActionAuthorizationReceipt.constraints` (max_amount_usd, allowed_domains, etc.) |
+
+### Three capability types
+
+| `capability_type` | When created | `capability_ref` |
+|---|---|---|
+| `login_credential` | After a `secret_ref` fill step resolves and fills the password via KMS | `pass_id` (e.g., `vp_demo_login_001`) |
+| `payment_method` | Before a payment-intent click step in a travel/payment route, if the user has a payment method | `payment_method_id` (e.g., `pay_method_demo_001`) |
+| `identity_profile` | Not created in v1 — identity events are always blocked if they occur | — |
+
+`login_credential` releases are NOT created for `pass_field` fills (the username, which is not a secret capability). Only `secret_ref` fills (the password) trigger a release.
+
+`payment_method` releases are created only for click steps whose button name/label matches payment intent keywords (Pay, Book, Purchase, Submit Payment, Place Order, Confirm Payment, Confirm Booking). Non-payment clicks in the same route do not trigger a release. If no payment method exists for the user, no release is created and any payment submit will fail as `not_covered_by_aegis`.
+
+### Coverage rule
+
+For each runtime event:
+
+1. `requiredCapabilityForEvent(event, actionType)` determines the required capability type:
+   - `credential` sensitivity → `login_credential`
+   - `payment` or `financial` sensitivity → `payment_method`
+   - `identity` sensitivity → `identity_profile`
+   - `unknown_sensitive` + `sensitive_form_submit` + payment/travel route → `payment_method`
+   - Otherwise → no capability required
+
+2. If a capability is required:
+   - `findMatchingCapabilityRelease(run_id, user_id, domain, capability_type)` is called
+   - **Match found → `covered_by_aegis`** with `capability_release_id` attached to the event
+   - **No match → `not_covered_by_aegis`** regardless of timing windows
+   - Timing windows are NOT consulted for events with a required capability
+
+3. If no capability is required:
+   - `unknown_sensitive` high/critical events: `not_covered_by_aegis` (conservative — timing windows not granted for high-risk unknowns)
+   - Other events: use existing timing-window logic (lower-risk events not requiring a named capability)
+
+### Blocking behavior
+
+If any event is `not_covered_by_aegis` after capability evaluation, the run is blocked:
+- `RuntimeIntervention` created with `type: "blocked_sensitive_action_without_capability_release"` (when capability was required but missing)
+- `capability_type_required` and `capability_release_present: false` attached to the intervention
+- Run status set to `"failed"` with `VIOLATION_BLOCKED` error
+- Signed failed receipt created with `runtime_capability_releases`, `runtime_interventions`, `runtime_coverage_summary`
+- Authorization stays `"active"` — the action did not complete
+
+### New intervention types
+
+| Type | When used |
+|---|---|
+| `blocked_sensitive_action_without_capability_release` | Event required a capability release but none existed for the run |
+| `blocked_capability_constraint_violation` | Release exists but constraints are violated (reserved for future enforcement) |
+
+### Receipt fields
+
+On both success and failure, receipts include:
+
+```json
+{
+  "runtime_capability_releases": [
+    {
+      "capability_release_id": "caprel_abc123",
+      "capability_type": "login_credential",
+      "capability_ref": "vp_demo_login_001",
+      "run_id": "run_...",
+      "user_id": "user_001",
+      "domain": "localhost",
+      "task_category": "login",
+      "released_to": "aegis_playwright_runtime",
+      "raw_secret_revealed_to_agent": false,
+      "created_at": "...",
+      "expires_at": "..."
+    }
+  ],
+  "capability_release_summary": {
+    "releases_created": 1,
+    "login_credential_releases": 1,
+    "payment_method_releases": 0,
+    "identity_profile_releases": 0,
+    "raw_secret_revealed_to_agent": false
+  }
+}
+```
+
+No raw secrets, passwords, PAN, CVV, private keys, or decrypted values appear in capability releases or receipts.
+
+### What this proves and does not prove
+
+- Proves: a credential or payment capability was explicitly released by Aegis for this run, the release was active when the sensitive event occurred, no raw secret was revealed to the agent
+- Does not prove: the agent has no out-of-band secrets, that all web actions are covered by Aegis, that the website has not been compromised, that the agent cannot interact with the page through other means
 
 ---
 

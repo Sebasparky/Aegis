@@ -700,6 +700,78 @@ export type RuntimeEventSensitivityKind =
   | "account_change"
   | "unknown_sensitive";
 
+export type RuntimeEventType =
+  | "sensitive_field_focus"
+  | "sensitive_field_input"
+  | "sensitive_button_click"
+  | "sensitive_form_submit";
+
+export type RuntimeCoverageStatus =
+  | "covered_by_aegis"
+  | "not_covered_by_aegis"
+  | "unknown";
+
+// The type of sensitive capability that was explicitly released by Aegis for a run.
+// Coverage of a sensitive event is granted by a matching release, not by timing proximity.
+export type RuntimeCapabilityType =
+  | "login_credential"
+  | "payment_method"
+  | "identity_profile";
+
+// Records that Aegis explicitly released a sensitive capability for use in a specific run.
+// Ephemeral for v1 — copied into receipts on run completion/failure. Not persisted across restarts.
+// capability_ref is an opaque ID (pass_id or payment_method_id) — never a secret value.
+export interface RuntimeCapabilityRelease {
+  capability_release_id: string;
+  run_id: string;
+  authorization_id?: string;
+  authorization_hash?: string;
+  user_id: string;
+  domain: string;
+  capability_type: RuntimeCapabilityType;
+  capability_ref: string;
+  task_category: string;
+  route_id?: string;
+  route_step_id?: string;
+  constraints?: {
+    max_amount_usd?: number;
+    currency?: string;
+    allowed_payment_instrument_types?: string[];
+    allowed_domains?: string[];
+  };
+  released_to: "aegis_playwright_runtime";
+  raw_secret_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+}
+
+export type RuntimeInterventionType =
+  | "blocked_uncovered_sensitive_click"
+  | "blocked_uncovered_sensitive_submit"
+  | "blocked_uncovered_sensitive_input"
+  | "failed_uncovered_sensitive_event"
+  | "blocked_sensitive_action_without_capability_release"
+  | "blocked_capability_constraint_violation";
+
+// Created when an uncovered high/critical-severity sensitive event causes a run to be blocked.
+// Metadata only — no field values, no secrets.
+export interface RuntimeIntervention {
+  intervention_id: string;
+  runtime_session_id: string;
+  run_id: string;
+  user_id: string;
+  domain: string;
+  type: RuntimeInterventionType;
+  sensitivity: RuntimeEventSensitivityKind;
+  event_type: RuntimeEventType;
+  page_url: string;
+  element_hint?: string;
+  reason: string;
+  created_at: string;
+  capability_type_required?: RuntimeCapabilityType;
+  capability_release_present?: boolean;
+}
+
 export interface RuntimeCoverageSummary {
   sensitive_events: number;
   covered_events: number;
@@ -707,6 +779,8 @@ export interface RuntimeCoverageSummary {
   unknown_events: number;
   highest_severity: "info" | "warning" | "high" | "critical";
   sensitivities: RuntimeEventSensitivityKind[];
+  blocked_events?: number;   // count of events that triggered a RuntimeIntervention
+  interventions?: number;    // count of RuntimeInterventions created for this session
 }
 
 export interface RouteRunReceipt {
@@ -732,6 +806,15 @@ export interface RouteRunReceipt {
   pass_ids_used?: string[];
   secret_values_revealed_to_agent?: false;
   runtime_coverage_summary?: RuntimeCoverageSummary;
+  runtime_interventions?: RuntimeIntervention[];
+  runtime_capability_releases?: RuntimeCapabilityRelease[];
+  capability_release_summary?: {
+    releases_created: number;
+    login_credential_releases: number;
+    payment_method_releases: number;
+    identity_profile_releases: number;
+    raw_secret_revealed_to_agent: false;
+  };
   authorization_context?: {
     authorization_id: string;
     authorization_hash: string;

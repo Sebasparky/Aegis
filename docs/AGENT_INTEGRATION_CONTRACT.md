@@ -1479,6 +1479,117 @@ Assertions expire (default 30 minutes). The verify endpoint checks expiry and re
 
 ---
 
+## Website Agent-Safety Profile v1
+
+A **Website Agent-Safety Profile** is a deterministic, domain-scoped assessment of whether a website is safe for agent interaction for a specific task category. It is the opposite-side trust layer from the Website Trust Assertion: where Trust Assertions answer "can this agent be trusted on my site?", the Agent-Safety Profile answers "can my agent safely interact with this website for this task?"
+
+### How It Differs from Website Trust Assertion
+
+| Object | Question answered | Audience | Signed? |
+|---|---|---|---|
+| **Website Trust Assertion** | Can this (known) agent be trusted on my site for this task? | Website admitting an agent | Yes (EdDSA JWS) |
+| **Website Agent-Safety Profile** | Can my agent safely call this website for this task? | Agent deciding whether to proceed | No — computed fresh on demand |
+
+The profile is advisory and requires no signing keys. It is generated on demand and reflects the current state of Aegis-observed evidence.
+
+### Signals Used
+
+- **Known routes**: does Aegis have verified workflow routes for this domain and task category?
+- **Verified receipts**: cryptographically verified execution history for this domain
+- **Runtime coverage**: were sensitive events covered by Aegis-controlled actions?
+- **Violation receipts**: failed runs with uncovered sensitive events or capability-missing interventions
+- **Observation mode**: did sessions activate `protected_observation` for this domain?
+- **Capability releases**: were login credentials or payment methods released through Aegis for this domain?
+
+### What It Does Not Prove
+
+- Business identity or domain ownership
+- That the site has not been compromised since the last Aegis-observed run
+- That the agent has no out-of-band access to the site
+- Absence of prompt injection (runtime and route-level mitigations are separate)
+- Safety for tasks with no prior Aegis-covered execution history (`step_up_required` is the default)
+
+### Decision Logic
+
+| Condition | Recommendation | Status |
+|---|---|---|
+| `secret_values_revealed_to_agent` in any receipt | `deny` | `unsafe` |
+| Violation receipts or uncovered sensitive events | `step_up_required` | `step_up_required` |
+| No matching route for the task category | `step_up_required` | `unknown` |
+| Matching routes + clean verified receipts (0 violations) | `allow_with_approval` | `agent_callable_with_approval` |
+| Matching routes but no execution evidence | `step_up_required` | `step_up_required` |
+
+Negative evidence overrides positive: if both clean and violation receipts exist for a domain, the result is `step_up_required` — not `allow_with_approval`.
+
+### API Endpoint
+
+```
+GET /api/website-agent-safety/profile?domain=localhost&task_category=travel_booking
+```
+
+**Response (matching routes, no receipts):**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "profile_id": "wsasp_...",
+    "domain": "localhost",
+    "requested_task_category": "travel_booking",
+    "website_verification_level": "dev_localhost",
+    "agent_safety_status": "step_up_required",
+    "recommendation": "step_up_required",
+    "confidence": "low",
+    "capabilities": {
+      "has_known_routes": true,
+      "supported_task_categories": ["travel_booking", "payment", "login", "credential_fill"],
+      "has_sensitive_workflow_support": true,
+      "supports_aegis_controlled_runtime": true,
+      "supports_agent_safe_observation": false,
+      "supports_capability_release_gate": false
+    },
+    "safety_signals": {
+      "verified_successful_receipts": 0,
+      "failed_violation_receipts": 0,
+      "uncovered_sensitive_events": 0,
+      "runtime_interventions": 0,
+      "secret_exposure_events": 0,
+      "protected_observation_sessions": 0,
+      "clean_sensitive_runs": 0
+    },
+    "task_fit": {
+      "category": "travel_booking",
+      "matching_routes": ["route_demo_travel_booking_001"],
+      "required_capabilities": ["payment_method"],
+      "known_constraints": ["route_scoped_to_specific_page", "requires_aegis_controlled_execution", "has_forbidden_actions"]
+    },
+    "disqualifying_signals": ["no_execution_evidence"],
+    "limitations": {
+      "not_business_verified": true,
+      "no_live_crawl_performed": true,
+      "based_only_on_aegis_observed_events": true,
+      "not_a_guarantee": true
+    }
+  }
+}
+```
+
+### MCP Tool
+
+**`get_website_agent_safety_profile`**
+
+```json
+{ "domain": "localhost", "task_category": "travel_booking" }
+```
+
+Returns compact profile + `interpretation` string explaining the recommendation.
+
+### Security
+
+- Response is aggregate only: no raw receipt JSON, no `secret_ref`, no credential values, no private keys.
+- `not_business_verified: true` is always set in v1 — the profile never claims to verify business identity.
+- `secret_exposure_events` uses `secret_values_revealed_to_agent` truthiness check from receipts only.
+
 ---
 
 ## Real Payment / Travel Mock Route v1

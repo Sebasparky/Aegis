@@ -545,6 +545,50 @@ async function verifyDelegationPassport({ passport_id } = {}) {
   };
 }
 
+async function getWebsiteAgentSafetyProfile({ domain, task_category } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-agent-safety/profile?domain=${encodeURIComponent(domain)}&task_category=${encodeURIComponent(task_category)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get website agent safety profile." };
+  }
+  const profile = res.data;
+  return {
+    profile_id: profile.profile_id,
+    generated_at: profile.generated_at,
+    domain: profile.domain,
+    requested_task_category: profile.requested_task_category,
+    website_verification_level: profile.website_verification_level,
+    agent_safety_status: profile.agent_safety_status,
+    recommendation: profile.recommendation,
+    confidence: profile.confidence,
+    capabilities: profile.capabilities,
+    safety_signals: profile.safety_signals,
+    task_fit: profile.task_fit,
+    disqualifying_signals: profile.disqualifying_signals,
+    limitations: profile.limitations,
+    interpretation: interpretSafetyProfile(profile),
+  };
+}
+
+function interpretSafetyProfile(profile) {
+  const { recommendation, confidence, agent_safety_status, domain, requested_task_category, disqualifying_signals } = profile;
+  const base = `Website '${domain}' agent safety for '${requested_task_category}': ${recommendation} (status: ${agent_safety_status}, confidence: ${confidence}).`;
+  const note = {
+    allow: "Aegis has sufficient evidence to allow direct agent interaction for this task.",
+    allow_with_approval: `Agent may proceed with human approval. Aegis has verified route(s) and clean execution evidence for this task.`,
+    step_up_required: `Human step-up confirmation required before agent interaction. ${disqualifying_signals.length ? "Signals: " + disqualifying_signals.join(", ") + "." : "No prior Aegis-covered execution evidence for this task."}`,
+    deny: `Do not proceed. Disqualifying signals: ${disqualifying_signals.join(", ")}.`,
+  }[recommendation] ?? "";
+  const caveat = "This profile is advisory only — not a business verification, no live crawl performed, not a guarantee.";
+  return `${base} ${note} ${caveat}`;
+}
+
 async function getDelegationTrustProfile({ delegation_id, task_category } = {}) {
   if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
   if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
@@ -1103,6 +1147,30 @@ const TOOLS = [
       required: ["session_id"],
     },
   },
+  {
+    name: "get_website_agent_safety_profile",
+    description:
+      "Evaluate whether a website is safe for agent interaction for a specific task category. Returns a deterministic profile based on Aegis-observed signals: known routes, verified receipts, runtime coverage violations, interventions, and observation mode. Does not crawl the site live and does not verify business identity. Advisory only — not a guarantee. Use before requesting a skill run to understand the website's Aegis coverage posture for the task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain to evaluate (e.g. 'localhost', 'en.wikipedia.org', 'localhost:3000').",
+        },
+        task_category: {
+          type: "string",
+          enum: [
+            "login", "credential_fill", "purchase", "payment", "travel_booking",
+            "financial_action", "identity_disclosure", "account_change",
+            "destructive_action", "message_send",
+          ],
+          description: "The task category the agent intends to perform on this website.",
+        },
+      },
+      required: ["domain", "task_category"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -1174,6 +1242,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_runtime_observation_mode":
       result = await getRuntimeObservationMode(a);
+      break;
+    case "get_website_agent_safety_profile":
+      result = await getWebsiteAgentSafetyProfile(a);
       break;
     default:
       return {

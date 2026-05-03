@@ -421,12 +421,13 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Sensitive Workflow Observation Mode v1 is complete** — implemented 2026-05-03. Aegis Playwright runtime now tracks a `RuntimeObservationModeState` per session, starting in `open_observation` and escalating to `protected_observation` when sensitivity signals are detected (route permissions, URL patterns, DOM patterns). An agent-safe observation snapshot is built after `page.goto()` and after each click step — stored in `runtimeObservationSnapshots` Map (ephemeral). Sensitive field values are always omitted (`value_redacted: true`); only `filled: boolean` is exposed. Sensitive elements carry `required_capability` and `allowed_actions: ["read", "request_fill"|"request_click"]`. Two new API endpoints: `GET /api/runtime-sessions/:sessionId/observation` and `GET /api/runtime-sessions/:sessionId/observation-mode`. Two new MCP tools: `get_runtime_observation` and `get_runtime_observation_mode`. All three receipt paths (success, violation, failure) include `observation_mode_summary`. Capability Release Gate v1 is unchanged — observation mode controls what agents see; capability releases control what sensitive actions proceed. Do not rebuild unless explicitly requested.
 
+**Website Agent-Safety Profile v1 is complete** — implemented 2026-05-03. `GET /api/website-agent-safety/profile?domain=&task_category=` returns a `WebsiteAgentSafetyProfile` evaluated from Aegis-observed signals: known routes, verified receipts, runtime coverage violations, interventions, and observation mode. Recommendation (`allow_with_approval` / `step_up_required` / `deny`) is determined deterministically — negative evidence (violation receipts, uncovered events) overrides positive (clean receipts). Does not perform live crawling, does not verify business identity, does not require signing keys. MCP tool `get_website_agent_safety_profile` exposes this to agents. No secrets in responses — aggregate only. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Website Agent-Safety Profile v1** — a structured machine-readable profile websites publish about their Aegis coverage posture
-2. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
-3. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
-4. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+1. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+2. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
+3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

@@ -191,10 +191,8 @@ Coverage Violation Blocking v1 is **complete** — implemented 2026-05-03. `Runt
 Capability Release Gate v1 is **complete** — implemented 2026-05-03. Sensitive event coverage is now provenance-based, not timing-based. `RuntimeCapabilityRelease` type tracks that Aegis explicitly released a capability (`login_credential`, `payment_method`, `identity_profile`) for a run. `requiredCapabilityForEvent()` determines the required capability per event; events with a required capability are `covered_by_aegis` only when a matching active release exists — timing windows are not consulted for those events. `unknown_sensitive` high/critical events are also not covered by timing alone. `login_credential` releases created on `secret_ref` fills only. `payment_method` releases created only for payment-intent click steps if the user has a payment method in `paymentMethods` Map. Receipts include `runtime_capability_releases` and `capability_release_summary` (metadata only). New intervention type: `blocked_sensitive_action_without_capability_release`. Violation demo correctly fails because the hidden credential submit at page load has no `login_credential` release.
 
 Candidate next milestones:
-1. **Agent-Safe Observation Layer v1** — structured agent-safe DOM/page description
-2. **Website Agent-Safety Profile v1** — machine-readable profile websites publish about their Aegis coverage posture
-3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
-4. **Cloud KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
+1. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
+2. **Cloud KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -295,6 +293,12 @@ Before making any changes:
 - Observation mode does not weaken Capability Release Gate v1 — observation mode controls what agents SEE in snapshots; capability releases control what sensitive actions can PROCEED
 - Sensitive fields and buttons have `allowed_actions: ["read", "request_fill"]` or `["read", "request_click"]` — they must go through Aegis route steps; agents cannot directly fill or click sensitive elements
 - `observation_mode_summary` on receipts is metadata only — it records what mode was active when the run executed; it does not include snapshots, raw DOM, or field values
+- Website Agent-Safety Profile v1 is **complete** — do not rebuild `WebsiteVerificationLevel`, `WebsiteAgentSafetyStatus`, `WebsiteAgentSafetyProfile` types, `website-agent-safety.ts` routes, `computeWebsiteAgentSafetyProfile`, or `get_website_agent_safety_profile` MCP tool unless explicitly requested
+- `WebsiteAgentSafetyProfile` is domain-scoped and advisory — it does not claim business verification; `limitations.not_business_verified: true` is always set in v1; do not add signing or JWS to this profile unless explicitly requested
+- `computeWebsiteAgentSafetyProfile` uses `getReceiptRepository().listReceipts(MOCK_USER_ID)` filtered by `receipt.domain` — this is a domain-wide query (not delegation-scoped); `MOCK_USER_ID` is correct for v1
+- Negative evidence overrides positive in `WebsiteAgentSafetyProfile` — if both clean and violation receipts exist, result is `step_up_required`; do not change this precedence unless explicitly requested
+- `secret_exposure_events` in `WebsiteAgentSafetyProfile` uses `r.secret_values_revealed_to_agent` truthiness check from receipts only — not from intervention types; `blocked_sensitive_action_without_capability_release` means Aegis blocked a missing-capability attempt, not that a secret was exposed
+- Do not include raw receipt JSON, `secret_ref` values, credential values, `devvault://` references, or private keys in any `WebsiteAgentSafetyProfile` response — aggregate only
 
 ## Terminology — Always Use
 

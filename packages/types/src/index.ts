@@ -1093,3 +1093,77 @@ export interface WebsiteTrustAssertion {
     assertion_jws: string;
   };
 }
+
+// ─── Website Agent-Safety Profile ────────────────────────────────────────────
+
+export type WebsiteVerificationLevel =
+  | "dev_localhost"
+  | "domain_observed"
+  | "domain_verified"
+  | "business_verified";
+
+export type WebsiteAgentSafetyStatus =
+  | "unknown"
+  | "agent_callable"
+  | "agent_callable_with_approval"
+  | "step_up_required"
+  | "unsafe"
+  | "blocked";
+
+// Deterministic profile describing whether a domain is safe for agent interaction
+// for a specific task category. Based only on Aegis-observed signals — not a
+// business verification or guarantee of safe behavior.
+export interface WebsiteAgentSafetyProfile {
+  profile_id: string;
+  generated_at: string;
+  domain: string;
+  requested_task_category: DelegationTrustTaskCategory;
+  website_verification_level: WebsiteVerificationLevel;
+  agent_safety_status: WebsiteAgentSafetyStatus;
+  recommendation: "allow" | "allow_with_approval" | "step_up_required" | "deny";
+  confidence: "low" | "medium" | "high";
+
+  capabilities: {
+    has_known_routes: boolean;
+    supported_task_categories: DelegationTrustTaskCategory[];
+    has_sensitive_workflow_support: boolean;
+    supports_aegis_controlled_runtime: boolean;
+    supports_agent_safe_observation: boolean;
+    supports_capability_release_gate: boolean;
+  };
+
+  safety_signals: {
+    verified_successful_receipts: number;
+    failed_violation_receipts: number;
+    uncovered_sensitive_events: number;
+    runtime_interventions: number;
+    secret_exposure_events: number;
+    protected_observation_sessions: number;
+    clean_sensitive_runs: number;
+  };
+
+  website_legibility: {
+    has_structured_route_metadata: boolean;
+    has_known_start_url: boolean;
+    has_known_sensitive_actions: boolean;
+    has_policy_source: boolean;
+    policy_source?: "seeded_demo" | "route_metadata" | "well_known" | "manual_review";
+  };
+
+  task_fit: {
+    category: DelegationTrustTaskCategory;
+    matching_routes: string[];
+    required_capabilities: RuntimeCapabilityType[];
+    known_constraints: string[];
+  };
+
+  disqualifying_signals: string[];
+  machine_readable_reasons: string[];
+
+  limitations: {
+    not_business_verified: boolean;
+    no_live_crawl_performed: true;
+    based_only_on_aegis_observed_events: true;
+    not_a_guarantee: true;
+  };
+}

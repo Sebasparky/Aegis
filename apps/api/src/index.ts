@@ -34,6 +34,7 @@ import { actionAuthorizationRoutes } from "./routes/action-authorizations.js";
 import { delegationTrustRoutes } from "./routes/delegation-trust.js";
 import { websiteAssertionRoutes } from "./routes/website-assertions.js";
 import { runtimeObservationRoutes } from "./routes/runtime-observations.js";
+import { websiteAgentSafetyRoutes } from "./routes/website-agent-safety.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -87,6 +88,7 @@ async function main() {
   await server.register(delegationTrustRoutes);
   await server.register(websiteAssertionRoutes);
   await server.register(runtimeObservationRoutes);
+  await server.register(websiteAgentSafetyRoutes);
 
   if (process.env.NODE_ENV !== "production") {
     await server.register(devRoutes);

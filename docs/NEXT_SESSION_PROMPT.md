@@ -409,11 +409,13 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Delegation Trust Profile v1 is complete** — implemented 2026-05-03. `GET /api/delegation-trust/profile?delegation_id=&task_category=` generates a machine-readable trust profile scoped to a specific task category. Trust is based on fulfilled Aegis authorizations, verified signed receipts, sensitive workflow coverage stats, and KMS custody attestation — NOT generic success count. Low-risk browsing/search tasks do not improve high-risk trust categories. Payment categories cap at `proven_limited` in v1 (payment capability not available). MCP tool `get_delegation_trust_profile` exposes this to agents. Do not rebuild unless explicitly requested.
 
+**Website Assertion / Handshake v1 is complete** — implemented 2026-05-03. `POST /api/website-assertions` creates a signed `WebsiteTrustAssertion` combining the Delegation Trust Profile and optional Delegation Passport into a compact machine-readable recommendation (allow / allow_with_approval / step_up_required / deny) with EdDSA JWS signature and hash chain. `GET /api/website-assertions/:id/verify` recomputes hash, verifies JWS, cross-checks payload fields, and checks expiry. MCP tools `create_website_trust_assertion` and `verify_website_trust_assertion` expose this to agents. Assertions require real signing keys — no unsigned fallback. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Website Assertion / Handshake v1** — structured API call where a website can request and verify a Delegation Passport + trust profile before accepting agent requests
-2. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always `unproven`/`capable_but_unproven` due to missing payment capability)
-3. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
+1. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always `unproven`/`capable_but_unproven` due to missing payment capability)
+2. **Coverage violation blocking v1** — block or pause run when `not_covered_by_aegis` event detected above threshold severity
+3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

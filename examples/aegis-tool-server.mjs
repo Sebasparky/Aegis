@@ -654,6 +654,72 @@ async function getCredentialSessionStatus({ session_id }) {
   };
 }
 
+async function createWebsiteTrustAssertion({ delegation_id, task_category, requesting_domain, requesting_origin, passport_id, human_readable_summary, expires_in_minutes } = {}) {
+  if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
+  if (!task_category) return { error: "VALIDATION_ERROR", message: "task_category is required." };
+  if (!requesting_domain) return { error: "VALIDATION_ERROR", message: "requesting_domain is required." };
+  const body = { delegation_id, task_category, requesting_domain };
+  if (requesting_origin) body.requesting_origin = requesting_origin;
+  if (passport_id) body.passport_id = passport_id;
+  if (human_readable_summary) body.human_readable_summary = human_readable_summary;
+  if (expires_in_minutes != null) body.expires_in_minutes = expires_in_minutes;
+  let res;
+  try {
+    res = await request("POST", "/api/website-assertions", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create website trust assertion." };
+  }
+  const a = res.data;
+  return {
+    assertion_id: a.assertion_id,
+    issuer: a.issuer,
+    issued_at: a.issued_at,
+    expires_at: a.expires_at,
+    requesting_website: a.requesting_website,
+    subject: a.subject,
+    requested_task: a.requested_task,
+    decision: a.decision,
+    verification: {
+      assertion_hash: a.verification?.assertion_hash,
+      assertion_jws: a.verification?.assertion_jws,
+    },
+    next_action: `Assertion created with recommendation="${a.decision?.recommendation}" and trust_status="${a.decision?.trust_status}". Call verify_website_trust_assertion with assertion_id="${a.assertion_id}" to confirm cryptographic integrity. Present assertion_jws to the requesting website as a signed Aegis trust claim.`,
+  };
+}
+
+async function verifyWebsiteTrustAssertion({ assertion_id } = {}) {
+  if (!assertion_id) return { error: "VALIDATION_ERROR", message: "assertion_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-assertions/${encodeURIComponent(assertion_id)}/verify`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to verify website trust assertion." };
+  }
+  const v = res.data;
+  return {
+    assertion_id,
+    valid: v.valid,
+    hash_valid: v.hash_valid,
+    signature_valid: v.signature_valid,
+    expired: v.expired,
+    assertion_hash: v.assertion_hash,
+    recomputed_hash: v.recomputed_hash,
+    jws_payload: v.jws_payload,
+    recommendation: v.recommendation,
+    trust_status: v.trust_status,
+    error: v.error ?? null,
+    interpretation: v.valid
+      ? `Assertion is valid and active. The recommendation "${v.recommendation}" and trust_status "${v.trust_status}" are cryptographically attested by Aegis.`
+      : `Assertion is NOT valid: ${v.error ?? "unknown reason"}. Do not rely on this assertion for trust decisions.`,
+  };
+}
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -920,6 +986,65 @@ const TOOLS = [
       required: ["delegation_id", "task_category"],
     },
   },
+  {
+    name: "create_website_trust_assertion",
+    description:
+      "Create a signed Aegis Website Trust Assertion for a delegation and task category. The assertion is a compact, machine-readable document websites can request before admitting an agent. It synthesizes the delegation trust profile and optional passport data into a cryptographically signed recommendation (allow, allow_with_approval, step_up_required, or deny) without exposing secrets. Present assertion_jws to the requesting website as a signed Aegis trust claim. No raw credentials, passwords, or secret_refs are included in any assertion.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delegation_id: {
+          type: "string",
+          description: "The delegation ID to issue the assertion for (e.g. 'delg_demo_001').",
+        },
+        task_category: {
+          type: "string",
+          enum: [
+            "login", "credential_fill", "purchase", "payment", "travel_booking",
+            "financial_action", "identity_disclosure", "account_change",
+            "destructive_action", "message_send",
+          ],
+          description: "The task category the agent intends to perform.",
+        },
+        requesting_domain: {
+          type: "string",
+          description: "The domain of the requesting website, e.g. 'example.com' or 'localhost'.",
+        },
+        requesting_origin: {
+          type: "string",
+          description: "Optional. Full origin URL of the requesting website, e.g. 'https://example.com'.",
+        },
+        passport_id: {
+          type: "string",
+          description: "Optional. A valid Delegation Passport ID to cross-reference in the assertion subject.",
+        },
+        human_readable_summary: {
+          type: "string",
+          description: "Optional. Human-readable description of the intended task, e.g. 'Agent wants to log in to localhost demo'.",
+        },
+        expires_in_minutes: {
+          type: "number",
+          description: "Optional. How long the assertion should be valid in minutes. Defaults to 30.",
+        },
+      },
+      required: ["delegation_id", "task_category", "requesting_domain"],
+    },
+  },
+  {
+    name: "verify_website_trust_assertion",
+    description:
+      "Verify the cryptographic integrity and active status of an Aegis Website Trust Assertion. Recomputes the assertion hash, verifies the EdDSA JWS signature, cross-checks JWS payload fields against stored values, and checks expiry. A valid result (valid=true) means: the hash matches, the Aegis signing key authenticated the assertion, all payload fields are consistent, and the assertion has not expired.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        assertion_id: {
+          type: "string",
+          description: "The assertion_id returned by create_website_trust_assertion.",
+        },
+      },
+      required: ["assertion_id"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -979,6 +1104,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_delegation_trust_profile":
       result = await getDelegationTrustProfile(a);
+      break;
+    case "create_website_trust_assertion":
+      result = await createWebsiteTrustAssertion(a);
+      break;
+    case "verify_website_trust_assertion":
+      result = await verifyWebsiteTrustAssertion(a);
       break;
     default:
       return {

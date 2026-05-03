@@ -885,3 +885,47 @@ export interface DelegationTrustProfile {
     based_only_on_aegis_observed_events: true;
   };
 }
+
+export interface WebsiteTrustAssertion {
+  assertion_id: string;
+  issuer: string;
+  issued_at: string;
+  expires_at: string;
+
+  requesting_website: {
+    domain: string;
+    origin?: string;
+    verification_level: "dev_localhost" | "domain_observed" | "domain_verified" | "business_verified";
+  };
+
+  subject: {
+    user_aegis_id: string;
+    agent_id: string;
+    delegation_id: string;
+    passport_id?: string;
+    passport_hash?: string;
+  };
+
+  requested_task: {
+    category: DelegationTrustTaskCategory;
+    domain: string;
+    human_readable_summary?: string;
+  };
+
+  decision: {
+    recommendation: "allow" | "allow_with_approval" | "step_up_required" | "deny";
+    trust_status: DelegationTrustStatus;
+    confidence: "low" | "medium" | "high";
+    reasons: string[];
+    disqualifying_signals: string[];
+  };
+
+  capability_summary: DelegationTrustProfile["capability_summary"];
+  coverage_summary: DelegationTrustProfile["coverage_summary"];
+  limitations: DelegationTrustProfile["limitations"];
+
+  verification: {
+    assertion_hash: string;
+    assertion_jws: string;
+  };
+}

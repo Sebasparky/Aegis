@@ -182,11 +182,12 @@ Sensitive Workflow Detection v1 is **complete** — implemented 2026-05-02. Aegi
 
 Delegation Passport v1 is **complete** — implemented 2026-05-02. Agents can create and verify a signed Delegation Passport documenting human subject, agent subject, collar-backed action limits, KMS custody model, Aegis coverage boundary, and receipt-backed evidence. MCP tools `create_delegation_passport` and `verify_delegation_passport` are available. The passport does NOT claim the agent has no out-of-band secrets — it attests only to Aegis-covered delegation boundaries.
 
+Website Assertion / Handshake v1 is **complete** — implemented 2026-05-03. `POST /api/website-assertions` creates a signed `WebsiteTrustAssertion` combining trust profile + optional passport into a compact machine-readable recommendation (allow / allow_with_approval / step_up_required / deny) with EdDSA JWS signature. `GET /api/website-assertions/:id/verify` recomputes hash, verifies JWS, cross-checks payload, checks expiry. MCP tools `create_website_trust_assertion` and `verify_website_trust_assertion` expose this to agents. No unsigned fallback.
+
 Candidate next milestones:
-1. **Action Authorization Receipt v1** — per-action signed receipts (not just run-level); enables finer-grained audit for multi-step sensitive workflows
-2. **Delegation Trust / Reputation v1** — aggregate trust score for a delegation based on receipt history
-3. **Website Handshake v1** — structured API call where a website can request and verify a Delegation Passport
-4. **Run lifecycle state machine + idempotency** — stricter state transitions, guard against duplicate approve/reject
+1. **Real payment/travel mock route** — enables trust evidence for payment categories (currently always unproven/capable_but_unproven due to missing payment capability)
+2. **Coverage violation blocking v1** — block or pause run when not_covered_by_aegis event detected above threshold severity
+3. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -253,6 +254,11 @@ Before making any changes:
 - Payment/travel/financial categories (`purchase`, `payment`, `travel_booking`, `financial_action`) can never reach `trusted_for_category` in v1 — `payment_method_available` is always `false`; do not change this ceiling without explicitly implementing payment capability
 - Trust profile is advisory, not a guarantee — every profile carries `not_a_guarantee: true`, `out_of_band_secret_use_not_covered: true`, `based_only_on_aegis_observed_events: true`; do not remove these fields or weaken the limitations block
 - Do not include raw receipt JSON, secret_ref values, passwords, private keys, or decrypted credential values in a trust profile response — only aggregate counts, capability booleans, domains, and receipt IDs
+- Website Assertion / Handshake v1 is **complete** — do not rebuild `WebsiteTrustAssertion` type, `websiteAssertionSigning.ts`, `website-assertions.ts` routes, `websiteTrustAssertions` Map, `create_website_trust_assertion`, or `verify_website_trust_assertion` MCP tools unless explicitly requested
+- `computeDelegationTrustProfile` is now an exported async function in `delegation-trust.ts` — the delegation-trust GET handler calls it; website-assertions.ts calls it too; do not re-inline the logic into the GET handler
+- Website assertions require `AEGIS_RECEIPT_JWS_PRIVATE_JWK` — no unsigned-dev-mode fallback; missing keys → 500 `SIGNING_NOT_CONFIGURED`; `verification.assertion_jws` is always a real compact JWS string
+- Do not include raw receipt JSON, raw action authorization JSON, secret_ref, devvault:// references, demo_pass values, or private keys in any `WebsiteTrustAssertion` response — aggregate only
+- Website Trust Assertions carry no stronger guarantees than Delegation Passports — they summarize Aegis-observed evidence and do not prove the agent has no out-of-band secrets; `limitations.not_a_guarantee: true` must remain in every assertion
 
 ## Terminology — Always Use
 

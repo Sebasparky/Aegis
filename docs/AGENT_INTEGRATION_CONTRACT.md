@@ -1217,6 +1217,200 @@ The profile attests only to Aegis-observed behavior. It cannot detect out-of-ban
 
 ---
 
+## Website Trust Assertion / Handshake v1
+
+A **Website Trust Assertion** is a compact, signed, machine-readable document a website can request before admitting an agent for a specific task. It synthesizes the Delegation Passport and Trust Profile into a single cryptographically signed recommendation without exposing secrets.
+
+### What It Proves (and Does Not Prove)
+
+A Website Trust Assertion attests to:
+- The user, agent, and delegation identity
+- The active trust status for the requested task category
+- Capability availability (login credential, payment method)
+- Aegis-covered execution history (verified receipts, fulfilled authorizations)
+- The assertion was issued by Aegis and has not been tampered with
+
+It does **not** prove:
+- The agent has no out-of-band secrets
+- The agent will behave safely in all circumstances
+- The user or business has been KYC-verified
+- The website domain has been independently verified (v1 uses `domain_observed`)
+
+### Relation to Delegation Passport and Trust Profile
+
+| Object | Purpose | Audience |
+|---|---|---|
+| **Delegation Passport** | What authority was granted — capability attestations, collar limits, KMS custody | Agent + API consumers |
+| **Delegation Trust Profile** | Whether that authority was exercised safely for a task category — evidence-based | Agent + API consumers |
+| **Website Trust Assertion** | Compact signed summary combining both — machine-readable recommendation for websites | Websites |
+
+### API Endpoints
+
+#### `POST /api/website-assertions` — Create an assertion
+
+**Request body:**
+```json
+{
+  "delegation_id": "delg_demo_001",
+  "task_category": "login",
+  "requesting_domain": "localhost",
+  "requesting_origin": "http://localhost:3000",
+  "passport_id": "pp_abc123",
+  "human_readable_summary": "Agent wants to log in to localhost demo",
+  "expires_in_minutes": 30
+}
+```
+
+`delegation_id`, `task_category`, and `requesting_domain` are required. `passport_id`, `requesting_origin`, `human_readable_summary`, and `expires_in_minutes` are optional.
+
+**Response (login, proven_limited history):**
+```json
+{
+  "ok": true,
+  "data": {
+    "assertion_id": "wta_abc123def456",
+    "issuer": "aegis.dev",
+    "issued_at": "2026-05-03T12:00:00.000Z",
+    "expires_at": "2026-05-03T12:30:00.000Z",
+    "requesting_website": {
+      "domain": "localhost",
+      "verification_level": "dev_localhost"
+    },
+    "subject": {
+      "user_aegis_id": "aid_user_001",
+      "agent_id": "Demo Agent",
+      "delegation_id": "delg_demo_001",
+      "passport_id": "pp_abc123",
+      "passport_hash": "..."
+    },
+    "requested_task": {
+      "category": "login",
+      "domain": "localhost"
+    },
+    "decision": {
+      "recommendation": "allow_with_approval",
+      "trust_status": "proven_limited",
+      "confidence": "medium",
+      "reasons": ["1 fulfilled authorization(s) found for category 'login'", "login credential available in vault"],
+      "disqualifying_signals": []
+    },
+    "capability_summary": { "login_credentials_available": true, "payment_method_available": false, ... },
+    "coverage_summary": { "verified_execution_receipts": 1, ... },
+    "limitations": { "not_a_guarantee": true, "out_of_band_secret_use_not_covered": true, "based_only_on_aegis_observed_events": true },
+    "verification": {
+      "assertion_hash": "sha256hex...",
+      "assertion_jws": "eyJhbGciOiJFZERTQS..."
+    }
+  }
+}
+```
+
+**Response (payment, no payment capability):**
+```json
+{
+  "decision": {
+    "recommendation": "deny",
+    "trust_status": "unproven",
+    "confidence": "low",
+    "disqualifying_signals": ["payment_capability_unavailable_v1"]
+  }
+}
+```
+
+#### `GET /api/website-assertions/:assertionId` — Retrieve an assertion
+
+Returns the stored assertion by ID.
+
+#### `GET /api/website-assertions/:assertionId/verify` — Verify an assertion
+
+Recomputes the hash, verifies the EdDSA JWS signature, cross-checks payload fields, and checks expiry.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "valid": true,
+    "hash_valid": true,
+    "signature_valid": true,
+    "expired": false,
+    "assertion_hash": "...",
+    "recomputed_hash": "...",
+    "jws_payload": { "typ": "aegis.website_assertion.v1", "recommendation": "allow_with_approval", ... },
+    "recommendation": "allow_with_approval",
+    "trust_status": "proven_limited",
+    "error": null
+  }
+}
+```
+
+### Verification Level
+
+The `requesting_website.verification_level` field indicates how much the requesting domain has been verified:
+
+| Value | Meaning |
+|---|---|
+| `dev_localhost` | Request came from `localhost` — development only |
+| `domain_observed` | Domain is recorded but not independently verified (v1 default) |
+| `domain_verified` | Domain ownership verified (not yet implemented) |
+| `business_verified` | Business identity verified (not yet implemented) |
+
+### Decision Rules
+
+| Condition | Recommendation |
+|---|---|
+| Delegation inactive / trust_status suspended or risky | `deny` |
+| trust_status caution | `step_up_required` |
+| Payment category + no payment capability + unproven | `deny` |
+| Payment category + no payment capability | `step_up_required` |
+| trust_status trusted_for_category | `allow` |
+| trust_status proven_limited | `allow_with_approval` |
+| trust_status unproven or capable_but_unproven | `step_up_required` |
+
+### MCP Tools
+
+**`create_website_trust_assertion`**
+
+```json
+{
+  "delegation_id": "delg_demo_001",
+  "task_category": "login",
+  "requesting_domain": "localhost",
+  "human_readable_summary": "Agent wants to log in to the demo site"
+}
+```
+
+Returns `assertion_id`, `decision`, `subject`, `requesting_website`, `verification.assertion_jws`, and a `next_action` hint.
+
+**`verify_website_trust_assertion`**
+
+```json
+{ "assertion_id": "wta_abc123def456" }
+```
+
+Returns `valid`, `hash_valid`, `signature_valid`, `expired`, `jws_payload`, `recommendation`, `trust_status`, and an `interpretation` string.
+
+### Security
+
+- Response is aggregate only: no raw receipt JSON, no raw action authorization JSON, no `secret_ref`, no `devvault://` references, no private keys.
+- Website assertions require real signing keys (`AEGIS_RECEIPT_JWS_PRIVATE_JWK`). If keys are unavailable, creation returns 500 `SIGNING_NOT_CONFIGURED`. There is no unsigned fallback.
+- JWS payload contains only: assertion_id, hash, identity fields, task_category, recommendation, trust_status — never secrets.
+
+### Limitations
+
+Every assertion carries:
+```json
+{
+  "not_a_guarantee": true,
+  "out_of_band_secret_use_not_covered": true,
+  "based_only_on_aegis_observed_events": true
+}
+```
+
+Assertions expire (default 30 minutes). The verify endpoint checks expiry and returns `expired: true` if the assertion is stale.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

@@ -38,6 +38,7 @@ import { runtimeObservationRoutes } from "./routes/runtime-observations.js";
 import { websiteAgentSafetyRoutes } from "./routes/website-agent-safety.js";
 import { websiteAegisPolicyRoutes } from "./routes/website-aegis-policy.js";
 import { agentApiRoutes } from "./routes/agent-api.js";
+import { authenticatedSessionRoutes } from "./routes/authenticated-sessions.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -94,6 +95,7 @@ async function main() {
   await server.register(runtimeObservationRoutes);
   await server.register(websiteAgentSafetyRoutes);
   await server.register(websiteAegisPolicyRoutes);
+  await server.register(authenticatedSessionRoutes);
   await server.register(agentApiRoutes);
 
   if (process.env.NODE_ENV !== "production") {

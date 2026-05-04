@@ -2273,3 +2273,183 @@ URL=http://localhost:3000/demo-login TASK_CATEGORY=login node examples/real-webs
 - `apps/api/src/routes/agent-api.ts` — `POST /api/agent/v1/observation-dry-runs` endpoint
 - `packages/types/src/index.ts` — `ObservationDryRunResult`, `ObservationDryRunOpenSummary`, `ObservationDryRunSensitiveSurface`, `ObservationDryRunStatus`, `ObservationDryRunRecommendation`
 - `examples/real-website-observation-dry-run.mjs` — demo script
+
+---
+
+## Authenticated Session Boundary v1
+
+### Purpose
+
+An agent may encounter a login wall during autonomous browsing. Rather than receiving credentials directly, the agent requests Aegis to perform the login and returns a safe **session handle** — not cookies, storage, or passwords.
+
+This implements a just-in-time credential capability: the agent never receives the secret, but gains access to an Aegis-owned authenticated browser context it can observe and navigate.
+
+### Agent Flow
+
+```
+1. Agent hits login wall while browsing
+2. Agent → POST /api/agent/v1/authenticated-sessions/login-request
+3. Session created: status = pending_approval
+4. User approves in /route-run-approvals ("Login session requests" section)
+5. Aegis logs in via isolated headless Playwright (agent is idle)
+6. Agent polls: GET /api/agent/v1/authenticated-sessions/:id
+7. status → authenticated
+8. Agent → GET /api/agent/v1/authenticated-sessions/:id/observe
+9. Agent receives safe observation (open or protected snapshot) — no cookies/storage
+10. Agent → POST /api/agent/v1/authenticated-sessions/:id/navigate (optional)
+```
+
+### Endpoints
+
+#### POST /api/agent/v1/authenticated-sessions/login-request
+
+Request Aegis to perform a login on the agent's behalf.
+
+**Auth:** `Authorization: Bearer <delegation-token>`
+
+**Request:**
+```json
+{
+  "domain": "localhost",
+  "login_url": "http://localhost:3000/demo-login",
+  "task_summary": "Log in to access private order history",
+  "pass_id": "pass_vault_demo_login_001"  // optional hint
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "session_id": "authsess_abc123def456",
+    "domain": "localhost",
+    "login_url": "http://localhost:3000/demo-login",
+    "task_summary": "Log in to access private order history",
+    "status": "pending_approval",
+    "capabilities": [],
+    "raw_cookies_revealed_to_agent": false,
+    "raw_storage_revealed_to_agent": false,
+    "raw_credentials_revealed_to_agent": false,
+    "created_at": "2026-05-04T...",
+    "expires_at": "2026-05-04T..."
+  }
+}
+```
+
+**v1 constraints:**
+- `domain: "localhost"` → `status: pending_approval` (awaits user approval)
+- Any other domain → `status: manual_step_required` immediately (automated login not supported)
+- Agent cannot self-approve
+
+#### GET /api/agent/v1/authenticated-sessions/:sessionId
+
+Poll current session handle.
+
+**Response statuses:**
+| Status | Meaning |
+|---|---|
+| `pending_approval` | Waiting for user to approve in UI |
+| `login_in_progress` | Aegis is executing the login via Playwright |
+| `authenticated` | Login complete; observe and navigate available |
+| `manual_step_required` | Challenge detected (2FA, CAPTCHA, passkey) or unsupported domain |
+| `failed` | Login failed or rejected |
+| `expired` | Session closed or timed out |
+
+#### GET /api/agent/v1/authenticated-sessions/:sessionId/observe
+
+Observe the current page of an authenticated session. Safe only — no cookies, storage, or credentials.
+
+**Requirements:** `status: authenticated`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "session_id": "authsess_...",
+    "status": "authenticated",
+    "page_url": "http://localhost:3000/demo-login/success",
+    "open_summary": { "page_title": "...", "headings": [...], "links_sample": [...] },
+    "raw_cookies_revealed_to_agent": false,
+    "raw_storage_revealed_to_agent": false
+  }
+}
+```
+
+If sensitivity signals are detected on the page, `protected_snapshot` is returned instead of `open_summary`. Sensitive field values are always `value_redacted: true` in protected snapshots.
+
+#### POST /api/agent/v1/authenticated-sessions/:sessionId/navigate
+
+Navigate to a same-domain URL within the authenticated session, then return safe observation.
+
+**Requirements:** `status: authenticated`, `capabilities` includes `safe_navigation`
+
+**v1 constraints:**
+- Same-domain only (`hostname` must match `session.domain`)
+- Read-only navigation: `page.goto` only
+- No form submission, no POST, no credential fill, no arbitrary clicking
+- Cross-domain navigation returns `400 CROSS_DOMAIN_NAVIGATION_BLOCKED`
+
+**Request:**
+```json
+{ "url": "http://localhost:3000/demo-login/success" }
+```
+
+### What Agents Never Receive
+
+| Data | Policy |
+|---|---|
+| Cookies | Never returned |
+| localStorage / sessionStorage | Never returned |
+| Set-Cookie headers | Never returned |
+| Auth tokens / bearer tokens | Never returned |
+| Playwright storageState | Never returned |
+| The password | Never returned |
+| `secret_ref` values | Never returned |
+| KMS material | Never returned |
+
+All three custody flags are always `false` literals on every response:
+- `raw_cookies_revealed_to_agent: false`
+- `raw_storage_revealed_to_agent: false`
+- `raw_credentials_revealed_to_agent: false`
+
+### Challenge Handling
+
+If Aegis detects a login challenge (2FA, CAPTCHA, passkey, security check, or verification code) before or after credential submission, it immediately:
+
+1. Sets `status: manual_step_required`
+2. Sets `manual_step_reason` with the detected signal
+3. Keeps the browser open (does not close it)
+4. **Does not attempt any bypass**
+
+The agent should surface this to the user for manual resolution. Future milestones may add a "resume after manual step" flow.
+
+### Credential Resolution
+
+Aegis looks up the vault pass for the session's `user_id + domain` (or uses `pass_id` hint if provided), decrypts via the KMS provider using `purpose: "login_password"`, and fills the form inside the isolated Playwright browser. A KMS audit event is recorded with `run_id: "authsession:<sessionId>"` for traceability. The decrypted password never leaves the Aegis runtime.
+
+### Approval UI
+
+`/route-run-approvals` includes a "Login session requests" section that shows `PendingAuthSessionCard` components for each `pending_approval` session. Each card explicitly states:
+
+- Aegis uses your stored credential — you are not sharing your password with the agent
+- The agent does not see the password
+- The agent does not receive cookies or session storage
+- Aegis returns only an `authenticated_session_id` handle
+
+### Implementation Files
+
+- `apps/api/src/runtime/authenticatedSessions.ts` — session registry, Playwright login, observe, navigate
+- `apps/api/src/routes/authenticated-sessions.ts` — internal UI endpoints (GET, approve, reject)
+- `apps/api/src/routes/agent-api.ts` — external agent endpoints under `/api/agent/v1/authenticated-sessions/*`
+- `packages/types/src/index.ts` — `AuthenticatedSessionHandle`, `AuthenticatedSessionStatus`, `AuthenticatedSessionCapability`, `AuthenticatedSessionLoginRequest`, `AuthenticatedSessionObserveResult`, `AuthenticatedSessionNavigateRequest`
+- `apps/web/src/app/route-run-approvals/page.tsx` — `PendingAuthSessionCard` + "Login session requests" section
+- `apps/web/src/lib/api.ts` — `listAuthenticatedSessions`, `approveAuthenticatedSession`, `rejectAuthenticatedSession`
+- `examples/authenticated-session-boundary-demo.mjs` — end-to-end demo script
+
+### Example Script
+
+```bash
+AEGIS_AGENT_TOKEN=pass_demo_001 node examples/authenticated-session-boundary-demo.mjs
+```

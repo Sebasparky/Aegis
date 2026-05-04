@@ -194,11 +194,14 @@ Capability Release Gate v1 is **complete** — implemented 2026-05-03. Sensitive
 
 Real Website Observation Dry Run v1 is **complete** — implemented 2026-05-04. Agents can request an observe-only inspection of any URL via `POST /api/agent/v1/observation-dry-runs`. Starts in `open_observation`, escalates to `protected_observation` only on sensitive task intent, URL patterns, or DOM signals. Non-sensitive pages return minimal open summary only. Protected mode returns redacted `AgentSafeObservationSnapshot`. Strictly observe-only: no clicks, typing, form submit, credential fill, KMS decrypt, or route execution. Shared helpers extracted into `agentSafeObservation.ts`. Route execution in `playwrightRuntime.ts` is unchanged.
 
+Authenticated Session Boundary v1 is **complete** — implemented 2026-05-04. Agents that hit a login wall can request Aegis to perform the login on their behalf. Flow: agent calls `POST /api/agent/v1/authenticated-sessions/login-request` → `pending_approval` → user approves in `/route-run-approvals` → Aegis logs in via isolated headless Playwright → agent polls to `authenticated` → agent observes/navigates via safe endpoints. Agent never receives cookies, storage, Playwright storageState, or the password. All three `raw_*_revealed_to_agent` fields are literal `false`. v1 supports localhost demo-login only; non-localhost → `manual_step_required` immediately. Challenge detection (2FA, CAPTCHA, passkey) halts with `manual_step_required` — no bypass. Same-domain navigation only. KMS audit event recorded with `run_id: "authsession:<sessionId>"`. New endpoints: internal `GET/POST /api/authenticated-sessions/*`, external `POST/GET /api/agent/v1/authenticated-sessions/*`. Approval UI shows "Login session requests" section. Demo: `examples/authenticated-session-boundary-demo.mjs`.
+
 Candidate next milestones:
-1. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-2. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
-3. **Production KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
-4. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **GitHub Authenticated Session Route v1** — authenticated sessions for real GitHub login with SAML/SSO and challenge handling
+2. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+4. **Production KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
+5. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -357,6 +360,19 @@ Real Website Observation Dry Run v1 is **complete** — do not rebuild `runObser
 - Shared observation helpers live in `agentSafeObservation.ts` (`scanPageForSensitivitySignals`, `buildAgentSafeObservationSnapshot`, `buildMinimalOpenObservation`, `SENSITIVE_URL_PATTERNS`, `isSensitiveTaskCategory`, `urlLooksSensitive`); `playwrightRuntime.ts` imports from this module — do not duplicate or re-inline these functions
 - The `agentSafeObservation.ts` extraction must not change route execution behavior in `playwrightRuntime.ts`
 - Do not use observation dry run output as a substitute for a proper Aegis-verified route when executing sensitive workflows
+
+Authenticated Session Boundary v1 is **complete** — implemented 2026-05-04. Do not rebuild `authenticatedSessions.ts`, `authenticated-sessions.ts`, `AuthenticatedSessionHandle`, or the `/api/agent/v1/authenticated-sessions/*` endpoints unless explicitly requested
+- External agents may browse autonomously until they hit a login wall; at that point they request a login capability from Aegis via `POST /api/agent/v1/authenticated-sessions/login-request` — they do not receive credentials directly
+- Authenticated session handles must never expose cookies, localStorage, sessionStorage, request headers, Set-Cookie values, auth tokens, Playwright storageState, passwords, `secret_ref` values, pass_id in raw form, KMS envelopes, or ciphertext — only the safe handle and safe observation snapshots are returned
+- All three `raw_cookies_revealed_to_agent`, `raw_storage_revealed_to_agent`, `raw_credentials_revealed_to_agent` fields are literal `false` on every handle and observation response — they are TypeScript literal types, never set to `true`
+- Automated login is localhost demo-login only in v1 — non-localhost domains return `status: manual_step_required` immediately; do not attempt real GitHub, Google, or other production site logins unless a dedicated authenticated session route is explicitly implemented
+- If login hits 2FA, CAPTCHA, passkey, verification code prompt, or security check, stop immediately with `status: manual_step_required` and `manual_step_reason` — do not attempt bypass, workaround, or retry
+- Post-login navigation is same-domain `page.goto` only — no form submission, no POST actions, no destructive actions, no credential fill after login, no arbitrary clicking; `CROSS_DOMAIN_NAVIGATION_BLOCKED` on any cross-domain URL
+- Credential resolution in `resolveAuthSessionCredential` uses existing `local_dev` KMS provider and `purpose: "login_password"` — do not change the KMS context purpose field; the KMS audit event uses `run_id: "authsession:<sessionId>"` to distinguish from RouteRun resolves
+- External agents cannot self-approve authenticated session requests — approval is always user-controlled via `/route-run-approvals`
+- Do not widen `KmsContext.purpose` in `kms.ts` for authenticated session work — all v1 decrypt calls pass `"login_password"` matching the existing vault blob AAD; a widened type would be correct but is not needed unless a new encrypt operation with a different purpose is introduced
+- `authenticatedSessionHandles` Map and `authenticatedSessionRecords` Map are in-memory only (not persisted to disk) — Playwright Browser/BrowserContext/Page refs are not serializable; sessions are ephemeral within the server process lifetime
+- The "Login session requests" section in `/route-run-approvals` must always display all 4 custody guarantees explicitly: Aegis uses the credential, agent does not see the password, agent does not receive cookies or storage, agent receives only an `authenticated_session_id` handle
 
 ## Terminology — Always Use
 

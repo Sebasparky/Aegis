@@ -1433,3 +1433,57 @@ export interface WebsitePolicyCompatibilityResult {
   required_assertions: string[];
   matching_workflows: string[];
 }
+
+// ─── Authenticated Session Boundary v1 ───────────────────────────────────────
+
+export type AuthenticatedSessionStatus =
+  | "pending_approval"
+  | "login_in_progress"
+  | "authenticated"
+  | "manual_step_required"
+  | "failed"
+  | "expired";
+
+export type AuthenticatedSessionCapability =
+  | "authenticated_observation"
+  | "safe_navigation";
+
+export interface AuthenticatedSessionHandle {
+  session_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  login_url: string;
+  task_summary: string;
+  status: AuthenticatedSessionStatus;
+  capabilities: AuthenticatedSessionCapability[];
+  // Literal false — Aegis never exposes cookies, storage, or credentials to the agent
+  raw_cookies_revealed_to_agent: false;
+  raw_storage_revealed_to_agent: false;
+  raw_credentials_revealed_to_agent: false;
+  manual_step_reason?: string;
+  initial_observation?: ObservationDryRunOpenSummary;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface AuthenticatedSessionLoginRequest {
+  domain: string;
+  login_url: string;
+  task_summary: string;
+  pass_id?: string;
+}
+
+export interface AuthenticatedSessionObserveResult {
+  session_id: string;
+  status: AuthenticatedSessionStatus;
+  page_url: string;
+  open_summary?: ObservationDryRunOpenSummary;
+  protected_snapshot?: AgentSafeObservationSnapshot;
+  raw_cookies_revealed_to_agent: false;
+  raw_storage_revealed_to_agent: false;
+}
+
+export interface AuthenticatedSessionNavigateRequest {
+  url: string;
+}

@@ -232,8 +232,8 @@ export const listInstalledSkills = () =>
 
 // Route Runs
 export type RouteRunWithSummary = RouteRun & {
-  skill_summary: { skill_id: string; name: string; domain: string } | null;
-  route_summary: { route_id: string; workflow_name: string; trust_tier: string; step_count: number } | null;
+  skill_summary: { skill_id: string; name: string; domain: string; risk_level?: string; execution_mode?: string; sensitivity_level?: string } | null;
+  route_summary: { route_id: string; workflow_name: string; trust_tier: string; step_count: number; start_url?: string } | null;
 };
 export const listRouteRuns = (params?: { domain?: string; status?: string }) => {
   const entries: [string, string][] = [];
@@ -248,6 +248,66 @@ export const rejectRouteRun = (runId: string, reason?: string) =>
   request<RouteRun>(`/api/route-runs/${runId}/reject`, {
     method: "POST",
     body: JSON.stringify({ reason: reason ?? "Rejected from approval queue." }),
+  });
+
+// Approval Context — safe manifest for pending_approval runs
+export interface ApprovalManifestLineItem {
+  label: string;
+  value: string;
+  tone?: "default" | "money" | "warning" | "success";
+}
+export interface ApprovalManifest {
+  title: string;
+  subtitle: string;
+  task_category: string;
+  primary_action_label: string;
+  risk_tier: string;
+  line_items: ApprovalManifestLineItem[];
+  capabilities_to_release: string[];
+  custody_guarantees: string[];
+  spending_limit?: {
+    max_amount_usd?: number;
+    currency?: string;
+    payment_instrument_label?: string;
+  };
+  runtime_guarantees: string[];
+  website_context?: {
+    domain: string;
+    policy_status?: string;
+    safety_recommendation?: string;
+    caution_signals?: string[];
+  };
+  purchase_amount?: {
+    amount_usd: number;
+    currency: string;
+    label: string;
+  };
+  constraint_warnings?: string[];
+  approval_blocked?: boolean;
+  approval_block_reason?: string;
+  spending_step_up?: {
+    required: boolean;
+    requested_amount_usd?: number;
+    approved_amount_usd?: number;
+    currency?: string;
+    status?: "not_requested" | "approved";
+    scope?: "this_run_only";
+  };
+}
+export interface RunApprovalContext {
+  run_id: string;
+  manifest: ApprovalManifest;
+  skill_name?: string;
+  route_name?: string;
+  agent_id?: string;
+  execution_surface?: string;
+}
+export const getApprovalContext = (runId: string) =>
+  request<RunApprovalContext>(`/api/route-runs/${runId}/approval-context`);
+export const requestSpendingStepUp = (runId: string, requestedLimitUsd: number) =>
+  request<RunApprovalContext>(`/api/route-runs/${runId}/spending-step-up`, {
+    method: "POST",
+    body: JSON.stringify({ requested_limit_usd: requestedLimitUsd, currency: "USD" }),
   });
 
 // Vault Passes (dev-only credential custody — login_password bundles)
@@ -317,6 +377,48 @@ export const listCredentialSessions = (status?: CredentialSessionView["status"])
 };
 export const approveCredentialSession = (sessionId: string) =>
   request<CredentialSessionView>(`/api/credential-sessions/${sessionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+// ─── Authenticated Session Boundary v1 ───────────────────────────────────────
+
+export interface AuthenticatedSessionHandleView {
+  session_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  login_url: string;
+  task_summary: string;
+  status:
+    | "pending_approval"
+    | "login_in_progress"
+    | "authenticated"
+    | "manual_step_required"
+    | "failed"
+    | "expired";
+  capabilities: string[];
+  raw_cookies_revealed_to_agent: false;
+  raw_storage_revealed_to_agent: false;
+  raw_credentials_revealed_to_agent: false;
+  manual_step_reason?: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export const listAuthenticatedSessions = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<AuthenticatedSessionHandleView[]>(`/api/authenticated-sessions${qs}`);
+};
+
+export const approveAuthenticatedSession = (sessionId: string) =>
+  request<AuthenticatedSessionHandleView>(`/api/authenticated-sessions/${sessionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+export const rejectAuthenticatedSession = (sessionId: string) =>
+  request<AuthenticatedSessionHandleView>(`/api/authenticated-sessions/${sessionId}/reject`, {
     method: "POST",
     body: JSON.stringify({}),
   });

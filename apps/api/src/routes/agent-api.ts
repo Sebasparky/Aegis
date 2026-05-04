@@ -10,7 +10,14 @@ import type {
   AegisExecutionSurface,
   RuntimeCoverageSummary,
   RuntimeObservationModeState,
+  AuthenticatedSessionLoginRequest,
 } from "@aegis/types";
+import {
+  createAuthenticatedSession,
+  getAuthenticatedSessionHandle,
+  observeAuthenticatedSession,
+  navigateAuthenticatedSession,
+} from "../runtime/authenticatedSessions.js";
 import {
   agentDelegations,
   skills,
@@ -530,5 +537,114 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 500, "OBSERVATION_DRY_RUN_FAILED", msg);
       }
     }
+  );
+
+  // ─── Authenticated Session Boundary v1 ─────────────────────────────────────
+
+  // Request Aegis to perform a login on the agent's behalf.
+  // Agent never receives cookies, storage, password, or session secrets.
+  // Returns a session handle with status pending_approval (or manual_step_required for non-localhost).
+  server.post(
+    "/api/agent/v1/authenticated-sessions/login-request",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = (req.body ?? {}) as {
+        domain?: unknown;
+        login_url?: unknown;
+        task_summary?: unknown;
+        pass_id?: unknown;
+      };
+
+      if (!body.domain || typeof body.domain !== "string" || !body.domain.trim()) {
+        return sendError(reply, 400, "MISSING_DOMAIN", "domain is required and must be a non-empty string.");
+      }
+      if (!body.login_url || typeof body.login_url !== "string") {
+        return sendError(reply, 400, "MISSING_LOGIN_URL", "login_url is required.");
+      }
+      if (!/^https?:\/\//i.test(body.login_url)) {
+        return sendError(reply, 400, "INVALID_LOGIN_URL", "login_url must start with http:// or https://.");
+      }
+      if (!body.task_summary || typeof body.task_summary !== "string" || !body.task_summary.trim()) {
+        return sendError(reply, 400, "MISSING_TASK_SUMMARY", "task_summary is required and must be a non-empty string.");
+      }
+
+      const loginReq: AuthenticatedSessionLoginRequest = {
+        domain: (body.domain as string).trim(),
+        login_url: body.login_url as string,
+        task_summary: (body.task_summary as string).trim(),
+        pass_id: typeof body.pass_id === "string" ? body.pass_id : undefined,
+      };
+
+      const handle = createAuthenticatedSession(loginReq, delegation);
+      return reply.send({ ok: true, data: handle });
+    },
+  );
+
+  // Get the current handle for an authenticated session.
+  server.get<{ Params: { sessionId: string } }>(
+    "/api/agent/v1/authenticated-sessions/:sessionId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const handle = getAuthenticatedSessionHandle(req.params.sessionId, delegation.user_id);
+      if (!handle) return sendError(reply, 404, "SESSION_NOT_FOUND", "Authenticated session not found.");
+      return reply.send({ ok: true, data: handle });
+    },
+  );
+
+  // Observe the current state of an authenticated session.
+  // Returns safe observation only — never cookies, storage, or credentials.
+  server.get<{ Params: { sessionId: string } }>(
+    "/api/agent/v1/authenticated-sessions/:sessionId/observe",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const handle = getAuthenticatedSessionHandle(req.params.sessionId, delegation.user_id);
+      if (!handle) return sendError(reply, 404, "SESSION_NOT_FOUND", "Authenticated session not found.");
+      if (handle.status !== "authenticated") {
+        return reply.send({ ok: true, data: { session_id: handle.session_id, status: handle.status, handle } });
+      }
+      try {
+        const result = await observeAuthenticatedSession(req.params.sessionId, delegation.user_id);
+        return reply.send({ ok: true, data: result });
+      } catch (err: unknown) {
+        const e = err as { code?: string; status?: number; message?: string };
+        return sendError(reply, e.status ?? 500, e.code ?? "OBSERVE_FAILED", e.message ?? "Observation failed.");
+      }
+    },
+  );
+
+  // Navigate to a same-domain URL within an authenticated session, then return safe observation.
+  // No form submission, POST, credential fill, or arbitrary clicking allowed.
+  server.post<{ Params: { sessionId: string }; Body: { url?: unknown } }>(
+    "/api/agent/v1/authenticated-sessions/:sessionId/navigate",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const handle = getAuthenticatedSessionHandle(req.params.sessionId, delegation.user_id);
+      if (!handle) return sendError(reply, 404, "SESSION_NOT_FOUND", "Authenticated session not found.");
+      if (handle.status !== "authenticated") {
+        return sendError(
+          reply, 400, "SESSION_NOT_AUTHENTICATED",
+          `Session status is '${handle.status}'; must be 'authenticated' to navigate.`,
+        );
+      }
+      if (!handle.capabilities.includes("safe_navigation")) {
+        return sendError(reply, 403, "CAPABILITY_NOT_GRANTED", "safe_navigation capability is not available.");
+      }
+      const url = req.body?.url;
+      if (!url || typeof url !== "string") {
+        return sendError(reply, 400, "INVALID_URL", "url is required and must be a string.");
+      }
+      try {
+        const result = await navigateAuthenticatedSession(req.params.sessionId, delegation.user_id, url);
+        return reply.send({ ok: true, data: result });
+      } catch (err: unknown) {
+        const e = err as { code?: string; status?: number; message?: string };
+        return sendError(reply, e.status ?? 500, e.code ?? "NAVIGATE_FAILED", e.message ?? "Navigation failed.");
+      }
+    },
   );
 }

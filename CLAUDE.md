@@ -164,6 +164,8 @@ Secret Vault / Pass Custody v1 is **complete** — implemented 2026-05-01. `Aegi
 
 KMS Abstraction v1 is **complete** — implemented 2026-05-02. `apps/api/src/lib/kms.ts` defines `KmsProvider` interface (`local_dev` provider uses AES-256-GCM with env key). `encryptedSecretVault` replaces `devSecretVault` (deprecated). Secrets encrypted at rest; persisted as `encryptedSecretVaultEntries`. `seedDefaultData/loadStore/resetStoreForDemo` are now async. Self-healing encrypts demo secret on startup after `seed:demo`. `vault-passes.ts`, `route-runs.ts`, `credential-sessions.ts` use KMS. Dotenv loaded from repo root `.env` in `index.ts`. To swap to cloud KMS: extend `KmsProviderName`, add provider class, add case in `getKmsProvider()`.
 
+Cloud KMS Provider v1 is **complete** — implemented 2026-05-03. `KmsProviderName` now includes `"cloud_kms_stub"`. `CloudKmsStubProvider` (`apps/api/src/lib/cloudKmsStubProvider.ts`) throws `CLOUD_KMS_NOT_IMPLEMENTED` on any encrypt/decrypt — never falls back to `local_dev`. `KmsAuditEvent` and `KmsOperationType` added to `packages/types/src/index.ts`. `apps/api/src/lib/kmsAudit.ts` records every KMS operation (metadata only, `raw_secret_exposed: false` always). `vault-passes.ts` records `encrypt_secret` events. `secretResolution.ts` records `resolve_secret_for_runtime` events. `GET /api/kms-audit-events` (dev/internal only). To add a real cloud KMS: extend `KmsProviderName`, add a provider class, add a case in `getKmsProvider()`.
+
 Route-to-Pass Binding v1 is **complete** — implemented 2026-05-01. `RoutePassBinding` type + `routePassBindings` map (persisted). `/api/route-pass-bindings` GET/POST/DELETE. `resolve-value` checks binding before route-step default. "Credential Assignments" UI on `/passes` page.
 
 Secret Vault UI v1 is **complete** — implemented 2026-05-01. `/passes` page has a "Credential Vault" section for creating and listing `login_password` bundles. API at `/api/vault-passes` (GET/POST/DELETE). Password never returned after creation. `has_password: false` if encrypted blob absent (pass created before KMS migration — re-enter password). Dev/MVP warning displayed.
@@ -216,6 +218,11 @@ Before making any changes:
 - Do not rebuild Secret Vault v1 (`AegisVaultPass`, `resolve-value`, `pass_field`/`secret_ref`) unless explicitly requested
 - Do not rebuild Secret Vault UI v1 (`/api/vault-passes`, `vault-passes.ts`, Credential Vault section in passes page) unless explicitly requested
 - Do not rebuild KMS Abstraction v1 (`encryptedSecretVault`, `LocalDevKmsProvider`, `EncryptedSecretBlob`, `getKmsProvider`, async `seedDefaultData/loadStore/resetStoreForDemo`) unless explicitly requested
+- Do not rebuild Cloud KMS Provider v1 (`CloudKmsStubProvider`, `kmsAudit.ts`, `kms-audit.ts` route, KMS audit logging in `vault-passes.ts`/`secretResolution.ts`) unless explicitly requested
+- `cloud_kms_stub` always throws `CLOUD_KMS_NOT_IMPLEMENTED` — it does not fall back to `local_dev`; do not add silent fallback behavior
+- `local_dev` KMS provider is demo-only — do not describe it as production-grade KMS
+- Do not expose plaintext passwords, ciphertext, nonces, auth tags, key material, secret_ref values, or encrypted blob IDs in `KmsAuditEvent` or in `GET /api/kms-audit-events` responses — `KmsAuditEvent.raw_secret_exposed: false` is a literal type and must always remain `false`
+- `GET /api/kms-audit-events` is an internal dev endpoint — audit events are in-memory only (reset on restart); do not frame it as a production public API
 - Do not write to or read from `devSecretVault` — it is deprecated; use `encryptedSecretVault + kms.decryptSecret()` for all password resolution
 - Do not rebuild Supabase Persistence v1 (`getVaultRepository`, `getReceiptRepository`, `docs/supabase/001_vault_and_receipts.sql`, `seed-supabase-demo.mjs`, `lib/supabase.ts`, `lib/receiptHash.ts`, `lib/persistenceProvider.ts`) unless explicitly requested
 - Do not directly access `aegisVaultPasses`, `encryptedSecretVault`, or `routeRunReceipts` Maps in vault-passes.ts or receipts.ts — use `getVaultRepository()` / `getReceiptRepository()` instead

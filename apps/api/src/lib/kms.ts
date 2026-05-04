@@ -1,10 +1,10 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { CloudKmsStubProvider } from "./cloudKmsStubProvider.js";
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
 
-// LOCAL DEV ONLY: local_dev is a temporary AES-256-GCM provider for MVP development.
-// To swap for cloud KMS: extend KmsProviderName, add a provider class, and add a case in getKmsProvider().
-export type KmsProviderName = "local_dev";
+// To add a real cloud KMS: extend KmsProviderName, add a provider class, and add a case in getKmsProvider().
+export type KmsProviderName = "local_dev" | "cloud_kms_stub";
 // Future providers: | "aws_kms" | "gcp_kms" | "azure_key_vault" | "hsm"
 
 export interface KmsContext {
@@ -112,6 +112,10 @@ export function getKmsProvider(): KmsProvider {
     _provider = new LocalDevKmsProvider();
     return _provider;
   }
+  if (name === "cloud_kms_stub") {
+    _provider = new CloudKmsStubProvider();
+    return _provider;
+  }
   // Future: add cases for "aws_kms", "gcp_kms", "azure_key_vault"
-  throw new Error(`[kms] Unknown AEGIS_KMS_PROVIDER: "${name}". Supported values: local_dev`);
+  throw new Error(`[kms] Unknown AEGIS_KMS_PROVIDER: "${name}". Supported values: local_dev, cloud_kms_stub`);
 }

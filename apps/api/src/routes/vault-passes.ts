@@ -4,6 +4,7 @@ import { MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
+import { recordKmsAuditEvent } from "../lib/kmsAudit.js";
 
 interface CreateVaultPassBody {
   label: string;
@@ -91,16 +92,33 @@ export async function vaultPassRoutes(server: FastifyInstance) {
     };
 
     let blob;
+    const kms = getKmsProvider();
+    const kmsContext: KmsContext = {
+      user_id: MOCK_USER_ID,
+      pass_id,
+      domain: domain.trim(),
+      purpose: "login_password",
+    };
     try {
-      const kms = getKmsProvider();
-      const kmsContext: KmsContext = {
+      blob = await kms.encryptSecret(password, kmsContext);
+      recordKmsAuditEvent({
+        operation: "encrypt_secret",
+        provider: kms.provider,
         user_id: MOCK_USER_ID,
         pass_id,
         domain: domain.trim(),
-        purpose: "login_password",
-      };
-      blob = await kms.encryptSecret(password, kmsContext);
+        success: true,
+      });
     } catch (err) {
+      recordKmsAuditEvent({
+        operation: "encrypt_secret",
+        provider: kms.provider,
+        user_id: MOCK_USER_ID,
+        pass_id,
+        domain: domain.trim(),
+        success: false,
+        error_code: err instanceof Error ? err.message.split(":")[0] : "KMS_ERROR",
+      });
       console.error("[vault-passes] Encryption failed:", err);
       return reply.status(500).send({ ok: false, error: { code: "KMS_ERROR", message: "Failed to encrypt credential. Check KMS configuration." } });
     }

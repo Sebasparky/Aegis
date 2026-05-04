@@ -21,6 +21,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 >
 > **Also: do NOT rebuild KMS Abstraction v1. `encryptedSecretVault`, `LocalDevKmsProvider`, `EncryptedSecretBlob`, `getKmsProvider`, and async `seedDefaultData/loadStore/resetStoreForDemo` are complete. Do not re-implement the old plaintext `devSecretVault` storage. Use `encryptedSecretVault + kms.decryptSecret()` for all password resolution.**
 >
+> **Also: do NOT rebuild Cloud KMS Provider v1. `CloudKmsStubProvider`, `kmsAudit.ts`, `kms-audit.ts` route, and KMS audit logging in `vault-passes.ts`/`secretResolution.ts` are complete. Do not remove `cloud_kms_stub` from `KmsProviderName`. Do not expose plaintext, ciphertext, nonce, key material, or secret_ref in `KmsAuditEvent` responses.**
+>
 > **Also: do NOT rebuild Supabase Persistence v1. `getVaultRepository()`, `getReceiptRepository()`, `AEGIS_PERSISTENCE_PROVIDER` feature flag, `lib/supabase.ts`, `lib/receiptHash.ts`, `docs/supabase/001_vault_and_receipts.sql`, and `seed-supabase-demo.mjs` are complete. Do not re-implement direct Map access in vault-passes.ts or receipts.ts.**
 >
 > **Also: do NOT rebuild credential session context binding v1. It is complete. Do not re-implement `target_url`/`url_match` on `CredentialUseSession`, `doesTabMatchCredentialSession` in the extension, or `session_context` in the fill-request API response.**
@@ -425,12 +427,14 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Website .well-known Aegis Policy v1 is complete** — implemented 2026-05-03. Demo policy served at `http://localhost:3000/.well-known/aegis-policy.json` (and `/well-known/aegis-policy.json` alias). `WebsiteAegisPolicy` type declares `agent_access`, `verification_level`, `supported_workflows`, `required_assertions`, `limitations`. API endpoints: `GET /api/website-aegis-policy?domain=`, `GET /api/website-aegis-policy/validate?domain=`, `GET /api/website-aegis-policy/compatibility?domain=&task_category=`. Only `localhost` fetch is enabled in v1; non-localhost returns `POLICY_NOT_AVAILABLE`. `computeWebsiteAgentSafetyProfile` now fetches and consumes the policy: `policy_source: "well_known"` in legibility; `well_known_policy_present` and capability constraints enriched in `task_fit`; machine-readable reasons include policy-declared workflow support. Policy alone does NOT upgrade recommendation — clean receipt evidence is still required for `allow_with_approval`. Invalid policy adds `invalid_website_policy` disqualifying signal (`step_up_required`, not `deny`). Three new MCP tools: `get_website_aegis_policy`, `validate_website_aegis_policy`, `check_website_policy_compatibility`. No JWS signing, no business verification, no live internet crawl. Do not rebuild unless explicitly requested.
 
+**Cloud KMS Provider v1 is complete** — implemented 2026-05-03. `KmsProviderName` now includes `"cloud_kms_stub"` (in addition to `"local_dev"`). `CloudKmsStubProvider` throws `CLOUD_KMS_NOT_IMPLEMENTED` on any encrypt/decrypt — it does not fall back to `local_dev`. KMS audit events (`KmsAuditEvent`, `KmsOperationType`) added to `packages/types`. `apps/api/src/lib/kmsAudit.ts` records every encrypt/decrypt operation with metadata only (`raw_secret_exposed: false` always). `vault-passes.ts` records `encrypt_secret` audit events. `secretResolution.ts` records `resolve_secret_for_runtime` audit events. `GET /api/kms-audit-events` exposes the in-memory audit log (dev/internal only — resets on restart). No raw secrets, plaintext, ciphertext, nonces, or key material in any audit event. Capability Release Gate and Observation Mode are unchanged. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Cloud KMS provider v1** — extend `KmsProviderName` with a cloud KMS backend
-2. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-3. **External Agent Delegation API v1** — REST endpoint for third-party agent runtimes to create delegations programmatically
-4. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+1. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+2. **External Agent Delegation API v1** — REST endpoint for third-party agent runtimes to create delegations programmatically
+3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+4. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

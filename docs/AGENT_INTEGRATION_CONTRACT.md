@@ -1956,6 +1956,73 @@ Only `localhost` is supported in v1. Non-localhost returns `POLICY_NOT_AVAILABLE
 
 ---
 
+## Cloud KMS Provider v1
+
+KMS Abstraction v1 (2026-05-02) defined the provider interface and local dev implementation. Cloud KMS Provider v1 (2026-05-03) formalizes the custody provider boundary with an explicit stub, an operation audit trail, and the path for future real cloud KMS providers.
+
+### Provider Kinds
+
+`KmsProviderName = "local_dev" | "cloud_kms_stub"`
+
+Set `AEGIS_KMS_PROVIDER` env var to select the provider. Default is `local_dev`.
+
+- **`local_dev`** — AES-256-GCM with `AEGIS_LOCAL_KMS_KEY_B64`. For demo and development only. Not suitable for production.
+- **`cloud_kms_stub`** — Explicit placeholder. Throws `CLOUD_KMS_NOT_IMPLEMENTED` on any encrypt/decrypt call. Does not fall back to `local_dev`. Use this to verify that your integration handles KMS failures correctly. Replace with a real cloud KMS implementation by adding a provider class and a case in `getKmsProvider()`.
+
+### KMS Audit Events
+
+Every encrypt and decrypt operation emits a `KmsAuditEvent` (defined in `@aegis/types`). Fields:
+
+- `kms_audit_id` — unique event ID
+- `operation` — one of `encrypt_secret`, `decrypt_secret`, `resolve_secret_for_runtime`, `rotate_key`, `destroy_key`
+- `provider` — the KMS provider kind that handled the operation
+- `user_id`, `pass_id`, `domain` — custody context (no secret values)
+- `run_id`, `route_id`, `route_step_id` — execution context when available
+- `success` — whether the operation succeeded
+- `error_code` — error prefix on failure (e.g., `CLOUD_KMS_NOT_IMPLEMENTED`)
+- `created_at` — ISO timestamp
+- `raw_secret_exposed: false` — literal type, always false
+
+Events are in-memory only (v1). They reset on process restart.
+
+### Audit Log Endpoint (Internal / Dev-Only)
+
+`GET /api/kms-audit-events` returns the audit log for the current process lifetime.
+
+```json
+{
+  "ok": true,
+  "data": [
+    {
+      "kms_audit_id": "kmsa_abc123",
+      "operation": "resolve_secret_for_runtime",
+      "provider": "local_dev",
+      "user_id": "user_001",
+      "pass_id": "pass_vault_demo_login_001",
+      "domain": "localhost",
+      "run_id": "run_...",
+      "route_id": "route_demo_login_001",
+      "route_step_id": "step_login_002",
+      "success": true,
+      "created_at": "2026-05-03T...",
+      "raw_secret_exposed": false
+    }
+  ]
+}
+```
+
+No plaintext passwords, ciphertext, nonces, authentication tags, key material, or `secret_ref` values appear in any audit event or endpoint response. `raw_secret_exposed: false` is a TypeScript literal type — it is structurally impossible for it to be `true`.
+
+### What This Is Not
+
+- `cloud_kms_stub` is not a real cloud KMS. It is an explicit not-implemented placeholder.
+- `local_dev` is not production-grade KMS. It is a single-process AES-GCM implementation for demo use.
+- The audit log is not durable in v1. It does not persist across restarts.
+- `GET /api/kms-audit-events` is an internal dev endpoint, not a public API.
+- KMS audit events do not replace receipt-based audit trails for sensitive workflow executions.
+
+---
+
 ## What This Is Not
 
 - This is not a browser automation SDK. Agents do not receive a browser handle.

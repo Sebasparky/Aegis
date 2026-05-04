@@ -202,6 +202,31 @@ export interface AegisVaultPass {
   updated_at: string;
 }
 
+// ─── KMS Audit Events ─────────────────────────────────────────────────────────
+
+export type KmsOperationType =
+  | "encrypt_secret"
+  | "decrypt_secret"
+  | "rotate_key"
+  | "destroy_key"
+  | "resolve_secret_for_runtime";
+
+export interface KmsAuditEvent {
+  kms_audit_id: string;
+  operation: KmsOperationType;
+  provider: string;       // matches KmsProviderName — string avoids cross-package import
+  user_id?: string;
+  pass_id?: string;
+  domain?: string;
+  run_id?: string;
+  route_id?: string;
+  route_step_id?: string;
+  success: boolean;
+  error_code?: string;
+  created_at: string;
+  raw_secret_exposed: false;  // literal type — always false
+}
+
 export interface ProtectedSession {
   id: string;
   user_id: string;

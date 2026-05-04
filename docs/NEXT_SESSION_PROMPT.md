@@ -429,12 +429,15 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Cloud KMS Provider v1 is complete** — implemented 2026-05-03. `KmsProviderName` now includes `"cloud_kms_stub"` (in addition to `"local_dev"`). `CloudKmsStubProvider` throws `CLOUD_KMS_NOT_IMPLEMENTED` on any encrypt/decrypt — it does not fall back to `local_dev`. KMS audit events (`KmsAuditEvent`, `KmsOperationType`) added to `packages/types`. `apps/api/src/lib/kmsAudit.ts` records every encrypt/decrypt operation with metadata only (`raw_secret_exposed: false` always). `vault-passes.ts` records `encrypt_secret` audit events. `secretResolution.ts` records `resolve_secret_for_runtime` audit events. `GET /api/kms-audit-events` exposes the in-memory audit log (dev/internal only — resets on restart). No raw secrets, plaintext, ciphertext, nonces, or key material in any audit event. Capability Release Gate and Observation Mode are unchanged. Do not rebuild unless explicitly requested.
 
+**External Agent Delegation API v1 is complete** — implemented 2026-05-03. Clean public namespace at `/api/agent/v1` for third-party agents using a delegated bearer token. Token is matched against `AgentDelegation.token_id`; server derives all identity fields (agent, delegation, collar) — never trusted from request body. Endpoints: `GET /api/agent/v1/me` (identity), `GET /api/agent/v1/skills` (policy-filtered skill discovery), `POST /api/agent/v1/runs` (create delegated run), `GET /api/agent/v1/runs/:runId` (poll status), `GET /api/agent/v1/runs/:runId/receipts` (safe receipt summaries), `GET /api/agent/v1/websites/:domain/safety-profile` (domain safety), `GET /api/agent/v1/websites/:domain/policy` (well-known policy). Receipt summaries exclude `pass_ids_used`, `runtime_capability_releases`, `variables`, and internal IDs. User approval stays in the Aegis UI; external agents cannot self-approve. Demo script: `examples/external-agent-demo.mjs`. Types added to `packages/types`: `ExternalAgentIdentity`, `ExternalAgentSkillSummary`, `ExternalAgentRunSummary`. Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
 1. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-2. **External Agent Delegation API v1** — REST endpoint for third-party agent runtimes to create delegations programmatically
+2. **Pending Runs surfaced in extension/UI** — surface `pending` and `pending_approval` runs in the extension popup for non-Playwright fallback
 3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
 4. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+5. **External Agent OAuth/App Registration v1** — formal app registration flow for third-party agents (today token is pre-seeded)
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

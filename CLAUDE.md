@@ -316,6 +316,16 @@ Website .well-known Aegis Policy v1 is **complete** — do not rebuild `WebsiteA
 - The localhost `.well-known` policy is demo-only — do not enable live internet fetching for non-localhost domains unless explicitly requested; non-localhost returns `POLICY_NOT_AVAILABLE` (404) in v1
 - Import direction is one-way: `website-agent-safety.ts` imports from `website-aegis-policy.ts`; do not create a reverse import — that would be circular
 
+External Agent Delegation API v1 is **complete** — do not rebuild `agentApiRoutes`, `agent-api.ts`, or any `/api/agent/v1/*` endpoints unless explicitly requested
+- `/api/agent/v1` is the stable public external-agent contract; internal routes (`/api/skills/:skillId/runs`, `/api/route-runs`, etc.) remain for the Aegis product UI
+- External agents must not receive raw secrets, `secret_ref` values, KMS envelopes, ciphertext, private keys, raw payment data, or raw identity data via the v1 API
+- Agent identity and delegation must come from bearer token lookup against `agentDelegations.token_id` — never from request body
+- User approval must remain in the Aegis UI (`/route-run-approvals`); external agents cannot self-approve via `/api/agent/v1`
+- `GET /api/agent/v1/runs/:runId/receipts` returns summaries only — excludes `pass_ids_used`, `runtime_capability_releases` (full list), `variables`, `allowed_reason`, `route_trust_tier`, `installed_skill_id`, and `user_id`
+- `agent_id` in `ExternalAgentIdentity` is derived from `delegation.agent_name` in v1 — it is not a globally unique durable ID; do not present it as one in docs or product copy
+- `jws_present` on receipt summaries reflects whether JWS is stored in Supabase row metadata; in-memory mode always returns `false`
+- `examples/external-agent-demo.mjs` is the reference demo script for the v1 API — do not rebuild unless explicitly requested
+
 ## Terminology — Always Use
 
 | Term | Meaning |

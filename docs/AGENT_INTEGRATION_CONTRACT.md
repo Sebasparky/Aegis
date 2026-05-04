@@ -2034,3 +2034,92 @@ No plaintext passwords, ciphertext, nonces, authentication tags, key material, o
 - The travel booking demo is not real payment processing. No money changes hands. The workflow demonstrates authorization and audit chain only.
 - Delegation Passports do not prove the agent has no out-of-band secrets. They prove only Aegis-covered delegation boundaries.
 - Website Aegis Policies are self-asserted in v1 and do not prove business identity, workflow accuracy, or fulfillment.
+
+---
+
+## External Agent Delegation API v1
+
+**Status: complete — implemented 2026-05-03**
+
+### Purpose
+
+`/api/agent/v1` is the stable public contract for third-party agents. Internal product routes (`/api/skills/:skillId/runs`, `/api/route-runs`, etc.) remain for the Aegis product UI. External agents should use the v1 namespace exclusively.
+
+### Authentication
+
+All v1 endpoints require `Authorization: Bearer <token>`.
+
+The token must match an active `AgentDelegation.token_id`. The server derives `agent_id`, `delegation_id`, and `collar_id` from the matched delegation. Callers cannot override these from the request body.
+
+Error codes: `AUTH_REQUIRED` (401, missing header), `INVALID_TOKEN` (401, token not found or delegation inactive).
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agent/v1/me` | Token-scoped agent identity |
+| `GET` | `/api/agent/v1/skills` | Installed skills visible to this delegation |
+| `POST` | `/api/agent/v1/runs` | Start a delegated skill run |
+| `GET` | `/api/agent/v1/runs/:runId` | Poll run status |
+| `GET` | `/api/agent/v1/runs/:runId/receipts` | Safe receipt summaries for a run |
+| `GET` | `/api/agent/v1/websites/:domain/safety-profile` | Domain safety profile (requires `?task_category=`) |
+| `GET` | `/api/agent/v1/websites/:domain/policy` | Well-known Aegis policy (localhost-only in v1) |
+
+### Run lifecycle via v1
+
+```
+POST /api/agent/v1/runs
+  → status: "pending_approval"   next_action: "wait_for_user_approval"
+  → status: "pending"            next_action: "poll_run_status"
+  → collar blocks                403 COLLAR_BLOCKED
+
+GET /api/agent/v1/runs/:runId   (poll every 1s)
+  → status: "pending_approval"   user has not yet approved in Aegis UI
+  → status: "pending"            Aegis Playwright auto-start pending
+  → status: "running"            Playwright runtime executing
+  → status: "completed"          run succeeded; receipt available
+  → status: "failed"             run failed; failure receipt available
+  → status: "blocked"            run rejected by user
+```
+
+Approval remains in the Aegis UI (`/route-run-approvals`). External agents cannot self-approve.
+
+### Receipt Summaries
+
+`GET /api/agent/v1/runs/:runId/receipts` returns summaries, not raw internal receipts. Included:
+
+- `receipt_id`, `run_id`, `skill_name`, `route_name`, `domain`, `status`, `execution_surface`
+- `credential_used` (boolean), `secret_values_revealed_to_agent: false`
+- `authorization_context` (authorization_id + authorization_hash only)
+- `runtime_coverage_summary`, `capability_release_summary`, `observation_mode_summary`
+- `jws_present` (boolean — indicates JWS is stored in Supabase row metadata)
+
+Excluded: `pass_ids_used`, `runtime_capability_releases` (full list), `variables`, `allowed_reason`, internal IDs.
+
+### Security Rules
+
+- Agent identity comes from bearer token lookup only — never from request body.
+- User approval is not available via the v1 API. It stays in the Aegis UI.
+- No raw secrets, `secret_ref` values, KMS envelopes, ciphertext, or private keys are returned.
+- `agent_id` in v1 is derived from `delegation.agent_name` and is not a globally unique durable ID.
+- Run ownership is verified: `run.delegation_id === delegation.id` enforced on all run endpoints.
+
+### Example: demo agent transcript
+
+```
+node examples/external-agent-demo.mjs
+```
+
+Expected output:
+- Agent identity: `agent_demo_001`, `delg_demo_001`
+- Skills: includes demo login/travel installed skills
+- Safety: `step_up_required` (before first travel booking run)
+- Run: `pending_approval` → `wait_for_user_approval`
+- After approval: Playwright auto-starts, run reaches `completed`
+- Receipt summary: `credential_used`, `runtime_coverage_summary`, no raw secrets
+
+### Implementation Files
+
+- `apps/api/src/routes/agent-api.ts` — all v1 endpoints, auth helper, receipt sanitizer
+- `packages/types/src/index.ts` — `ExternalAgentIdentity`, `ExternalAgentSkillSummary`, `ExternalAgentRunSummary`
+- `examples/external-agent-demo.mjs` — demo external agent script

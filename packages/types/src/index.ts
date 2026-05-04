@@ -653,6 +653,49 @@ export interface Skill {
   sensitivity_level?: SensitivityLevel;
 }
 
+// ─── External Agent Delegation API v1 — Public Response Types ────────────────
+
+export interface ExternalAgentIdentity {
+  /** Derived from delegation.agent_name in v1 — not a globally unique durable ID. */
+  agent_id: string;
+  agent_name: string;
+  agent_platform?: string;
+  delegation_id: string;
+  user_aegis_id: string;
+  default_collar_id?: string;
+  delegation_status: AgentDelegationStatus;
+  token_scope: {
+    skill_access_mode: SkillAccessMode;
+    allowed_skill_ids?: string[];
+    excluded_skill_ids?: string[];
+  };
+}
+
+export interface ExternalAgentSkillSummary {
+  skill_id: string;
+  name: string;
+  summary: string;
+  domain: string;
+  required_permissions: string[];
+  risk_level?: string;
+  trust_tier?: string;
+  execution_mode?: ExecutionMode;
+  sensitivity_level?: SensitivityLevel;
+}
+
+export interface ExternalAgentRunSummary {
+  run_id: string;
+  skill_id: string;
+  route_id: string;
+  status: RouteRunStatus;
+  approval_required: boolean;
+  approval_required_permissions?: string[];
+  created_at: string;
+  completed_at?: string;
+  error?: string | null;
+  receipt_ids: string[];
+}
+
 export interface InstalledSkill {
   installed_skill_id: string;
   skill_id: string;

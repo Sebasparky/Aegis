@@ -25,6 +25,7 @@ import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { schedulePersist } from "../store/persistence.js";
 import { computeWebsiteAgentSafetyProfile } from "./website-agent-safety.js";
 import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
+import { runObservationDryRun } from "../runtime/observationDryRun.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -490,6 +491,44 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             : {}),
         },
       });
+    }
+  );
+
+  /**
+   * POST /api/agent/v1/observation-dry-runs
+   * Navigate to a URL in an isolated headless browser, inspect DOM for sensitive signals,
+   * and return a structured observation report. Observe-only — no clicks, no typing,
+   * no form submit, no credential fill, no capability release, no KMS, no route execution.
+   */
+  server.post(
+    "/api/agent/v1/observation-dry-runs",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = req.body as { url?: unknown; task_category?: unknown };
+
+      if (!body.url || typeof body.url !== "string") {
+        return sendError(reply, 400, "INVALID_URL", "url is required and must be a string.");
+      }
+      if (
+        body.task_category !== undefined &&
+        !VALID_TASK_CATEGORIES.has(body.task_category as DelegationTrustTaskCategory)
+      ) {
+        return sendError(reply, 400, "INVALID_TASK_CATEGORY", `Unknown task_category: "${body.task_category}".`);
+      }
+
+      try {
+        const result = await runObservationDryRun({
+          requested_url: body.url,
+          task_category: body.task_category as DelegationTrustTaskCategory | undefined,
+          user_id: MOCK_USER_ID,
+        });
+        return reply.send({ ok: true, data: result });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Unexpected error during observation dry run.";
+        return sendError(reply, 500, "OBSERVATION_DRY_RUN_FAILED", msg);
+      }
     }
   );
 }

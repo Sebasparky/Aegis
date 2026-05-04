@@ -192,9 +192,13 @@ Coverage Violation Blocking v1 is **complete** — implemented 2026-05-03. `Runt
 
 Capability Release Gate v1 is **complete** — implemented 2026-05-03. Sensitive event coverage is now provenance-based, not timing-based. `RuntimeCapabilityRelease` type tracks that Aegis explicitly released a capability (`login_credential`, `payment_method`, `identity_profile`) for a run. `requiredCapabilityForEvent()` determines the required capability per event; events with a required capability are `covered_by_aegis` only when a matching active release exists — timing windows are not consulted for those events. `unknown_sensitive` high/critical events are also not covered by timing alone. `login_credential` releases created on `secret_ref` fills only. `payment_method` releases created only for payment-intent click steps if the user has a payment method in `paymentMethods` Map. Receipts include `runtime_capability_releases` and `capability_release_summary` (metadata only). New intervention type: `blocked_sensitive_action_without_capability_release`. Violation demo correctly fails because the hidden credential submit at page load has no `login_credential` release.
 
+Real Website Observation Dry Run v1 is **complete** — implemented 2026-05-04. Agents can request an observe-only inspection of any URL via `POST /api/agent/v1/observation-dry-runs`. Starts in `open_observation`, escalates to `protected_observation` only on sensitive task intent, URL patterns, or DOM signals. Non-sensitive pages return minimal open summary only. Protected mode returns redacted `AgentSafeObservationSnapshot`. Strictly observe-only: no clicks, typing, form submit, credential fill, KMS decrypt, or route execution. Shared helpers extracted into `agentSafeObservation.ts`. Route execution in `playwrightRuntime.ts` is unchanged.
+
 Candidate next milestones:
-1. **Website .well-known Aegis policy v1** — structured endpoint websites publish to describe their Aegis agent policy
-2. **Cloud KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
+1. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+2. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+3. **Production KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS (AWS KMS, GCP KMS, or HashiCorp Vault)
+4. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list and recommended next steps.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.
@@ -325,6 +329,34 @@ External Agent Delegation API v1 is **complete** — do not rebuild `agentApiRou
 - `agent_id` in `ExternalAgentIdentity` is derived from `delegation.agent_name` in v1 — it is not a globally unique durable ID; do not present it as one in docs or product copy
 - `jws_present` on receipt summaries reflects whether JWS is stored in Supabase row metadata; in-memory mode always returns `false`
 - `examples/external-agent-demo.mjs` is the reference demo script for the v1 API — do not rebuild unless explicitly requested
+
+Agent Approval Context Panel v1 is **complete** — do not rebuild unless explicitly requested
+- Do not rebuild `GET /api/route-runs/:runId/approval-context`, `ApprovalManifest`, `ApprovalManifestLineItem`, `RunApprovalContext`, or the `/route-run-approvals` panel redesign unless explicitly requested
+- Approval UI must render real authorization/constraint data — spending limits come from `collar.spending_limits.max_with_approval`, never hardcoded amounts; "$248 fare (demo)" is a demo constant labeled explicitly as such, not the authorization max
+- Approval UI must never display raw secrets, `secret_ref` values, KMS envelopes, ciphertext, private keys, PAN, CVV, or raw identity documents
+- External agents cannot approve their own runs — approval is always user-controlled via the Aegis UI
+- `GET /api/route-runs/:runId/approval-context` assembles `ApprovalManifest` server-side from safe_literal route steps, collar data, and payment method metadata — it must never return `secret_ref`, `pass_id`, `devvault://` references, card numbers, ciphertext, or credential values
+- Only `value_policy.type === "safe_literal"` step values may appear in an `ApprovalManifest` line item; `pass_field` and `secret_ref` steps must never be read or surfaced in the manifest
+
+Spending Limit Step-Up v1 is **complete** — do not rebuild unless explicitly requested
+- Do not rebuild `SpendingLimitStepUp` type, `spendingLimitStepUps` Map, `POST /api/route-runs/:runId/spending-step-up`, `buildRunApprovalContext` helper, `ApprovalManifest.purchase_amount`/`constraint_warnings`/`approval_blocked`/`spending_step_up` fields, or the over-limit / step-up UI in `/route-run-approvals` unless explicitly requested
+- Step-up must never mutate `collar.spending_limits` — only the per-run `spendingLimitStepUps` Map entry is updated
+- External agents cannot request or self-approve spending step-ups via `/api/agent/v1`
+- Approval receipt `constraints.max_amount_usd` uses `spendingLimitStepUps.get(runId)?.approved_limit_usd ?? collar max ?? 500` — the one-time override takes precedence
+- Approval UI must block normal approve when `manifest.approval_blocked === true`; Reject must always remain enabled regardless of step-up state
+- Do not display invented fallback limits (e.g., $500) in the manifest when `collar.spending_limits.max_with_approval` is absent — show nothing or "No delegated limit found"
+- After a step-up is approved, UI must show BOTH the original collar limit AND the one-time approved limit to make it clear the collar was not mutated
+
+Real Website Observation Dry Run v1 is **complete** — do not rebuild `runObservationDryRun`, `observationDryRun.ts`, `agentSafeObservation.ts`, `POST /api/agent/v1/observation-dry-runs`, or `examples/real-website-observation-dry-run.mjs` unless explicitly requested
+- Dry runs are strictly observe-only — do not add `page.click()`, `page.fill()`, `page.type()`, `page.press()`, `locator.click()`, `locator.fill()`, `form.submit()`, `resolveRouteStepValue()`, `createRuntimeCapabilityRelease()`, `createRuntimeIntervention()`, `buildReceipt()`, `page.screenshot()`, or any KMS call to `runObservationDryRun`
+- Dry runs start in `open_observation`; escalate to `protected_observation` only when task intent, URL pattern, or DOM signals indicate a sensitive workflow — do not escalate globally by default
+- In open mode, return only `ObservationDryRunOpenSummary` (page title, ≤5 headings, ≤5 links, ≤5 non-sensitive buttons, form count) — do not build `AgentSafeObservationSnapshot`, return full element lists, dump HTML, or return screenshots
+- In protected mode, build `AgentSafeObservationSnapshot` — only sensitive elements get `value_redacted: true` and restricted `allowed_actions`; normal non-sensitive elements remain readable
+- Dry run output must never include raw field values from sensitive inputs; `page.evaluate()` must only check `.value.length > 0` boolean for filled detection, never `.value` itself
+- `runObservationDryRun` must not create a `RouteRun`, `ActionAuthorizationReceipt`, or `RuntimeCapabilityRelease`; it creates only a `RuntimeSession` for observation state tracking
+- Shared observation helpers live in `agentSafeObservation.ts` (`scanPageForSensitivitySignals`, `buildAgentSafeObservationSnapshot`, `buildMinimalOpenObservation`, `SENSITIVE_URL_PATTERNS`, `isSensitiveTaskCategory`, `urlLooksSensitive`); `playwrightRuntime.ts` imports from this module — do not duplicate or re-inline these functions
+- The `agentSafeObservation.ts` extraction must not change route execution behavior in `playwrightRuntime.ts`
+- Do not use observation dry run output as a substitute for a proper Aegis-verified route when executing sensitive workflows
 
 ## Terminology — Always Use
 

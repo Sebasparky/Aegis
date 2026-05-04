@@ -136,6 +136,17 @@ export interface SpendingLimits {
   subscriptions_allowed: boolean;
 }
 
+export interface SpendingLimitStepUp {
+  run_id: string;
+  original_limit_usd?: number;
+  requested_limit_usd: number;
+  approved_limit_usd: number;
+  currency: string;
+  scope: "this_run_only";
+  approved_at: string;
+  approved_by: "user";
+}
+
 export interface CounterpartyRules {
   sensitive_actions_require_verified_business: boolean;
   block_known_prompt_injection_sites: boolean;
@@ -491,6 +502,60 @@ export interface ActionAuthorizationReceipt {
     authorization_hash: string;
     authorization_jws: string;
   };
+}
+
+export interface ApprovalManifestLineItem {
+  label: string;
+  value: string;
+  tone?: "default" | "money" | "warning" | "success";
+}
+
+export interface ApprovalManifest {
+  title: string;
+  subtitle: string;
+  task_category: string;
+  primary_action_label: string;
+  risk_tier: string;
+  line_items: ApprovalManifestLineItem[];
+  capabilities_to_release: string[];
+  custody_guarantees: string[];
+  spending_limit?: {
+    max_amount_usd?: number;
+    currency?: string;
+    payment_instrument_label?: string;
+  };
+  runtime_guarantees: string[];
+  website_context?: {
+    domain: string;
+    policy_status?: string;
+    safety_recommendation?: string;
+    caution_signals?: string[];
+  };
+  purchase_amount?: {
+    amount_usd: number;
+    currency: string;
+    label: string;
+  };
+  constraint_warnings?: string[];
+  approval_blocked?: boolean;
+  approval_block_reason?: string;
+  spending_step_up?: {
+    required: boolean;
+    requested_amount_usd?: number;
+    approved_amount_usd?: number;
+    currency?: string;
+    status?: "not_requested" | "approved";
+    scope?: "this_run_only";
+  };
+}
+
+export interface RunApprovalContext {
+  run_id: string;
+  manifest: ApprovalManifest;
+  skill_name?: string;
+  route_name?: string;
+  agent_id?: string;
+  execution_surface?: string;
 }
 
 export interface PolicyEvalInput {
@@ -956,6 +1021,69 @@ export interface AgentSafeObservationSnapshot {
     redacted_values: number;
     required_capabilities: RuntimeCapabilityType[];
   };
+}
+
+// ─── Observation Dry Run v1 ───────────────────────────────────────────────────
+
+export type ObservationDryRunStatus = "completed" | "failed";
+
+export type ObservationDryRunRecommendation =
+  | "safe_to_observe"
+  | "sensitive_surface_detected"
+  | "do_not_execute_without_aegis_route"
+  | "blocked_by_navigation_error";
+
+export interface ObservationDryRunSensitiveSurface {
+  kind: AgentSafeElementKind;
+  label?: string;
+  text?: string;
+  input_type?: string;
+  sensitivity?: RuntimeEventSensitivityKind;
+  required_capability?: RuntimeCapabilityType;
+  reason: string;
+}
+
+export interface ObservationDryRunOpenSummary {
+  page_title?: string;
+  headings: string[];
+  links_sample: string[];
+  buttons_sample: string[];
+  forms_detected: number;
+}
+
+export interface ObservationDryRunResult {
+  dry_run_id: string;
+  status: ObservationDryRunStatus;
+  requested_url: string;
+  final_url?: string;
+  domain?: string;
+  task_category?: DelegationTrustTaskCategory;
+  created_at: string;
+  completed_at?: string;
+  recommendation: ObservationDryRunRecommendation;
+  observation_mode: RuntimeObservationModeState;
+  open_summary?: ObservationDryRunOpenSummary;
+  snapshot?: AgentSafeObservationSnapshot;
+  sensitive_surfaces: ObservationDryRunSensitiveSurface[];
+  summary: {
+    total_elements: number;
+    sensitive_elements: number;
+    redacted_values: number;
+    required_capabilities: RuntimeCapabilityType[];
+    navigation_ms?: number;
+  };
+  safety_rules_enforced: {
+    no_clicks: true;
+    no_typing: true;
+    no_form_submit: true;
+    no_credential_fill: true;
+    no_payment_release: true;
+    no_kms_decrypt: true;
+    no_route_execution: true;
+    no_screenshot: true;
+    no_full_dom_dump: true;
+  };
+  error?: { code: string; message: string };
 }
 
 // ─── Aegis Rails — RoutePassBinding ──────────────────────────────────────────

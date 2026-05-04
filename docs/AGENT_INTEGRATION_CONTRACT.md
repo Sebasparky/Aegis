@@ -2123,3 +2123,153 @@ Expected output:
 - `apps/api/src/routes/agent-api.ts` — all v1 endpoints, auth helper, receipt sanitizer
 - `packages/types/src/index.ts` — `ExternalAgentIdentity`, `ExternalAgentSkillSummary`, `ExternalAgentRunSummary`
 - `examples/external-agent-demo.mjs` — demo external agent script
+
+---
+
+## Real Website Observation Dry Run v1
+
+> **Status: Development / Demo Only.**
+
+### Purpose
+
+Before committing to a skill run, an agent can ask Aegis to visit a URL in an isolated headless browser and report whether the page contains sensitive surfaces — without taking any action.
+
+This lets agents evaluate real websites safely:
+- Is the page sensitive? Should Aegis protection be applied?
+- What type of inputs or buttons are on the page?
+- Is an Aegis-verified route required before acting here?
+
+### Endpoint
+
+```
+POST /api/agent/v1/observation-dry-runs
+Authorization: Bearer <delegation-token>
+Content-Type: application/json
+
+{
+  "url": "https://example.com",
+  "task_category": "travel_booking"  // optional
+}
+```
+
+### Observation Mode Logic
+
+The dry run starts in `open_observation`. It escalates to `protected_observation` only when sensitivity signals are detected:
+
+| Trigger | Escalation source |
+|---|---|
+| `task_category` is sensitive (login, payment, travel_booking, etc.) | Pre-navigation intent |
+| URL path matches sensitive pattern (`/login`, `/checkout`, `/payment`, etc.) | Pre-navigation |
+| DOM contains password fields, payment autocomplete, or sensitive labels | Post-navigation DOM scan |
+
+**Non-sensitive pages** return a minimal open summary only — page title, up to 5 headings, links, buttons, form count. No full DOM. No element list. No snapshot.
+
+**Sensitive pages** return a redacted `AgentSafeObservationSnapshot` — sensitive fields carry `value_redacted: true`, `required_capability`, and `allowed_actions: ["read", "request_fill"]`. Normal non-sensitive elements are not globally redacted.
+
+### Observe-Only Guarantees
+
+The endpoint enforces these rules at the implementation level — not just by policy:
+
+| Rule | Enforced |
+|---|---|
+| No clicks | `safety_rules_enforced.no_clicks: true` |
+| No typing | `safety_rules_enforced.no_typing: true` |
+| No form submit | `safety_rules_enforced.no_form_submit: true` |
+| No credential fill | `safety_rules_enforced.no_credential_fill: true` |
+| No capability release | `safety_rules_enforced.no_payment_release: true` |
+| No KMS decrypt | `safety_rules_enforced.no_kms_decrypt: true` |
+| No route execution | `safety_rules_enforced.no_route_execution: true` |
+| No screenshots | `safety_rules_enforced.no_screenshot: true` |
+| No full DOM dump | `safety_rules_enforced.no_full_dom_dump: true` |
+
+No `RouteRun` is created. No `ActionAuthorizationReceipt` is created. No KMS operations are performed.
+
+### Response: `ObservationDryRunResult`
+
+```json
+{
+  "ok": true,
+  "data": {
+    "dry_run_id": "obsdry_abc123def456",
+    "status": "completed",
+    "requested_url": "https://example.com",
+    "final_url": "https://example.com",
+    "domain": "example.com",
+    "task_category": "travel_booking",
+    "created_at": "...",
+    "completed_at": "...",
+    "recommendation": "safe_to_observe",
+    "observation_mode": {
+      "mode": "open_observation",
+      "activation_reasons": [],
+      "sensitive_signals": []
+    },
+    "open_summary": {
+      "page_title": "Example Domain",
+      "headings": ["Example Domain"],
+      "links_sample": ["More information..."],
+      "buttons_sample": [],
+      "forms_detected": 0
+    },
+    "sensitive_surfaces": [],
+    "summary": {
+      "total_elements": 0,
+      "sensitive_elements": 0,
+      "redacted_values": 0,
+      "required_capabilities": [],
+      "navigation_ms": 843
+    },
+    "safety_rules_enforced": {
+      "no_clicks": true,
+      "no_typing": true,
+      "no_form_submit": true,
+      "no_credential_fill": true,
+      "no_payment_release": true,
+      "no_kms_decrypt": true,
+      "no_route_execution": true,
+      "no_screenshot": true,
+      "no_full_dom_dump": true
+    }
+  }
+}
+```
+
+### Recommendation Values
+
+| Value | Meaning |
+|---|---|
+| `safe_to_observe` | Non-sensitive page, no sensitive signals detected, no sensitive task intent |
+| `sensitive_surface_detected` | Protected mode active, one or more sensitive elements found |
+| `do_not_execute_without_aegis_route` | Sensitive task intent or URL — no explicit sensitive DOM found, but execution requires an Aegis-verified route |
+| `blocked_by_navigation_error` | Navigation failed (timeout, redirect loop, CAPTCHA, paywall, bot protection) |
+
+### Limitations
+
+- **Single URL only** — no crawling, no multi-page traversal.
+- **No screenshots** — only DOM metadata is collected.
+- **No full DOM dump** — only structured element metadata (role, label, sensitivity).
+- **Heuristic classification** — sensitivity detection uses field type, name, id, autocomplete, placeholder, and button text. It may miss obfuscated or JavaScript-rendered fields.
+- **DOM can be incomplete** — JavaScript-heavy SPAs may not fully render before `domcontentloaded`. The scan reflects the state at that moment.
+- **No business verification** — a clean observation does not mean the site is safe or legitimate.
+- **No bypassing bot protections** — if the URL requires CAPTCHA, authentication, or bot detection, the navigation will fail with `blocked_by_navigation_error`.
+- **Not a guarantee** — dry run results are advisory signals, not proof of safety.
+
+### Example Script
+
+```
+node examples/real-website-observation-dry-run.mjs
+
+URL=https://www.wikipedia.org node examples/real-website-observation-dry-run.mjs
+
+URL=http://localhost:3000/demo-travel TASK_CATEGORY=travel_booking node examples/real-website-observation-dry-run.mjs
+
+URL=http://localhost:3000/demo-login TASK_CATEGORY=login node examples/real-website-observation-dry-run.mjs
+```
+
+### Implementation Files
+
+- `apps/api/src/runtime/observationDryRun.ts` — `runObservationDryRun()` core function
+- `apps/api/src/runtime/agentSafeObservation.ts` — shared helpers: `scanPageForSensitivitySignals`, `buildAgentSafeObservationSnapshot`, `buildMinimalOpenObservation`, `isSensitiveTaskCategory`, `urlLooksSensitive`, `SENSITIVE_URL_PATTERNS`
+- `apps/api/src/routes/agent-api.ts` — `POST /api/agent/v1/observation-dry-runs` endpoint
+- `packages/types/src/index.ts` — `ObservationDryRunResult`, `ObservationDryRunOpenSummary`, `ObservationDryRunSensitiveSurface`, `ObservationDryRunStatus`, `ObservationDryRunRecommendation`
+- `examples/real-website-observation-dry-run.mjs` — demo script

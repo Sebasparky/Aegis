@@ -370,7 +370,7 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
           "0. If no Playwright browser is running or the CDP connection is unavailable: call start_task_browser_session. If the response includes reused_existing=true, the session is already active — no reconnect needed. If requires_browser_reconnect=true, use the returned cdp_url with your browser adapter before navigating.",
           "1. Navigate to the login page in your Playwright browser.",
           "2. Choose username/password path (not OAuth — Aegis cannot fill OAuth flows).",
-          "3. Call list_vault_passes to find the pass_id for the domain (optional if only one credential exists).",
+          "3. Call list_vault_passes to find the pass_id for the credential provider domain. Each pass has a domain field (e.g. 'github.com') — select the pass whose domain matches the login page you navigated to, not the originating site. If Supabase redirected you to github.com for OAuth login, find the GitHub credential (domain='github.com'), not a Supabase credential.",
           "4. Call request_secret_field_injection({ domain, field_kind: 'username', page_url, reason }).",
           "5. If status='pending_approval': tell the user to approve in Aegis UI, then call wait_for_credential_authorization({ authorization_id }) — do NOT ask user to type 'done'.",
           "6. When wait_for_credential_authorization returns status='approved': call execute_secret_field_injection with the injection_request_id.",
@@ -1472,7 +1472,7 @@ const TOOLS = [
   {
     name: "list_vault_passes",
     description:
-      "List Aegis vault credential metadata available to this delegated user. Returns labels, usernames, domains, kinds, and pass_ids only — never passwords or secret values. Use this when the user names a credential ('use my Test Login account', 'use the staging credentials') so you can identify the correct pass_id and supply it in pass_overrides when calling request_skill_run. Optionally filter by domain, kind, or a free-text query matching label/username/domain.",
+      "List Aegis vault credential metadata available to this delegated user. Returns labels, usernames, domains, kinds, and pass_ids only — never passwords or secret values. Use this when the user names a credential ('use my GitHub account', 'use the Vercel credentials') so you can identify the correct pass_id. Each pass has a domain field that identifies the credential provider's login domain (e.g. 'github.com', 'vercel.com') — match this against the current page hostname before requesting injection. Optionally filter by domain, kind, or a free-text query matching label/username/domain.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2030,6 +2030,7 @@ const TOOLS = [
       "- Aegis does NOT choose between OAuth and username/password. The agent must navigate to the username/password login path before calling this.\n" +
       "- Aegis does NOT log into the site for the agent. Aegis only fills the specific field you request.\n" +
       "- Routes/skills are for complex high-risk workflows (payments, banking, account deletion) — not for normal login.\n" +
+      "- CREDENTIAL PROVIDER DOMAINS: Each vault pass is bound to a specific credential provider domain (e.g. a GitHub credential is valid only on github.com). Use the GitHub credential only when the active browser is on github.com — Aegis validates the domain before injecting and will reject cross-domain injection with a clear error. If a site uses OAuth (e.g. Supabase redirecting to github.com for login), navigate to the OAuth provider's login page first, then request injection against github.com, not the originating site.\n" +
       "ONE-APPROVAL FLOW: When you call this for a username field, Aegis creates one 'credential-use authorization' covering BOTH username and password for this login attempt. " +
       "The user approves once at /route-run-approvals under 'Login credential requests' — that single approval covers both fields. " +
       "You do NOT need to request a second approval for the password injection on the same login attempt.\n" +

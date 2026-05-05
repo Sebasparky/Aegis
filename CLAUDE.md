@@ -358,6 +358,18 @@ Before making any changes:
 - New sensitive workflow features should target `aegis_playwright` first; Chrome extension support can follow as a companion surface
 - Future website handshake features should consume `passport_jws` from the Delegation Passport
 
+**Credential Provider Model invariants:**
+
+- Domain remains the security primitive — `findCredentialProviderByDomain` is a display-only lookup; it does NOT authorize or validate injection on any domain
+- Injection domain validation remains in the CDP fill endpoint (`new URL(injection.page_url).hostname` must match `injection.domain`) — do not bypass or weaken this check
+- User-facing copy should prefer `"GitHub · username"` over raw domain when a provider is known; fall back to `"domain · username"` for unrecognized domains (`is_custom: true`)
+- `getInjectionSafetyCopy` is the canonical approval copy generator for credential injection cards — use it; do not hardcode provider names in UI components
+- Provider registry is intentionally small (13 providers) — do not add entries without clear product need
+- Registry is duplicated in `apps/api/src/lib/credentialProviders.ts` and `apps/web/src/lib/credentialProviders.ts` with a TODO to move to a shared package — do not create a dependency from api to web or vice versa for this module
+- Aegis only injects credentials on the current `injection_domain` (which must match `pass.domain`) — `requesting_site` never becomes the injection target even if it matches a provider's display name
+- Three-domain model (requesting_site / credential_provider_domain / current_injection_domain) is documented in `docs/CREDENTIAL_PROVIDER_MODEL.md` — do not remove or collapse this model
+- Do not rebuild: Credential Provider Model v1
+
 ## Terminology — Always Use
 
 | Term | Meaning |

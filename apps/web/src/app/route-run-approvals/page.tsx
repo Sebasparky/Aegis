@@ -38,6 +38,7 @@ import {
   type EmailResolverStatusView,
   type ChallengeEmailResolutionView,
 } from "../../lib/api";
+import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 
 // ─── Tone helpers ─────────────────────────────────────────────────────────────
 
@@ -612,13 +613,25 @@ function PendingInjectionCard({
   const fieldKindClass = isPassword
     ? "border-red-800 text-red-300 bg-red-950"
     : "border-blue-800 text-blue-300 bg-blue-950";
+  const provider = findCredentialProviderByDomain(injection.domain);
+  const safetyCopy = getInjectionSafetyCopy({
+    provider_display_name: provider?.display_name ?? injection.domain,
+    injection_domain: injection.domain,
+  });
 
   return (
     <div className="bg-gray-900 border border-emerald-900 rounded-xl p-5 space-y-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-semibold text-white">Secret Field Injection</p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-semibold text-white">Secret Field Injection</p>
+            {provider && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
+                {provider.display_name}
+              </span>
+            )}
+          </div>
           <p className="text-xs text-emerald-300 font-mono mt-0.5">{injection.domain}</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -641,6 +654,7 @@ function PendingInjectionCard({
       <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
         <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-1">Target page</p>
         <p className="text-xs text-gray-400 font-mono break-all">{injection.page_url}</p>
+        <p className="text-xs text-gray-500 mt-2">{safetyCopy}</p>
       </div>
 
       {/* Custody guarantees */}
@@ -699,13 +713,22 @@ function PendingCredAuthCard({
 }) {
   const [approving, setApproving] = useState(false);
   const [denying, setDenying] = useState(false);
+  const provider = findCredentialProviderByDomain(auth.domain);
+  const providerLabel = provider ? `${provider.display_name} · ${auth.pass_label}` : auth.pass_label;
 
   return (
     <div className="bg-gray-900 border border-indigo-900 rounded-xl p-5 space-y-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-semibold text-white">Login credential request</p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-semibold text-white">Login credential request</p>
+            {provider && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-400 border border-indigo-800">
+                {provider.display_name}
+              </span>
+            )}
+          </div>
           <p className="text-xs text-indigo-300 font-mono mt-0.5">{auth.domain}</p>
         </div>
         <span className="text-xs px-2 py-1 rounded-full border border-amber-800 text-amber-300 bg-amber-950 shrink-0">
@@ -716,7 +739,7 @@ function PendingCredAuthCard({
       {/* Account info */}
       <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 space-y-1">
         <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500">Account</p>
-        <p className="text-sm text-white font-medium">{auth.pass_label}</p>
+        <p className="text-sm text-white font-medium">{providerLabel}</p>
         {auth.pass_username && (
           <p className="text-xs text-gray-400 font-mono">{auth.pass_username}</p>
         )}
@@ -775,7 +798,7 @@ function PendingCredAuthCard({
           onClick={async () => { setApproving(true); try { await onApprove(); } finally { setApproving(false); } }}
           className="px-4 py-2 text-sm rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-medium transition-colors disabled:opacity-50"
         >
-          {approving ? "Approving…" : `Allow use of ${auth.pass_label}`}
+          {approving ? "Approving…" : `Allow use of ${providerLabel}`}
         </button>
         <button
           disabled={approving || denying}

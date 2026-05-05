@@ -53,6 +53,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Sensitive Action Receipt Timeline v1 or its polish. Both are complete. Do not re-implement `SensitiveActionTimelineItem`, `SensitiveActionEventType`, `GET /api/internal/sensitive-receipts/recent`, `sensitiveReceiptsRouter`, `listSensitiveReceiptTimeline`, or the `/sensitive-receipts` page. Events are derived at query time from existing Maps — no write-time hooks, event emitters, or new persistence. The endpoint supports `since` (default "24h") and `event_group` filters applied after derivation. Agent-provided `reason` strings are sanitized via `sanitizeReceiptText` before inclusion. Nav labels are "Route Receipts" and "Sensitive Timeline". Never include `pass_id`, `secret_ref`, `authorization_hash`, `authorization_jws`, `user_data_dir`, `cdp_url`, raw codes, email body/subject, cookies, or storage in the response. `pass_label` is display metadata only.**
 
+> **Also: do NOT rebuild Credential Provider Model v1. It is complete. Do not re-implement `CredentialProviderDefinition`, `CredentialProviderMatch`, `normalizeLoginDomain`, `findCredentialProviderByDomain`, `getCredentialDisplayLabel`, or `getInjectionSafetyCopy`. The registry lives in `apps/api/src/lib/credentialProviders.ts` and `apps/web/src/lib/credentialProviders.ts` (duplicated with a TODO to move to a shared package). `findCredentialProviderByDomain` is display-only — it does NOT authorize injection on any domain. Injection domain validation remains in the CDP fill endpoint. Do not remove the three-domain model from `docs/CREDENTIAL_PROVIDER_MODEL.md`.**
+
 ---
 
 ## Completed Increments (as of 2026-05-03)
@@ -523,15 +525,40 @@ MCP `start_task_browser_session`: reads `reused_existing`/`port_auto_selected`/`
 4. No `lsof`, no port numbers in prose, no shell commands in any `next_action` or `user_message`.
 5. `plan_aegis_action` with `"log into GitHub and summarize my repos"` → step 0 mentions `requires_browser_reconnect`; step 11 present with repo verification guidance.
 
+**Credential Provider Model v1 — complete (2026-05-05).**
+
+Provider/account-first UX layer on top of the existing domain-bound security model. Users see "GitHub · Sebasparky" labels instead of raw domains in approval and vault UI; domain binding remains the security primitive.
+
+Key additions:
+- `CredentialProviderDefinition`, `CredentialProviderMatch` types in `packages/types/src/index.ts`
+- `apps/api/src/lib/credentialProviders.ts` + `apps/web/src/lib/credentialProviders.ts` — 13-provider registry (GitHub, Google, Microsoft, Apple, Supabase, Vercel, AWS, Stripe, Slack, Discord, Notion, Linear, Figma) + helpers
+- `normalizeLoginDomain(input)` — strips protocol/path/port/www; `findCredentialProviderByDomain(domainOrUrl)` — display-only lookup (does NOT authorize injection); `getCredentialDisplayLabel(pass)` — `"GitHub · username"` format; `getInjectionSafetyCopy(opts)` — three-domain clarification text
+- `/route-run-approvals`: `PendingInjectionCard` shows provider badge + injection safety copy; `PendingCredAuthCard` shows provider badge, `"GitHub · pass_label"` in account section, and `"Allow use of GitHub · pass_label"` button
+- `/passes`: vault pass list shows provider badge (e.g. "GitHub") next to label
+- `examples/aegis-tool-server.mjs`: `list_vault_passes` description updated with credential provider domain guidance; `request_secret_field_injection` and `plan_aegis_action` step 3 updated with provider-domain matching rules and OAuth cross-domain example
+- `docs/CREDENTIAL_PROVIDER_MODEL.md` — three-domain model, OAuth example (Supabase→GitHub), non-goals, future work
+
+Key invariants (see CLAUDE.md):
+- `findCredentialProviderByDomain` is display-only — never used to authorize or validate injection
+- Injection domain validation remains in the CDP fill endpoint (pass.domain check)
+- `is_custom: true` for unrecognized domains — display as `"domain · username"` fallback
+- Registry is intentionally small — do not add entries without product need
+- Both registry files have a TODO to move to `@aegis/credential-providers` when a shared package is created
+
+Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
 1. **Connected Email Challenge Resolver v1** — after a live `SecurityChallenge` exists, Aegis searches Gmail for the code in a narrow time window; extracts code only (no email body returned); injects once; user approval required before first use. See `docs/CHALLENGE_RELAY.md` Phase 3.
-2. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
-3. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
-4. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-5. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
-6. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
-7. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+2. **Vault schema migration for Credential Provider Model** — add `provider_id?: string` to `AegisVaultPass`; populate from `findCredentialProviderByDomain` at write time; fall back to domain inference for existing records
+3. **Password import / migration UI v1** — bulk import credentials with provider selection
+4. **Signup Credential Custody v1** — extend the provider model to cover new account creation flows
+5. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
+6. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
+7. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+8. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+9. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+10. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

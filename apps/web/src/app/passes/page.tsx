@@ -8,6 +8,7 @@ import {
   listRoutePassBindings, setRoutePassBinding, clearRoutePassBinding,
 } from "@/lib/api";
 import type { VaultPassView, RoutePassBinding } from "@/lib/api";
+import { findCredentialProviderByDomain } from "@/lib/credentialProviders";
 import type { AegisRoute } from "@aegis/types";
 import { listRoutes } from "@/lib/api";
 
@@ -418,12 +419,19 @@ export default function PassesPage() {
               </div>
             )}
             <div className="space-y-3">
-              {vaultPasses.map((vp) => (
+              {vaultPasses.map((vp) => {
+                const vpProvider = findCredentialProviderByDomain(vp.domain);
+                return (
                 <div key={vp.pass_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-medium text-white truncate">{vp.label}</p>
+                        {vpProvider && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-400 border border-indigo-800 shrink-0">
+                            {vpProvider.display_name}
+                          </span>
+                        )}
                         <span className="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 shrink-0">
                           {vp.kind}
                         </span>
@@ -456,7 +464,7 @@ export default function PassesPage() {
                     </button>
                   </div>
                 </div>
-              ))}
+              );})}
             </div>
           </div>
 

@@ -216,6 +216,25 @@ export interface AegisVaultPass {
   updated_at: string;
 }
 
+// ─── Credential Provider Model ────────────────────────────────────────────────
+
+export interface CredentialProviderDefinition {
+  provider_id: string;
+  display_name: string;
+  login_domains: string[];
+  oauth_provider: boolean;
+  aliases?: string[];
+}
+
+export interface CredentialProviderMatch {
+  provider_id: string;
+  display_name: string;
+  matched_domain: string;
+  login_domains: string[];
+  oauth_provider: boolean;
+  is_custom: boolean;
+}
+
 // ─── KMS Audit Events ─────────────────────────────────────────────────────────
 
 export type KmsOperationType =

@@ -392,7 +392,12 @@ export default function PassesPage() {
       {/* ── Credential Vault ───────────────────────────────────────────────── */}
       <div>
         <div className="mb-4">
-          <h2 className="text-xl font-semibold text-white">Credential Vault</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-white">Credential Vault</h2>
+            <a href="/vault-import" className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+              Import from CSV →
+            </a>
+          </div>
           <p className="mt-1 text-gray-400 text-sm">
             Store login credentials here. Agents never see passwords — Aegis resolves them only during approved, controlled execution.
           </p>

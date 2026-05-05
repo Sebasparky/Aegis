@@ -55,6 +55,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Credential Provider Model v1. It is complete. Do not re-implement `CredentialProviderDefinition`, `CredentialProviderMatch`, `normalizeLoginDomain`, `findCredentialProviderByDomain`, `getCredentialDisplayLabel`, or `getInjectionSafetyCopy`. The registry lives in `apps/api/src/lib/credentialProviders.ts` and `apps/web/src/lib/credentialProviders.ts` (duplicated with a TODO to move to a shared package). `findCredentialProviderByDomain` is display-only — it does NOT authorize injection on any domain. Injection domain validation remains in the CDP fill endpoint. Do not remove the three-domain model from `docs/CREDENTIAL_PROVIDER_MODEL.md`.**
 
+> **Also: do NOT rebuild Password Import / Migration v1. It is complete. Do not re-implement `parseCredentialCsv`, `ParsedCredential`, `CsvParseResult` in `apps/web/src/lib/csvImport.ts`, `importVaultPasses` in `apps/web/src/lib/api.ts`, the `/vault-import` page, or `POST /api/internal/vault-passes/import`. The bulk import endpoint uses the same `createAndStoreVaultPass` helper as the single POST endpoint — do not create a second vault write path. CSV is parsed client-side; raw CSV is never sent to the API. Passwords are never returned in import responses. Duplicate detection compares normalized domain + lowercase username against existing vault passes. Max 200 credentials per import request.**
+
 ---
 
 ## Completed Increments (as of 2026-05-03)

@@ -14,6 +14,16 @@ interface CreateVaultPassBody {
   password: string;
 }
 
+interface ImportVaultPassesBody {
+  credentials: Array<{
+    label: string;
+    kind: AegisPassKind;
+    domain: string;
+    username: string;
+    password: string;
+  }>;
+}
+
 // Metadata shape returned to the UI — never includes password or raw secret.
 interface VaultPassView {
   pass_id: string;
@@ -39,6 +49,77 @@ async function toView(pass: AegisVaultPass): Promise<VaultPassView> {
     updated_at: pass.updated_at,
     has_password: await getVaultRepository().hasEncryptedSecret(pass.secret_ref),
   };
+}
+
+// Shared creation path used by both single and bulk import endpoints.
+// Password is encrypted and stored via KMS; plaintext is never persisted.
+type CreateOneResult = { ok: true; pass: AegisVaultPass } | { ok: false; error: string };
+
+async function createAndStoreVaultPass(params: {
+  label: string;
+  kind: AegisPassKind;
+  domain: string;
+  username: string;
+  password: string;
+}): Promise<CreateOneResult> {
+  const { label, kind, domain, username, password } = params;
+  const now = new Date().toISOString();
+  const pass_id = newId("pass_vault");
+  const secret_ref = `devvault://${pass_id}/password`;
+
+  const pass: AegisVaultPass = {
+    pass_id,
+    user_id: MOCK_USER_ID,
+    label: label.trim(),
+    kind,
+    domain: domain.trim(),
+    username: username.trim(),
+    secret_ref,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const kms = getKmsProvider();
+  const kmsContext: KmsContext = {
+    user_id: MOCK_USER_ID,
+    pass_id,
+    domain: domain.trim(),
+    purpose: "login_password",
+  };
+
+  let blob;
+  try {
+    blob = await kms.encryptSecret(password, kmsContext);
+    recordKmsAuditEvent({
+      operation: "encrypt_secret",
+      provider: kms.provider,
+      user_id: MOCK_USER_ID,
+      pass_id,
+      domain: domain.trim(),
+      success: true,
+    });
+  } catch (err) {
+    recordKmsAuditEvent({
+      operation: "encrypt_secret",
+      provider: kms.provider,
+      user_id: MOCK_USER_ID,
+      pass_id,
+      domain: domain.trim(),
+      success: false,
+      error_code: err instanceof Error ? err.message.split(":")[0] : "KMS_ERROR",
+    });
+    console.error("[vault-passes] Encryption failed:", err);
+    return { ok: false, error: "KMS_ERROR" };
+  }
+
+  try {
+    await getVaultRepository().createVaultPass(pass, blob);
+  } catch (err) {
+    console.error("[vault-passes] Repository createVaultPass failed:", err);
+    return { ok: false, error: "STORAGE_ERROR" };
+  }
+
+  return { ok: true, pass };
 }
 
 export async function vaultPassRoutes(server: FastifyInstance) {
@@ -75,64 +156,61 @@ export async function vaultPassRoutes(server: FastifyInstance) {
     if (!password)
       return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "password is required for login_password." } });
 
-    const now = new Date().toISOString();
-    const pass_id = newId("pass_vault");
-    const secret_ref = `devvault://${pass_id}/password`;
-
-    const pass: AegisVaultPass = {
-      pass_id,
-      user_id: MOCK_USER_ID,
-      label: label.trim(),
-      kind,
-      domain: domain.trim(),
-      username: username.trim(),
-      secret_ref,
-      created_at: now,
-      updated_at: now,
-    };
-
-    let blob;
-    const kms = getKmsProvider();
-    const kmsContext: KmsContext = {
-      user_id: MOCK_USER_ID,
-      pass_id,
-      domain: domain.trim(),
-      purpose: "login_password",
-    };
-    try {
-      blob = await kms.encryptSecret(password, kmsContext);
-      recordKmsAuditEvent({
-        operation: "encrypt_secret",
-        provider: kms.provider,
-        user_id: MOCK_USER_ID,
-        pass_id,
-        domain: domain.trim(),
-        success: true,
-      });
-    } catch (err) {
-      recordKmsAuditEvent({
-        operation: "encrypt_secret",
-        provider: kms.provider,
-        user_id: MOCK_USER_ID,
-        pass_id,
-        domain: domain.trim(),
-        success: false,
-        error_code: err instanceof Error ? err.message.split(":")[0] : "KMS_ERROR",
-      });
-      console.error("[vault-passes] Encryption failed:", err);
-      return reply.status(500).send({ ok: false, error: { code: "KMS_ERROR", message: "Failed to encrypt credential. Check KMS configuration." } });
+    const result = await createAndStoreVaultPass({ label, kind, domain, username, password });
+    if (!result.ok) {
+      const msg = result.error === "KMS_ERROR"
+        ? "Failed to encrypt credential. Check KMS configuration."
+        : "Failed to store credential.";
+      return reply.status(500).send({ ok: false, error: { code: result.error, message: msg } });
     }
 
-    try {
-      await getVaultRepository().createVaultPass(pass, blob);
-    } catch (err) {
-      console.error("[vault-passes] Repository createVaultPass failed:", err);
-      return reply.status(500).send({ ok: false, error: { code: "STORAGE_ERROR", message: "Failed to store credential." } });
+    schedulePersist();
+    return reply.status(201).send({ ok: true, data: await toView(result.pass) });
+  });
+
+  /**
+   * POST /api/internal/vault-passes/import
+   * Bulk import credentials from a CSV export.
+   * Each entry is validated and encrypted individually via the same KMS path as single creation.
+   * Passwords are never persisted — raw values exist only during this request.
+   * Returns only safe metadata; partial success is allowed.
+   */
+  server.post<{ Body: ImportVaultPassesBody }>("/api/internal/vault-passes/import", async (req, reply) => {
+    const { credentials } = req.body ?? {};
+
+    if (!Array.isArray(credentials) || credentials.length === 0)
+      return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "credentials must be a non-empty array." } });
+    if (credentials.length > 200)
+      return reply.status(400).send({ ok: false, error: { code: "IMPORT_LIMIT_EXCEEDED", message: "Maximum 200 credentials per import request." } });
+
+    const imported: VaultPassView[] = [];
+    const failed: Array<{ index: number; reason: string }> = [];
+
+    for (let i = 0; i < credentials.length; i++) {
+      const c = credentials[i];
+      if (!c.label?.trim() || !c.domain?.trim() || !c.username?.trim() || !c.password || c.kind !== "login_password") {
+        failed.push({ index: i, reason: "VALIDATION_ERROR" });
+        continue;
+      }
+      const result = await createAndStoreVaultPass(c);
+      if (result.ok) {
+        imported.push(await toView(result.pass));
+      } else {
+        failed.push({ index: i, reason: result.error });
+      }
     }
 
     schedulePersist();
 
-    return reply.status(201).send({ ok: true, data: await toView(pass) });
+    return {
+      ok: true,
+      data: {
+        imported,
+        failed,
+        total_requested: credentials.length,
+        total_imported: imported.length,
+      },
+    };
   });
 
   /**

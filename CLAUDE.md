@@ -138,6 +138,7 @@ Before making any changes:
 - Ephemeral Agent Browser Session + No-Save Policy v1
 - Task Browser Lifecycle v1
 - Sensitive Action Receipt Timeline v1
+- Password Import / Migration v1
 
 ## Login and Secret Injection Rules
 

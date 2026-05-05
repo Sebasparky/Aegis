@@ -328,6 +328,11 @@ export const createVaultPass = (body: { label: string; kind: "login_password"; d
   request<VaultPassView>("/api/vault-passes", { method: "POST", body: JSON.stringify(body) });
 export const deleteVaultPass = (passId: string) =>
   request<{ ok: boolean }>(`/api/vault-passes/${passId}`, { method: "DELETE" });
+export const importVaultPasses = (credentials: Array<{ label: string; kind: "login_password"; domain: string; username: string; password: string }>) =>
+  request<{ imported: VaultPassView[]; failed: Array<{ index: number; reason: string }>; total_requested: number; total_imported: number }>(
+    "/api/internal/vault-passes/import",
+    { method: "POST", body: JSON.stringify({ credentials }) },
+  );
 
 // Route Pass Bindings
 export interface RoutePassBinding {

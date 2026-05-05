@@ -23,6 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <NavLink href="/marketplace" label="Marketplace" />
           <NavLink href="/skill-library" label="Skill Library" />
           <NavLink href="/passes" label="Passes" />
+          <NavLink href="/vault-import" label="Import CSV" />
           <NavLink href="/collars" label="Collars" />
           <NavLink href="/sessions" label="Sessions" />
           <NavLink href="/approvals" label="Approvals" badge />

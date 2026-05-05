@@ -85,7 +85,13 @@ async function discoverInstalledSkills({ domain }) {
       ? {
           credential_session_available: true,
           guidance:
-            "No Aegis-controlled skills found for this domain. For generic login tasks (no pre-recorded route needed), use start_credential_session for field-level credential delegation: the agent navigates freely; Aegis fills credentials without exposing them.",
+            "No Aegis-controlled skills found for this domain. " +
+            "For normal username/password login, no skill is needed — use request_secret_field_injection (primary path): " +
+            "navigate to the login page in your Playwright browser, then call request_secret_field_injection for username and password fields. " +
+            "One user approval covers both fields. The agent submits the form itself. " +
+            "Routes/skills are for high-risk workflows with exact verified action sequences (payments, banking, account deletion) — not for normal login. " +
+            "DO NOT use request_authenticated_session_login for normal login when you have a Playwright browser (it is secondary/experimental, for isolated Aegis-controlled browser sessions only). " +
+            "DO NOT use start_credential_session — that targets the Aegis Chrome extension on the user's tab and is incompatible with agent-controlled Playwright browsers.",
         }
       : {}),
   };
@@ -348,17 +354,34 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
   const taskIsLogin = LOGIN_SIGNALS.some((kw) => taskLower.includes(kw));
 
   if (!matchedSkill) {
-    // No pre-recorded route, but task involves login + user named a credential → recommend field-level credential session
-    if (taskIsLogin && (credential_hint || taskLower.includes("credential") || taskLower.includes("using my"))) {
-      const isLocalDemo = resolvedDomain === "localhost" || resolvedDomain?.startsWith("localhost");
+    // No pre-recorded route — for login tasks, use Agent-Browser Secret Injection (primary path)
+    if (taskIsLogin) {
       return {
-        recommended_path: "credential_session",
+        recommended_path: "agent_browser_secret_injection",
         explanation:
-          "No pre-recorded Aegis skill was found for this login task. Use start_credential_session for field-level credential delegation: the agent navigates the login flow freely, and Aegis fills credentials when needed without exposing secrets.",
-        next_tool: "start_credential_session",
-        note: "Call list_vault_passes first to find the pass_id for the named credential, then call start_credential_session with { pass_id, domain, allowed_fields: [\"username\", \"password\"], target_url } where target_url is the exact login page URL. Providing target_url prevents Aegis from filling credentials on the wrong same-domain page.",
+          "No pre-recorded Aegis skill needed for normal username/password login. " +
+          "Use your own Playwright browser for all navigation, clicking, and reading. " +
+          "Use Aegis only to inject the protected credential fields (username, password) via CDP. " +
+          "The agent navigates to the login page, chooses username/password (not OAuth), then calls " +
+          "request_secret_field_injection to have Aegis fill each field. One user approval covers both " +
+          "username and password for the login attempt. After both fields are filled, the agent clicks Submit itself.",
+        next_tool: "request_secret_field_injection",
+        workflow: [
+          "0. If no Playwright browser is running or the CDP connection is unavailable: call start_task_browser_session. If the response includes reused_existing=true, the session is already active — no reconnect needed. If requires_browser_reconnect=true, use the returned cdp_url with your browser adapter before navigating.",
+          "1. Navigate to the login page in your Playwright browser.",
+          "2. Choose username/password path (not OAuth — Aegis cannot fill OAuth flows).",
+          "3. Call list_vault_passes to find the pass_id for the domain (optional if only one credential exists).",
+          "4. Call request_secret_field_injection({ domain, field_kind: 'username', page_url, reason }).",
+          "5. If status='pending_approval': tell the user to approve in Aegis UI, then call wait_for_credential_authorization({ authorization_id }) — do NOT ask user to type 'done'.",
+          "6. When wait_for_credential_authorization returns status='approved': call execute_secret_field_injection with the injection_request_id.",
+          "7. Call request_secret_field_injection again for field_kind: 'password' (auto-attached to same authorization, no second approval needed if already approved).",
+          "8. Call execute_secret_field_injection for the password injection.",
+          "9. Click Submit / Sign In yourself in your Playwright browser.",
+          "10. Continue using the browser for the rest of the task. Only call close_task_browser_session after the full task is complete — closing destroys cookies and session data.",
+          "11. [GitHub repo listing and similar dynamic lists] After login, navigate to the target page yourself. Verify dynamic content: check displayed count, scroll to load all visible items, inspect pagination links. Do not claim 'all repos' or 'all items' unless you verified count and pagination. If uncertain, report exactly what you can see: 'I can see X items on the current page.' Aegis does not read or summarize content — you own the reading step.",
+        ],
+        note: "DO NOT use request_authenticated_session_login for normal login when you have a Playwright browser — that tool performs the ENTIRE login in a separate Aegis-controlled browser and is secondary/experimental. DO NOT use start_credential_session — that targets the Aegis Chrome extension on the user's tab, incompatible with agent Playwright browsers.",
         suggested_domain: resolvedDomain ?? null,
-        ...(isLocalDemo ? { suggested_target_url: "http://localhost:3000/demo-login" } : {}),
       };
     }
     if (taskIsSensitive) {
@@ -850,6 +873,569 @@ async function getRuntimeObservationMode({ session_id } = {}) {
   return res.data;
 }
 
+// ─── Challenge Relay v1 handlers ─────────────────────────────────────────────
+
+async function reportSecurityChallenge({ domain, page_url, challenge_type, masked_destination, browser_session_id, element_hint, instructions } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+
+  const body = { domain, page_url };
+  if (challenge_type) body.challenge_type = challenge_type;
+  if (masked_destination) body.masked_destination = masked_destination;
+  if (browser_session_id) body.browser_session_id = browser_session_id;
+  if (element_hint && Object.keys(element_hint).length > 0) body.element_hint = element_hint;
+  if (instructions) body.instructions = instructions;
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/security-challenges", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to report security challenge." };
+  }
+  const data = res.data;
+  return {
+    challenge_id: data.challenge_id,
+    status: data.status,
+    challenge_type: data.challenge_type,
+    domain: data.domain,
+    masked_destination: data.masked_destination ?? null,
+    expires_at: data.expires_at,
+    raw_code_revealed_to_agent: false,
+    next_action: data.next_action,
+  };
+}
+
+async function waitForSecurityChallenge({ challenge_id, timeout_ms = 120_000, poll_interval_ms = 2000 } = {}) {
+  if (!challenge_id) return { error: "VALIDATION_ERROR", message: "challenge_id is required." };
+
+  const TERMINAL = new Set(["code_submitted", "code_injected", "user_completed", "cancelled", "expired", "failed"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/security-challenges/${encodeURIComponent(challenge_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll challenge." };
+    }
+    const data = res.data;
+    if (TERMINAL.has(data.status)) {
+      return {
+        challenge_id: data.challenge_id,
+        status: data.status,
+        challenge_type: data.challenge_type,
+        domain: data.domain,
+        raw_code_revealed_to_agent: false,
+        next_action: data.next_action,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, poll_interval_ms));
+  }
+
+  return {
+    status: "timeout",
+    challenge_id,
+    raw_code_revealed_to_agent: false,
+    next_action: `User has not submitted the code within the timeout window. Tell the user the challenge is still waiting in the Aegis UI at ${APPROVAL_UI} under "Security challenges". You can call wait_for_security_challenge again with the same challenge_id.`,
+  };
+}
+
+async function injectSecurityChallengeCode({ challenge_id } = {}) {
+  if (!challenge_id) return { error: "VALIDATION_ERROR", message: "challenge_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/security-challenges/${encodeURIComponent(challenge_id)}/inject`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to inject code." };
+  }
+  const data = res.data;
+  return {
+    challenge_id: data.challenge_id,
+    status: data.status,
+    raw_code_revealed_to_agent: false,
+    ...(data.error ? { error: data.error } : {}),
+    next_action: data.next_action,
+  };
+}
+
+// ─── Connected Email Challenge Resolver v1 handlers ──────────────────────────
+
+async function requestChallengeEmailResolution({ challenge_id } = {}) {
+  if (!challenge_id) return { error: "VALIDATION_ERROR", message: "challenge_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/security-challenges/${encodeURIComponent(challenge_id)}/email-resolution-request`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request email resolution." };
+  }
+  const data = res.data;
+  return {
+    resolution_id: data.resolution_id,
+    challenge_id: data.challenge_id,
+    status: data.status,
+    provider: data.provider,
+    domain: data.domain,
+    raw_code_revealed_to_agent: false,
+    email_body_revealed_to_agent: false,
+    next_action: data.next_action,
+  };
+}
+
+async function waitForChallengeEmailResolution({ resolution_id, timeout_ms = 120_000, poll_interval_ms = 3000 } = {}) {
+  if (!resolution_id) return { error: "VALIDATION_ERROR", message: "resolution_id is required." };
+
+  const TERMINAL = new Set(["code_found", "not_found", "failed", "cancelled", "expired", "injected"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/challenge-email-resolutions/${encodeURIComponent(resolution_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll email resolution." };
+    }
+    const data = res.data;
+    if (TERMINAL.has(data.status)) {
+      return {
+        resolution_id: data.resolution_id,
+        challenge_id: data.challenge_id,
+        status: data.status,
+        provider: data.provider,
+        domain: data.domain,
+        sender_domain: data.sender_domain ?? null,
+        received_at: data.received_at ?? null,
+        error: data.error ?? null,
+        raw_code_revealed_to_agent: false,
+        email_body_revealed_to_agent: false,
+        next_action: data.next_action,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, poll_interval_ms));
+  }
+
+  return {
+    status: "timeout",
+    resolution_id,
+    raw_code_revealed_to_agent: false,
+    email_body_revealed_to_agent: false,
+    next_action: `Approval has not arrived within the timeout window. Tell the user to approve the Gmail search in the Aegis UI at ${APPROVAL_UI} under "Security challenges". You can call wait_for_challenge_email_resolution again with the same resolution_id.`,
+  };
+}
+
+async function injectChallengeEmailCode({ resolution_id } = {}) {
+  if (!resolution_id) return { error: "VALIDATION_ERROR", message: "resolution_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/challenge-email-resolutions/${encodeURIComponent(resolution_id)}/inject`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to inject email code." };
+  }
+  const data = res.data;
+  return {
+    resolution_id: data.resolution_id,
+    status: data.status,
+    injected_at: data.injected_at ?? null,
+    raw_code_revealed_to_agent: false,
+    email_body_revealed_to_agent: false,
+    ...(data.error ? { error: data.error } : {}),
+    next_action: data.next_action,
+  };
+}
+
+// ─── Task Browser Lifecycle handlers ─────────────────────────────────────────
+
+async function startTaskBrowserSession({ delegation_id } = {}) {
+  const body = {};
+  if (delegation_id) body.delegation_id = delegation_id;
+  let res;
+  try {
+    res = await request("POST", "/api/task-browser-sessions", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    if (res.error?.code === "NO_PORTS_AVAILABLE") {
+      return { error: "NO_PORTS_AVAILABLE", message: "Aegis could not start a secure browser session. Please try again." };
+    }
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to start task browser session." };
+  }
+  const s = res.data;
+  const reused   = s.reused_existing === true;
+  const autoPort = s.port_auto_selected === true;
+  const reconnect = s.requires_browser_reconnect === true;
+
+  let next_action;
+  if (reused) {
+    next_action =
+      "The existing Aegis task browser session is active and ready. " +
+      "Continue using your browser tools for navigation and clicking. " +
+      "Call request_secret_field_injection when you reach a credential field. " +
+      "Do not close the session until the full task is complete.";
+  } else if (reconnect) {
+    next_action =
+      "A fresh Aegis task browser session has been started. " +
+      "Use the returned cdp_url (" + s.cdp_url + ") with your browser adapter before navigating. " +
+      "Then proceed with navigation and clicking as normal. Call request_secret_field_injection for credential fields. " +
+      "Do not close the session until the full task is complete.";
+  } else {
+    next_action =
+      "Chrome is running at " + s.cdp_url + ". " +
+      "Use your browser tools for all navigation and clicking. " +
+      "When you reach a username or password field, call request_secret_field_injection — Aegis fills it via CDP without revealing the value. " +
+      "Keep the session open while you work. Call close_task_browser_session after the task is fully complete.";
+  }
+
+  return {
+    browser_session_id: s.browser_session_id,
+    status: s.status,
+    cdp_url: s.cdp_url,
+    ephemeral: s.ephemeral,
+    expires_at: s.expires_at,
+    cleanup_complete: s.cleanup_complete ?? false,
+    reused_existing: reused,
+    port_auto_selected: autoPort,
+    requires_browser_reconnect: reconnect,
+    user_message: s.user_message ?? null,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    next_action,
+  };
+}
+
+async function getTaskBrowserSession({ browser_session_id } = {}) {
+  if (!browser_session_id) return { error: "VALIDATION_ERROR", message: "browser_session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/task-browser-sessions/${encodeURIComponent(browser_session_id)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get task browser session." };
+  }
+  const s = res.data;
+  return {
+    browser_session_id: s.browser_session_id,
+    status: s.status,
+    cdp_url: s.cdp_url,
+    ephemeral: s.ephemeral,
+    expires_at: s.expires_at,
+    closed_at: s.closed_at,
+    cleanup_complete: s.cleanup_complete,
+    error: s.error,
+  };
+}
+
+async function closeTaskBrowserSession({ browser_session_id } = {}) {
+  if (!browser_session_id) return { error: "VALIDATION_ERROR", message: "browser_session_id is required." };
+  let res;
+  try {
+    res = await request("POST", `/api/task-browser-sessions/${encodeURIComponent(browser_session_id)}/close`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to close task browser session." };
+  }
+  return {
+    browser_session_id: res.data.browser_session_id,
+    status: res.data.status,
+    closed_at: res.data.closed_at,
+    cleanup_complete: res.data.cleanup_complete,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    next_action:
+      "Profile deleted — Chrome process killed and /tmp profile directory removed. " +
+      "GitHub, any website logins, cookies, and session storage are gone. " +
+      "For the next task that needs a browser, call start_task_browser_session to get a clean ephemeral session.",
+  };
+}
+
+// ─── Authenticated Session Boundary handlers ─────────────────────────────────
+
+async function requestAuthenticatedSessionLogin({ domain, login_url, task_summary, pass_id }) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!login_url) return { error: "VALIDATION_ERROR", message: "login_url is required." };
+  if (!task_summary) return { error: "VALIDATION_ERROR", message: "task_summary is required." };
+  const body = { domain, login_url, task_summary };
+  if (pass_id) body.pass_id = pass_id;
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/authenticated-sessions/login-request", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request authenticated session." };
+  }
+  const handle = res.data;
+  return {
+    session_id: handle.session_id,
+    domain: handle.domain,
+    login_url: handle.login_url,
+    task_summary: handle.task_summary,
+    status: handle.status,
+    capabilities: handle.capabilities,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    raw_credentials_revealed_to_agent: false,
+    created_at: handle.created_at,
+    expires_at: handle.expires_at,
+    next_action: `Session created with status="${handle.status}". Direct the user to ${APPROVAL_UI} to approve the login request under "Login session requests". After approval, Aegis performs the login in an isolated Playwright session. Poll get_authenticated_session until status is "authenticated" or "manual_step_required".`,
+  };
+}
+
+async function getAuthenticatedSession({ session_id }) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/authenticated-sessions/${encodeURIComponent(session_id)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get authenticated session." };
+  }
+  const handle = res.data;
+  const terminal = ["authenticated", "manual_step_required", "failed", "expired"].includes(handle.status);
+  return {
+    session_id: handle.session_id,
+    domain: handle.domain,
+    status: handle.status,
+    capabilities: handle.capabilities,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    raw_credentials_revealed_to_agent: false,
+    manual_step_reason: handle.manual_step_reason ?? null,
+    expires_at: handle.expires_at,
+    terminal,
+    next_action: handle.status === "authenticated"
+      ? "Login succeeded. Call observe_authenticated_session to inspect the current page, or navigate_authenticated_session to move to another same-domain URL."
+      : handle.status === "manual_step_required"
+      ? `Login blocked: ${handle.manual_step_reason ?? "security challenge detected"}. Stop — do not retry. Inform the user that manual intervention is required. Aegis does not bypass 2FA, CAPTCHA, passkey, or device verification.`
+      : handle.status === "failed"
+      ? `Login failed: ${handle.manual_step_reason ?? "unknown error"}. Do not retry automatically.`
+      : handle.status === "pending_approval"
+      ? `Awaiting user approval at ${APPROVAL_UI} under "Login session requests". Poll again after the user approves.`
+      : handle.status === "login_in_progress"
+      ? "Aegis is performing login. Poll again in a few seconds."
+      : `Session status is "${handle.status}". No further agent action available.`,
+  };
+}
+
+async function observeAuthenticatedSession({ session_id }) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/authenticated-sessions/${encodeURIComponent(session_id)}/observe`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to observe authenticated session." };
+  }
+  const result = res.data;
+  return {
+    session_id: result.session_id,
+    status: result.status,
+    page_url: result.page_url ?? null,
+    open_summary: result.open_summary ?? null,
+    protected_snapshot: result.protected_snapshot ?? null,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    note: "Aegis never returns cookies, storage, session tokens, passwords, secret_ref values, pass_id, KMS material, ciphertext, or storageState. Sensitive field values are always redacted.",
+  };
+}
+
+async function navigateAuthenticatedSession({ session_id, url }) {
+  if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
+  if (!url) return { error: "VALIDATION_ERROR", message: "url is required." };
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/authenticated-sessions/${encodeURIComponent(session_id)}/navigate`, { url });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to navigate authenticated session." };
+  }
+  const result = res.data;
+  return {
+    session_id: result.session_id,
+    status: result.status,
+    page_url: result.page_url ?? null,
+    open_summary: result.open_summary ?? null,
+    protected_snapshot: result.protected_snapshot ?? null,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    note: "Same-domain navigation only. Aegis blocks cross-domain navigation. Sensitive field values are always redacted.",
+  };
+}
+
+// ─── Agent-Browser Secret Injection v1 handlers ──────────────────────────────
+
+async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!field_kind || !["username", "password"].includes(field_kind)) {
+    return { error: "VALIDATION_ERROR", message: "field_kind must be 'username' or 'password'." };
+  }
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  const body = { domain, field_kind, page_url, reason };
+  if (pass_id) body.pass_id = pass_id;
+  if (element_hint && Object.keys(element_hint).length > 0) body.element_hint = element_hint;
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/injections", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to request injection.",
+    };
+  }
+  const data = res.data;
+  return {
+    injection_request_id: data.injection_request_id,
+    authorization_id: data.authorization_id ?? null,
+    status: data.status,
+    domain: data.domain,
+    field_kind: data.field_kind,
+    pass_label: data.pass_label ?? null,
+    raw_value_revealed_to_agent: false,
+    expires_at: data.expires_at,
+    authorization_covers: data.authorization_covers ?? null,
+    remaining_uses: data.remaining_uses ?? null,
+    next_action: data.status === "approved"
+      ? `Injection pre-approved (covered by existing authorization). Call execute_secret_field_injection with injection_request_id="${data.injection_request_id}".`
+      : `Tell the user to approve at ${APPROVAL_UI} under "Login credential requests". Then call wait_for_credential_authorization with authorization_id="${data.authorization_id}" — it returns automatically when approved. Do NOT ask the user to type "done".`,
+  };
+}
+
+async function getSecretInjectionStatus({ injection_request_id } = {}) {
+  if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get injection status." };
+  }
+  return res.data;
+}
+
+async function executeSecretFieldInjection({ injection_request_id } = {}) {
+  if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}/execute`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "CDP fill failed.",
+    };
+  }
+  const data = res.data;
+  // IMPORTANT: Only metadata is returned. The raw credential value is NEVER in this response.
+  return {
+    injection_request_id: data.injection_request_id,
+    status: data.status,
+    field_kind: data.field_kind,
+    domain: data.domain,
+    filled_at: data.filled_at ?? null,
+    raw_value_revealed_to_agent: false,
+    note: data.note ?? "Aegis injected the field value directly via CDP. The raw credential was never returned to the agent.",
+  };
+}
+
+async function waitForCredentialAuthorization({
+  authorization_id,
+  timeout_ms = 120000,
+  poll_interval_ms = 1000,
+} = {}) {
+  if (!authorization_id) return { error: "VALIDATION_ERROR", message: "authorization_id is required." };
+
+  const TERMINAL = new Set(["approved", "denied", "expired", "fulfilled", "revoked"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/credential-authorizations/${encodeURIComponent(authorization_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return {
+        error: res.error?.code ?? "UNKNOWN_ERROR",
+        message: res.error?.message ?? "Failed to poll credential authorization.",
+      };
+    }
+
+    const data = res.data;
+    if (TERMINAL.has(data.status)) {
+      let next_action;
+      if (data.status === "approved") {
+        next_action =
+          "Authorization approved. Call execute_secret_field_injection with the injection_request_id from request_secret_field_injection to fill the field. Then request and execute the password field injection (no second approval needed — same authorization covers both).";
+      } else {
+        next_action = `Authorization ${data.status}. Stop this credential flow and report the outcome to the user. Do not retry without user direction.`;
+      }
+      return {
+        authorization_id: data.authorization_id,
+        status: data.status,
+        domain: data.domain,
+        pass_label: data.pass_label,
+        raw_values_revealed_to_agent: false,
+        ...(data.approved_at ? { approved_at: data.approved_at } : {}),
+        ...(data.fulfilled_at ? { fulfilled_at: data.fulfilled_at } : {}),
+        next_action,
+      };
+    }
+
+    // Not yet terminal — wait before next poll
+    await new Promise((resolve) => setTimeout(resolve, poll_interval_ms));
+  }
+
+  return {
+    status: "timeout",
+    authorization_id,
+    raw_values_revealed_to_agent: false,
+    next_action:
+      "Approval has not arrived within the timeout window. Ask the user whether they want to continue waiting, cancel, or retry the login. You can call wait_for_credential_authorization again with the same authorization_id.",
+  };
+}
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -1283,6 +1869,468 @@ const TOOLS = [
       required: ["domain", "task_category"],
     },
   },
+  {
+    name: "start_task_browser_session",
+    description:
+      "Create an ephemeral Chrome browser session for agent-controlled navigation.\n\n" +
+      "Aegis launches Chrome with --remote-debugging-port=9222 and a fresh /tmp profile " +
+      "that has password saving, autofill, card saving, and sync disabled. " +
+      "The agent uses Playwright browser tools (via @playwright/mcp --cdp-endpoint=http://localhost:9222) for all navigation, clicking, and reading. " +
+      "Aegis uses the CDP connection ONLY for secret field injection (request_secret_field_injection) — " +
+      "Aegis does NOT navigate, click, or read pages on behalf of the agent.\n\n" +
+      "When to call this: when you need a browser for a task (e.g., log in to a website, navigate to fetch data) " +
+      "and no task browser session is currently running. Check get_task_browser_session first if you think one may exist.\n\n" +
+      "Do NOT close the session immediately after login — keep it open while you continue the task. " +
+      "Call close_task_browser_session only after the full task is complete.\n\n" +
+      "Aegis automatically handles port conflicts: if an active Aegis session is already running it is reused (reused_existing=true). " +
+      "Stale sessions are recycled automatically. If the default port is taken by an unknown process, Aegis selects an available port " +
+      "and returns port_auto_selected=true with requires_browser_reconnect=true — use the returned cdp_url with your browser adapter before navigating. " +
+      "Returns NO_PORTS_AVAILABLE (503) only if no port in the 9222–9230 range is available or Chrome cannot launch.\n\n" +
+      "LOCAL-DEV NOTE: When requires_browser_reconnect=true, the browser adapter must be pointed at the returned cdp_url. " +
+      "In production, browser adapters should use dynamic session handles rather than static endpoints.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delegation_id: {
+          type: "string",
+          description: "Optional delegation ID to associate with the browser session.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_task_browser_session",
+    description:
+      "Get the status and metadata of a task browser session. " +
+      "Use to check if a session is 'ready' before using Playwright tools, or to see if a session already exists. " +
+      "Does not return cookies, storage, credentials, or process details.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browser_session_id: {
+          type: "string",
+          description: "The browser_session_id from start_task_browser_session.",
+        },
+      },
+      required: ["browser_session_id"],
+    },
+  },
+  {
+    name: "close_task_browser_session",
+    description:
+      "Close an ephemeral task browser session and delete its profile. " +
+      "Kills the Chrome process and removes the /tmp profile directory, deleting all cookies, localStorage, and session data. " +
+      "Call this ONLY after the full task is complete — the agent still needs the browser to navigate and read after login. " +
+      "Starting a new task browser session after close guarantees a clean, unauthenticated state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browser_session_id: {
+          type: "string",
+          description: "The browser_session_id to close.",
+        },
+      },
+      required: ["browser_session_id"],
+    },
+  },
+  {
+    name: "request_authenticated_session_login",
+    description:
+      "SECONDARY/EXPERIMENTAL — Do not use for normal login when the agent has a Playwright browser. " +
+      "Primary path for login fields is request_secret_field_injection: agent navigates its own browser, Aegis fills only the protected fields via CDP.\n\n" +
+      "Use request_authenticated_session_login ONLY when: (1) the agent has no browser of its own, " +
+      "(2) the user explicitly asks Aegis to perform an isolated login, or (3) the task description says to use an authenticated session handle.\n\n" +
+      "What it does: Aegis performs the ENTIRE login workflow in an isolated headless Playwright session using a KMS-vaulted credential. " +
+      "The agent receives only an authenticated_session_id handle — never the password, cookies, localStorage, sessionStorage, storageState, Set-Cookie headers, auth tokens, secret_ref values, pass_id, KMS envelopes, or ciphertext. " +
+      "After calling, direct the user to /route-run-approvals. Poll get_authenticated_session until status is 'authenticated' or 'manual_step_required'. " +
+      "If status becomes 'manual_step_required', stop immediately — Aegis does not bypass 2FA, CAPTCHA, passkey, or device verification.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain to log into, e.g. 'github.com'. Must match the vault pass domain.",
+        },
+        login_url: {
+          type: "string",
+          description: "The full login page URL, e.g. 'https://github.com/login'. Must be http:// or https://.",
+        },
+        task_summary: {
+          type: "string",
+          description: "Short description of why the agent needs this session, shown to the user in the approval UI.",
+        },
+        pass_id: {
+          type: "string",
+          description: "Optional. The pass_id from list_vault_passes to use for login. If omitted, Aegis selects the first matching credential for the domain.",
+        },
+      },
+      required: ["domain", "login_url", "task_summary"],
+    },
+  },
+  {
+    name: "get_authenticated_session",
+    description:
+      "Poll the status of an Aegis authenticated session. Returns the session handle with status, capabilities, and expiry. Use this to wait for a pending_approval session to become authenticated after the user approves, or to check for manual_step_required (security challenge detected). Terminal statuses: 'authenticated' (login succeeded, observe/navigate now available), 'manual_step_required' (2FA/CAPTCHA/passkey detected — stop and inform user), 'failed' (login error), 'expired' (30-minute window elapsed). Non-terminal: 'pending_approval' (waiting for user), 'login_in_progress' (Aegis running). Aegis NEVER returns cookies, storage, passwords, secret_ref values, pass_id, KMS material, ciphertext, storageState, or auth tokens.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session_id returned by request_authenticated_session_login.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "observe_authenticated_session",
+    description:
+      "Get a safe observation snapshot of the current page in an authenticated Aegis browser session. Returns structured page metadata — headings, links, buttons, form structure, and (for sensitive pages) element-level sensitivity classification with allowed_actions. Sensitive field values are ALWAYS redacted (value_redacted: true). Aegis NEVER returns raw cookies, storage, session tokens, passwords, secret_ref values, pass_id, KMS material, ciphertext, or storageState. Session must be in 'authenticated' status. If the session is in 'manual_step_required', stop and do not call this tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session_id from request_authenticated_session_login.",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "navigate_authenticated_session",
+    description:
+      "Navigate the authenticated Aegis browser session to a same-domain URL, then return a safe observation snapshot. Same-domain enforcement is strict — cross-domain navigation is blocked with CROSS_DOMAIN_NAVIGATION_BLOCKED. No form submission, POST actions, credential fill, or clicks are performed — navigation is page.goto only. Returns the same observation format as observe_authenticated_session. Session must be in 'authenticated' status with 'safe_navigation' capability. Aegis NEVER returns cookies, storage, passwords, secret_ref values, pass_id, KMS material, ciphertext, or storageState.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session_id from request_authenticated_session_login.",
+        },
+        url: {
+          type: "string",
+          description: "The URL to navigate to. Must be same-domain as the session's login domain. E.g. if domain is 'github.com', only URLs on github.com are allowed.",
+        },
+      },
+      required: ["session_id", "url"],
+    },
+  },
+  {
+    name: "request_secret_field_injection",
+    description:
+      "Request Aegis to inject a stored credential (username or password) directly into a field " +
+      "in your active Playwright browser via CDP — without returning the value to the agent. " +
+      "IMPORTANT PRODUCT BOUNDARIES:\n" +
+      "- This is the PRIMARY path for credential fields when using an agent-controlled Playwright browser (e.g., Claude Code).\n" +
+      "- Do NOT use start_credential_session (targets the Aegis Chrome extension on a user tab — incompatible with agent Playwright browsers).\n" +
+      "- Do NOT use request_authenticated_session_login (that tool performs the ENTIRE login in a separate Aegis-controlled browser — Aegis should not own the login workflow).\n" +
+      "- Aegis does NOT click Submit, Next, or Sign In. The agent is responsible for all clicking and navigation.\n" +
+      "- Aegis does NOT choose between OAuth and username/password. The agent must navigate to the username/password login path before calling this.\n" +
+      "- Aegis does NOT log into the site for the agent. Aegis only fills the specific field you request.\n" +
+      "- Routes/skills are for complex high-risk workflows (payments, banking, account deletion) — not for normal login.\n" +
+      "ONE-APPROVAL FLOW: When you call this for a username field, Aegis creates one 'credential-use authorization' covering BOTH username and password for this login attempt. " +
+      "The user approves once at /route-run-approvals under 'Login credential requests' — that single approval covers both fields. " +
+      "You do NOT need to request a second approval for the password injection on the same login attempt.\n" +
+      "After calling this tool: if status='approved', call execute_secret_field_injection immediately. " +
+      "If status='pending_approval', direct the user to /route-run-approvals under 'Login credential requests', then call execute_secret_field_injection after approval. " +
+      "For subsequent fields in the same login attempt, call request_secret_field_injection again — it will auto-attach to the same authorization (no second approval needed if already approved). " +
+      "Call list_vault_passes first if you need to identify the correct pass_id for the domain.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain of the page where the field exists (e.g. 'github.com', 'localhost'). Must match the hostname of page_url and the vault pass domain.",
+        },
+        pass_id: {
+          type: "string",
+          description: "Optional. The pass_id from list_vault_passes. If omitted, Aegis uses the first matching credential for the domain.",
+        },
+        field_kind: {
+          type: "string",
+          enum: ["username", "password"],
+          description: "'username' fills email/username inputs. 'password' fills password inputs. Password injection always requires user approval.",
+        },
+        page_url: {
+          type: "string",
+          description: "The full URL of the current page containing the field (e.g. 'https://github.com/login'). The hostname must match domain. Aegis rejects cross-domain injection requests with a clear error.",
+        },
+        element_hint: {
+          type: "object",
+          description: "Optional hints to identify the target field. Provide any of: label (visible label text), placeholder (input placeholder text), input_type (e.g. 'email', 'password'), or selector_hint (CSS selector). If omitted, Aegis infers a selector from field_kind.",
+          properties: {
+            label: { type: "string", description: "Visible label text for the input." },
+            placeholder: { type: "string", description: "Placeholder text of the input." },
+            input_type: { type: "string", description: "HTML input type, e.g. 'password', 'email', 'text'." },
+            selector_hint: { type: "string", description: "CSS selector targeting the field, e.g. '#login_field', 'input[name=\"login\"]'." },
+          },
+        },
+        reason: {
+          type: "string",
+          description: "Short explanation shown to the user in the approval UI. E.g. 'Filling GitHub username to log in to github.com/login'.",
+        },
+      },
+      required: ["domain", "field_kind", "page_url", "reason"],
+    },
+  },
+  {
+    name: "get_secret_injection_status",
+    description:
+      "Poll the status of a secret field injection request created by request_secret_field_injection. " +
+      "Use this to check whether the user has approved the injection at /route-run-approvals. " +
+      "When status='approved', call execute_secret_field_injection. " +
+      "Terminal statuses: 'filled', 'denied', 'failed', 'expired'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        injection_request_id: {
+          type: "string",
+          description: "The injection_request_id returned by request_secret_field_injection.",
+        },
+      },
+      required: ["injection_request_id"],
+    },
+  },
+  {
+    name: "execute_secret_field_injection",
+    description:
+      "Execute an approved secret field injection — Aegis resolves the credential from the KMS vault " +
+      "and injects it into the browser field via CDP. The raw credential value is NEVER returned to the agent. " +
+      "Requires AEGIS_PLAYWRIGHT_CDP_URL to be configured on the Aegis API server and the Playwright MCP " +
+      "server to be started with --cdp-port matching that URL. " +
+      "Only call this after: (1) the injection status is 'approved', AND (2) the agent has navigated to the page " +
+      "containing the target field. After the field is filled, the agent must continue: click Next, Sign In, " +
+      "or submit the form itself. Aegis does not submit forms.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        injection_request_id: {
+          type: "string",
+          description: "The injection_request_id returned by request_secret_field_injection.",
+        },
+      },
+      required: ["injection_request_id"],
+    },
+  },
+  {
+    name: "report_security_challenge",
+    description:
+      "Report a security challenge detected in the browser (email/SMS device verification, TOTP, etc.) to Aegis. " +
+      "Call this when the page shows a verification code prompt — GitHub device verification, Google 2-step, etc. " +
+      "IMPORTANT PRODUCT BOUNDARIES:\n" +
+      "- Do NOT ask the user to paste the code into chat — that is a security anti-pattern.\n" +
+      "- Tell the user: \"A verification code was sent. Please enter it in the Aegis UI at /route-run-approvals under 'Security challenges'.\"\n" +
+      "- Aegis does not bypass 2FA, CAPTCHA, passkeys, or device checks. Passkey and CAPTCHA challenges require direct user action in the browser.\n" +
+      "- The agent never receives the raw code. Aegis injects it via CDP once the user submits it.\n" +
+      "After calling this tool, call wait_for_security_challenge with the returned challenge_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain where the challenge appeared, e.g. 'github.com'.",
+        },
+        page_url: {
+          type: "string",
+          description: "The full URL of the page showing the challenge, e.g. 'https://github.com/sessions/verified-device'.",
+        },
+        challenge_type: {
+          type: "string",
+          enum: ["email_device_verification", "sms_code", "totp", "passkey", "captcha", "device_verification", "unknown"],
+          description: "The type of challenge detected. Use 'unknown' if unsure.",
+        },
+        masked_destination: {
+          type: "string",
+          description: "Optional. Masked destination shown on screen, e.g. 'n*******@gmail.com' or '+1 *** *** **42'.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional. The task browser session ID if one is active.",
+        },
+        element_hint: {
+          type: "object",
+          description: "Optional hints to identify the target code input field. Provide selector_hint, label, placeholder, or input_type.",
+          properties: {
+            label: { type: "string" },
+            placeholder: { type: "string" },
+            input_type: { type: "string" },
+            selector_hint: { type: "string" },
+          },
+        },
+        instructions: {
+          type: "string",
+          description: "Optional. Human-readable description of the challenge shown to the user in the Aegis UI.",
+        },
+      },
+      required: ["domain", "page_url"],
+    },
+  },
+  {
+    name: "wait_for_security_challenge",
+    description:
+      "Wait for the user to submit a verification code (or complete the challenge directly in the browser). " +
+      "Call this after report_security_challenge — it polls until a terminal status arrives.\n\n" +
+      "Terminal statuses:\n" +
+      "- 'code_submitted': User entered the code in Aegis UI. Call inject_security_challenge_code immediately.\n" +
+      "- 'code_injected': Code was already injected. Continue by clicking Verify/Continue in your browser.\n" +
+      "- 'user_completed': User completed the challenge directly in the browser. Continue your workflow.\n" +
+      "- 'cancelled': User cancelled. Do not retry without user direction.\n" +
+      "- 'expired': Challenge window expired (5 min). Navigate back to the challenge page and call report_security_challenge again.\n" +
+      "- 'failed': Injection failed on a previous attempt. Check the error field.\n" +
+      "DO NOT ask the user to type 'done' or paste the code into chat — direct them to the Aegis UI.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        challenge_id: {
+          type: "string",
+          description: "The challenge_id returned by report_security_challenge.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Maximum milliseconds to wait before returning a timeout result. Default: 120000 (2 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Milliseconds between poll attempts. Default: 2000.",
+        },
+      },
+      required: ["challenge_id"],
+    },
+  },
+  {
+    name: "inject_security_challenge_code",
+    description:
+      "Execute the challenge code injection — Aegis takes the code the user submitted in the Aegis UI " +
+      "and injects it into the browser field via CDP. The raw code is never returned to the agent.\n\n" +
+      "Only call this after wait_for_security_challenge returns status='code_submitted'.\n" +
+      "After successful injection (status='code_injected'), the agent must click 'Verify', 'Continue', or 'Submit' " +
+      "in its own Playwright browser — Aegis does not click for you.\n" +
+      "Requires AEGIS_PLAYWRIGHT_CDP_URL to be configured and the browser to still be open on the challenge page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        challenge_id: {
+          type: "string",
+          description: "The challenge_id from report_security_challenge.",
+        },
+      },
+      required: ["challenge_id"],
+    },
+  },
+  {
+    name: "request_challenge_email_resolution",
+    description:
+      "Request Gmail-based automatic resolution for a live GitHub device verification challenge. " +
+      "Call this after report_security_challenge when challenge_type='email_device_verification' and domain='github.com'. " +
+      "Creates a resolution record (status: 'pending_approval') and waits for user approval in the Aegis UI.\n\n" +
+      "PRODUCT BOUNDARIES:\n" +
+      "- v1 supports github.com email_device_verification challenges only.\n" +
+      "- The agent never receives the code or any email body/subject contents.\n" +
+      "- User must approve the Gmail search in the Aegis UI — approval is not automatic.\n" +
+      "- After approval, Aegis searches Gmail (sender allowlist: noreply@github.com only), extracts the code, and holds it in memory.\n" +
+      "- Call wait_for_challenge_email_resolution after this to poll until code_found or not_found.\n" +
+      "- If not_found, fall back to wait_for_security_challenge (manual code entry by the user).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        challenge_id: {
+          type: "string",
+          description: "The challenge_id returned by report_security_challenge.",
+        },
+      },
+      required: ["challenge_id"],
+    },
+  },
+  {
+    name: "wait_for_challenge_email_resolution",
+    description:
+      "Wait for Aegis to complete a Gmail-based email resolution. " +
+      "Call this after request_challenge_email_resolution — it polls until a terminal status arrives.\n\n" +
+      "Terminal statuses:\n" +
+      "- 'code_found': Aegis found the code in Gmail. Call inject_challenge_email_code immediately.\n" +
+      "- 'not_found': No matching code found. Fall back to manual code entry via the Aegis UI (wait_for_security_challenge).\n" +
+      "- 'failed': Gmail search failed (token issue, API error). Tell the user to enter the code manually.\n" +
+      "- 'cancelled': Resolution was cancelled. User may enter code manually.\n" +
+      "- 'expired': Resolution expired. Request a new resolution if the challenge is still active.\n" +
+      "- 'injected': Code was already injected. Click Verify/Continue in your browser.\n\n" +
+      "PRODUCT BOUNDARIES: Never returns the code. 'code_found' means Aegis has it in memory only. " +
+      "Do NOT ask the user to paste the code into chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resolution_id: {
+          type: "string",
+          description: "The resolution_id returned by request_challenge_email_resolution.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Maximum milliseconds to wait before returning timeout. Default: 120000 (2 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Milliseconds between poll attempts. Default: 3000.",
+        },
+      },
+      required: ["resolution_id"],
+    },
+  },
+  {
+    name: "inject_challenge_email_code",
+    description:
+      "Inject the Gmail-retrieved verification code into the browser field via CDP. " +
+      "Only call this after wait_for_challenge_email_resolution returns status='code_found'.\n\n" +
+      "After successful injection (status='injected'), the agent must click 'Verify', 'Continue', or 'Submit' " +
+      "in its own Playwright browser — Aegis does not click for you.\n\n" +
+      "PRODUCT BOUNDARIES:\n" +
+      "- The raw code is never returned to the agent.\n" +
+      "- The email body, subject, and sender email are never returned.\n" +
+      "- Requires AEGIS_PLAYWRIGHT_CDP_URL to be configured and the browser to still be on the challenge page.\n" +
+      "- The code is deleted from Aegis memory immediately after this call (success or failure).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resolution_id: {
+          type: "string",
+          description: "The resolution_id from request_challenge_email_resolution.",
+        },
+      },
+      required: ["resolution_id"],
+    },
+  },
+  {
+    name: "wait_for_credential_authorization",
+    description:
+      "Wait for the user to approve or deny a pending credential-use authorization. " +
+      "Use this immediately after request_secret_field_injection returns status='pending_approval'. " +
+      "Tell the user to approve in the Aegis UI (/route-run-approvals under 'Login credential requests'), " +
+      "then call this tool — it polls until a decision arrives and returns automatically. " +
+      "DO NOT ask the user to type 'done' or 'approved'. The user acts in the Aegis UI; the agent waits here.\n\n" +
+      "Terminal statuses returned: 'approved' (proceed with execute_secret_field_injection), " +
+      "'denied' / 'expired' / 'revoked' (stop and report to user), 'fulfilled' (all fields already used — start fresh). " +
+      "If the tool returns status='timeout', ask the user whether to continue waiting or cancel, then call again with the same authorization_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        authorization_id: {
+          type: "string",
+          description:
+            "The authorization_id from the request_secret_field_injection response (inside authorization_covers context) or from the Aegis approval UI. " +
+            "Note: request_secret_field_injection does not return authorization_id directly — call get_secret_injection_status on the injection_request_id and read the authorization_id from the linked authorization, or use the authorization_id shown in the Aegis UI.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Maximum milliseconds to wait before returning a timeout result. Default: 120000 (2 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Milliseconds between poll attempts. Default: 1000 (1 second).",
+        },
+      },
+      required: ["authorization_id"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -1366,6 +2414,57 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "check_website_policy_compatibility":
       result = await checkWebsitePolicyCompatibility(a);
+      break;
+    case "start_task_browser_session":
+      result = await startTaskBrowserSession(a);
+      break;
+    case "get_task_browser_session":
+      result = await getTaskBrowserSession(a);
+      break;
+    case "close_task_browser_session":
+      result = await closeTaskBrowserSession(a);
+      break;
+    case "request_authenticated_session_login":
+      result = await requestAuthenticatedSessionLogin(a);
+      break;
+    case "get_authenticated_session":
+      result = await getAuthenticatedSession(a);
+      break;
+    case "observe_authenticated_session":
+      result = await observeAuthenticatedSession(a);
+      break;
+    case "navigate_authenticated_session":
+      result = await navigateAuthenticatedSession(a);
+      break;
+    case "request_secret_field_injection":
+      result = await requestSecretFieldInjection(a);
+      break;
+    case "get_secret_injection_status":
+      result = await getSecretInjectionStatus(a);
+      break;
+    case "execute_secret_field_injection":
+      result = await executeSecretFieldInjection(a);
+      break;
+    case "wait_for_credential_authorization":
+      result = await waitForCredentialAuthorization(a);
+      break;
+    case "report_security_challenge":
+      result = await reportSecurityChallenge(a);
+      break;
+    case "wait_for_security_challenge":
+      result = await waitForSecurityChallenge(a);
+      break;
+    case "inject_security_challenge_code":
+      result = await injectSecurityChallengeCode(a);
+      break;
+    case "request_challenge_email_resolution":
+      result = await requestChallengeEmailResolution(a);
+      break;
+    case "wait_for_challenge_email_resolution":
+      result = await waitForChallengeEmailResolution(a);
+      break;
+    case "inject_challenge_email_code":
+      result = await injectChallengeEmailCode(a);
       break;
     default:
       return {

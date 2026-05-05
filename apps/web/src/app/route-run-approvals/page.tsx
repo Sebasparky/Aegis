@@ -12,12 +12,31 @@ import {
   listAuthenticatedSessions,
   approveAuthenticatedSession,
   rejectAuthenticatedSession,
+  listSecretFieldInjections,
+  approveSecretFieldInjection,
+  denySecretFieldInjection,
+  listCredentialUseAuthorizations,
+  approveCredentialUseAuthorization,
+  denyCredentialUseAuthorization,
+  listSecurityChallenges,
+  submitSecurityChallengeCode,
+  completeSecurityChallenge,
+  cancelSecurityChallenge,
+  getEmailResolverStatus,
+  getChallengeEmailResolutions,
+  startChallengeEmailResolution,
+  cancelChallengeEmailResolution,
   type RouteRunWithSummary,
   type CredentialSessionView,
   type RunApprovalContext,
   type ApprovalManifest,
   type ApprovalManifestLineItem,
   type AuthenticatedSessionHandleView,
+  type SecretFieldInjectionView,
+  type CredentialUseAuthorizationView,
+  type SecurityChallengeView,
+  type EmailResolverStatusView,
+  type ChallengeEmailResolutionView,
 } from "../../lib/api";
 
 // ─── Tone helpers ─────────────────────────────────────────────────────────────
@@ -575,12 +594,488 @@ function PendingAuthSessionCard({
   );
 }
 
+// ─── Secret Field Injection Card ──────────────────────────────────────────────
+
+function PendingInjectionCard({
+  injection,
+  onApprove,
+  onDeny,
+}: {
+  injection: SecretFieldInjectionView;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [denying, setDenying] = useState(false);
+
+  const isPassword = injection.field_kind === "password";
+  const fieldKindClass = isPassword
+    ? "border-red-800 text-red-300 bg-red-950"
+    : "border-blue-800 text-blue-300 bg-blue-950";
+
+  return (
+    <div className="bg-gray-900 border border-emerald-900 rounded-xl p-5 space-y-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold text-white">Secret Field Injection</p>
+          <p className="text-xs text-emerald-300 font-mono mt-0.5">{injection.domain}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className={`text-xs px-2 py-1 rounded-full border font-mono ${fieldKindClass}`}>
+            {injection.field_kind}
+          </span>
+          <span className="text-xs px-2 py-1 rounded-full border border-amber-800 text-amber-300 bg-amber-950">
+            Waiting for approval
+          </span>
+        </div>
+      </div>
+
+      {/* Reason */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-1">Agent reason</p>
+        <p className="text-sm text-gray-200">{injection.reason}</p>
+      </div>
+
+      {/* Target page */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-1">Target page</p>
+        <p className="text-xs text-gray-400 font-mono break-all">{injection.page_url}</p>
+      </div>
+
+      {/* Custody guarantees */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-2">
+          Credential custody
+        </p>
+        <ul className="space-y-1.5">
+          {[
+            "Aegis resolves the credential server-side via KMS — the agent never sees the value.",
+            "The value flows directly from the Aegis API into the browser field via CDP.",
+            "The agent receives only injection metadata (id, status, field_kind). No raw value.",
+            "raw_value_revealed_to_agent: false — enforced as a TypeScript literal type on every response.",
+          ].map((item, i) => (
+            <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+              <span className="text-emerald-500 mt-0.5 shrink-0">✓</span>
+              <span>{item}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-3 pt-1">
+        <button
+          disabled={approving || denying}
+          onClick={async () => { setApproving(true); try { await onApprove(); } finally { setApproving(false); } }}
+          className="px-4 py-2 text-sm rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-medium transition-colors disabled:opacity-50"
+        >
+          {approving ? "Approving…" : `Approve ${injection.field_kind} fill`}
+        </button>
+        <button
+          disabled={approving || denying}
+          onClick={async () => { setDenying(true); try { await onDeny(); } finally { setDenying(false); } }}
+          className="px-4 py-2 text-sm rounded-lg border border-red-800 text-red-400 hover:bg-red-950 transition-colors disabled:opacity-50"
+        >
+          {denying ? "Denying…" : "Deny"}
+        </button>
+      </div>
+
+      <p className="text-xs text-gray-600 font-mono">{injection.injection_request_id}</p>
+    </div>
+  );
+}
+
+// ─── Credential-use authorization card ────────────────────────────────────────
+
+function PendingCredAuthCard({
+  auth,
+  onApprove,
+  onDeny,
+}: {
+  auth: CredentialUseAuthorizationView;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [denying, setDenying] = useState(false);
+
+  return (
+    <div className="bg-gray-900 border border-indigo-900 rounded-xl p-5 space-y-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold text-white">Login credential request</p>
+          <p className="text-xs text-indigo-300 font-mono mt-0.5">{auth.domain}</p>
+        </div>
+        <span className="text-xs px-2 py-1 rounded-full border border-amber-800 text-amber-300 bg-amber-950 shrink-0">
+          Waiting for approval
+        </span>
+      </div>
+
+      {/* Account info */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 space-y-1">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500">Account</p>
+        <p className="text-sm text-white font-medium">{auth.pass_label}</p>
+        {auth.pass_username && (
+          <p className="text-xs text-gray-400 font-mono">{auth.pass_username}</p>
+        )}
+      </div>
+
+      {/* Fields covered */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-2">
+          This approval covers
+        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          {auth.allowed_field_kinds.map((kind) => (
+            <span
+              key={kind}
+              className={`text-xs px-2 py-1 rounded-full border font-mono ${
+                kind === "password"
+                  ? "border-red-800 text-red-300 bg-red-950"
+                  : "border-blue-800 text-blue-300 bg-blue-950"
+              }`}
+            >
+              {kind} (max {auth.max_uses_per_field[kind] ?? 1}×)
+            </span>
+          ))}
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          One approval for this login attempt. Expires 5 minutes after approval. Each field can be
+          filled once — after both are filled the authorization is closed.
+        </p>
+      </div>
+
+      {/* Custody guarantees */}
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-2">
+          Credential custody
+        </p>
+        <ul className="space-y-1.5">
+          {[
+            "Aegis resolves credentials server-side via KMS — the agent never sees username or password.",
+            "Values are injected directly into browser fields via CDP. No raw credential in any API response.",
+            "The agent receives only injection metadata (id, status, field_kind). raw_values_revealed_to_agent: false.",
+            "The agent owns all navigation and form submission. Aegis only fills the protected fields.",
+            "Default Aegis agent browsers disable password/card saving. This approval does not authorize 'remember me', 'keep me signed in', 'trust this device', or saving credentials to the browser or website.",
+          ].map((item, i) => (
+            <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+              <span className="text-indigo-400 mt-0.5 shrink-0">✓</span>
+              <span>{item}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-3 pt-1">
+        <button
+          disabled={approving || denying}
+          onClick={async () => { setApproving(true); try { await onApprove(); } finally { setApproving(false); } }}
+          className="px-4 py-2 text-sm rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-medium transition-colors disabled:opacity-50"
+        >
+          {approving ? "Approving…" : `Allow use of ${auth.pass_label}`}
+        </button>
+        <button
+          disabled={approving || denying}
+          onClick={async () => { setDenying(true); try { await onDeny(); } finally { setDenying(false); } }}
+          className="px-4 py-2 text-sm rounded-lg border border-red-800 text-red-400 hover:bg-red-950 transition-colors disabled:opacity-50"
+        >
+          {denying ? "Denying…" : "Deny"}
+        </button>
+      </div>
+
+      <p className="text-xs text-gray-600 font-mono">{auth.authorization_id}</p>
+    </div>
+  );
+}
+
+// ─── Security challenge card ───────────────────────────────────────────────────
+
+function PendingChallengeCard({
+  challenge,
+  onSubmitCode,
+  onComplete,
+  onCancel,
+  emailResolverStatus,
+}: {
+  challenge: SecurityChallengeView;
+  onSubmitCode: (code: string) => Promise<void>;
+  onComplete: () => Promise<void>;
+  onCancel: () => Promise<void>;
+  emailResolverStatus: EmailResolverStatusView | null;
+}) {
+  const [code, setCode] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [emailResolution, setEmailResolution] = useState<ChallengeEmailResolutionView | null>(null);
+  const [emailSearching, setEmailSearching] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  const challengeLabel: Record<string, string> = {
+    email_device_verification: "Email verification",
+    sms_code: "SMS code",
+    totp: "Authenticator code",
+    device_verification: "Device verification",
+    passkey: "Passkey",
+    captcha: "CAPTCHA",
+    unknown: "Security challenge",
+  };
+
+  async function handleSubmit() {
+    if (!code.trim()) return;
+    setSubmitting(true);
+    try {
+      await onSubmitCode(code.trim());
+      setCode("");
+      setSubmitted(true);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleFindInGmail() {
+    setEmailSearching(true);
+    setEmailError(null);
+    try {
+      const res = await startChallengeEmailResolution(challenge.challenge_id);
+      setEmailResolution(res);
+    } catch (err: unknown) {
+      setEmailError(err instanceof Error ? err.message : "Gmail search failed.");
+    } finally {
+      setEmailSearching(false);
+    }
+  }
+
+  async function handleCancelEmailResolution() {
+    if (!emailResolution) return;
+    try {
+      await cancelChallengeEmailResolution(emailResolution.resolution_id);
+      setEmailResolution(null);
+    } catch {
+      // ignore
+    }
+  }
+
+  const isGithubEmailChallenge =
+    challenge.challenge_type === "email_device_verification" &&
+    challenge.domain === "github.com";
+
+  function renderEmailResolverSection() {
+    if (!isGithubEmailChallenge) return null;
+
+    if (!emailResolverStatus?.connected) {
+      return (
+        <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+          <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-1">
+            Or: Find code automatically
+          </p>
+          <p className="text-xs text-gray-600">Gmail resolver is not connected.</p>
+        </div>
+      );
+    }
+
+    if (!emailResolution || emailResolution.status === "cancelled") {
+      return (
+        <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 space-y-2">
+          <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500">
+            Or: Find code automatically
+          </p>
+          <button
+            disabled={emailSearching || submitted}
+            onClick={handleFindInGmail}
+            className="px-3 py-1.5 text-xs rounded-lg bg-blue-800 hover:bg-blue-700 text-white font-medium transition-colors disabled:opacity-50"
+          >
+            {emailSearching ? "Searching Gmail…" : "Find code in connected Gmail"}
+          </button>
+          <p className="text-xs text-gray-600">
+            Aegis will search recent GitHub verification emails. The code is never shown to the agent.
+          </p>
+          {emailError && (
+            <p className="text-xs text-red-400">{emailError}</p>
+          )}
+        </div>
+      );
+    }
+
+    const { status, sender_domain, received_at, error } = emailResolution;
+
+    if (status === "code_found") {
+      const seconds = received_at
+        ? Math.round((Date.now() - new Date(received_at).getTime()) / 1000)
+        : null;
+      return (
+        <div className="rounded-lg bg-emerald-950 border border-emerald-800 px-4 py-3 space-y-1">
+          <p className="text-xs font-semibold text-emerald-300">Code found</p>
+          <p className="text-xs text-emerald-400">
+            From {sender_domain ?? "github.com"}
+            {seconds !== null ? `, received ${seconds}s ago` : ""}.
+          </p>
+          <p className="text-xs text-emerald-500">
+            The agent will inject it when it calls inject_challenge_email_code.
+          </p>
+        </div>
+      );
+    }
+
+    if (status === "injected") {
+      return (
+        <div className="rounded-lg bg-emerald-950 border border-emerald-800 px-4 py-3">
+          <p className="text-xs font-semibold text-emerald-300">Code injected.</p>
+          <p className="text-xs text-emerald-500 mt-0.5">
+            The agent will click Verify/Continue in the browser.
+          </p>
+        </div>
+      );
+    }
+
+    if (status === "not_found") {
+      return (
+        <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 space-y-2">
+          <p className="text-xs text-gray-400">
+            No code found in recent GitHub emails. Enter the code manually below.
+          </p>
+          <button
+            onClick={handleFindInGmail}
+            disabled={emailSearching}
+            className="text-xs text-blue-400 hover:underline disabled:opacity-50"
+          >
+            {emailSearching ? "Searching…" : "Try again"}
+          </button>
+        </div>
+      );
+    }
+
+    if (status === "failed") {
+      return (
+        <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 space-y-1">
+          <p className="text-xs text-red-400">Search failed. Enter the code manually below.</p>
+          {error && <p className="text-xs text-gray-600 font-mono">{error}</p>}
+        </div>
+      );
+    }
+
+    return null;
+  }
+
+  return (
+    <div className="bg-gray-900 border border-amber-900 rounded-xl p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold text-white">
+            {challengeLabel[challenge.challenge_type] ?? "Security challenge"}
+          </p>
+          <p className="text-xs text-amber-300 font-mono mt-0.5">{challenge.domain}</p>
+        </div>
+        <span className="text-xs px-2 py-1 rounded-full border border-amber-800 text-amber-300 bg-amber-950 shrink-0">
+          {submitted ? "Code submitted" : "Waiting for you"}
+        </span>
+      </div>
+
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-1">
+          What's happening
+        </p>
+        <p className="text-xs text-gray-300">{challenge.instructions}</p>
+        {challenge.masked_destination && (
+          <p className="text-xs text-gray-500 mt-1">
+            Code sent to{" "}
+            <span className="text-gray-300 font-mono">{challenge.masked_destination}</span>
+          </p>
+        )}
+      </div>
+
+      <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+        <p className="text-[10px] font-semibold tracking-widest uppercase text-gray-500 mb-2">
+          Aegis guarantees
+        </p>
+        <CheckList
+          items={[
+            "Enter the code here — do not paste it into the agent chat.",
+            "Aegis injects the code directly into the browser field once.",
+            "The agent never sees the code.",
+            "Code expires immediately after injection.",
+          ]}
+        />
+      </div>
+
+      {renderEmailResolverSection()}
+
+      {!submitted ? (
+        <div className="space-y-2">
+          <label className="block text-xs text-gray-400">
+            Or enter code manually
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+              placeholder="Enter code…"
+              maxLength={10}
+              disabled={submitting}
+              className="flex-1 px-3 py-2 text-sm rounded-lg bg-gray-800 border border-gray-700 text-white placeholder-gray-600 focus:outline-none focus:border-amber-600 disabled:opacity-50 font-mono tracking-widest"
+            />
+            <button
+              disabled={submitting || !code.trim()}
+              onClick={handleSubmit}
+              className="px-4 py-2 text-sm rounded-lg bg-amber-700 hover:bg-amber-600 text-white font-medium transition-colors disabled:opacity-50"
+            >
+              {submitting ? "Injecting…" : "Inject code"}
+            </button>
+          </div>
+          <p className="text-xs text-gray-600">
+            The agent will click Verify/Continue after Aegis fills the field.
+          </p>
+        </div>
+      ) : (
+        <p className="text-xs text-emerald-400">
+          Code submitted. Aegis will inject it into the browser field when the agent calls inject_security_challenge_code.
+        </p>
+      )}
+
+      <div className="flex items-center gap-3 pt-1">
+        <button
+          disabled={submitting || completing || cancelling}
+          onClick={async () => {
+            setCompleting(true);
+            try { await onComplete(); } finally { setCompleting(false); }
+          }}
+          className="px-3 py-1.5 text-xs rounded-lg border border-gray-700 text-gray-400 hover:bg-gray-800 transition-colors disabled:opacity-50"
+        >
+          {completing ? "Marking done…" : "I completed it in the browser"}
+        </button>
+        <button
+          disabled={submitting || completing || cancelling}
+          onClick={async () => {
+            setCancelling(true);
+            try { await onCancel(); } finally { setCancelling(false); }
+          }}
+          className="px-3 py-1.5 text-xs rounded-lg border border-red-900 text-red-500 hover:bg-red-950 transition-colors disabled:opacity-50"
+        >
+          {cancelling ? "Cancelling…" : "Cancel"}
+        </button>
+      </div>
+
+      <p className="text-xs text-gray-700 font-mono">{challenge.challenge_id}</p>
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function RouteRunApprovalsPage() {
   const [runs, setRuns] = useState<RouteRunWithSummary[]>([]);
   const [credSessions, setCredSessions] = useState<CredentialSessionView[]>([]);
   const [authSessions, setAuthSessions] = useState<AuthenticatedSessionHandleView[]>([]);
+  const [injections, setInjections] = useState<SecretFieldInjectionView[]>([]);
+  const [credAuths, setCredAuths] = useState<CredentialUseAuthorizationView[]>([]);
+  const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
+  const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
   const [contexts, setContexts] = useState<Map<string, RunApprovalContext>>(new Map());
@@ -591,11 +1086,19 @@ export default function RouteRunApprovalsPage() {
       listRouteRuns({ status: "pending_approval" }),
       listCredentialSessions("pending_approval"),
       listAuthenticatedSessions("pending_approval"),
+      listSecretFieldInjections("pending_approval"),
+      listCredentialUseAuthorizations("pending_approval"),
+      listSecurityChallenges("pending_user"),
+      getEmailResolverStatus().catch(() => null),
     ])
-      .then(([r, s, a]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
+        setInjections(inj);
+        setCredAuths(auths);
+        setChallenges(chlgs);
+        setEmailResolverStatus(emailStatus);
         // Fetch approval context for each pending run in parallel.
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
@@ -675,7 +1178,79 @@ export default function RouteRunApprovalsPage() {
     }
   }
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length;
+  async function handleApproveInjection(id: string) {
+    setActionError(null);
+    try {
+      await approveSecretFieldInjection(id);
+      setInjections((prev) => prev.filter((i) => i.injection_request_id !== id));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to approve injection.");
+    }
+  }
+
+  async function handleDenyInjection(id: string) {
+    setActionError(null);
+    try {
+      await denySecretFieldInjection(id);
+      setInjections((prev) => prev.filter((i) => i.injection_request_id !== id));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to deny injection.");
+    }
+  }
+
+  async function handleApproveCredAuth(id: string) {
+    setActionError(null);
+    try {
+      await approveCredentialUseAuthorization(id);
+      setCredAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to approve credential authorization.");
+    }
+  }
+
+  async function handleDenyCredAuth(id: string) {
+    setActionError(null);
+    try {
+      await denyCredentialUseAuthorization(id);
+      setCredAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to deny credential authorization.");
+    }
+  }
+
+  async function handleSubmitChallengeCode(challengeId: string, code: string) {
+    setActionError(null);
+    try {
+      await submitSecurityChallengeCode(challengeId, code);
+      setChallenges((prev) =>
+        prev.map((c) => c.challenge_id === challengeId ? { ...c, status: "code_submitted" } : c),
+      );
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to submit code.");
+    }
+  }
+
+  async function handleCompleteChallenge(challengeId: string) {
+    setActionError(null);
+    try {
+      await completeSecurityChallenge(challengeId);
+      setChallenges((prev) => prev.filter((c) => c.challenge_id !== challengeId));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to mark challenge complete.");
+    }
+  }
+
+  async function handleCancelChallenge(challengeId: string) {
+    setActionError(null);
+    try {
+      await cancelSecurityChallenge(challengeId);
+      setChallenges((prev) => prev.filter((c) => c.challenge_id !== challengeId));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to cancel challenge.");
+    }
+  }
+
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + challenges.length;
 
   return (
     <div className="max-w-2xl space-y-12">
@@ -832,6 +1407,90 @@ export default function RouteRunApprovalsPage() {
                 session={session}
                 onApprove={() => handleApproveAuthSession(session.session_id)}
                 onReject={() => handleRejectAuthSession(session.session_id)}
+              />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Login credential requests (one-approval credential-use authorization) */}
+      {(credAuths.length > 0 || !loading) && (
+        <div className="space-y-4 border-t border-gray-800 pt-8">
+          <div>
+            <h2 className="text-lg font-semibold text-indigo-300">Login credential requests</h2>
+            <p className="mt-1 text-gray-400 text-sm leading-relaxed">
+              An agent is requesting permission to use one of your stored credentials to log in.
+              One approval covers both username and password fields for this login attempt. Aegis
+              resolves and injects the values — the agent never receives them.
+            </p>
+          </div>
+
+          {loading ? null : credAuths.length === 0 ? (
+            <p className="text-gray-600 text-sm">No login credential requests waiting for approval.</p>
+          ) : (
+            credAuths.map((auth) => (
+              <PendingCredAuthCard
+                key={auth.authorization_id}
+                auth={auth}
+                onApprove={() => handleApproveCredAuth(auth.authorization_id)}
+                onDeny={() => handleDenyCredAuth(auth.authorization_id)}
+              />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Secret Field Injection Requests */}
+      {(injections.length > 0 || !loading) && (
+        <div className="space-y-4 border-t border-gray-800 pt-8">
+          <div>
+            <h2 className="text-lg font-semibold text-emerald-300">Secret field injection requests</h2>
+            <p className="mt-1 text-gray-400 text-sm leading-relaxed">
+              An agent is requesting Aegis to fill a credential field directly in its active browser
+              via CDP. Approving lets Aegis resolve the value from the KMS vault and inject it — the
+              agent never receives the raw credential. The agent owns all navigation and form
+              submission.
+            </p>
+          </div>
+
+          {loading ? null : injections.length === 0 ? (
+            <p className="text-gray-600 text-sm">No secret field injection requests waiting for approval.</p>
+          ) : (
+            injections.map((inj) => (
+              <PendingInjectionCard
+                key={inj.injection_request_id}
+                injection={inj}
+                onApprove={() => handleApproveInjection(inj.injection_request_id)}
+                onDeny={() => handleDenyInjection(inj.injection_request_id)}
+              />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Security challenges */}
+      {(challenges.length > 0 || !loading) && (
+        <div className="space-y-4 border-t border-gray-800 pt-8">
+          <div>
+            <h2 className="text-lg font-semibold text-amber-300">Security challenges</h2>
+            <p className="mt-1 text-gray-400 text-sm leading-relaxed">
+              An agent encountered a security challenge (device verification, email code, etc.) and
+              paused. Enter the code here — Aegis injects it once into the browser. The agent never
+              sees the code.
+            </p>
+          </div>
+
+          {loading ? null : challenges.length === 0 ? (
+            <p className="text-gray-600 text-sm">No security challenges waiting.</p>
+          ) : (
+            challenges.map((ch) => (
+              <PendingChallengeCard
+                key={ch.challenge_id}
+                challenge={ch}
+                onSubmitCode={(code) => handleSubmitChallengeCode(ch.challenge_id, code)}
+                onComplete={() => handleCompleteChallenge(ch.challenge_id)}
+                onCancel={() => handleCancelChallenge(ch.challenge_id)}
+                emailResolverStatus={emailResolverStatus}
               />
             ))
           )}

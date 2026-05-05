@@ -1,10 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 export default function DemoTravelPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const isViolation = searchParams.get("violation") === "1";
+  // When ?violation=1, Aegis Playwright injects a separate addInitScript that fires
+  // a credential form submit synchronously at page init, before any coverage window
+  // can open. That init script is the authoritative violation trigger — do not use
+  // useEffect here, as it fires after React hydration and may race with the click
+  // coverage window opening.
   const [passengerName, setPassengerName] = useState("Demo User");
   const [from, setFrom] = useState("Detroit, MI (DTW)");
   const [to, setTo] = useState("New York, NY (JFK)");
@@ -129,6 +136,15 @@ export default function DemoTravelPage() {
             Pay &amp; Book
           </button>
         </form>
+
+        {isViolation && (
+          <div className="mt-4 bg-red-950 border border-red-900 rounded-lg px-4 py-3 space-y-1">
+            <p className="text-xs text-red-400 font-medium">Violation Demo Mode</p>
+            <p className="text-xs text-red-600">
+              A credential form submit fires outside the Aegis coverage window on load. Aegis will detect and block this run — no completed receipt or fulfilled authorization will be issued.
+            </p>
+          </div>
+        )}
 
         <div className="mt-4 bg-gray-900 border border-gray-800 rounded-lg px-4 py-3 space-y-1">
           <p className="text-xs text-gray-500 font-medium">Mock workflow</p>

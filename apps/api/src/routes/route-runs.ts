@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier } from "@aegis/types";
-import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, MOCK_USER_ID, newId } from "../store/index.js";
+import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier, ApprovalManifest, ApprovalManifestLineItem, RunApprovalContext } from "@aegis/types";
+import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
@@ -79,6 +79,202 @@ function deriveRiskTier(permissions: string[]): AuthorizationRiskTier {
   if (permissions.some((p) => ["payment", "purchase", "financial_action", "travel_booking"].includes(p))) return "high";
   if (permissions.some((p) => ["login", "credential_fill", "submit_form"].includes(p))) return "medium";
   return "low";
+}
+
+function buildRunApprovalContext(runId: string): RunApprovalContext | null {
+  const run = routeRuns.get(runId);
+  if (!run) return null;
+
+  const route = routes.get(run.route_id);
+  const skill = skills.get(run.skill_id);
+  const collar = run.collar_id ? collars.get(run.collar_id) : undefined;
+  const delegation = run.delegation_id ? agentDelegations.get(run.delegation_id) : undefined;
+
+  const userPaymentMethod =
+    Array.from(paymentMethods.values()).find((pm) => (pm as any).user_id === MOCK_USER_ID) ??
+    Array.from(paymentMethods.values())[0];
+
+  const permissions = run.approval_required_permissions ?? [];
+
+  const taskCategory = permissions.includes("travel_booking")
+    ? "travel_booking"
+    : permissions.includes("login")
+    ? "login"
+    : permissions.includes("payment")
+    ? "payment"
+    : permissions.includes("purchase")
+    ? "purchase"
+    : permissions[0] ?? "unknown";
+
+  let manifest: ApprovalManifest;
+
+  if (taskCategory === "travel_booking") {
+    const steps = route?.steps ?? [];
+    const getSafeLiteral = (intent: string): string | undefined => {
+      const step = steps.find((s) => s.intent === intent);
+      return step?.value_policy?.type === "safe_literal" ? step.value_policy.value : undefined;
+    };
+
+    const passenger = getSafeLiteral("fill_passenger_name");
+    const fromCity = getSafeLiteral("fill_from_city");
+    const toCity = getSafeLiteral("fill_to_city");
+    const rawDate = getSafeLiteral("fill_departure_date");
+    const departureFormatted = rawDate
+      ? new Date(rawDate + "T12:00:00Z").toLocaleDateString("en-US", {
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+          timeZone: "UTC",
+        })
+      : undefined;
+
+    const lineItems: ApprovalManifestLineItem[] = [];
+    if (passenger) lineItems.push({ label: "Passenger", value: passenger });
+    if (fromCity && toCity) lineItems.push({ label: "Route", value: `${fromCity} → ${toCity}` });
+    if (departureFormatted) lineItems.push({ label: "Departure", value: departureFormatted });
+    lineItems.push({ label: "Fare (demo)", value: "$248.00 USD", tone: "money" });
+    lineItems.push({ label: "Website", value: run.domain });
+
+    const subtitle = fromCity && toCity ? `${fromCity} → ${toCity}` : (route?.workflow_description ?? "");
+
+    const payLabel = userPaymentMethod
+      ? `${userPaymentMethod.label} ending ${userPaymentMethod.last4}`
+      : "Demo card only";
+
+    const collarMax = collar?.spending_limits?.max_with_approval;
+    const stepUp = spendingLimitStepUps.get(runId);
+    const effectiveLimit = stepUp?.approved_limit_usd ?? collarMax;
+    const fareAmount = 248;
+    const isOverLimit = effectiveLimit !== undefined && fareAmount > effectiveLimit;
+    const hasApprovedStepUp = stepUp !== undefined && stepUp.approved_limit_usd >= fareAmount;
+
+    const constraintWarnings: string[] = [];
+    let approvalBlocked = false;
+    let approvalBlockReason: string | undefined;
+    let spendingStepUp: ApprovalManifest["spending_step_up"] | undefined;
+
+    if (hasApprovedStepUp) {
+      constraintWarnings.push(
+        `One-time spending limit approved for this run: $${stepUp.approved_limit_usd.toFixed(2)}.`
+      );
+      spendingStepUp = {
+        required: false,
+        requested_amount_usd: fareAmount,
+        approved_amount_usd: stepUp.approved_limit_usd,
+        currency: "USD",
+        status: "approved",
+        scope: "this_run_only",
+      };
+    } else if (isOverLimit) {
+      approvalBlocked = true;
+      approvalBlockReason = "This purchase exceeds the approved spending limit.";
+      constraintWarnings.push(
+        `Estimated fare $${fareAmount.toFixed(2)} exceeds the current approved limit of $${effectiveLimit!.toFixed(2)}.`
+      );
+      spendingStepUp = {
+        required: true,
+        requested_amount_usd: fareAmount,
+        currency: "USD",
+        status: "not_requested",
+        scope: "this_run_only",
+      };
+    }
+
+    manifest = {
+      title: skill?.name ?? route?.workflow_name ?? "Book flight",
+      subtitle,
+      task_category: taskCategory,
+      primary_action_label: "Book flight",
+      risk_tier: route?.risk_level ?? "high",
+      line_items: lineItems,
+      capabilities_to_release: ["payment_method"],
+      custody_guarantees: [
+        "Raw card data will not be shown to the agent",
+        "Payment is processed in the Aegis-controlled runtime only",
+      ],
+      spending_limit: {
+        ...(collarMax !== undefined ? { max_amount_usd: collarMax } : {}),
+        currency: "USD",
+        payment_instrument_label: payLabel,
+      },
+      runtime_guarantees: [
+        "Aegis executes this in an isolated Playwright browser session",
+        "Coverage violation detection blocks unexpected sensitive actions",
+        "A signed execution receipt is created and linked to this approval",
+      ],
+      website_context: {
+        domain: run.domain,
+        policy_status: "policy_found",
+        safety_recommendation: "allow_with_approval",
+      },
+      purchase_amount: { amount_usd: fareAmount, currency: "USD", label: "Fare (demo)" },
+      ...(constraintWarnings.length > 0 ? { constraint_warnings: constraintWarnings } : {}),
+      ...(approvalBlocked ? { approval_blocked: true, approval_block_reason: approvalBlockReason } : {}),
+      ...(spendingStepUp ? { spending_step_up: spendingStepUp } : {}),
+    };
+  } else if (taskCategory === "login") {
+    const lineItems: ApprovalManifestLineItem[] = [
+      { label: "Website", value: run.domain },
+      { label: "Login type", value: "Username + password (Aegis-managed)" },
+    ];
+
+    manifest = {
+      title: `Log in to ${run.domain}`,
+      subtitle: "Aegis fills credentials without showing them to the agent",
+      task_category: taskCategory,
+      primary_action_label: "Allow login",
+      risk_tier: route?.risk_level ?? "high",
+      line_items: lineItems,
+      capabilities_to_release: ["login_credential"],
+      custody_guarantees: [
+        "Password is filled by Aegis — never shown to the agent",
+        "Credentials come from your Aegis vault, not from the agent",
+      ],
+      runtime_guarantees: [
+        "Aegis executes this in an isolated Playwright browser session",
+        "A signed execution receipt is created and linked to this approval",
+      ],
+      website_context: {
+        domain: run.domain,
+        policy_status: "policy_found",
+        safety_recommendation: "allow_with_approval",
+      },
+    };
+  } else {
+    const lineItems: ApprovalManifestLineItem[] = [
+      { label: "Website", value: run.domain },
+      { label: "Permissions", value: permissions.join(", ") || "—" },
+    ];
+
+    manifest = {
+      title: skill?.name ?? route?.workflow_name ?? "Agent action",
+      subtitle: route?.workflow_description ?? `Requesting: ${permissions.join(", ")}`,
+      task_category: taskCategory,
+      primary_action_label: "Allow action",
+      risk_tier: route?.risk_level ?? "medium",
+      line_items: lineItems,
+      capabilities_to_release: permissions,
+      custody_guarantees: [
+        "Sensitive operations are executed by Aegis, not exposed directly to the agent",
+      ],
+      runtime_guarantees: [
+        "Aegis executes this in an isolated Playwright browser session",
+        "A signed execution receipt is created and linked to this approval",
+      ],
+      website_context: {
+        domain: run.domain,
+      },
+    };
+  }
+
+  return {
+    run_id: run.run_id,
+    manifest,
+    skill_name: skill?.name,
+    route_name: route?.workflow_name,
+    agent_id: delegation?.agent_name ?? run.agent_id,
+    execution_surface: run.claimed_execution_surface,
+  };
 }
 
 export async function routeRunRoutes(server: FastifyInstance) {
@@ -453,7 +649,9 @@ export async function routeRunRoutes(server: FastifyInstance) {
           constraints: {
             allowed_domains: [run.domain],
             ...(["travel_booking", "payment", "purchase"].includes(action_type) && {
-              max_amount_usd: collar?.spending_limits?.max_with_approval ?? 500,
+              max_amount_usd: spendingLimitStepUps.get(run.run_id)?.approved_limit_usd
+                ?? collar?.spending_limits?.max_with_approval
+                ?? 500,
               currency: "USD",
               allowed_payment_instrument_types: ["demo_card"],
             }),
@@ -464,9 +662,9 @@ export async function routeRunRoutes(server: FastifyInstance) {
             approved_at: approvedAt,
             approval_ui_version: "route-run-approvals-v1",
             approval_text_shown: action_type === "travel_booking"
-              ? `Book demo flight on ${run.domain} (max $${collar?.spending_limits?.max_with_approval ?? 500} USD, Aegis Demo Card ending 4242)`
+              ? `Book demo flight on ${run.domain} (max $${spendingLimitStepUps.get(run.run_id)?.approved_limit_usd ?? collar?.spending_limits?.max_with_approval ?? 500} USD, Aegis Demo Card ending 4242)`
               : action_type === "payment"
-              ? `Approve payment on ${run.domain} (max $${collar?.spending_limits?.max_with_approval ?? 500} USD, demo card only)`
+              ? `Approve payment on ${run.domain} (max $${spendingLimitStepUps.get(run.run_id)?.approved_limit_usd ?? collar?.spending_limits?.max_with_approval ?? 500} USD, demo card only)`
               : `Approve ${action_type} on ${run.domain}?`,
             liability_terms_version: "aegis-v1",
             user_liability_acknowledged: true,
@@ -532,6 +730,23 @@ export async function routeRunRoutes(server: FastifyInstance) {
   );
 
   /**
+   * GET /api/route-runs/:runId/approval-context
+   *
+   * Returns a human-readable ApprovalManifest for a pending_approval run.
+   * Assembles safe context from route step safe_literal values, collar spending limits,
+   * and payment method metadata. Never exposes secrets, secret_ref, pass_id, KMS data,
+   * card PAN, CVV, or credential values.
+   */
+  server.get<{ Params: { runId: string } }>(
+    "/api/route-runs/:runId/approval-context",
+    async (req, reply) => {
+      const context = buildRunApprovalContext(req.params.runId);
+      if (!context) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
+      return reply.send({ ok: true, data: context });
+    }
+  );
+
+  /**
    * POST /api/route-runs/:runId/reject
    *
    * Reject a pending_approval run, blocking execution.
@@ -550,6 +765,54 @@ export async function routeRunRoutes(server: FastifyInstance) {
     routeRuns.set(run.run_id, run);
     schedulePersist();
     return { ok: true, data: run };
+  });
+
+  /**
+   * POST /api/route-runs/:runId/spending-step-up
+   *
+   * User-only: approve a one-time spending limit for a pending_approval run.
+   * Does NOT mutate the collar. Not exposed via /api/agent/v1.
+   * Returns the updated RunApprovalContext so the UI can reflect the new limit immediately.
+   */
+  server.post<{
+    Params: { runId: string };
+    Body: { requested_limit_usd: number; currency?: string };
+  }>("/api/route-runs/:runId/spending-step-up", async (req, reply) => {
+    const run = routeRuns.get(req.params.runId);
+    if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
+    if (run.status !== "pending_approval") {
+      return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
+    }
+
+    const permissions = run.approval_required_permissions ?? [];
+    const isPaymentRun = permissions.some((p) =>
+      ["travel_booking", "payment", "purchase", "financial_action"].includes(p)
+    );
+    if (!isPaymentRun) {
+      return sendError(reply, 400, "NOT_APPLICABLE", "Spending step-up only applies to payment/travel runs.");
+    }
+
+    const { requested_limit_usd } = req.body ?? {};
+    if (typeof requested_limit_usd !== "number" || requested_limit_usd <= 0 || requested_limit_usd > 1000) {
+      return sendError(reply, 400, "INVALID_AMOUNT", "requested_limit_usd must be a positive number up to 1000.");
+    }
+
+    const collar = run.collar_id ? collars.get(run.collar_id) : undefined;
+    spendingLimitStepUps.set(run.run_id, {
+      run_id: run.run_id,
+      original_limit_usd: collar?.spending_limits?.max_with_approval,
+      requested_limit_usd,
+      approved_limit_usd: requested_limit_usd,
+      currency: "USD",
+      scope: "this_run_only",
+      approved_at: new Date().toISOString(),
+      approved_by: "user",
+    });
+    schedulePersist();
+
+    const context = buildRunApprovalContext(run.run_id);
+    if (!context) return sendError(reply, 500, "INTERNAL_ERROR", "Failed to build updated approval context.");
+    return reply.send({ ok: true, data: context });
   });
 
   /**

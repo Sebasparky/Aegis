@@ -106,6 +106,36 @@ export function detect(input: DetectionInput): DetectionResult {
       return ok("submit_form", "medium", "Detected form submission.", [`text="${input.targetText}"`]);
     }
 
+    // Payment method / card persistence
+    // TODO(v2): Also inspect nearby label text and checkbox state — many "save card" controls
+    // are checkboxes where targetText may be blank; nearby DOM text must be checked then.
+    if (
+      text.includes("save card") ||
+      text.includes("save this card") ||
+      text.includes("remember this card") ||
+      text.includes("save payment method") ||
+      text.includes("set as default payment")
+    ) {
+      return ok("save_payment_method", "high", "Detected payment persistence action — requires separate approval.", [
+        `text="${input.targetText}"`,
+      ]);
+    }
+
+    // Credential / session persistence ("remember me", "trust this device", etc.)
+    // TODO(v2): Also inspect label text and aria-label — these controls often have blank targetText.
+    if (
+      text.includes("save password") ||
+      text.includes("remember me") ||
+      text.includes("keep me signed in") ||
+      text.includes("trust this device") ||
+      text.includes("don't ask again") ||
+      text.includes("one-click checkout")
+    ) {
+      return ok("save_credential", "high", "Detected credential or session persistence action — requires separate approval.", [
+        `text="${input.targetText}"`,
+      ]);
+    }
+
     return NONE;
   }
 

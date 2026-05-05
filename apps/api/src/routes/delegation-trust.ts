@@ -125,11 +125,24 @@ export async function computeDelegationTrustProfile(
   const fulfilledAuths = delegationAuths.filter((a) => a.status === "fulfilled");
   const fulfilledAuthIds = new Set(fulfilledAuths.map((a) => a.authorization_id));
 
-  // Delegation-linked valid receipts: receipts whose authorization_context points to a fulfilled auth.
+  // All authorization IDs for this delegation (fulfilled and non-fulfilled).
+  // Used to find violation receipts whose authorizations never fulfilled.
+  const allDelegationAuthIds = new Set(delegationAuths.map((a) => a.authorization_id));
+
+  // Positive evidence: receipts linked to fulfilled authorizations.
   const linkedValidReceipts = allReceipts.filter(
     (r) =>
       r.authorization_context?.authorization_id !== undefined &&
       fulfilledAuthIds.has(r.authorization_context.authorization_id) &&
+      validReceiptIds.has(r.receipt_id)
+  );
+
+  // All valid receipts linked to any delegation authorization (fulfilled or not).
+  // Used for negative evidence — violation receipts have active (unfulfilled) authorizations.
+  const allLinkedValidReceipts = allReceipts.filter(
+    (r) =>
+      r.authorization_context?.authorization_id !== undefined &&
+      allDelegationAuthIds.has(r.authorization_context.authorization_id) &&
       validReceiptIds.has(r.receipt_id)
   );
 
@@ -140,11 +153,17 @@ export async function computeDelegationTrustProfile(
   let secretExposureEvents = 0;
   let playwrightExecutions = 0;
 
+  // Positive evidence: covered events and Playwright attestations only from fulfilled-auth receipts.
   for (const r of linkedValidReceipts) {
     coveredEvents += r.runtime_coverage_summary?.covered_events ?? 0;
+    if (r.execution_surface === "aegis_playwright") playwrightExecutions++;
+  }
+  // Negative evidence: uncovered events and secret exposures from ALL delegation receipts.
+  // This ensures violation runs (unfulfilled authorization, failed receipt) still register
+  // as disqualifying signals without counting as positive category experience.
+  for (const r of allLinkedValidReceipts) {
     uncoveredEvents += r.runtime_coverage_summary?.uncovered_events ?? 0;
     if (r.secret_values_revealed_to_agent) secretExposureEvents++;
-    if (r.execution_surface === "aegis_playwright") playwrightExecutions++;
   }
 
   // ── Category experience ──────────────────────────────────────────────────

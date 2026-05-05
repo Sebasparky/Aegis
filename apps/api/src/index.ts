@@ -39,10 +39,17 @@ import { websiteAgentSafetyRoutes } from "./routes/website-agent-safety.js";
 import { websiteAegisPolicyRoutes } from "./routes/website-aegis-policy.js";
 import { agentApiRoutes } from "./routes/agent-api.js";
 import { authenticatedSessionRoutes } from "./routes/authenticated-sessions.js";
+import { secretFieldInjectionRoutes } from "./routes/secret-field-injections.js";
+import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
+import { expireInactiveTaskBrowserSessions } from "./runtime/taskBrowserSessions.js";
+import { securityChallengeRoutes } from "./routes/security-challenges.js";
+import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
+import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
   await loadStore();
+  expireInactiveTaskBrowserSessions();
 
   // Validate Supabase credentials at startup when supabase persistence is enabled.
   if (process.env.AEGIS_PERSISTENCE_PROVIDER === "supabase") {
@@ -96,6 +103,11 @@ async function main() {
   await server.register(websiteAgentSafetyRoutes);
   await server.register(websiteAegisPolicyRoutes);
   await server.register(authenticatedSessionRoutes);
+  await server.register(secretFieldInjectionRoutes);
+  await server.register(taskBrowserSessionRoutes);
+  await server.register(securityChallengeRoutes);
+  await server.register(emailChallengeResolverRoutes);
+  await server.register(sensitiveReceiptsRouter);
   await server.register(agentApiRoutes);
 
   if (process.env.NODE_ENV !== "production") {

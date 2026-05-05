@@ -9,7 +9,9 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "typecheck": "turbo typecheck",
-    "seed:demo": "node apps/api/scripts/seed-demo-data.mjs"
+    "seed:demo": "node apps/api/scripts/seed-demo-data.mjs",
+    "chrome:agent": "node apps/api/scripts/start-aegis-debug-chrome.mjs",
+    "chrome:agent:dev": "node apps/api/scripts/start-aegis-debug-chrome.mjs --persistent-dev"
   },
   "devDependencies": {
     "serve": "^14.2.6",

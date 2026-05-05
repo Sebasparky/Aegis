@@ -700,6 +700,39 @@ const routes = [
     }
   ],
   [
+    "route_demo_travel_violation_001",
+    {
+      route_id: "route_demo_travel_violation_001",
+      version: "1.0.0",
+      created_at: "2026-05-03T10:00:00.000Z",
+      last_verified_at: "2026-05-03T10:00:04.000Z",
+      creator_aegis_id: "aid_user_001",
+      trust_tier: "aegis_scanned",
+      domain: "localhost",
+      url_match: { hostname: "localhost", path_prefix: "/demo-travel" },
+      start_url: "http://localhost:3000/demo-travel?violation=1",
+      workflow_name: "Demo Flight Booking (Violation Demo)",
+      workflow_description: "Same steps as Demo Flight Booking but starts on /demo-travel?violation=1, which fires a credential form submit outside the Aegis coverage window. Used to demonstrate Coverage Violation Blocking v1.",
+      risk_level: "high",
+      required_permissions: ["travel_booking", "payment"],
+      allowed_actions: ["travel_booking", "payment"],
+      forbidden_actions: ["identity_disclosure", "delete_account"],
+      approval_gates: [],
+      confidence_threshold: 0.75,
+      steps: TRAVEL_STEPS,
+      run_count: 0,
+      success_rate: 0,
+      incident_count: 0,
+      verification_report: TRAVEL_VERIFICATION,
+      marketplace_status: "approved",
+      submitted_for_review_at: "2026-05-03T10:30:00.000Z",
+      reviewed_at: "2026-05-03T10:30:00.000Z",
+      review_note: "Violation demo route — fires uncovered credential event before Aegis coverage window opens.",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
+  ],
+  [
     "route_demo_login_001",
     {
       route_id: "route_demo_login_001",
@@ -845,6 +878,25 @@ const skills = [
       execution_mode: "aegis_controlled",
       sensitivity_level: "sensitive"
     }
+  ],
+  [
+    "skill_demo_travel_violation_001",
+    {
+      skill_id: "skill_demo_travel_violation_001",
+      route_id: "route_demo_travel_violation_001",
+      name: "Demo Flight Booking (Violation Demo)",
+      summary: "Demonstrates Coverage Violation Blocking v1. Starts on /demo-travel?violation=1, which fires a credential form submit outside the Aegis coverage window. Run is blocked, receipt status is failed, authorization is not fulfilled.",
+      domain: "localhost",
+      risk_level: "high",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["travel_booking", "payment"],
+      forbidden_actions: ["identity_disclosure", "delete_account"],
+      approval_gates: [],
+      created_at: "2026-05-03T10:30:00.000Z",
+      published_at: "2026-05-03T10:30:00.000Z",
+      execution_mode: "aegis_controlled",
+      sensitivity_level: "sensitive"
+    }
   ]
 ];
 
@@ -879,6 +931,16 @@ const installedSkills = [
       skill_id: "skill_demo_travel_booking_001",
       user_id: "user_001",
       installed_at: "2026-04-30T13:30:00.000Z",
+      enabled: true
+    }
+  ],
+  [
+    "ins_skill_travel_violation_001",
+    {
+      installed_skill_id: "ins_skill_travel_violation_001",
+      skill_id: "skill_demo_travel_violation_001",
+      user_id: "user_001",
+      installed_at: "2026-05-03T10:30:00.000Z",
       enabled: true
     }
   ]
@@ -1043,14 +1105,16 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 8 routes, 5 skills, 2 delegations, 1 payment method written.");
-console.log("  route_demo_banking_001          — Demo Banking Workflow       (localhost, aegis_scanned, private)");
-console.log("  route_demo_wikipedia_001        — Wikipedia Search            (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
-console.log("  route_demo_draft_001            — Account Statement Draft     (localhost, unverified_draft)");
-console.log("  route_demo_pending_001          — Wikipedia Topic Lookup      (en.wikipedia.org, aegis_scanned, pending_review)");
-console.log("  route_demo_travel_booking_001   — Demo Flight Booking         (localhost, aegis_scanned, approved, aegis_controlled, high)");
-console.log("  route_demo_login_001            — Demo Login                  (localhost, aegis_scanned, approved, aegis_controlled)");
-console.log("  skill_demo_wikipedia_001        — Wikipedia Search (Skill)    (agent_runnable/routine)");
-console.log("  skill_demo_login_001            — Demo Login (Skill)          (aegis_controlled/sensitive, pre-installed)");
-console.log("  skill_demo_travel_booking_001   — Demo Flight Booking (Skill) (aegis_controlled/sensitive, pre-installed)");
-console.log("  pay_method_demo_001             — Aegis Demo Card             (visa, last4: 4242, metadata only)");
+console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 1 payment method written.");
+console.log("  route_demo_banking_001              — Demo Banking Workflow           (localhost, aegis_scanned, private)");
+console.log("  route_demo_wikipedia_001            — Wikipedia Search                (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
+console.log("  route_demo_draft_001                — Account Statement Draft         (localhost, unverified_draft)");
+console.log("  route_demo_pending_001              — Wikipedia Topic Lookup          (en.wikipedia.org, aegis_scanned, pending_review)");
+console.log("  route_demo_travel_booking_001       — Demo Flight Booking             (localhost, aegis_scanned, approved, aegis_controlled, high)");
+console.log("  route_demo_travel_violation_001     — Demo Flight Booking (Violation) (localhost, aegis_scanned, approved, aegis_controlled, violation demo)");
+console.log("  route_demo_login_001                — Demo Login                      (localhost, aegis_scanned, approved, aegis_controlled)");
+console.log("  skill_demo_wikipedia_001            — Wikipedia Search (Skill)        (agent_runnable/routine)");
+console.log("  skill_demo_login_001                — Demo Login (Skill)              (aegis_controlled/sensitive, pre-installed)");
+console.log("  skill_demo_travel_booking_001       — Demo Flight Booking (Skill)     (aegis_controlled/sensitive, pre-installed)");
+console.log("  skill_demo_travel_violation_001     — Demo Flight Booking Violation   (aegis_controlled/sensitive, violation demo, pre-installed)");
+console.log("  pay_method_demo_001                 — Aegis Demo Card                 (visa, last4: 4242, metadata only)");

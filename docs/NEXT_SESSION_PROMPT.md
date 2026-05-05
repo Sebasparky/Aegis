@@ -46,6 +46,12 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Real Payment / Travel Mock Route v1. It is complete. Do not re-implement `PaymentMethodCapability` type, `paymentMethods` Map, `pay_method_demo_001` seed, `route_demo_travel_booking_001`, `skill_demo_travel_booking_001`, `ins_skill_travel_001`, `safe_literal` support in Playwright runtime, or `travel_booking` deriveActionType/deriveRiskTier logic. Do not add raw card numbers, CVV, or PAN. `payment_method_available` now uses a live Map lookup — do not revert to hardcoded `false`.**
 >
 > **Also: do NOT rebuild Spending Limit Step-Up v1. It is complete. Do not re-implement `SpendingLimitStepUp` type, `spendingLimitStepUps` Map, `POST /api/route-runs/:runId/spending-step-up` endpoint, `buildRunApprovalContext` helper, `ApprovalManifest.purchase_amount`/`constraint_warnings`/`approval_blocked`/`spending_step_up` fields, or the over-limit / step-up UI in `/route-run-approvals`. Do not expose step-up to external agents via `/api/agent/v1`. Do not mutate the collar when a step-up is approved — `spendingLimitStepUps` is the one-time override only. Approval receipt `constraints.max_amount_usd` must use `spendingLimitStepUps.get(runId)?.approved_limit_usd ?? collar max ?? 500`. Approval UI must block normal approve when `manifest.approval_blocked === true`.**
+>
+> **Also: do NOT rebuild Task Browser Lifecycle v1. It is complete. Do not re-implement `TaskBrowserSession` type, `taskBrowserSessions` Map, `taskBrowserProcesses` private Map, `createTaskBrowserSession`, `getTaskBrowserSession`, `closeTaskBrowserSession`, `expireInactiveTaskBrowserSessions`, `POST /api/task-browser-sessions`, or the three MCP tools (`start_task_browser_session`, `get_task_browser_session`, `close_task_browser_session`). Port 9222 conflict handling is autonomous (see Autonomous Browser Conflict Handling v1). Sessions are always ephemeral. `taskBrowserProcesses` is private — never expose PIDs. MCP tool responses omit `user_data_dir`. Do not close sessions immediately after login — close after full task completion.**
+
+> **Also: do NOT rebuild Autonomous Browser Conflict Handling v1. It is complete. Do not re-implement `findSessionByPort`, `isCdpAlive`, `waitForPortFree`, `findAvailablePort`, `launchChrome`, or `CreateTaskBrowserResult`. The four-case port conflict resolution logic in `createTaskBrowserSession` is correct. `NO_PORTS_AVAILABLE` (503) is the only port error code. `PORT_IN_USE` (409) is no longer thrown — do not re-introduce it. `reused_existing`, `port_auto_selected`, `requires_browser_reconnect`, `user_message` are route/MCP-layer metadata only — do not add them to `TaskBrowserSession` type.**
+
+> **Also: do NOT rebuild Sensitive Action Receipt Timeline v1 or its polish. Both are complete. Do not re-implement `SensitiveActionTimelineItem`, `SensitiveActionEventType`, `GET /api/internal/sensitive-receipts/recent`, `sensitiveReceiptsRouter`, `listSensitiveReceiptTimeline`, or the `/sensitive-receipts` page. Events are derived at query time from existing Maps — no write-time hooks, event emitters, or new persistence. The endpoint supports `since` (default "24h") and `event_group` filters applied after derivation. Agent-provided `reason` strings are sanitized via `sanitizeReceiptText` before inclusion. Nav labels are "Route Receipts" and "Sensitive Timeline". Never include `pass_id`, `secret_ref`, `authorization_hash`, `authorization_jws`, `user_data_dir`, `cdp_url`, raw codes, email body/subject, cookies, or storage in the response. `pass_label` is display metadata only.**
 
 ---
 
@@ -441,15 +447,91 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Real Website Observation Dry Run v1 is complete** — implemented 2026-05-04. Agents can request an observe-only inspection of any URL before deciding whether to commit to a route run. `POST /api/agent/v1/observation-dry-runs` navigates to the URL in an isolated headless Chromium session, detects sensitive surfaces (task intent, URL patterns, DOM signals), and returns a structured `ObservationDryRunResult`. Starts in `open_observation` and only escalates to `protected_observation` when sensitivity signals are found — non-sensitive pages return a minimal open summary only, not a full DOM dump. Protected mode builds a redacted `AgentSafeObservationSnapshot` with sensitive fields carrying `value_redacted: true` and `required_capability`. The endpoint is strictly observe-only: no clicks, no typing, no form submit, no credential fill, no capability release, no KMS decrypt, no route execution, no screenshots. Shared observation helpers extracted into `apps/api/src/runtime/agentSafeObservation.ts` (`scanPageForSensitivitySignals`, `buildAgentSafeObservationSnapshot`, `buildMinimalOpenObservation`, `SENSITIVE_URL_PATTERNS`, `isSensitiveTaskCategory`, `urlLooksSensitive`). `playwrightRuntime.ts` route execution behavior is unchanged. Example: `examples/real-website-observation-dry-run.mjs`. Types: `ObservationDryRunResult`, `ObservationDryRunOpenSummary`, `ObservationDryRunSensitiveSurface`, `ObservationDryRunStatus`, `ObservationDryRunRecommendation`. Do not rebuild unless explicitly requested.
 
-**Authenticated Session Boundary v1 is complete** — implemented 2026-05-04. Agents can request Aegis to perform a login on their behalf without ever receiving credentials, cookies, storage, or session tokens. Flow: agent calls `POST /api/agent/v1/authenticated-sessions/login-request` → session created with `status: pending_approval` → user approves in `/route-run-approvals` → Aegis logs in via isolated headless Playwright → agent polls to `authenticated` → agent calls observe/navigate endpoints. All three `raw_cookies_revealed_to_agent`, `raw_storage_revealed_to_agent`, `raw_credentials_revealed_to_agent` fields are `false` literal on every response. For v1, automated login is localhost only; non-localhost domains return `manual_step_required` immediately. Challenge detection (2FA, CAPTCHA, passkey, security check) halts execution and sets `manual_step_required` — no bypass. KMS credential resolution uses existing `local_dev` provider and `purpose: "login_password"` (no KMS type change needed). KMS audit event recorded with `run_id: "authsession:<sessionId>"` for distinction from RouteRun resolves. Post-login navigation is same-domain `page.goto` only — no form submit, no POST, no clicking, no credential fill after login. Approval UI at `/route-run-approvals` shows a "Login session requests" section with `PendingAuthSessionCard` explicitly stating all 4 custody guarantees. New endpoints: `GET/POST /api/authenticated-sessions` (internal UI), `GET/POST /api/authenticated-sessions/:id/approve|reject` (internal UI), `POST /api/agent/v1/authenticated-sessions/login-request`, `GET /api/agent/v1/authenticated-sessions/:id`, `GET /api/agent/v1/authenticated-sessions/:id/observe`, `POST /api/agent/v1/authenticated-sessions/:id/navigate`. Types: `AuthenticatedSessionStatus`, `AuthenticatedSessionCapability`, `AuthenticatedSessionHandle`, `AuthenticatedSessionLoginRequest`, `AuthenticatedSessionObserveResult`, `AuthenticatedSessionNavigateRequest`. Demo: `examples/authenticated-session-boundary-demo.mjs`. Do not rebuild unless explicitly requested.
+**Authenticated Session Boundary v1 is complete** — implemented 2026-05-04. Agents can request Aegis to perform a login on their behalf without ever receiving credentials, cookies, storage, or session tokens. Flow: agent calls `POST /api/agent/v1/authenticated-sessions/login-request` → session created with `status: pending_approval` → user approves in `/route-run-approvals` → Aegis logs in via isolated headless Playwright → agent polls to `authenticated` → agent calls observe/navigate endpoints. All three `raw_cookies_revealed_to_agent`, `raw_storage_revealed_to_agent`, `raw_credentials_revealed_to_agent` fields are `false` literal on every response. Real-web login requests are supported for test accounts — the code uses generic selectors and stops immediately on any security challenge (2FA, CAPTCHA, passkey, device verification, bot detection) — no bypass. Treat as experimental for real sites; missing vault credential or selector failure results in `status: "failed"` safely. KMS credential resolution uses existing `local_dev` provider and `purpose: "login_password"`. KMS audit event recorded with `run_id: "authsession:<sessionId>"`. Post-login navigation is same-domain `page.goto` only — no form submit, no POST, no clicking, no credential fill after login. Approval UI at `/route-run-approvals` shows a "Login session requests" section explicitly stating all 4 custody guarantees. New endpoints: `GET/POST /api/authenticated-sessions` (internal UI), `POST /api/agent/v1/authenticated-sessions/login-request`, `GET /api/agent/v1/authenticated-sessions/:id`, `GET /api/agent/v1/authenticated-sessions/:id/observe`, `POST /api/agent/v1/authenticated-sessions/:id/navigate`. Demo: `examples/authenticated-session-boundary-demo.mjs`. Do not rebuild unless explicitly requested.
+
+**Agent-Browser Secret Injection v1 + One-Approval Credential Use Authorization + Real GitHub Test — complete (2026-05-04).**
+
+Agents use their own Playwright browser for navigation, clicking, reading, and form submission. Aegis fills only the protected credential fields (username, password) via CDP. One user approval covers both fields per login attempt. Authorization becomes `fulfilled` after both fields are used once — replay blocked with `AUTHORIZATION_FULFILLED`. Tested successfully against real GitHub with private repo (`NordaTestUser/Test-Repo`). See `docs/REAL_GITHUB_SECRET_INJECTION_TEST.md` for full checkpoint.
+
+Key invariants:
+- `request_secret_field_injection` is the PRIMARY login path for agent-controlled browsers.
+- `request_authenticated_session_login` is SECONDARY/EXPERIMENTAL — for isolated Aegis-controlled browser sessions only.
+- `raw_value_revealed_to_agent: false` and `raw_values_revealed_to_agent: false` are TypeScript literal `false`.
+- `CredentialUseAuthorization.max_uses_per_field = { username: 1, password: 1 }` by default.
+- Do not rebuild unless explicitly requested.
+
+**Current working state:**
+- Primary login path: `request_secret_field_injection` (agent-browser CDP injection)
+- Authenticated Session Boundary: secondary/experimental — retained, do not remove
+- `plan_aegis_action` for login tasks now recommends `agent_browser_secret_injection` / `request_secret_field_injection`
+- `discover_installed_skills` guidance updated: no skill needed for normal login, use `request_secret_field_injection`
+
+**Approval Wakeup/Polling v1 — complete (2026-05-04).**
+
+After `request_secret_field_injection` returns `pending_approval`, agents no longer ask the user to type "done". Instead: agent tells user to approve in Aegis UI, then calls `wait_for_credential_authorization({ authorization_id })` — polls `GET /api/agent/v1/credential-authorizations/:id` and returns automatically when approved/denied/expired/timeout. Agent continues without user text input. New endpoint and MCP tool added. Do not rebuild unless explicitly requested.
+
+**Task Browser Lifecycle v1 — complete (2026-05-04).**
+
+Aegis now manages ephemeral Chrome browser session lifecycle. Agents no longer need to manually run `npm run chrome:agent`. Flow: agent calls `start_task_browser_session` (MCP tool or `POST /api/task-browser-sessions`) → Aegis launches Chrome with a fresh `/tmp/aegis-agent-browser-<id>` profile and CDP on port 9222 → agent uses Playwright MCP tools for navigation/clicking → Aegis uses CDP for secret injection (unchanged) → agent calls `close_task_browser_session` when task is complete → Chrome killed, profile deleted.
+
+Key implementation:
+- `packages/types/src/index.ts`: `TaskBrowserSession` type, `TaskBrowserSessionStatus`
+- `apps/api/src/runtime/taskBrowserSessions.ts`: `taskBrowserSessions` Map, `taskBrowserProcesses` private Map, `createTaskBrowserSession`, `getTaskBrowserSession`, `closeTaskBrowserSession`, `expireInactiveTaskBrowserSessions`
+- `apps/api/src/routes/task-browser-sessions.ts`: `POST /api/task-browser-sessions`, `GET /api/task-browser-sessions`, `GET /api/task-browser-sessions/:id`, `POST /api/task-browser-sessions/:id/close`
+- `examples/aegis-tool-server.mjs`: `start_task_browser_session`, `get_task_browser_session`, `close_task_browser_session` MCP tools
+- `plan_aegis_action` login workflow updated with step 0 (start_task_browser_session if no browser running) and step 10 (close after task complete)
+
+Key invariants (all in CLAUDE.md):
+- Sessions always ephemeral — `ephemeral: true` literal, never persistent paths via API
+- Port 9222 fixed in v1 — `PORT_IN_USE` (409) with actionable message on conflict
+- `taskBrowserProcesses` Map private — PIDs never exposed to agents or API callers
+- MCP tool responses omit `user_data_dir` (local path) — return only `cdp_url`, `ephemeral`, `expires_at`, `cleanup_complete`
+- Do NOT close after login — keep session open until task is fully complete
+- Chrome `exit` event marks orphaned sessions `"failed"` and cleans up
+- Do not rebuild unless explicitly requested.
+
+**Verification steps:**
+1. Start Aegis API: `npm run dev` in `apps/api`
+2. `curl -X POST http://localhost:4000/api/task-browser-sessions` → `{ ok: true, data: { status: "ready", cdp_url: "http://localhost:9222", ... } }`
+3. Chrome opens — `curl http://localhost:9222/json/version` responds
+4. Run GitHub login with Playwright MCP + `request_secret_field_injection` (unchanged from prior test)
+5. `curl -X POST http://localhost:4000/api/task-browser-sessions/<id>/close` → `{ ok: true, data: { status: "closed", cleanup_complete: true } }`
+6. `lsof -i :9222` returns nothing — Chrome gone
+7. `/tmp/aegis-agent-browser-<id>` deleted
+8. Call `start_task_browser_session` again → new clean session (no GitHub login state)
+9. Port conflict test: with Chrome running, second POST → `{ ok: true, data: { reused_existing: true, ... } }` (reuses active session)
+
+**Autonomous Browser Conflict Handling + Repo Reading Guidance v1 — complete (2026-05-05).**
+
+`createTaskBrowserSession` now autonomously resolves port 9222 conflicts in four cases — no user is ever asked to manage ports or kill Chrome:
+- Case A (tracked ready session, CDP alive): return existing session; `reused_existing: true`; no new Chrome spawned
+- Case B (tracked stale session — expired/failed): SIGTERM + recycle; fresh session on 9222 if freed, else 9223–9230
+- Case C (unknown process on 9222): server-log only; fresh session on 9223–9230; `port_auto_selected: true`, `requires_browser_reconnect: true`
+- Case D (no ports 9222–9230 available): `NO_PORTS_AVAILABLE` HTTP 503; agent-safe message only
+
+New helpers in `taskBrowserSessions.ts`: `isCdpAlive`, `waitForPortFree`, `findAvailablePort`, `findSessionByPort`, `launchChrome` (extracted from `createTaskBrowserSession`).
+New exported type: `CreateTaskBrowserResult` (route/MCP metadata layer only — not on `TaskBrowserSession`).
+Route: HTTP 200 on reuse, 201 on create, 503 on `NO_PORTS_AVAILABLE`. `PORT_IN_USE` (409) no longer thrown.
+MCP `start_task_browser_session`: reads `reused_existing`/`port_auto_selected`/`requires_browser_reconnect`; conditional `next_action` (no port numbers, lsof, or shell instructions in user-facing text); tool description updated.
+`planAegisAction` step 0 updated for `requires_browser_reconnect`. Step 11 added: repo-reading verification guidance (check count, scroll, check pagination; no "all repos" claim without verification; agent owns reading).
+`CLAUDE.md` Task Browser Lifecycle invariants updated. Do not rebuild.
+
+**Verification:**
+1. Start API. `POST /api/task-browser-sessions` → 201, `status: "ready"`, Chrome opens.
+2. `POST /api/task-browser-sessions` again → 200, `reused_existing: true`, same `browser_session_id`, one Chrome process.
+3. `node -e "require('net').createServer().listen(9222)"` to bind 9222 with unknown process; `POST /api/task-browser-sessions` → 201, `port_auto_selected: true`, `requires_browser_reconnect: true`, `cdp_url: "http://localhost:9223"` (or next free). Server console: "Port 9222 occupied by unknown process".
+4. No `lsof`, no port numbers in prose, no shell commands in any `next_action` or `user_message`.
+5. `plan_aegis_action` with `"log into GitHub and summarize my repos"` → step 0 mentions `requires_browser_reconnect`; step 11 present with repo verification guidance.
 
 **Candidate next milestones:**
 
-1. **GitHub Authenticated Session Route v1** — extend authenticated sessions with a GitHub-specific route that handles SAML/SSO redirects and challenge detection for real GitHub login
-2. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-3. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
-4. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
-5. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **Connected Email Challenge Resolver v1** — after a live `SecurityChallenge` exists, Aegis searches Gmail for the code in a narrow time window; extracts code only (no email body returned); injects once; user approval required before first use. See `docs/CHALLENGE_RELAY.md` Phase 3.
+2. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
+3. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
+4. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+5. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+6. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+7. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

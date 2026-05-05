@@ -128,7 +128,10 @@ export type ActionType =
   | "account_setting_change"
   | "delete_account"
   | "connect_app"
-  | "oauth_authorize";
+  | "oauth_authorize"
+  | "save_credential"
+  | "save_payment_method"
+  | "enable_persistence";
 
 export interface SpendingLimits {
   max_without_approval: number;
@@ -546,6 +549,11 @@ export interface ApprovalManifest {
     currency?: string;
     status?: "not_requested" | "approved";
     scope?: "this_run_only";
+  };
+  payment_no_save?: {
+    save_payment_method_allowed: false;
+    subscription_allowed: false;
+    default_payment_method_allowed: false;
   };
 }
 
@@ -1448,6 +1456,35 @@ export type AuthenticatedSessionCapability =
   | "authenticated_observation"
   | "safe_navigation";
 
+export interface AuthenticatedSessionLoginDiagnostics {
+  attempted: boolean;
+  started_at?: string;
+  completed_at?: string;
+  // Credential metadata — booleans only, never values
+  credential_found: boolean;
+  username_present: boolean;   // vault pass has a non-empty username
+  password_present: boolean;   // KMS decrypt produced a non-empty string
+  // Fill and submit outcomes
+  username_fill_attempted: boolean;
+  username_fill_succeeded: boolean;
+  password_fill_attempted: boolean;
+  password_fill_succeeded: boolean;
+  submit_attempted: boolean;
+  submit_succeeded: boolean;
+  // Post-submit state
+  post_submit_url?: string;
+  post_submit_wait_ms?: number;
+  post_submit_url_transitions?: string[];
+  // Verification outcome
+  verification_authenticated: boolean;
+  verification_reason?: string;
+  // Challenge detection
+  challenge_detected?: boolean;
+  challenge_reason?: string;
+  // Safe page-level failure text — UI banners/alerts only, never input values or secrets
+  failure_evidence?: string[];
+}
+
 export interface AuthenticatedSessionHandle {
   session_id: string;
   user_id: string;
@@ -1462,6 +1499,7 @@ export interface AuthenticatedSessionHandle {
   raw_storage_revealed_to_agent: false;
   raw_credentials_revealed_to_agent: false;
   manual_step_reason?: string;
+  login_diagnostics?: AuthenticatedSessionLoginDiagnostics;
   initial_observation?: ObservationDryRunOpenSummary;
   created_at: string;
   expires_at: string;
@@ -1480,10 +1518,223 @@ export interface AuthenticatedSessionObserveResult {
   page_url: string;
   open_summary?: ObservationDryRunOpenSummary;
   protected_snapshot?: AgentSafeObservationSnapshot;
+  manual_step_reason?: string;
   raw_cookies_revealed_to_agent: false;
   raw_storage_revealed_to_agent: false;
 }
 
 export interface AuthenticatedSessionNavigateRequest {
   url: string;
+}
+
+// ─── Agent-Browser Secret Injection v1 ───────────────────────────────────────
+
+export type SecretFieldInjectionStatus =
+  | "pending_approval"
+  | "approved"
+  | "executing"
+  | "filled"
+  | "denied"
+  | "failed"
+  | "expired";
+
+export interface SecretFieldInjectionElementHint {
+  label?: string;
+  placeholder?: string;
+  input_type?: string;
+  selector_hint?: string;
+}
+
+export interface SecretFieldInjection {
+  injection_request_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  field_kind: "username" | "password";
+  pass_id: string;
+  page_url: string;
+  element_hint?: SecretFieldInjectionElementHint;
+  reason: string;
+  status: SecretFieldInjectionStatus;
+  authorization_id?: string;
+  raw_value_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  filled_at?: string;
+  error?: string;
+}
+
+export type CredentialUseAuthorizationStatus =
+  | "pending_approval"
+  | "approved"
+  | "fulfilled"
+  | "denied"
+  | "expired"
+  | "revoked";
+
+export interface CredentialUseAuthorization {
+  authorization_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  pass_id: string;
+  pass_label: string;
+  pass_username?: string;
+  allowed_field_kinds: Array<"username" | "password">;
+  max_uses_per_field: { username?: number; password?: number };
+  purpose: "login";
+  status: CredentialUseAuthorizationStatus;
+  raw_values_revealed_to_agent: false;
+  persistence_allowed: false;
+  browser_storage_allowed: false;
+  website_save_allowed: false;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+  last_used_at?: string;
+  used_field_kinds: Array<"username" | "password">;
+  use_counts: { username: number; password: number };
+}
+
+// ─── Challenge Relay v1 ──────────────────────────────────────────────────────
+
+export type SecurityChallengeType =
+  | "email_device_verification"
+  | "sms_code"
+  | "totp"
+  | "passkey"
+  | "captcha"
+  | "device_verification"
+  | "unknown";
+
+export type SecurityChallengeStatus =
+  | "pending_user"
+  | "code_submitted"
+  | "code_injected"
+  | "user_completed"
+  | "cancelled"
+  | "expired"
+  | "failed";
+
+export interface SecurityChallengeElementHint {
+  label?: string;
+  placeholder?: string;
+  input_type?: string;
+  selector_hint?: string;
+}
+
+export interface SecurityChallenge {
+  challenge_id: string;
+  user_id: string;
+  delegation_id: string;
+  browser_session_id?: string;
+  domain: string;
+  page_url: string;
+  challenge_type: SecurityChallengeType;
+  status: SecurityChallengeStatus;
+  masked_destination?: string;
+  element_hint?: SecurityChallengeElementHint;
+  instructions: string;
+  // Literal false — the raw verification code is never returned to the agent
+  raw_code_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  submitted_at?: string;
+  injected_at?: string;
+  completed_at?: string;
+  error?: string;
+}
+
+// ─── Connected Email Challenge Resolver v1 ────────────────────────────────────
+
+export type ChallengeEmailResolutionStatus =
+  | "pending_approval"
+  | "searching"        // Reserved for future async path — not used in v1
+  | "code_found"
+  | "injected"
+  | "not_found"
+  | "failed"
+  | "expired"
+  | "cancelled";
+
+export interface ChallengeEmailResolution {
+  resolution_id: string;
+  challenge_id: string;
+  user_id: string;
+  delegation_id: string;
+  provider: "gmail";
+  domain: string;
+  status: ChallengeEmailResolutionStatus;
+  // Literal false — raw code is never returned to the agent
+  raw_code_revealed_to_agent: false;
+  // Literal false — email body is never returned to the agent
+  email_body_revealed_to_agent: false;
+  // = challenge.created_at — only emails received after this point are considered
+  search_window_started_at: string;
+  searched_at?: string;
+  found_at?: string;
+  injected_at?: string;
+  // Domain of the sender (e.g. "github.com") — never full sender name or email
+  sender_domain?: string;
+  // ISO timestamp of the matched email
+  received_at?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── Task Browser Lifecycle v1 ────────────────────────────────────────────────
+
+export type TaskBrowserSessionStatus =
+  | "starting"
+  | "ready"
+  | "closed"
+  | "failed"
+  | "expired";
+
+export interface TaskBrowserSession {
+  browser_session_id: string;
+  user_id: string;
+  delegation_id?: string;
+  status: TaskBrowserSessionStatus;
+  cdp_url: string;          // e.g. "http://localhost:9222" — localhost only
+  cdp_port: number;
+  user_data_dir: string;    // /tmp/aegis-agent-browser-<id> — local path, not a secret
+  ephemeral: true;
+  created_at: string;
+  expires_at: string;
+  closed_at?: string;
+  error?: string;
+  cleanup_complete?: boolean;
+}
+
+// ─── Sensitive Action Receipt Timeline v1 ──────────────────────────────────────
+
+export type SensitiveActionEventType =
+  | "task_browser_session_started"
+  | "task_browser_session_closed"
+  | "credential_authorization_approved"
+  | "credential_authorization_fulfilled"
+  | "secret_field_injected"
+  | "security_challenge_reported"
+  | "challenge_code_submitted_manual"
+  | "challenge_code_injected"
+  | "challenge_email_resolution_requested"
+  | "challenge_email_code_found"
+  | "challenge_email_code_injected";
+
+export interface SensitiveActionTimelineItem {
+  item_id: string;
+  event_type: SensitiveActionEventType;
+  timestamp: string;
+  domain?: string;
+  description: string;
+  metadata: Record<string, string | boolean | number>;
+  privacy_guarantees: string[];
+  browser_session_id?: string;
+  authorization_id?: string;
+  challenge_id?: string;
+  resolution_id?: string;
 }

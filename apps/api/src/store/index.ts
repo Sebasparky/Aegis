@@ -19,6 +19,11 @@ import type {
   ActionAuthorizationReceipt,
   WebsiteTrustAssertion,
   PaymentMethodCapability,
+  SpendingLimitStepUp,
+  SecretFieldInjection,
+  CredentialUseAuthorization,
+  SecurityChallenge,
+  ChallengeEmailResolution,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -189,6 +194,23 @@ export const websiteTrustAssertions = new Map<string, WebsiteTrustAssertion>();
 
 // Tokenized payment method capabilities — metadata only, no raw card data (no PAN, no CVV).
 export const paymentMethods = new Map<string, PaymentMethodCapability>();
+
+// One-time user-approved spending step-ups keyed by run_id. Never mutates the collar.
+export const spendingLimitStepUps = new Map<string, SpendingLimitStepUp>();
+
+// Agent-Browser Secret Injection requests (v1). Ephemeral — expire on restart (browser CDP context is gone).
+export const secretFieldInjections = new Map<string, SecretFieldInjection>();
+
+// One-approval credential-use sessions covering username + password injection for a single login attempt.
+export const credentialUseAuthorizations = new Map<string, CredentialUseAuthorization>();
+
+// Security challenge metadata for Challenge Relay v1. Ephemeral — expire on restart.
+// Raw codes are never stored here; they live in challengeInjection.challengeCodes (memory-only).
+export const securityChallenges = new Map<string, SecurityChallenge>();
+
+// Email resolution requests for Connected Email Challenge Resolver v1.
+// resolutionCodes (resolved codes) live in emailChallengeResolver.resolutionCodes (memory-only, never persisted).
+export const challengeEmailResolutions = new Map<string, ChallengeEmailResolution>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

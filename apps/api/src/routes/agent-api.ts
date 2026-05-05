@@ -11,6 +11,14 @@ import type {
   RuntimeCoverageSummary,
   RuntimeObservationModeState,
   AuthenticatedSessionLoginRequest,
+  SecretFieldInjection,
+  SecretFieldInjectionStatus,
+  CredentialUseAuthorization,
+  SecurityChallenge,
+  SecurityChallengeType,
+  SecurityChallengeStatus,
+  ChallengeEmailResolution,
+  ChallengeEmailResolutionStatus,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -18,6 +26,7 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
+import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import {
   agentDelegations,
   skills,
@@ -25,9 +34,19 @@ import {
   routes,
   routeRuns,
   collars,
+  aegisVaultPasses,
+  secretFieldInjections,
+  credentialUseAuthorizations,
+  securityChallenges,
+  challengeEmailResolutions,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
+import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
+import { resolutionCodes, searchGmailForChallengeCode } from "../runtime/emailChallengeResolver.js";
+import { getVaultRepository } from "../repositories/vaultRepository.js";
+import { getKmsProvider } from "../lib/kms.js";
+import { recordKmsAuditEvent } from "../lib/kmsAudit.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { schedulePersist } from "../store/persistence.js";
 import { computeWebsiteAgentSafetyProfile } from "./website-agent-safety.js";
@@ -543,7 +562,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
   // Request Aegis to perform a login on the agent's behalf.
   // Agent never receives cookies, storage, password, or session secrets.
-  // Returns a session handle with status pending_approval (or manual_step_required for non-localhost).
+  // Returns a session handle with status pending_approval.
+  // Login runs after user approval; stops on 2FA/CAPTCHA/passkey/security challenge.
   server.post(
     "/api/agent/v1/authenticated-sessions/login-request",
     async (req, reply) => {
@@ -603,7 +623,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (!delegation) return;
       const handle = getAuthenticatedSessionHandle(req.params.sessionId, delegation.user_id);
       if (!handle) return sendError(reply, 404, "SESSION_NOT_FOUND", "Authenticated session not found.");
-      if (handle.status !== "authenticated") {
+      // Allow observation for authenticated and manual_step_required — browser is kept open in both states.
+      // For other statuses (pending_approval, login_in_progress, failed, expired) return handle only.
+      const canObserve = handle.status === "authenticated" || handle.status === "manual_step_required";
+      if (!canObserve) {
         return reply.send({ ok: true, data: { session_id: handle.session_id, status: handle.status, handle } });
       }
       try {
@@ -645,6 +668,963 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         const e = err as { code?: string; status?: number; message?: string };
         return sendError(reply, e.status ?? 500, e.code ?? "NAVIGATE_FAILED", e.message ?? "Navigation failed.");
       }
+    },
+  );
+
+  // ─── Agent-Browser Secret Injection v1 ─────────────────────────────────────
+
+  function injectionNextAction(status: SecretFieldInjectionStatus, authCovered?: boolean): string {
+    switch (status) {
+      case "pending_approval":
+        return authCovered
+          ? "Tell the user to approve in the Aegis UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id from this response — it will return automatically when approved. Do NOT ask the user to type 'done'."
+          : "Tell the user to approve in the Aegis UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id. Do NOT ask the user to type 'done'.";
+      case "approved":
+        return "Injection is approved. Call execute_secret_field_injection with this injection_request_id.";
+      case "executing":
+        return "Injection is in progress. Poll get_secret_injection_status again shortly.";
+      case "filled":
+        return "Field was filled successfully. Continue your workflow — navigate, click submit, etc.";
+      case "denied":
+        return "Injection was denied by the user. Do not retry without user direction.";
+      case "failed":
+        return "Injection failed. Check error for details. Request a new injection if the issue is transient.";
+      case "expired":
+        return "Injection expired (5-minute TTL or API restart). Call request_secret_field_injection to start a new login attempt — a new user approval will be required.";
+    }
+  }
+
+  // POST /api/agent/v1/injections — create a secret field injection request
+  server.post(
+    "/api/agent/v1/injections",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = req.body as {
+        domain?: string;
+        pass_id?: string;
+        field_kind?: string;
+        page_url?: string;
+        element_hint?: {
+          label?: string;
+          placeholder?: string;
+          input_type?: string;
+          selector_hint?: string;
+        };
+        reason?: string;
+      };
+
+      if (!body.domain || typeof body.domain !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "domain is required.");
+      }
+      if (!body.field_kind || !["username", "password"].includes(body.field_kind)) {
+        return sendError(reply, 400, "VALIDATION_ERROR", "field_kind must be 'username' or 'password'.");
+      }
+      if (!body.page_url || typeof body.page_url !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "page_url is required.");
+      }
+      if (!body.reason || typeof body.reason !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "reason is required.");
+      }
+
+      // Domain must match the page_url hostname to prevent cross-domain injection
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(body.page_url).hostname;
+      } catch {
+        return sendError(reply, 400, "INVALID_URL", "page_url is not a valid URL.");
+      }
+      if (pageHostname !== body.domain && !pageHostname.endsWith(`.${body.domain}`)) {
+        return sendError(
+          reply, 400, "DOMAIN_MISMATCH",
+          `Aegis will not inject ${body.domain} credentials into ${pageHostname}. ` +
+          `Navigate to the ${body.domain} login page (using username/password, not OAuth) before requesting injection.`,
+        );
+      }
+
+      // Find the vault pass
+      const vaultRepo = getVaultRepository();
+      let pass: Awaited<ReturnType<typeof vaultRepo.getVaultPass>> | undefined;
+      if (body.pass_id) {
+        pass = aegisVaultPasses.get(body.pass_id) ?? await vaultRepo.getVaultPass(body.pass_id);
+        if (!pass || pass.user_id !== MOCK_USER_ID || pass.domain !== body.domain) {
+          return sendError(reply, 404, "PASS_NOT_FOUND", `No vault pass found for pass_id '${body.pass_id}' on domain '${body.domain}'.`);
+        }
+      } else {
+        pass = Array.from(aegisVaultPasses.values()).find(
+          (p) => p.user_id === MOCK_USER_ID && p.domain === body.domain,
+        );
+        if (!pass) {
+          return sendError(reply, 404, "PASS_NOT_FOUND", `No vault pass found for domain '${body.domain}'. Add credentials for this domain first.`);
+        }
+      }
+
+      // Find or create a CredentialUseAuthorization for this login attempt.
+      // One approval covers both username and password for the same pass/domain/delegation.
+      const now = new Date();
+      const fieldKind = body.field_kind as "username" | "password";
+
+      // An approved auth is only reusable if the field_kind has remaining uses.
+      const approvedAuth = Array.from(credentialUseAuthorizations.values()).find(
+        (a) =>
+          a.user_id === MOCK_USER_ID &&
+          a.delegation_id === delegation.id &&
+          a.domain === body.domain &&
+          a.pass_id === pass.pass_id &&
+          a.purpose === "login" &&
+          a.status === "approved" &&
+          new Date(a.expires_at) > now &&
+          a.allowed_field_kinds.includes(fieldKind) &&
+          (a.use_counts[fieldKind] ?? 0) < (a.max_uses_per_field[fieldKind] ?? 1),
+      );
+
+      const pendingAuth = !approvedAuth
+        ? Array.from(credentialUseAuthorizations.values()).find(
+            (a) =>
+              a.user_id === MOCK_USER_ID &&
+              a.delegation_id === delegation.id &&
+              a.domain === body.domain &&
+              a.pass_id === pass.pass_id &&
+              a.purpose === "login" &&
+              a.status === "pending_approval" &&
+              new Date(a.expires_at) > now,
+          )
+        : undefined;
+
+      let auth: CredentialUseAuthorization;
+      let injectionStatus: SecretFieldInjectionStatus;
+
+      if (approvedAuth) {
+        auth = approvedAuth;
+        injectionStatus = "approved";
+      } else if (pendingAuth) {
+        auth = pendingAuth;
+        injectionStatus = "pending_approval";
+      } else {
+        auth = {
+          authorization_id: newId("credauth"),
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          domain: body.domain,
+          pass_id: pass.pass_id,
+          pass_label: pass.label,
+          pass_username: pass.username,
+          allowed_field_kinds: ["username", "password"],
+          max_uses_per_field: { username: 1, password: 1 },
+          purpose: "login",
+          status: "pending_approval",
+          raw_values_revealed_to_agent: false,
+          persistence_allowed: false,
+          browser_storage_allowed: false,
+          website_save_allowed: false,
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          used_field_kinds: [],
+          use_counts: { username: 0, password: 0 },
+        };
+        credentialUseAuthorizations.set(auth.authorization_id, auth);
+        injectionStatus = "pending_approval";
+      }
+
+      const injection: SecretFieldInjection = {
+        injection_request_id: newId("inj"),
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain: body.domain,
+        field_kind: fieldKind,
+        pass_id: pass.pass_id,
+        page_url: body.page_url,
+        element_hint: body.element_hint,
+        reason: body.reason,
+        status: injectionStatus,
+        authorization_id: auth.authorization_id,
+        raw_value_revealed_to_agent: false,
+        created_at: new Date().toISOString(),
+        expires_at: auth.expires_at,
+      };
+      secretFieldInjections.set(injection.injection_request_id, injection);
+      schedulePersist();
+
+      const authCovered = injectionStatus === "pending_approval";
+      const remainingUses = auth.allowed_field_kinds.reduce(
+        (acc, fk) => {
+          acc[fk] = (auth.max_uses_per_field[fk] ?? 1) - (auth.use_counts[fk] ?? 0);
+          return acc;
+        },
+        {} as Record<string, number>,
+      );
+      return reply.send({
+        ok: true,
+        data: {
+          injection_request_id: injection.injection_request_id,
+          status: injection.status,
+          domain: injection.domain,
+          field_kind: injection.field_kind,
+          pass_label: pass.label,
+          raw_value_revealed_to_agent: false,
+          expires_at: injection.expires_at,
+          authorization_id: auth.authorization_id,
+          authorization_covers: "username and password for this login attempt — one approval, one use each, 5-minute TTL",
+          remaining_uses: remainingUses,
+          next_action: injectionNextAction(injection.status, authCovered),
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/injections/:injectionId — poll status
+  server.get<{ Params: { injectionId: string } }>(
+    "/api/agent/v1/injections/:injectionId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const injection = secretFieldInjections.get(req.params.injectionId);
+      if (!injection) return sendError(reply, 404, "INJECTION_NOT_FOUND", "Injection not found.");
+      if (injection.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This injection does not belong to your delegation.");
+      }
+
+      // Lazily promote injection status from linked authorization if approved/denied/expired
+      const terminalStatuses = ["filled", "denied", "failed", "expired"] as const;
+      if (!terminalStatuses.includes(injection.status as any)) {
+        if (new Date(injection.expires_at) < new Date()) {
+          injection.status = "expired";
+          secretFieldInjections.set(injection.injection_request_id, injection);
+          schedulePersist();
+        } else if (injection.status === "pending_approval" && injection.authorization_id) {
+          const auth = credentialUseAuthorizations.get(injection.authorization_id);
+          if (auth) {
+            if (auth.status === "approved" && auth.allowed_field_kinds.includes(injection.field_kind)) {
+              injection.status = "approved";
+              injection.approved_at = auth.approved_at;
+              secretFieldInjections.set(injection.injection_request_id, injection);
+              schedulePersist();
+            } else if (["denied", "expired", "fulfilled", "revoked"].includes(auth.status)) {
+              injection.status = auth.status === "fulfilled" ? "denied" : auth.status as any;
+              secretFieldInjections.set(injection.injection_request_id, injection);
+              schedulePersist();
+            }
+          }
+        }
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          injection_request_id: injection.injection_request_id,
+          status: injection.status,
+          domain: injection.domain,
+          field_kind: injection.field_kind,
+          raw_value_revealed_to_agent: false,
+          expires_at: injection.expires_at,
+          ...(injection.filled_at ? { filled_at: injection.filled_at } : {}),
+          ...(injection.error ? { error: injection.error } : {}),
+          next_action: injectionNextAction(injection.status),
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/injections/:injectionId/execute — CDP fill trigger
+  server.post<{ Params: { injectionId: string } }>(
+    "/api/agent/v1/injections/:injectionId/execute",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const injection = secretFieldInjections.get(req.params.injectionId);
+      if (!injection) return sendError(reply, 404, "INJECTION_NOT_FOUND", "Injection not found.");
+      if (injection.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This injection does not belong to your delegation.");
+      }
+
+      // Expiry check
+      if (new Date(injection.expires_at) < new Date() && injection.status !== "filled") {
+        injection.status = "expired";
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 400, "INJECTION_EXPIRED", "Injection has expired. Request a new injection.");
+      }
+
+      // Promote via authorization if still pending; also enforce use limits
+      if (injection.authorization_id) {
+        const auth = credentialUseAuthorizations.get(injection.authorization_id);
+        if (auth) {
+          // Lazy expire the auth if past TTL
+          if (new Date(auth.expires_at) < new Date() && auth.status === "approved") {
+            auth.status = "expired";
+            credentialUseAuthorizations.set(auth.authorization_id, auth);
+            schedulePersist();
+          }
+          // Promote pending injection to approved if auth is now approved
+          if (
+            injection.status === "pending_approval" &&
+            auth.status === "approved" &&
+            auth.allowed_field_kinds.includes(injection.field_kind)
+          ) {
+            injection.status = "approved";
+            injection.approved_at = auth.approved_at;
+            secretFieldInjections.set(injection.injection_request_id, injection);
+            schedulePersist();
+          }
+          // Block if authorization is fulfilled (all uses exhausted)
+          if (auth.status === "fulfilled") {
+            return sendError(
+              reply, 400, "AUTHORIZATION_FULFILLED",
+              `The credential-use authorization for this login attempt has already been fulfilled. ` +
+              `Request a new injection to start a new login attempt — a new approval will be required.`,
+            );
+          }
+          // Enforce per-field use limit
+          if (injection.status === "approved" || auth.status === "approved") {
+            const used = auth.use_counts[injection.field_kind] ?? 0;
+            const max = auth.max_uses_per_field[injection.field_kind] ?? 1;
+            if (used >= max) {
+              return sendError(
+                reply, 400, "USE_LIMIT_EXCEEDED",
+                `The ${injection.field_kind} field has already been filled once for this login attempt. ` +
+                `Request a new injection to start a new login attempt.`,
+              );
+            }
+          }
+        }
+      }
+
+      if (injection.status !== "approved") {
+        return sendError(
+          reply, 400, "INJECTION_NOT_APPROVED",
+          `Injection status is '${injection.status}'; only 'approved' injections can be executed. ${injectionNextAction(injection.status)}`,
+        );
+      }
+
+      // Transition to executing
+      injection.status = "executing";
+      secretFieldInjections.set(injection.injection_request_id, injection);
+      schedulePersist();
+
+      // Resolve credential — resolvedValue never leaves this function into any response or log
+      const vaultRepo = getVaultRepository();
+      const pass = aegisVaultPasses.get(injection.pass_id) ?? await vaultRepo.getVaultPass(injection.pass_id);
+      if (!pass || pass.user_id !== MOCK_USER_ID) {
+        injection.status = "failed";
+        injection.error = "Vault pass not found or access denied.";
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 404, "PASS_NOT_FOUND", "Vault pass not found.");
+      }
+
+      let resolvedValue: string;
+      const kms = getKmsProvider();
+
+      try {
+        if (injection.field_kind === "username") {
+          if (!pass.username) throw new Error("Pass has no username stored.");
+          resolvedValue = pass.username;
+          // Username is non-secret metadata — no KMS needed, no audit event
+        } else {
+          // Password — decrypt via KMS
+          const blob = await vaultRepo.getEncryptedSecret(pass.secret_ref);
+          if (!blob) throw new Error(`Secret not available for pass ${pass.pass_id}.`);
+          const kmsCtx = {
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            purpose: "login_password" as const,
+          };
+          resolvedValue = await kms.decryptSecret(blob, kmsCtx);
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            run_id: `injection:${injection.injection_request_id}`,
+            success: true,
+          });
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Credential resolution failed";
+        if (injection.field_kind === "password") {
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            run_id: `injection:${injection.injection_request_id}`,
+            success: false,
+            error_code: "RESOLVE_FAILED",
+          });
+        }
+        injection.status = "failed";
+        injection.error = msg;
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 500, "CREDENTIAL_RESOLVE_FAILED", msg);
+      }
+
+      // CDP fill — resolvedValue used here and immediately discarded; never returned in response
+      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue);
+
+      if (fillResult.success) {
+        injection.status = "filled";
+        injection.filled_at = new Date().toISOString();
+        injection.error = undefined;
+        // Update use counts and check for fulfillment
+        if (injection.authorization_id) {
+          const auth = credentialUseAuthorizations.get(injection.authorization_id);
+          if (auth) {
+            const now = new Date().toISOString();
+            auth.use_counts[injection.field_kind] = (auth.use_counts[injection.field_kind] ?? 0) + 1;
+            if (!auth.used_field_kinds.includes(injection.field_kind)) {
+              auth.used_field_kinds = [...auth.used_field_kinds, injection.field_kind];
+            }
+            auth.last_used_at = now;
+            // Fulfilled when all allowed fields have hit their max use count
+            const allFulfilled = auth.allowed_field_kinds.every(
+              (fk) => (auth.use_counts[fk] ?? 0) >= (auth.max_uses_per_field[fk] ?? 1),
+            );
+            if (allFulfilled) {
+              auth.status = "fulfilled";
+              auth.fulfilled_at = now;
+            }
+            credentialUseAuthorizations.set(auth.authorization_id, auth);
+          }
+        }
+      } else {
+        injection.status = "failed";
+        injection.error = fillResult.error ?? "CDP fill failed";
+      }
+      secretFieldInjections.set(injection.injection_request_id, injection);
+      schedulePersist();
+
+      if (!fillResult.success) {
+        return sendError(reply, 500, "CDP_FILL_FAILED", fillResult.error ?? "CDP fill failed");
+      }
+
+      // Response NEVER includes resolvedValue or pass_id
+      return reply.send({
+        ok: true,
+        data: {
+          injection_request_id: injection.injection_request_id,
+          status: "filled",
+          field_kind: injection.field_kind,
+          domain: injection.domain,
+          filled_at: injection.filled_at,
+          raw_value_revealed_to_agent: false,
+          note: "Aegis injected the field value directly via CDP. The raw credential was never returned to the agent.",
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/credential-authorizations/:authorizationId — poll authorization status
+  server.get<{ Params: { authorizationId: string } }>(
+    "/api/agent/v1/credential-authorizations/:authorizationId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const auth = credentialUseAuthorizations.get(req.params.authorizationId);
+      if (!auth) return sendError(reply, 404, "AUTHORIZATION_NOT_FOUND", "Credential authorization not found.");
+      if (auth.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This authorization does not belong to your delegation.");
+      }
+
+      // Lazy expire if past TTL and still in a non-terminal pre-approved state
+      const terminalStatuses = ["fulfilled", "denied", "expired", "revoked"];
+      if (!terminalStatuses.includes(auth.status) && new Date(auth.expires_at) < new Date()) {
+        auth.status = "expired";
+        credentialUseAuthorizations.set(auth.authorization_id, auth);
+        schedulePersist();
+      }
+
+      const remainingUses = auth.allowed_field_kinds.reduce(
+        (acc, fk) => {
+          acc[fk] = (auth.max_uses_per_field[fk] ?? 1) - (auth.use_counts[fk] ?? 0);
+          return acc;
+        },
+        {} as Record<string, number>,
+      );
+
+      // Safe metadata only — no pass_id, secret_ref, raw values, cookies, KMS material
+      return reply.send({
+        ok: true,
+        data: {
+          authorization_id: auth.authorization_id,
+          domain: auth.domain,
+          pass_label: auth.pass_label,
+          allowed_field_kinds: auth.allowed_field_kinds,
+          max_uses_per_field: auth.max_uses_per_field,
+          use_counts: auth.use_counts,
+          remaining_uses: remainingUses,
+          status: auth.status,
+          raw_values_revealed_to_agent: false,
+          expires_at: auth.expires_at,
+          approved_at: auth.approved_at,
+          fulfilled_at: auth.fulfilled_at,
+          last_used_at: auth.last_used_at,
+          used_field_kinds: auth.used_field_kinds,
+        },
+      });
+    },
+  );
+
+  // ─── Challenge Relay v1 ────────────────────────────────────────────────────
+
+  const VALID_CHALLENGE_TYPES = new Set<SecurityChallengeType>([
+    "email_device_verification", "sms_code", "totp", "passkey",
+    "captcha", "device_verification", "unknown",
+  ]);
+
+  function challengeNextAction(status: SecurityChallengeStatus): string {
+    switch (status) {
+      case "pending_user":
+        return 'Tell the user: "A verification code is needed. Please enter it in the Aegis UI at /route-run-approvals under \'Security challenges\'." Do NOT ask the user to paste the code into chat. Call wait_for_security_challenge again.';
+      case "code_submitted":
+        return "User has submitted the code. Call inject_security_challenge_code now.";
+      case "code_injected":
+        return "Code was injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge.";
+      case "user_completed":
+        return "User completed the challenge directly in the browser. Continue your workflow.";
+      case "cancelled":
+        return "Challenge was cancelled by the user. Do not retry without user direction.";
+      case "expired":
+        return "Challenge expired. Navigate back to the challenge page and call report_security_challenge again.";
+      case "failed":
+        return "Challenge injection failed. Check the error field. The user may submit the code again via the Aegis UI.";
+    }
+  }
+
+  // POST /api/agent/v1/security-challenges — agent reports a detected challenge
+  server.post(
+    "/api/agent/v1/security-challenges",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = req.body as {
+        domain?: unknown;
+        page_url?: unknown;
+        challenge_type?: unknown;
+        masked_destination?: unknown;
+        browser_session_id?: unknown;
+        element_hint?: unknown;
+        instructions?: unknown;
+      };
+
+      if (!body.domain || typeof body.domain !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "domain is required.");
+      }
+      if (!body.page_url || typeof body.page_url !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "page_url is required.");
+      }
+
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(body.page_url).hostname;
+      } catch {
+        return sendError(reply, 400, "INVALID_URL", "page_url is not a valid URL.");
+      }
+      if (pageHostname !== body.domain && !pageHostname.endsWith(`.${body.domain}`)) {
+        return sendError(
+          reply, 400, "DOMAIN_MISMATCH",
+          `page_url hostname '${pageHostname}' must match domain '${body.domain}'.`,
+        );
+      }
+
+      const challengeType = (typeof body.challenge_type === "string" && VALID_CHALLENGE_TYPES.has(body.challenge_type as SecurityChallengeType))
+        ? body.challenge_type as SecurityChallengeType
+        : "unknown";
+
+      const now = new Date();
+      const challenge: SecurityChallenge = {
+        challenge_id: newId("chlg"),
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        browser_session_id: typeof body.browser_session_id === "string" ? body.browser_session_id : undefined,
+        domain: body.domain,
+        page_url: body.page_url,
+        challenge_type: challengeType,
+        status: "pending_user",
+        masked_destination: typeof body.masked_destination === "string" ? body.masked_destination : undefined,
+        element_hint: (body.element_hint && typeof body.element_hint === "object") ? body.element_hint as SecurityChallenge["element_hint"] : undefined,
+        instructions: (typeof body.instructions === "string" && body.instructions.trim())
+          ? body.instructions.trim()
+          : `${body.domain} requires a security verification code. Enter the code in the Aegis UI.`,
+        raw_code_revealed_to_agent: false,
+        created_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+      };
+
+      securityChallenges.set(challenge.challenge_id, challenge);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          challenge_id: challenge.challenge_id,
+          status: challenge.status,
+          challenge_type: challenge.challenge_type,
+          domain: challenge.domain,
+          masked_destination: challenge.masked_destination,
+          expires_at: challenge.expires_at,
+          raw_code_revealed_to_agent: false as const,
+          next_action: `Tell the user: "A security challenge was detected on ${challenge.domain}. Please enter the verification code in the Aegis UI at /route-run-approvals under 'Security challenges'." Do NOT ask the user to paste the code into chat. Then call wait_for_security_challenge with challenge_id="${challenge.challenge_id}".`,
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/security-challenges/:challengeId — poll challenge status
+  server.get<{ Params: { challengeId: string } }>(
+    "/api/agent/v1/security-challenges/:challengeId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const challenge = securityChallenges.get(req.params.challengeId);
+      if (!challenge) return sendError(reply, 404, "CHALLENGE_NOT_FOUND", "Security challenge not found.");
+      if (challenge.user_id !== MOCK_USER_ID || challenge.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this challenge.");
+      }
+
+      // Lazy expire
+      if (
+        (challenge.status === "pending_user" || challenge.status === "code_submitted") &&
+        new Date(challenge.expires_at) < new Date()
+      ) {
+        challenge.status = "expired";
+        challengeCodes.delete(challenge.challenge_id);
+        securityChallenges.set(challenge.challenge_id, challenge);
+        schedulePersist();
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          challenge_id: challenge.challenge_id,
+          status: challenge.status,
+          challenge_type: challenge.challenge_type,
+          domain: challenge.domain,
+          masked_destination: challenge.masked_destination,
+          expires_at: challenge.expires_at,
+          submitted_at: challenge.submitted_at,
+          injected_at: challenge.injected_at,
+          completed_at: challenge.completed_at,
+          error: challenge.error,
+          raw_code_revealed_to_agent: false as const,
+          next_action: challengeNextAction(challenge.status),
+        },
+      });
+    },
+  );
+
+  // ─── Connected Email Challenge Resolver v1 ──────────────────────────────────
+
+  function resolutionNextAction(status: ChallengeEmailResolutionStatus): string {
+    switch (status) {
+      case "pending_approval":
+        return "Wait for the user to approve the Gmail search in the Aegis UI at /route-run-approvals under 'Security challenges'. Then call wait_for_challenge_email_resolution again.";
+      case "code_found":
+        return "Call inject_challenge_email_code to inject the code into the browser field. The agent never sees the code.";
+      case "injected":
+        return "Code was injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you.";
+      case "not_found":
+        return "No code found in recent GitHub emails. Tell the user: 'Aegis could not find the verification code in Gmail. Please enter it manually in the Aegis UI at /route-run-approvals under Security challenges.'";
+      case "failed":
+        return "Email resolution failed. Tell the user to enter the verification code manually in the Aegis UI.";
+      case "cancelled":
+        return "Resolution was cancelled. The user can enter the code manually in the Aegis UI.";
+      case "expired":
+        return "Resolution expired. Request a new resolution if the challenge is still active.";
+      case "searching":
+        return "Gmail search is in progress. Call wait_for_challenge_email_resolution again shortly.";
+    }
+  }
+
+  function safeEmailResolution(res: ChallengeEmailResolution) {
+    return {
+      resolution_id: res.resolution_id,
+      challenge_id: res.challenge_id,
+      provider: res.provider,
+      domain: res.domain,
+      status: res.status,
+      raw_code_revealed_to_agent: false as const,
+      email_body_revealed_to_agent: false as const,
+      search_window_started_at: res.search_window_started_at,
+      searched_at: res.searched_at,
+      found_at: res.found_at,
+      injected_at: res.injected_at,
+      sender_domain: res.sender_domain,
+      received_at: res.received_at,
+      error: res.error,
+      created_at: res.created_at,
+      updated_at: res.updated_at,
+    };
+  }
+
+  // POST /api/agent/v1/security-challenges/:challengeId/email-resolution-request
+  // Agent requests Gmail-based email resolution for a live challenge.
+  server.post<{ Params: { challengeId: string } }>(
+    "/api/agent/v1/security-challenges/:challengeId/email-resolution-request",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const challenge = securityChallenges.get(req.params.challengeId);
+      if (!challenge) return sendError(reply, 404, "CHALLENGE_NOT_FOUND", "Security challenge not found.");
+      if (challenge.user_id !== MOCK_USER_ID || challenge.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this challenge.");
+      }
+
+      if (challenge.status !== "pending_user") {
+        return sendError(
+          reply, 400, "INVALID_CHALLENGE_STATUS",
+          `Challenge status is '${challenge.status}'. Gmail resolver requires status 'pending_user'.`,
+        );
+      }
+      if (challenge.domain !== "github.com") {
+        return sendError(
+          reply, 400, "DOMAIN_NOT_SUPPORTED",
+          "Email resolver v1 only supports github.com challenges. Use report_security_challenge for other domains.",
+        );
+      }
+      if (challenge.challenge_type !== "email_device_verification") {
+        return sendError(
+          reply, 400, "CHALLENGE_TYPE_NOT_SUPPORTED",
+          `Email resolver v1 only supports 'email_device_verification'. This challenge is '${challenge.challenge_type}'.`,
+        );
+      }
+
+      // Deduplication: return existing non-terminal resolution for this challenge
+      const existing = Array.from(challengeEmailResolutions.values()).find(
+        (r) =>
+          r.challenge_id === challenge.challenge_id &&
+          !["injected", "not_found", "failed", "expired", "cancelled"].includes(r.status),
+      );
+      if (existing) {
+        return reply.send({
+          ok: true,
+          data: {
+            ...safeEmailResolution(existing),
+            next_action: resolutionNextAction(existing.status),
+          },
+        });
+      }
+
+      const now = new Date().toISOString();
+      const resolution: ChallengeEmailResolution = {
+        resolution_id: newId("ceres"),
+        challenge_id: challenge.challenge_id,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        provider: "gmail",
+        domain: challenge.domain,
+        status: "pending_approval",
+        raw_code_revealed_to_agent: false,
+        email_body_revealed_to_agent: false,
+        search_window_started_at: challenge.created_at,
+        created_at: now,
+        updated_at: now,
+      };
+
+      challengeEmailResolutions.set(resolution.resolution_id, resolution);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          ...safeEmailResolution(resolution),
+          next_action: resolutionNextAction(resolution.status),
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/challenge-email-resolutions/:resolutionId — poll resolution status
+  server.get<{ Params: { resolutionId: string } }>(
+    "/api/agent/v1/challenge-email-resolutions/:resolutionId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const resolution = challengeEmailResolutions.get(req.params.resolutionId);
+      if (!resolution) return sendError(reply, 404, "RESOLUTION_NOT_FOUND", "Email resolution not found.");
+      if (resolution.user_id !== MOCK_USER_ID || resolution.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this resolution.");
+      }
+
+      // Lazy expiry: resolutions expire 10 minutes after creation if not completed
+      const RESOLUTION_TTL_MS = 10 * 60 * 1000;
+      const isNonTerminal = !["injected", "not_found", "failed", "expired", "cancelled"].includes(resolution.status);
+      if (isNonTerminal && new Date(resolution.created_at).getTime() + RESOLUTION_TTL_MS < Date.now()) {
+        resolution.status = "expired";
+        resolution.updated_at = new Date().toISOString();
+        resolutionCodes.delete(resolution.resolution_id);
+        challengeEmailResolutions.set(resolution.resolution_id, resolution);
+        schedulePersist();
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          ...safeEmailResolution(resolution),
+          next_action: resolutionNextAction(resolution.status),
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/challenge-email-resolutions/:resolutionId/inject
+  // Agent triggers CDP injection of the found code.
+  server.post<{ Params: { resolutionId: string } }>(
+    "/api/agent/v1/challenge-email-resolutions/:resolutionId/inject",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const resolution = challengeEmailResolutions.get(req.params.resolutionId);
+      if (!resolution) return sendError(reply, 404, "RESOLUTION_NOT_FOUND", "Email resolution not found.");
+      if (resolution.user_id !== MOCK_USER_ID || resolution.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this resolution.");
+      }
+      if (resolution.status !== "code_found") {
+        return sendError(
+          reply, 400, "INVALID_STATUS",
+          `Cannot inject for resolution with status '${resolution.status}'. Status must be 'code_found'.`,
+        );
+      }
+
+      const codeEntry = resolutionCodes.get(resolution.resolution_id);
+      if (!codeEntry) {
+        resolution.status = "failed";
+        resolution.error = "Code is no longer available. It may have expired. Request a new resolution.";
+        resolution.updated_at = new Date().toISOString();
+        challengeEmailResolutions.set(resolution.resolution_id, resolution);
+        schedulePersist();
+        return sendError(reply, 400, "CODE_NOT_AVAILABLE", resolution.error);
+      }
+      if (new Date(codeEntry.expires_at) < new Date()) {
+        resolutionCodes.delete(resolution.resolution_id);
+        resolution.status = "expired";
+        resolution.error = "The retrieved code has expired. Request a new resolution.";
+        resolution.updated_at = new Date().toISOString();
+        challengeEmailResolutions.set(resolution.resolution_id, resolution);
+        schedulePersist();
+        return sendError(reply, 400, "CODE_EXPIRED", resolution.error);
+      }
+
+      // Retrieve the original challenge for CDP targeting
+      const challenge = securityChallenges.get(resolution.challenge_id);
+      if (!challenge) {
+        resolutionCodes.delete(resolution.resolution_id);
+        resolution.status = "failed";
+        resolution.error = "Associated challenge not found.";
+        resolution.updated_at = new Date().toISOString();
+        challengeEmailResolutions.set(resolution.resolution_id, resolution);
+        schedulePersist();
+        return sendError(reply, 400, "CHALLENGE_NOT_FOUND", resolution.error);
+      }
+
+      // Consume the code immediately — deleted regardless of outcome
+      const { code } = codeEntry;
+      resolutionCodes.delete(resolution.resolution_id);
+
+      const fillResult = await executeChallengeInjectionViaCDP(challenge, code);
+
+      if (fillResult.success) {
+        resolution.status = "injected";
+        resolution.injected_at = new Date().toISOString();
+        resolution.error = undefined;
+      } else {
+        resolution.status = "failed";
+        resolution.error = fillResult.error;
+      }
+      resolution.updated_at = new Date().toISOString();
+      challengeEmailResolutions.set(resolution.resolution_id, resolution);
+      schedulePersist();
+
+      return reply.send({
+        ok: fillResult.success,
+        data: {
+          resolution_id: resolution.resolution_id,
+          status: resolution.status,
+          injected_at: resolution.injected_at,
+          raw_code_revealed_to_agent: false as const,
+          email_body_revealed_to_agent: false as const,
+          ...(resolution.error ? { error: resolution.error } : {}),
+          next_action: resolutionNextAction(resolution.status),
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/security-challenges/:challengeId/inject — CDP code injection
+  server.post<{ Params: { challengeId: string } }>(
+    "/api/agent/v1/security-challenges/:challengeId/inject",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const challenge = securityChallenges.get(req.params.challengeId);
+      if (!challenge) return sendError(reply, 404, "CHALLENGE_NOT_FOUND", "Security challenge not found.");
+      if (challenge.user_id !== MOCK_USER_ID || challenge.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this challenge.");
+      }
+      if (challenge.status !== "code_submitted") {
+        return sendError(
+          reply, 400, "INVALID_STATUS",
+          `Cannot inject code for challenge with status '${challenge.status}'. The user must submit the code in the Aegis UI first.`,
+        );
+      }
+
+      const entry = challengeCodes.get(challenge.challenge_id);
+      if (!entry) {
+        return sendError(
+          reply, 400, "CODE_NOT_AVAILABLE",
+          "No code found for this challenge. It may have been cleared after submission. Ask the user to submit again in the Aegis UI.",
+        );
+      }
+      if (new Date(entry.expires_at) < new Date()) {
+        challengeCodes.delete(challenge.challenge_id);
+        challenge.status = "expired";
+        securityChallenges.set(challenge.challenge_id, challenge);
+        schedulePersist();
+        return sendError(reply, 400, "CODE_EXPIRED", "The submitted code has expired. Ask the user to submit again.");
+      }
+
+      // Consume the code immediately — deleted regardless of outcome
+      const { code } = entry;
+      challengeCodes.delete(challenge.challenge_id);
+
+      const fillResult = await executeChallengeInjectionViaCDP(challenge, code);
+
+      if (fillResult.success) {
+        challenge.status = "code_injected";
+        challenge.injected_at = new Date().toISOString();
+        challenge.error = undefined;
+      } else {
+        challenge.status = "failed";
+        challenge.error = fillResult.error;
+      }
+      securityChallenges.set(challenge.challenge_id, challenge);
+      schedulePersist();
+
+      return reply.send({
+        ok: fillResult.success,
+        data: {
+          challenge_id: challenge.challenge_id,
+          status: challenge.status,
+          raw_code_revealed_to_agent: false as const,
+          ...(challenge.error ? { error: challenge.error } : {}),
+          next_action: challenge.status === "code_injected"
+            ? "Code injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you."
+            : `Injection failed: ${challenge.error ?? "unknown error"}. Ensure the browser is still open on the challenge page. Ask the user to submit the code again in the Aegis UI.`,
+        },
+      });
     },
   );
 }

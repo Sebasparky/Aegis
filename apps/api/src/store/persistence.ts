@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution } from "@aegis/types";
 import {
   users,
   collars,
@@ -29,6 +29,11 @@ import {
   actionAuthorizations,
   websiteTrustAssertions,
   paymentMethods,
+  spendingLimitStepUps,
+  secretFieldInjections,
+  credentialUseAuthorizations,
+  securityChallenges,
+  challengeEmailResolutions,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -223,6 +228,11 @@ export function persistStore(): void {
       actionAuthorizations: Array.from(actionAuthorizations.entries()),
       websiteTrustAssertionEntries: Array.from(websiteTrustAssertions.entries()),
       paymentMethods: Array.from(paymentMethods.entries()),
+      spendingLimitStepUps: Array.from(spendingLimitStepUps.entries()),
+      secretFieldInjections: Array.from(secretFieldInjections.entries()),
+      credentialUseAuthorizations: Array.from(credentialUseAuthorizations.entries()),
+      securityChallenges: Array.from(securityChallenges.entries()),
+      challengeEmailResolutions: Array.from(challengeEmailResolutions.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -286,6 +296,52 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.actionAuthorizations ?? [])) actionAuthorizations.set(k, v as ActionAuthorizationReceipt);
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
     for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
+    for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
+
+    // Injection requests cannot survive restart — CDP browser context is gone.
+    for (const [k, v] of (data.secretFieldInjections ?? [])) {
+      const inj = v as SecretFieldInjection;
+      if (["pending_approval", "approved", "executing"].includes(inj.status)) {
+        inj.status = "expired";
+      }
+      secretFieldInjections.set(k, inj);
+    }
+
+    // Credential-use authorizations cannot survive restart — they are session-scoped.
+    for (const [k, v] of (data.credentialUseAuthorizations ?? [])) {
+      const auth = v as CredentialUseAuthorization;
+      if (auth.status === "pending_approval" || auth.status === "approved") {
+        auth.status = "expired";
+      }
+      // Migrate pre-fulfillment records that lack the new required fields
+      if (!auth.use_counts) auth.use_counts = { username: 0, password: 0 };
+      if (!auth.max_uses_per_field) auth.max_uses_per_field = { username: 1, password: 1 };
+      if (!auth.used_field_kinds) auth.used_field_kinds = [];
+      if (auth.persistence_allowed === undefined) (auth as any).persistence_allowed = false;
+      if (auth.browser_storage_allowed === undefined) (auth as any).browser_storage_allowed = false;
+      if (auth.website_save_allowed === undefined) (auth as any).website_save_allowed = false;
+      credentialUseAuthorizations.set(k, auth);
+    }
+
+    // Security challenge metadata — cannot survive restart (browser context + codes are gone).
+    for (const [k, v] of (data.securityChallenges ?? [])) {
+      const ch = v as SecurityChallenge;
+      if (ch.status === "pending_user" || ch.status === "code_submitted") {
+        ch.status = "expired";
+      }
+      securityChallenges.set(k, ch);
+    }
+
+    // Email resolution requests — pending/searching states cannot resume after restart
+    // (Gmail search cannot be re-triggered automatically; resolutionCodes are memory-only and gone).
+    for (const [k, v] of (data.challengeEmailResolutions ?? [])) {
+      const res = v as ChallengeEmailResolution;
+      if (res.status === "pending_approval" || res.status === "searching") {
+        res.status = "expired";
+        res.updated_at = new Date().toISOString();
+      }
+      challengeEmailResolutions.set(k, res);
+    }
 
     // Load encrypted vault blobs (ciphertext only — never plaintext).
     // Old devSecretVaultEntries from pre-KMS store files are silently ignored.
@@ -354,6 +410,11 @@ export async function resetStoreForDemo(): Promise<void> {
   actionAuthorizations.clear();
   websiteTrustAssertions.clear();
   paymentMethods.clear();
+  spendingLimitStepUps.clear();
+  secretFieldInjections.clear();
+  credentialUseAuthorizations.clear();
+  securityChallenges.clear();
+  challengeEmailResolutions.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

@@ -21,6 +21,7 @@ import type {
   InstalledSkill,
   RouteRunReceipt,
   RouteRun,
+  SensitiveActionTimelineItem,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -422,3 +423,197 @@ export const rejectAuthenticatedSession = (sessionId: string) =>
     method: "POST",
     body: JSON.stringify({}),
   });
+
+// ─── Agent-Browser Secret Injection v1 ───────────────────────────────────────
+
+export interface SecretFieldInjectionView {
+  injection_request_id: string;
+  domain: string;
+  field_kind: "username" | "password";
+  page_url: string;
+  element_hint?: {
+    label?: string;
+    placeholder?: string;
+    input_type?: string;
+    selector_hint?: string;
+  };
+  reason: string;
+  status: string;
+  raw_value_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  filled_at?: string;
+  error?: string;
+}
+
+export const listSecretFieldInjections = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<SecretFieldInjectionView[]>(`/api/internal/injections${qs}`);
+};
+
+export const approveSecretFieldInjection = (id: string) =>
+  request<{ injection_request_id: string; status: string }>(
+    `/api/internal/injections/${id}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const denySecretFieldInjection = (id: string) =>
+  request<{ injection_request_id: string; status: string }>(
+    `/api/internal/injections/${id}/deny`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+// ─── Credential-use authorization (one approval per login attempt) ────────────
+
+export interface CredentialUseAuthorizationView {
+  authorization_id: string;
+  domain: string;
+  pass_label: string;
+  pass_username?: string;
+  allowed_field_kinds: Array<"username" | "password">;
+  max_uses_per_field: { username?: number; password?: number };
+  use_counts: { username: number; password: number };
+  purpose: "login";
+  status: string;
+  raw_values_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+  last_used_at?: string;
+  used_field_kinds: Array<"username" | "password">;
+}
+
+export const listCredentialUseAuthorizations = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<CredentialUseAuthorizationView[]>(`/api/internal/credential-authorizations${qs}`);
+};
+
+export const approveCredentialUseAuthorization = (id: string) =>
+  request<{ authorization_id: string; status: string }>(
+    `/api/internal/credential-authorizations/${id}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const denyCredentialUseAuthorization = (id: string) =>
+  request<{ authorization_id: string; status: string }>(
+    `/api/internal/credential-authorizations/${id}/deny`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+// ─── Challenge Relay v1 ───────────────────────────────────────────────────────
+
+export interface SecurityChallengeView {
+  challenge_id: string;
+  domain: string;
+  page_url: string;
+  challenge_type: string;
+  status: string;
+  masked_destination?: string;
+  element_hint?: {
+    label?: string;
+    placeholder?: string;
+    input_type?: string;
+    selector_hint?: string;
+  };
+  instructions: string;
+  raw_code_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  submitted_at?: string;
+  injected_at?: string;
+  completed_at?: string;
+  error?: string;
+}
+
+export const listSecurityChallenges = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<SecurityChallengeView[]>(`/api/internal/security-challenges${qs}`);
+};
+
+export const submitSecurityChallengeCode = (challengeId: string, code: string) =>
+  request<SecurityChallengeView>(
+    `/api/internal/security-challenges/${challengeId}/submit-code`,
+    { method: "POST", body: JSON.stringify({ code }) },
+  );
+
+export const completeSecurityChallenge = (challengeId: string) =>
+  request<SecurityChallengeView>(
+    `/api/internal/security-challenges/${challengeId}/complete`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const cancelSecurityChallenge = (challengeId: string) =>
+  request<SecurityChallengeView>(
+    `/api/internal/security-challenges/${challengeId}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+// ─── Connected Email Challenge Resolver v1 ────────────────────────────────────
+
+export interface EmailResolverStatusView {
+  connected: boolean;
+  method: "env_var" | "none";
+}
+
+export interface ChallengeEmailResolutionView {
+  resolution_id: string;
+  challenge_id: string;
+  provider: string;
+  domain: string;
+  status: string;
+  raw_code_revealed_to_agent: false;
+  email_body_revealed_to_agent: false;
+  search_window_started_at: string;
+  searched_at?: string;
+  found_at?: string;
+  injected_at?: string;
+  sender_domain?: string;
+  received_at?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const getEmailResolverStatus = () =>
+  request<EmailResolverStatusView>("/api/internal/email-resolver/status");
+
+export const getChallengeEmailResolutions = (challengeId: string) =>
+  request<ChallengeEmailResolutionView[]>(
+    `/api/internal/challenge-email-resolutions?challenge_id=${encodeURIComponent(challengeId)}`,
+  );
+
+export const startChallengeEmailResolution = (challengeId: string) =>
+  request<ChallengeEmailResolutionView>(
+    "/api/internal/challenge-email-resolutions/start",
+    { method: "POST", body: JSON.stringify({ challenge_id: challengeId }) },
+  );
+
+export const cancelChallengeEmailResolution = (resolutionId: string) =>
+  request<ChallengeEmailResolutionView>(
+    `/api/internal/challenge-email-resolutions/${resolutionId}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+// ─── Sensitive Action Receipt Timeline v1 ────────────────────────────────────
+
+export async function listSensitiveReceiptTimeline(params?: {
+  browser_session_id?: string;
+  authorization_id?: string;
+  challenge_id?: string;
+  since?: "today" | "24h" | "7d" | "all";
+  event_group?: "all" | "browser" | "credential" | "challenge" | "email";
+  limit?: number;
+}): Promise<{ items: SensitiveActionTimelineItem[] }> {
+  const url = new URL(`${BASE}/api/internal/sensitive-receipts/recent`);
+  if (params?.browser_session_id) url.searchParams.set("browser_session_id", params.browser_session_id);
+  if (params?.authorization_id) url.searchParams.set("authorization_id", params.authorization_id);
+  if (params?.challenge_id) url.searchParams.set("challenge_id", params.challenge_id);
+  if (params?.since) url.searchParams.set("since", params.since);
+  if (params?.event_group) url.searchParams.set("event_group", params.event_group);
+  if (params?.limit) url.searchParams.set("limit", String(params.limit));
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error("Failed to fetch sensitive receipt timeline");
+  return res.json();
+}

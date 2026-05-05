@@ -12,6 +12,84 @@ An agent holds a **Delegation Token** bound to a user's active delegation. It ca
 
 ---
 
+## Which Aegis tool should agents use?
+
+| Situation | Correct Aegis tool |
+|---|---|
+| Need an ephemeral browser for navigation / login | `start_task_browser_session` → use Playwright MCP → `close_task_browser_session` after task |
+| Normal username/password login (agent has Playwright browser) | `request_secret_field_injection` → `execute_secret_field_injection` (agent navigates, Aegis fills fields, agent submits) |
+| Inspect a URL before committing to any action | `plan_aegis_action` or observation dry run |
+| Agent has no browser / explicit isolated login requested | `request_authenticated_session_login` → poll `get_authenticated_session` → `observe_authenticated_session` / `navigate_authenticated_session` |
+| High-risk predefined workflow (payment, banking, account deletion) | `request_skill_run` → (approve) → `start_playwright_route_run` |
+| Extension/user-tab credential fill (NOT for agent Playwright) | `start_credential_session` + `fill_credential_field` |
+
+- **Agent-Browser Secret Injection (primary login path)**: agent uses its own Playwright browser for all navigation, clicking, reading, and form submission. Agent calls `request_secret_field_injection` to have Aegis inject only the protected credential fields (username, password) via CDP. One user approval covers both fields for the login attempt. After both fields are filled, the authorization is `fulfilled` and cannot be replayed. Aegis NEVER returns the credential value — only status metadata. Validated on real GitHub (2026-05-04).
+
+  **Full login flow (with automatic approval wakeup):**
+  ```
+  1. browser_navigate → https://github.com/login
+  2. request_secret_field_injection({ domain, field_kind: "username", page_url, reason })
+     → returns { injection_request_id, authorization_id, status: "pending_approval" }
+  3. Tell user: "Please approve in Aegis UI at /route-run-approvals under Login credential requests."
+  4. wait_for_credential_authorization({ authorization_id })
+     → polls until approved/denied/expired/timeout — agent continues automatically, no "type done"
+  5. execute_secret_field_injection({ injection_request_id })   ← username filled via CDP
+  6. request_secret_field_injection({ domain, field_kind: "password", ... })
+     → auto-attaches to same authorization (already approved, no second prompt)
+  7. execute_secret_field_injection({ injection_request_id })   ← password filled via CDP
+  8. browser_click → Sign In button (agent submits the form itself)
+  ```
+- **Observation dry run**: inspect page content and sensitivity signals before deciding whether to act. Does not click, fill, or submit anything.
+- **Authenticated session boundary (secondary/experimental)**: Aegis performs the ENTIRE login workflow in an isolated Playwright session using a KMS-vaulted credential. Agent receives `authenticated_session_id` only — no password, cookies, storageState, or auth tokens. Use only when the agent has no browser of its own or explicitly requests isolated Aegis-controlled login. **Do not use as the default login path when the agent has a Playwright browser.**
+- **Route run / skill**: for complex or high-risk workflows where the exact action sequence is verified, audited, and scoped by a Collar. Requires a pre-recorded Aegis Rail. **Routes/skills are not needed for normal username/password login.**
+- **Task Browser Lifecycle (local dev)**: Aegis creates and destroys ephemeral Chrome sessions on demand. See section below.
+- **Credential session**: extension-and-user-tab targeted field fill. Requires the Aegis Chrome extension active on a user-open tab. **Not compatible with agent-controlled Playwright browsers (e.g. Claude's own browser).** Do not use for autonomous agent login flows.
+
+---
+
+## Task Browser Sessions (Local Dev — v1)
+
+Aegis manages ephemeral Chrome browser lifecycle for agents running locally. This replaces the manual `npm run chrome:agent` workflow.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/task-browser-sessions` | Launch a fresh ephemeral Chrome on port 9222 |
+| `GET` | `/api/task-browser-sessions` | List active sessions |
+| `GET` | `/api/task-browser-sessions/:id` | Get session status |
+| `POST` | `/api/task-browser-sessions/:id/close` | Kill Chrome and delete profile |
+
+### MCP tools
+
+- `start_task_browser_session` — creates ephemeral Chrome, returns `cdp_url` and `browser_session_id`
+- `get_task_browser_session` — polls status; safe metadata only (no PIDs, no local paths)
+- `close_task_browser_session` — kills process, deletes `/tmp` profile
+
+### Invariants
+
+- Port 9222 is fixed in v1. `PORT_IN_USE` (409) if occupied — close the existing session first.
+- Sessions are always ephemeral. `/tmp/aegis-agent-browser-<id>` profile deleted on close.
+- Agent uses Playwright MCP for navigation/clicking. Aegis uses CDP only for secret field injection.
+- Keep the session open while the task is in progress. Close only after the task is fully complete.
+- No PIDs, process handles, or raw filesystem paths in agent-facing responses.
+- `raw_cookies_revealed_to_agent: false` and `raw_storage_revealed_to_agent: false` on all task browser tool responses.
+
+### Typical flow
+
+```
+1. start_task_browser_session()
+   → { browser_session_id, status: "ready", cdp_url: "http://localhost:9222" }
+2. [Playwright MCP tools] browser_navigate, browser_snapshot, browser_click, etc.
+3. request_secret_field_injection + execute_secret_field_injection  (Aegis fills fields)
+4. [Playwright MCP] browser_click → submit form
+5. [Continue task — navigate, read, summarize, etc.]
+6. close_task_browser_session({ browser_session_id })
+   → { status: "closed", cleanup_complete: true }
+```
+
+---
+
 ## Agent Autonomy Model
 
 Agents remain fully autonomous above Aegis — using their own tools for reading pages, searching, summarizing, planning, and reasoning. Aegis is not a general browsing layer.

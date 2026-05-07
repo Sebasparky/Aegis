@@ -43,7 +43,7 @@ import {
   newId,
 } from "../store/index.js";
 import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
-import { resolutionCodes, searchGmailForChallengeCode } from "../runtime/emailChallengeResolver.js";
+import { resolutionCodes, searchGmailForChallengeCode, isEmailChallengeSupported } from "../runtime/emailChallengeResolver.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
 import { getKmsProvider } from "../lib/kms.js";
 import { recordKmsAuditEvent } from "../lib/kmsAudit.js";
@@ -1333,7 +1333,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       case "injected":
         return "Code was injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you.";
       case "not_found":
-        return "No code found in recent GitHub emails. Tell the user: 'Aegis could not find the verification code in Gmail. Please enter it manually in the Aegis UI at /route-run-approvals under Security challenges.'";
+        return "No code found in recent verification emails. Tell the user: 'Aegis could not find the verification code in Gmail. Please enter it manually in the Aegis UI at /route-run-approvals under Security challenges.'";
       case "failed":
         return "Email resolution failed. Tell the user to enter the verification code manually in the Aegis UI.";
       case "cancelled":
@@ -1360,6 +1360,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       injected_at: res.injected_at,
       sender_domain: res.sender_domain,
       received_at: res.received_at,
+      extraction_source: res.extraction_source,
       error: res.error,
       created_at: res.created_at,
       updated_at: res.updated_at,
@@ -1386,10 +1387,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           `Challenge status is '${challenge.status}'. Gmail resolver requires status 'pending_user'.`,
         );
       }
-      if (challenge.domain !== "github.com") {
+      if (!isEmailChallengeSupported(challenge.domain)) {
         return sendError(
           reply, 400, "DOMAIN_NOT_SUPPORTED",
-          "Email resolver v1 only supports github.com challenges. Use report_security_challenge for other domains.",
+          `Email resolver does not support '${challenge.domain}' challenges. Use report_security_challenge for unsupported domains.`,
         );
       }
       if (challenge.challenge_type !== "email_device_verification") {

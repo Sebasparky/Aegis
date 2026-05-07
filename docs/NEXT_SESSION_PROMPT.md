@@ -549,18 +549,25 @@ Key invariants (see CLAUDE.md):
 
 Do not rebuild unless explicitly requested.
 
+**Dynamic CDP Targeting for Challenge Injection v1 — complete (2026-05-07).**
+
+`executeChallengeInjectionViaCDP` now resolves the CDP URL dynamically from the task browser session when `challenge.browser_session_id` is set, rather than always using static `AEGIS_PLAYWRIGHT_CDP_URL`. If a session ID is present, it looks up `taskBrowserSessions.get(browser_session_id)` and uses `session.cdp_url` — which reflects the actual port (9222, 9223, etc.). Falls back to `AEGIS_PLAYWRIGHT_CDP_URL` only for legacy challenges with no session ID. Updated error messages: `BROWSER_SESSION_NOT_READY` (session expired/not found) and `CDP_NOT_CONFIGURED` (no session and no env var). `report_security_challenge` MCP tool description updated to require `browser_session_id` when using a task browser session. `plan_aegis_action` workflow step 9a added for challenge detection flow. Do not rebuild.
+
+**Connected Email Challenge Resolver v1.1 — complete (2026-05-07).**
+
+Two-phase Gmail search with restricted body-fetch fallback. Phase 1: metadata scan (subject + snippet extraction). Phase 2: `format=FULL` body fetch for the best candidate only if Phase 1 fails (at most 2 body fetches, body capped at 20,000 chars, immediately discarded). Provider architecture generalized via `VERIFICATION_EMAIL_POLICIES` registry — GitHub is the only provider in v1.1; future providers (Google, Microsoft, etc.) can be added without rewriting the resolver. `extraction_source` ("subject_snippet" | "body_text") is safe metadata on `ChallengeEmailResolution`. Domain check uses `isEmailChallengeSupported(domain)` from registry (replaces hardcoded "github.com" check in both route files). Body text is function-local — never stored, logged, or returned. Manual fallback retained on `not_found`. Do not rebuild.
+
 **Candidate next milestones:**
 
-1. **Connected Email Challenge Resolver v1** — after a live `SecurityChallenge` exists, Aegis searches Gmail for the code in a narrow time window; extracts code only (no email body returned); injects once; user approval required before first use. See `docs/CHALLENGE_RELAY.md` Phase 3.
-2. **Vault schema migration for Credential Provider Model** — add `provider_id?: string` to `AegisVaultPass`; populate from `findCredentialProviderByDomain` at write time; fall back to domain inference for existing records
-3. **Password import / migration UI v1** — bulk import credentials with provider selection
-4. **Signup Credential Custody v1** — extend the provider model to cover new account creation flows
-5. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
-6. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
-7. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-8. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
-9. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
-10. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **Vault schema migration for Credential Provider Model** — add `provider_id?: string` to `AegisVaultPass`; populate from `findCredentialProviderByDomain` at write time; fall back to domain inference for existing records
+2. **Password import / migration UI v1** — bulk import credentials with provider selection
+3. **Signup Credential Custody v1** — extend the provider model to cover new account creation flows
+4. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
+5. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
+6. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
+7. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
+8. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+9. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

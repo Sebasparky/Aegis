@@ -377,6 +377,7 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
           "7. Call request_secret_field_injection again for field_kind: 'password' (auto-attached to same authorization, no second approval needed if already approved).",
           "8. Call execute_secret_field_injection for the password injection.",
           "9. Click Submit / Sign In yourself in your Playwright browser.",
+          "9a. If a security verification challenge appears after Submit (device verification email, 2FA, TOTP): call report_security_challenge({ domain, page_url, challenge_type, browser_session_id }) — always include the browser_session_id from step 0. Without it, Aegis injects into the wrong browser port and fails. Then call wait_for_security_challenge, and either inject_security_challenge_code (manual) or request_challenge_email_resolution → wait_for_challenge_email_resolution → inject_challenge_email_code (Gmail). After injection, click Verify yourself.",
           "10. Continue using the browser for the rest of the task. Only call close_task_browser_session after the full task is complete — closing destroys cookies and session data.",
           "11. [GitHub repo listing and similar dynamic lists] After login, navigate to the target page yourself. Verify dynamic content: check displayed count, scroll to load all visible items, inspect pagination links. Do not claim 'all repos' or 'all items' unless you verified count and pagination. If uncertain, report exactly what you can see: 'I can see X items on the current page.' Aegis does not read or summarize content — you own the reading step.",
         ],
@@ -2120,6 +2121,8 @@ const TOOLS = [
     description:
       "Report a security challenge detected in the browser (email/SMS device verification, TOTP, etc.) to Aegis. " +
       "Call this when the page shows a verification code prompt — GitHub device verification, Google 2-step, etc. " +
+      "IMPORTANT: Always pass browser_session_id from start_task_browser_session when a task browser session is active. " +
+      "Aegis uses browser_session_id to inject the code into the correct browser — without it, injection targets the wrong port and fails.\n" +
       "IMPORTANT PRODUCT BOUNDARIES:\n" +
       "- Do NOT ask the user to paste the code into chat — that is a security anti-pattern.\n" +
       "- Tell the user: \"A verification code was sent. Please enter it in the Aegis UI at /route-run-approvals under 'Security challenges'.\"\n" +
@@ -2148,7 +2151,7 @@ const TOOLS = [
         },
         browser_session_id: {
           type: "string",
-          description: "Optional. The task browser session ID if one is active.",
+          description: "The task browser session ID from start_task_browser_session. Required when using a task browser session — Aegis uses this to inject into the correct browser port. Omit only for legacy flows without a managed session.",
         },
         element_hint: {
           type: "object",

@@ -10,6 +10,7 @@ import {
   resolutionCodes,
   getEmailResolverStatus,
   searchGmailForChallengeCode,
+  isEmailChallengeSupported,
 } from "../runtime/emailChallengeResolver.js";
 import { schedulePersist } from "../store/persistence.js";
 
@@ -32,6 +33,7 @@ function safeResolution(res: ChallengeEmailResolution) {
     injected_at: res.injected_at,
     sender_domain: res.sender_domain,
     received_at: res.received_at,
+    extraction_source: res.extraction_source,
     error: res.error,
     created_at: res.created_at,
     updated_at: res.updated_at,
@@ -82,10 +84,10 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
         schedulePersist();
         return sendError(reply, 400, "CHALLENGE_EXPIRED", "Challenge has expired.");
       }
-      if (challenge.domain !== "github.com") {
+      if (!isEmailChallengeSupported(challenge.domain)) {
         return sendError(
           reply, 400, "DOMAIN_NOT_SUPPORTED",
-          "Gmail resolver v1 only supports github.com challenges.",
+          `Gmail resolver does not support '${challenge.domain}' challenges.`,
         );
       }
 
@@ -134,6 +136,7 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
           resolution.found_at = new Date().toISOString();
           resolution.sender_domain = result.sender_domain;
           resolution.received_at = result.received_at;
+          resolution.extraction_source = result.extraction_source;
           resolution.updated_at = resolution.found_at;
         } else {
           resolution.status = "not_found";
@@ -192,6 +195,7 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
           resolution.found_at = new Date().toISOString();
           resolution.sender_domain = result.sender_domain;
           resolution.received_at = result.received_at;
+          resolution.extraction_source = result.extraction_source;
           resolution.updated_at = resolution.found_at;
         } else {
           resolution.status = "not_found";

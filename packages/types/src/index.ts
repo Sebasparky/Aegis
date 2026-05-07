@@ -1699,6 +1699,8 @@ export interface ChallengeEmailResolution {
   sender_domain?: string;
   // ISO timestamp of the matched email
   received_at?: string;
+  /** Safe metadata: which phase found the code — never contains the code or email text. */
+  extraction_source?: "subject_snippet" | "body_text";
   error?: string;
   created_at: string;
   updated_at: string;

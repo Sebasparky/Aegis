@@ -76,24 +76,28 @@ The agent never sees the code. It only learns that the challenge was resolved.
 
 ---
 
-### Phase 3 — Connected Email Challenge Resolver ← **local-dev Gmail resolver v1 — current implementation target**
+### Phase 3 — Connected Email Challenge Resolver ← **local-dev Gmail resolver v1.1 — implemented**
 
-User connects Gmail via env token. Aegis searches only recent GitHub verification emails for a live challenge, extracts the code, and injects it — all without exposing email body, subject, or raw code to the agent.
+User connects Gmail via env token. Aegis searches only recent verification emails for a live challenge, extracts the code, and injects it — all without exposing email body, subject, or raw code to the agent.
 
-**v1 scope constraints:**
-- Gmail only. GitHub device verification only (`github.com` domain, `email_device_verification` challenge type).
+**v1.1 scope constraints:**
+- Gmail only. GitHub device verification only (`github.com` domain, `email_device_verification` challenge type). Provider registry is policy-based and designed for future expansion (Google, Microsoft, Supabase, etc.).
 - Auth path: `GOOGLE_REFRESH_TOKEN` env var (manual token, local dev only). Full OAuth web redirect is a separate future milestone.
-- Gmail API calls use `format=METADATA` + snippet only. Full body is never fetched in v1.
-- Subject and snippet used internally for code extraction only — never returned to agent, never logged.
+- **Two-phase search:**
+  1. Metadata scan: fetch up to 5 messages with `format=METADATA`. Validate sender domain and received time. Try code extraction from subject + snippet. Return immediately on success (`extraction_source: "subject_snippet"`).
+  2. Restricted body fetch: if no code found in Phase 1, fetch `format=FULL` for the best (most recent valid) candidate only. At most 2 body fetches total. Body text is function-local — never stored, logged, or returned. Return on success (`extraction_source: "body_text"`).
+- Body text capped at 20,000 characters. Prefers `text/plain`; falls back to tag-stripped `text/html`.
+- Subject, snippet, and body text used internally only — never returned to agent, never logged.
+- `extraction_source` ("subject_snippet" | "body_text") is safe metadata only — it describes which phase found the code, not the code or any email content.
 - `GOOGLE_REFRESH_TOKEN` read from `process.env` only — never stored in Maps, persistence, or API responses.
 - `raw_code_revealed_to_agent: false` and `email_body_revealed_to_agent: false` are TypeScript literals on all agent-facing types and responses.
-- Sender allowlist: `noreply@github.com`, `github-noreply@github.com`. Sender domain re-validated per-result.
-- Search window: only emails received after `challenge.created_at`.
+- Sender domain validated per-result against policy allowlist. Domain check uses `isEmailChallengeSupported(domain)` from `VERIFICATION_EMAIL_POLICIES` registry — not a hardcoded string.
+- Search window: only emails received after `challenge.created_at` (with 2-minute grace period for send latency).
 - Code memory-only in `resolutionCodes` Map — not in `store/index.ts`, not in persistence, never logged.
 - Inject once. Code deleted immediately after injection attempt (success or failure).
-- If code not found in subject/snippet across 5 results: return `not_found`, fall back to Manual Challenge Code Injection.
+- If no code found after both phases: return `not_found`, fall back to Manual Challenge Code Injection.
 
-**This is local-dev Gmail resolver v1.** Production use requires a proper OAuth flow, encrypted refresh-token storage, revocation, user consent screens, and audit trail — deferred to a separate milestone.
+**This is local-dev Gmail resolver v1.1.** Production use requires a proper OAuth flow, encrypted refresh-token storage, revocation, user consent screens, and audit trail — deferred to a separate milestone.
 
 **MCP tool flow:**
 1. `report_security_challenge` — agent reports the challenge

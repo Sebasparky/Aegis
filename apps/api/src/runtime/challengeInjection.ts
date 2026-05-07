@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { SecurityChallenge } from "@aegis/types";
+import { taskBrowserSessions } from "./taskBrowserSessions.js";
 
 /**
  * Memory-only store for submitted verification codes.
@@ -22,14 +23,31 @@ export async function executeChallengeInjectionViaCDP(
   challenge: SecurityChallenge,
   resolvedCode: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const cdpBase = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+  // Resolve CDP base URL: prefer the task browser session's cdp_url when available,
+  // fall back to static env var for legacy challenges with no browser_session_id.
+  let cdpBase: string | undefined;
+  if (challenge.browser_session_id) {
+    const session = taskBrowserSessions.get(challenge.browser_session_id);
+    if (!session || session.status !== "ready") {
+      return {
+        success: false,
+        error:
+          `BROWSER_SESSION_NOT_READY: Task browser session '${challenge.browser_session_id}' ` +
+          `is not available (status: ${session?.status ?? "not found"}). ` +
+          "The session may have expired or the browser was closed.",
+      };
+    }
+    cdpBase = session.cdp_url;
+  } else {
+    cdpBase = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+  }
   if (!cdpBase) {
     return {
       success: false,
       error:
-        "AEGIS_PLAYWRIGHT_CDP_URL is not configured. " +
-        "Set this to the Chrome remote debugging base URL (e.g. http://localhost:9222). " +
-        "Chrome must be started with --remote-debugging-port=9222.",
+        "CDP_NOT_CONFIGURED: No task browser session is associated with this challenge and " +
+        "AEGIS_PLAYWRIGHT_CDP_URL is not set. Pass browser_session_id when calling " +
+        "report_security_challenge to target the correct browser.",
     };
   }
 

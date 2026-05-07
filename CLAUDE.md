@@ -295,11 +295,17 @@ Before making any changes:
 - Domain validation: injection target must match `challenge.domain` — enforced in agent-api.ts at challenge creation
 - CDP injection deletes the code from `challengeCodes` immediately before injecting — regardless of success or failure; no retry with the same code
 - On API restart, `pending_user` and `code_submitted` challenges become `expired` in persistence.ts loadStore
-- Connected email resolver (Phase 3) is future work — not implemented; do not stub or partially implement
+- Challenge injection must use `challenge.browser_session_id` → `taskBrowserSessions.get(id).cdp_url` when a session ID is present. Static `AEGIS_PLAYWRIGHT_CDP_URL` is a legacy fallback for challenges with no session ID. Agents must always pass `browser_session_id` from `start_task_browser_session` when calling `report_security_challenge` — without it, injection targets the wrong port.
+- Connected Email Challenge Resolver v1.1 is implemented — two-phase Gmail search (metadata scan + restricted body fetch fallback). Do not re-implement.
+- Verification email body fetch is allowed only inside Connected Email Challenge Resolver after user approval for a live `SecurityChallenge`. Body text is function-local only — never logged, never persisted, never returned to the agent or any API response.
+- Body fetch applies only to the best (most recent valid) candidate — at most 2 body fetches total (`MAX_BODY_FETCHES = 2`), body capped at 20,000 characters.
+- `extraction_source` ("subject_snippet" | "body_text") is safe metadata only — it describes which phase found the code, not the code or email content.
+- Domain check uses `isEmailChallengeSupported(domain)` from `VERIFICATION_EMAIL_POLICIES` registry in `emailChallengeResolver.ts` — not a hardcoded "github.com" string.
 - Aegis never bypasses 2FA, CAPTCHA, passkeys, or any human-presence security check
 - No full email body or inbox listing is ever returned to the agent
 - Every relay produces a status change record; see `docs/CHALLENGE_RELAY.md` for full phase roadmap
 - Do not rebuild: Manual Challenge Code Injection v1
+- Do not rebuild: Connected Email Challenge Resolver v1.1
 
 **Ephemeral Agent Browser Session invariants:**
 

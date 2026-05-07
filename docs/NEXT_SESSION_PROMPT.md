@@ -57,6 +57,10 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Password Import / Migration v1. It is complete. Do not re-implement `parseCredentialCsv`, `ParsedCredential`, `CsvParseResult` in `apps/web/src/lib/csvImport.ts`, `importVaultPasses` in `apps/web/src/lib/api.ts`, the `/vault-import` page, or `POST /api/internal/vault-passes/import`. The bulk import endpoint uses the same `createAndStoreVaultPass` helper as the single POST endpoint — do not create a second vault write path. CSV is parsed client-side; raw CSV is never sent to the API. Passwords are never returned in import responses. Duplicate detection compares normalized domain + lowercase username against existing vault passes. Max 200 credentials per import request.**
 
+> **Also: do NOT rebuild Sensitive Requirement Assessment v1. It is complete. Do not re-implement `assessSensitiveRequirements`, the `assess_sensitive_requirements` MCP tool schema, or the switch case in `examples/aegis-tool-server.mjs`. Agent autonomy boundary is defined in `docs/AGENT_INTEGRATION_CONTRACT.md` and `CLAUDE.md`. `plan_aegis_action` behavior and semantics are unchanged — its description was updated with a disambiguation note only.**
+
+> **Also: do NOT rebuild Security Challenge Expiry / Stale Approval Cleanup v1. It is complete. Do not re-implement lazy expiry in `GET /api/internal/security-challenges` (marks pending_user/code_submitted challenges expired, filters terminal statuses by default, supports `?include_terminal=true`), lazy expiry in `GET /api/internal/challenge-email-resolutions` (marks non-terminal resolutions expired when their linked challenge has expired), the `isExpired` setTimeout in `PendingChallengeCard`, the expired card early return, the auto-refresh `useEffect` on `challenges.length`, or the `isEmailTypeChallenge` generalization. Gmail button copy reads "Aegis only searches for this live verification request after you approve." Gmail resolution remains user-initiated (click = approval). Do not remove `TERMINAL_STATUSES` set from `security-challenges.ts`.**
+
 ---
 
 ## Completed Increments (as of 2026-05-03)

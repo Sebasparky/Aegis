@@ -438,6 +438,37 @@ Before making any changes:
 - Expose `AEGIS_RECEIPT_JWS_PRIVATE_JWK` in any API response, log line, or front-end import — it must remain in `apps/api` env only
 - Include plaintext passwords, credential values, or secrets in `receipt_jws` payload — the JWS covers only metadata
 
+**Security Challenge Expiry / Stale Approval Cleanup invariants:**
+
+- Security challenge approvals are live tasks, not permanent records — expired, cancelled, injected, and completed challenges must not remain actionable in the UI
+- `GET /api/internal/security-challenges` performs lazy expiry (marks `pending_user`/`code_submitted` challenges `expired` when `now > expires_at`) and filters terminal statuses by default (`expired`, `cancelled`, `code_injected`, `user_completed`, `failed`); `?include_terminal=true` is for debugging only
+- `GET /api/internal/challenge-email-resolutions` performs lazy expiry for non-terminal resolutions (`pending_approval`, `searching`, `code_found`) when the linked security challenge has expired
+- Challenge codes (`challengeCodes` Map) are deleted during lazy expiry in the list endpoint — same as on inject and restart
+- `TERMINAL_STATUSES` set is defined at module scope in `security-challenges.ts` — do not redefine per-request
+- `PendingChallengeCard` detects client-side expiry via `setTimeout` keyed to `challenge.expires_at`; shows a compact disabled "Expired" card with the message "This verification request expired. Start the login again to request a new code."
+- The expired card early return in `PendingChallengeCard` runs before `renderEmailResolverSection` is called — expired challenges never show actionable email resolver buttons
+- Auto-refresh on the approvals page polls `listSecurityChallenges()` every 8 seconds while `challenges.length > 0` — removes cards that have been injected, completed, or expired server-side on the next cycle
+- `isEmailTypeChallenge` checks only `challenge.challenge_type === "email_device_verification"` — no hardcoded provider domain in the frontend; backend enforces domain support via `isEmailChallengeSupported`
+- Gmail resolution remains user-initiated: "Find code in connected Gmail" button click = approval; Aegis does not search automatically; button copy reads "Aegis only searches for this live verification request after you approve"
+- Do not rebuild: Security Challenge Expiry / Stale Approval Cleanup v1
+
+**Sensitive Requirement Assessment invariants:**
+
+- `assess_sensitive_requirements` returns an intervention assessment, not a step-by-step workflow plan — Aegis does not replace the agent planner
+- Agent owns: navigation, clicking, reading, summarization, form submission, login method selection, and deciding when the task is complete
+- Aegis owns: credential field values (CDP injection), user approval gates, challenge relay, browser session lifecycle (ephemeral profile), and signed sensitive action receipts
+- `recommended_mode` values: `agent_owned_task_with_aegis_interventions` (login, browsing), `requires_aegis_sensitive_workflow` (payment/purchase/financial — must use a verified Aegis Rail), `requires_explicit_approval` (signup/account creation — stop and confirm), `requires_user_presence` (identity verification, biometrics, KYC — cannot delegate)
+- `available_aegis_routes` is always advisory — presence indicates a matching installed skill was found; whether to use it is the agent's decision; it never overrides agent autonomy
+- Payment/purchase/financial tasks returning `requires_aegis_sensitive_workflow` are a hard block, not a suggestion — the agent must not attempt these without a verified Aegis Rail
+- `requires_explicit_approval` means stop and obtain explicit user confirmation before taking any action
+- `requires_user_presence` tasks cannot be delegated — Aegis does not handle government IDs, biometrics, or KYC flows
+- OAuth credential injection boundary: Aegis should not inject credentials into a requesting site simply because it initiated an OAuth flow — injection is permitted only on the actual provider-owned login domain; the injection domain must match the provider's domain, not the originating site
+- Challenge relay has two paths: Connected Email Challenge Resolver (automatic, supported domains) and Manual Challenge Relay (fallback); `report_security_challenge` is the entry point for both paths
+- `must_not_do` fields in assessment responses are hard constraints the agent must comply with
+- When login appears unexpectedly mid-task, re-call `assess_sensitive_requirements` with the specific sub-task to get the correct intervention list
+- `assess_sensitive_requirements` never calls any POST endpoint, never creates or modifies resources, and never returns raw passwords, `secret_ref` values, or KMS material
+- Do not rebuild: Sensitive Requirement Assessment v1
+
 ## Core Lines
 
 - Agents are disposable. Trust is not.

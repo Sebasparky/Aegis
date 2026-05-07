@@ -28,13 +28,38 @@ function safeChallenge(ch: SecurityChallenge) {
   };
 }
 
+const TERMINAL_STATUSES = new Set(["expired", "cancelled", "code_injected", "user_completed", "failed"]);
+
 export async function securityChallengeRoutes(server: FastifyInstance): Promise<void> {
   // List challenges — used by the approval UI
   server.get("/api/internal/security-challenges", async (req, reply) => {
-    const { status } = (req.query ?? {}) as { status?: string };
+    const { status, include_terminal } = (req.query ?? {}) as { status?: string; include_terminal?: string };
+    const now = new Date();
+
     let items = Array.from(securityChallenges.values()).filter(
       (c) => c.user_id === MOCK_USER_ID,
     );
+
+    // Lazy expiry: mark stale active challenges as expired
+    let dirty = false;
+    for (const challenge of items) {
+      if (
+        (challenge.status === "pending_user" || challenge.status === "code_submitted") &&
+        new Date(challenge.expires_at) < now
+      ) {
+        challenge.status = "expired";
+        challengeCodes.delete(challenge.challenge_id);
+        securityChallenges.set(challenge.challenge_id, challenge);
+        dirty = true;
+      }
+    }
+    if (dirty) schedulePersist();
+
+    // By default hide terminal statuses; ?include_terminal=true for debugging
+    if (include_terminal !== "true") {
+      items = items.filter((c) => !TERMINAL_STATUSES.has(c.status));
+    }
+
     if (status) items = items.filter((c) => c.status === status);
     return reply.send({ ok: true, data: items.map(safeChallenge) });
   });

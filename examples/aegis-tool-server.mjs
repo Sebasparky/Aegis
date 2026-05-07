@@ -504,6 +504,211 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
   };
 }
 
+async function assessSensitiveRequirements({ task, domain } = {}) {
+  if (!task) return { error: "VALIDATION_ERROR", message: "task is required." };
+
+  const taskLower = task.toLowerCase();
+
+  const LOGIN_SIGNALS    = ["log in", "login", "sign in", "signin", "log into", "sign into", "authenticate"];
+  const PAYMENT_SIGNALS  = ["buy", "purchase", "pay", "checkout", "order", "payment", "credit card", "billing", "subscribe", "subscription"];
+  const SIGNUP_SIGNALS   = ["sign up", "signup", "create account", "register", "create a new account", "open an account"];
+  const IDENTITY_SIGNALS = ["verify identity", "identity verification", "id verification", "ssn", "social security", "kyc", "know your customer", "biometric"];
+
+  const taskIsLogin    = LOGIN_SIGNALS.some((kw)    => taskLower.includes(kw));
+  const taskIsPayment  = PAYMENT_SIGNALS.some((kw)  => taskLower.includes(kw));
+  const taskIsSignup   = SIGNUP_SIGNALS.some((kw)   => taskLower.includes(kw));
+  const taskIsIdentity = IDENTITY_SIGNALS.some((kw) => taskLower.includes(kw));
+
+  let resolvedDomain = domain ?? null;
+  if (!resolvedDomain) {
+    if (taskLower.includes("demo") || taskLower.includes("localhost")) {
+      resolvedDomain = "localhost:3000";
+    } else if (taskLower.includes("wikipedia")) {
+      resolvedDomain = "en.wikipedia.org";
+    }
+  }
+
+  const skillsPath = resolvedDomain
+    ? `/api/skills?domain=${encodeURIComponent(resolvedDomain)}&installed=true`
+    : `/api/skills?installed=true`;
+
+  let skills = [];
+  try {
+    const skillsRes = await request("GET", skillsPath);
+    if (skillsRes.ok) skills = skillsRes.data ?? [];
+  } catch (_) {}
+
+  const matchedSkill = skills.length > 0 ? scoreSkills(skills, taskLower) : null;
+  const availableAegisRoutes = matchedSkill
+    ? [{ skill_id: matchedSkill.skill_id, name: matchedSkill.name, domain: matchedSkill.domain, execution_mode: matchedSkill.execution_mode, note: "Advisory only — the agent may choose to use this route; it is not required." }]
+    : [];
+
+  if (taskIsIdentity) {
+    return {
+      recommended_mode: "requires_user_presence",
+      possible_sensitive_requirements: ["identity_document", "biometric_check", "government_id"],
+      unsupported_reason:
+        "Identity verification tasks require direct user presence and cannot be delegated to an agent in v1. " +
+        "Aegis does not handle government IDs, biometric checks, or KYC flows.",
+      ...(availableAegisRoutes.length > 0 && { available_aegis_routes: availableAegisRoutes }),
+      must_not_do: [
+        "submit or transmit government-issued document numbers on behalf of the user",
+        "attempt to pass a biometric or liveness check",
+        "proceed past an identity verification gate without explicit user confirmation",
+      ],
+    };
+  }
+
+  if (taskIsSignup) {
+    return {
+      recommended_mode: "requires_explicit_approval",
+      possible_sensitive_requirements: ["new_account_creation", "terms_acceptance", "email_verification"],
+      unsupported_reason:
+        "Account signup creates a new persistent identity for the user. " +
+        "Signup Credential Custody is not yet implemented in v1 — Aegis cannot safely manage credentials created during signup. " +
+        "The user must perform account creation themselves or an approved signup workflow must exist.",
+      ...(availableAegisRoutes.length > 0 && { available_aegis_routes: availableAegisRoutes }),
+      must_not_do: [
+        "create an account without explicit user approval",
+        "accept terms of service on behalf of the user without review",
+        "generate or store account credentials for newly created accounts",
+        "treat signup as equivalent to login",
+      ],
+    };
+  }
+
+  if (taskIsPayment) {
+    return {
+      recommended_mode: "requires_aegis_sensitive_workflow",
+      possible_sensitive_requirements: ["payment_method", "billing_address", "order_confirmation", "sensitive_action_receipt"],
+      explanation:
+        "Payment and purchase tasks are high-risk irreversible actions. " +
+        "Aegis must execute these through a verified Aegis Rail (request_skill_run + start_playwright_route_run) " +
+        "with collar-enforced spending limits and a signed receipt. " +
+        "The agent must not attempt payment workflows without a verified route.",
+      ...(availableAegisRoutes.length > 0
+        ? { available_aegis_routes: availableAegisRoutes, next_step: "A matching Aegis skill was found. The agent may use request_skill_run with the skill_id, then start_playwright_route_run after approval." }
+        : { next_step: "No matching Aegis skill found for this task. Check the Aegis Skill Library before proceeding." }),
+      user_approval_points: ["payment method use", "order confirmation", "spending limit step-up if required"],
+      must_not_do: [
+        "attempt to complete a purchase without a verified Aegis Rail",
+        "enter or relay payment card numbers, CVVs, or billing data",
+        "click order confirmation controls without Aegis route authorization",
+        "treat payment as a simple form fill",
+      ],
+    };
+  }
+
+  if (taskIsLogin) {
+    return {
+      recommended_mode: "agent_owned_task_with_aegis_interventions",
+      possible_sensitive_requirements: ["login_credential", "verification_challenge", "ephemeral_browser_session", "sensitive_action_receipt"],
+      recommended_aegis_interventions: [
+        {
+          when: "before browser-based authenticated work",
+          tool: "start_task_browser_session",
+          reason: "creates an ephemeral browser profile with password saving and autofill disabled; destroyed on close",
+        },
+        {
+          when: "when a username field is encountered on the login page",
+          tool: "request_secret_field_injection",
+          params: { field_kind: "username" },
+          reason: "Aegis fills the username from vault metadata via CDP; agent does not receive the raw value",
+        },
+        {
+          when: "when a password field is encountered on the login page",
+          tool: "request_secret_field_injection",
+          params: { field_kind: "password" },
+          reason: "Aegis fills the password from KMS-encrypted vault via CDP; agent does not receive the raw value",
+        },
+        {
+          when: "if a security verification challenge appears after form submit (email code, SMS, TOTP, device verification)",
+          tool: "report_security_challenge",
+          paths: [
+            {
+              when: "email-based challenge on a supported provider domain",
+              tools: ["request_challenge_email_resolution", "wait_for_challenge_email_resolution", "inject_challenge_email_code"],
+              reason: "Connected Email Challenge Resolver automatically fetches and injects the verification code; no user action needed after approval",
+            },
+            {
+              when: "unsupported domain or automatic resolution fails",
+              tools: ["wait_for_security_challenge", "inject_security_challenge_code"],
+              reason: "Manual Challenge Relay — user enters the code in Aegis UI; agent never receives the raw code",
+            },
+          ],
+          reason: "challenge relay without exposing raw verification codes to the agent or chat",
+        },
+        {
+          when: "when task is fully complete or has terminally failed",
+          tool: "close_task_browser_session",
+          reason: "destroys ephemeral profile and all cookies; required to prevent session persistence",
+        },
+      ],
+      ...(availableAegisRoutes.length > 0 && { available_aegis_routes: availableAegisRoutes }),
+      agent_owned_steps: [
+        "navigate to the login page",
+        "identify and select the username/password path",
+        "click Next, Sign In, Submit, or equivalent form controls",
+        "read page content and verify login success",
+        "continue with the post-login task (navigate, read, summarize, etc.)",
+        "decide whether to use an available Aegis route if one is listed",
+      ],
+      credential_injection_note:
+        "For OAuth flows: Aegis should not inject credentials into a requesting site simply because it initiated an OAuth flow. " +
+        "If the browser is redirected to the actual provider-owned login domain, Aegis may inject the provider credential there under normal credential custody rules. " +
+        "The injection domain must always match the provider's domain — not the originating site.",
+      user_approval_points: [
+        "credential use (one approval covers both username and password for the login attempt)",
+        "email challenge resolution if a verification email is sent (Connected Email Challenge Resolver)",
+        "manual challenge code relay if automatic email resolution fails or domain is not supported",
+      ],
+      must_not_do: [
+        "ask the user to paste verification codes into chat — use report_security_challenge instead",
+        "request raw credentials from the user",
+        "reuse the browser session after close_task_browser_session — start a fresh session",
+        "treat payment, signup, or identity verification encountered during login as a simple continuation",
+        "inject credentials into a requesting site's domain just because it initiated an OAuth redirect",
+        "use start_credential_session or fill_credential_field — those target the Chrome extension, not an agent Playwright browser",
+        "use request_authenticated_session_login unless the agent has no Playwright browser of its own",
+      ],
+    };
+  }
+
+  return {
+    recommended_mode: "agent_owned_task_with_aegis_interventions",
+    possible_sensitive_requirements: [],
+    recommended_aegis_interventions: [
+      {
+        when: "if an authenticated browser session is needed for the task",
+        tool: "start_task_browser_session",
+        reason: "ephemeral browser custody for any authenticated web task",
+      },
+      {
+        when: "if a login form or credential-protected page is unexpectedly encountered",
+        tool: "assess_sensitive_requirements",
+        params: { task: "log into <domain>" },
+        reason: "re-assess with login-specific signals to get the correct intervention list",
+      },
+      {
+        when: "when task is complete or terminally failed",
+        tool: "close_task_browser_session",
+        reason: "destroy ephemeral profile",
+      },
+    ],
+    ...(availableAegisRoutes.length > 0 && { available_aegis_routes: availableAegisRoutes }),
+    agent_owned_steps: [
+      "navigate pages using browser tools",
+      "read and summarize content",
+      "click non-sensitive controls",
+      "reason and plan next steps",
+    ],
+    must_not_do: [
+      "pass raw credentials, tokens, or secrets through chat",
+      "perform payment or financial actions without first calling assess_sensitive_requirements",
+    ],
+  };
+}
+
 async function createDelegationPassport({ delegation_id, expires_in_minutes } = {}) {
   if (!delegation_id) return { error: "VALIDATION_ERROR", message: "delegation_id is required." };
   const body = { delegation_id };
@@ -1656,7 +1861,7 @@ const TOOLS = [
   {
     name: "plan_aegis_action",
     description:
-      "Analyze a task description and return a structured execution plan without executing anything. Matches installed skills and recommends: get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run + start_playwright_route_run (Aegis-controlled sensitive workflows), or normal agent tools. For aegis_controlled skills, the response includes post_approval_next_tool='start_playwright_route_run' — after the run is created with request_skill_run and approved (if required), call start_playwright_route_run to execute via the Aegis Playwright runtime. Optionally resolves a vault credential by hint and includes a ready-to-use suggested_request. Call this first when you have a task description but haven't yet identified the skill or execution path.",
+      "Analyze a task description and return a structured execution plan without executing anything. Matches installed skills and recommends: get_agent_runnable_workflow (routine agent-executable workflows), request_skill_run + start_playwright_route_run (Aegis-controlled sensitive workflows), or normal agent tools. For aegis_controlled skills, the response includes post_approval_next_tool='start_playwright_route_run' — after the run is created with request_skill_run and approved (if required), call start_playwright_route_run to execute via the Aegis Playwright runtime. Optionally resolves a vault credential by hint and includes a ready-to-use suggested_request. Call this first when you have a task description but haven't yet identified the skill or execution path.\n\nUse plan_aegis_action when you need skill matching or credential resolution. For open-ended identification of which Aegis interventions a task may require (without skill matching or credential lookup), prefer assess_sensitive_requirements instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1674,6 +1879,37 @@ const TOOLS = [
           type: "string",
           description:
             "Optional. Substring to match against vault pass labels or usernames (e.g. 'Demo Login Account', 'staging'). Used only when the matched skill is aegis_controlled.",
+        },
+      },
+      required: ["task"],
+    },
+  },
+  {
+    name: "assess_sensitive_requirements",
+    description:
+      "Identify which Aegis interventions a task may require — without constructing a step-by-step workflow plan and without executing anything. " +
+      "The agent remains fully autonomous for navigation, clicking, reading, and summarization. " +
+      "Aegis is invoked selectively only for credential custody, challenge relay, browser session lifecycle, and sensitive action receipts.\n\n" +
+      "Preferred over plan_aegis_action when the goal is open-ended intervention identification rather than skill-matching or credential resolution. " +
+      "Use plan_aegis_action when you specifically need an installed skill matched or a ready-to-use suggested_request with credential resolution.\n\n" +
+      "recommended_mode values:\n" +
+      "  agent_owned_task_with_aegis_interventions — agent executes the task; call listed Aegis tools at the specified trigger points\n" +
+      "  requires_aegis_sensitive_workflow — high-risk irreversible action (payment, purchase); use a verified Aegis Rail\n" +
+      "  requires_explicit_approval — requires user approval before any agent action (signup, account creation)\n" +
+      "  requires_user_presence — cannot be delegated to an agent (identity verification, biometrics, KYC)\n\n" +
+      "available_aegis_routes is advisory — if present, a matching installed skill was found; whether to use it is the agent's decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description:
+            "Natural language description of the task. Examples: 'Log into my account and list my activity', 'Buy this item', 'Search for hotels in Paris'.",
+        },
+        domain: {
+          type: "string",
+          description:
+            "Optional. Target domain to restrict installed skill discovery (e.g. 'example.com', 'localhost:3000'). Inferred from task keywords if omitted.",
         },
       },
       required: ["task"],
@@ -2391,6 +2627,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "plan_aegis_action":
       result = await planAegisAction(a);
+      break;
+    case "assess_sensitive_requirements":
+      result = await assessSensitiveRequirements(a);
       break;
     case "get_delegation_trust_profile":
       result = await getDelegationTrustProfile(a);

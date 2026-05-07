@@ -838,6 +838,17 @@ function PendingChallengeCard({
   const [emailSearching, setEmailSearching] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
 
+  const [isExpired, setIsExpired] = useState(
+    challenge.status === "expired" || new Date(challenge.expires_at) < new Date(),
+  );
+  useEffect(() => {
+    if (isExpired) return;
+    const ms = new Date(challenge.expires_at).getTime() - Date.now();
+    if (ms <= 0) { setIsExpired(true); return; }
+    const t = setTimeout(() => setIsExpired(true), ms);
+    return () => clearTimeout(t);
+  }, [challenge.expires_at, isExpired]);
+
   const challengeLabel: Record<string, string> = {
     email_device_verification: "Email verification",
     sms_code: "SMS code",
@@ -883,12 +894,11 @@ function PendingChallengeCard({
     }
   }
 
-  const isGithubEmailChallenge =
-    challenge.challenge_type === "email_device_verification" &&
-    challenge.domain === "github.com";
+  const isEmailTypeChallenge = challenge.challenge_type === "email_device_verification";
 
   function renderEmailResolverSection() {
-    if (!isGithubEmailChallenge) return null;
+    if (!isEmailTypeChallenge) return null;
+    if (isExpired) return null;
 
     if (!emailResolverStatus?.connected) {
       return (
@@ -915,7 +925,7 @@ function PendingChallengeCard({
             {emailSearching ? "Searching Gmail…" : "Find code in connected Gmail"}
           </button>
           <p className="text-xs text-gray-600">
-            Aegis will search recent GitHub verification emails. The code is never shown to the agent.
+            Aegis only searches for this live verification request after you approve. The code is never shown to the agent.
           </p>
           {emailError && (
             <p className="text-xs text-red-400">{emailError}</p>
@@ -982,6 +992,30 @@ function PendingChallengeCard({
     }
 
     return null;
+  }
+
+  if (isExpired) {
+    return (
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 space-y-3 opacity-60">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-gray-400">
+              {challengeLabel[challenge.challenge_type] ?? "Security challenge"}
+            </p>
+            <p className="text-xs text-gray-600 font-mono mt-0.5">{challenge.domain}</p>
+          </div>
+          <span className="text-xs px-2 py-1 rounded-full border border-gray-700 text-gray-500 bg-gray-900 shrink-0">
+            Expired
+          </span>
+        </div>
+        <div className="rounded-lg bg-gray-950 border border-gray-800 px-4 py-3">
+          <p className="text-xs text-gray-500">
+            This verification request expired. Start the login again to request a new code.
+          </p>
+        </div>
+        <p className="text-xs text-gray-700 font-mono">{challenge.challenge_id}</p>
+      </div>
+    );
   }
 
   return (
@@ -1111,7 +1145,7 @@ export default function RouteRunApprovalsPage() {
       listAuthenticatedSessions("pending_approval"),
       listSecretFieldInjections("pending_approval"),
       listCredentialUseAuthorizations("pending_approval"),
-      listSecurityChallenges("pending_user"),
+      listSecurityChallenges(),
       getEmailResolverStatus().catch(() => null),
     ])
       .then(([r, s, a, inj, auths, chlgs, emailStatus]) => {
@@ -1146,6 +1180,20 @@ export default function RouteRunApprovalsPage() {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  // Auto-refresh challenges while any are active (catches expiry and injected codes)
+  useEffect(() => {
+    if (challenges.length === 0) return;
+    const id = setInterval(async () => {
+      try {
+        const fresh = await listSecurityChallenges();
+        setChallenges(fresh);
+      } catch {
+        // non-fatal — don't disrupt UI on poll failure
+      }
+    }, 8000);
+    return () => clearInterval(id);
+  }, [challenges.length]);
 
   async function handleApprove(runId: string) {
     setActionError(null);

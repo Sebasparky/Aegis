@@ -50,9 +50,29 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
   // GET /api/internal/challenge-email-resolutions — list resolutions for current user
   server.get("/api/internal/challenge-email-resolutions", async (req, reply) => {
     const { challenge_id } = (req.query ?? {}) as { challenge_id?: string };
+    const now = new Date();
+
     let items = Array.from(challengeEmailResolutions.values()).filter(
       (r) => r.user_id === MOCK_USER_ID,
     );
+
+    // Lazy expiry: mark non-terminal resolutions as expired when their challenge has expired
+    const NON_TERMINAL = new Set(["pending_approval", "searching", "code_found"]);
+    let dirty = false;
+    for (const res of items) {
+      if (!NON_TERMINAL.has(res.status)) continue;
+      const linked = securityChallenges.get(res.challenge_id);
+      if (!linked || new Date(linked.expires_at) < now) {
+        res.status = "expired";
+        res.error = res.error ?? "The associated security challenge has expired.";
+        res.updated_at = now.toISOString();
+        resolutionCodes.delete(res.resolution_id);
+        challengeEmailResolutions.set(res.resolution_id, res);
+        dirty = true;
+      }
+    }
+    if (dirty) schedulePersist();
+
     if (challenge_id) items = items.filter((r) => r.challenge_id === challenge_id);
     return reply.send({ ok: true, data: items.map(safeResolution) });
   });

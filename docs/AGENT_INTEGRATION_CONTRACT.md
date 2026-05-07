@@ -18,6 +18,7 @@ An agent holds a **Delegation Token** bound to a user's active delegation. It ca
 |---|---|
 | Need an ephemeral browser for navigation / login | `start_task_browser_session` → use Playwright MCP → `close_task_browser_session` after task |
 | Normal username/password login (agent has Playwright browser) | `request_secret_field_injection` → `execute_secret_field_injection` (agent navigates, Aegis fills fields, agent submits) |
+| Identify which Aegis interventions a task needs (open-ended) | `assess_sensitive_requirements` |
 | Inspect a URL before committing to any action | `plan_aegis_action` or observation dry run |
 | Agent has no browser / explicit isolated login requested | `request_authenticated_session_login` → poll `get_authenticated_session` → `observe_authenticated_session` / `navigate_authenticated_session` |
 | High-risk predefined workflow (payment, banking, account deletion) | `request_skill_run` → (approve) → `start_playwright_route_run` |
@@ -1004,6 +1005,105 @@ plan_aegis_action({
     },
     "explanation": "This is a sensitive workflow requiring Aegis control. Your selected credential will be resolved server-side — no passwords are exposed."
   }
+```
+
+---
+
+## Sensitive Requirement Assessment Tool: `assess_sensitive_requirements` (v1)
+
+**Status:** Implemented.
+
+`assess_sensitive_requirements` identifies what Aegis interventions may be needed for a task — without constructing a step-by-step workflow plan and without executing anything. The agent remains autonomous for navigation, clicking, reading, and summarization. Aegis is invoked only at specific trigger points the assessment identifies.
+
+Use this instead of `plan_aegis_action` when the goal is intervention identification rather than skill matching or credential resolution.
+
+### Inputs
+
+| Field | Required | Description |
+|---|---|---|
+| `task` | Yes | Natural language description of the task |
+| `domain` | No | Target domain to restrict installed skill discovery; inferred from task keywords if omitted |
+
+### `recommended_mode` values
+
+| Value | Meaning | Agent action |
+|---|---|---|
+| `agent_owned_task_with_aegis_interventions` | Agent owns the task; call listed Aegis tools at the specified trigger points | Follow `recommended_aegis_interventions` list |
+| `requires_aegis_sensitive_workflow` | High-risk irreversible action (payment, purchase, financial) | Use a verified Aegis Rail: `request_skill_run` + `start_playwright_route_run` |
+| `requires_explicit_approval` | Requires explicit user approval before any agent action (signup, account creation) | Stop and obtain explicit user confirmation before proceeding |
+| `requires_user_presence` | Cannot be delegated to an agent (identity verification, biometrics, KYC) | Stop; inform the user they must perform this step themselves |
+
+### Agent Autonomy Boundary
+
+| Agent owns | Aegis owns |
+|---|---|
+| Navigation (browser_navigate, browser_click, browser_snapshot) | Credential field values (username, password via CDP injection) |
+| Reading and summarizing page content | User approval gates |
+| Login method selection | Challenge relay (verification codes, email codes) |
+| Form submission (clicking Submit/Sign In) | Browser session lifecycle (ephemeral profile creation and destruction) |
+| Task completion judgment | Signed sensitive action receipts |
+| Deciding whether to use an available Aegis route | KMS secret resolution |
+
+### Key response fields
+
+- **`recommended_aegis_interventions`** — list of `{ when, tool, reason }` entries. Each entry describes the trigger condition and which Aegis tool to call. For challenge relay, a `paths` array provides both the Connected Email Challenge Resolver path (for supported domains) and the Manual Challenge Relay fallback.
+- **`agent_owned_steps`** — steps the agent performs autonomously.
+- **`available_aegis_routes`** — if present, a matching installed Aegis skill was found. **Advisory only** — the agent decides whether to use the route.
+- **`user_approval_points`** — moments where user approval is expected.
+- **`must_not_do`** — hard constraints the agent must not violate for this task type.
+- **`credential_injection_note`** — OAuth boundary guidance on login tasks.
+
+### OAuth credential injection boundary
+
+Aegis should not inject credentials into a requesting site simply because it initiated an OAuth flow. If the browser is redirected to the actual provider-owned login domain, Aegis may inject the provider credential there under normal credential custody rules. The injection domain must always match the provider's domain — not the originating site.
+
+### Security invariants
+
+- No passwords, `secret_ref`, raw secret values, or KMS material are ever returned.
+- `available_aegis_routes` contains only `skill_id`, `name`, `domain`, and `execution_mode`.
+- The tool never calls any POST endpoint and never creates or modifies any resource.
+- `must_not_do` entries are hard constraints, not suggestions.
+
+### Example: login task
+
+```
+assess_sensitive_requirements({ task: "Log into my account and list my activity" })
+
+→ {
+    "recommended_mode": "agent_owned_task_with_aegis_interventions",
+    "possible_sensitive_requirements": ["login_credential", "verification_challenge", "ephemeral_browser_session", "sensitive_action_receipt"],
+    "recommended_aegis_interventions": [
+      { "when": "before browser-based authenticated work", "tool": "start_task_browser_session", "reason": "ephemeral browser custody" },
+      { "when": "when a username field is encountered", "tool": "request_secret_field_injection", "params": { "field_kind": "username" }, "reason": "credential custody" },
+      { "when": "when a password field is encountered", "tool": "request_secret_field_injection", "params": { "field_kind": "password" }, "reason": "credential custody" },
+      {
+        "when": "if a verification challenge appears after submit",
+        "tool": "report_security_challenge",
+        "paths": [
+          { "when": "email challenge on a supported provider domain", "tools": ["request_challenge_email_resolution", "wait_for_challenge_email_resolution", "inject_challenge_email_code"], "reason": "Connected Email Resolver — automatic injection" },
+          { "when": "unsupported domain or automatic resolution fails", "tools": ["wait_for_security_challenge", "inject_security_challenge_code"], "reason": "Manual Challenge Relay — user enters code in Aegis UI" }
+        ]
+      },
+      { "when": "when task is complete or terminally failed", "tool": "close_task_browser_session", "reason": "destroy browser profile" }
+    ],
+    "agent_owned_steps": ["navigate to the login page", "select username/password path", "click Submit", "read page content", "summarize results"],
+    "user_approval_points": ["credential use", "email challenge resolution", "manual challenge code relay if automatic fails"],
+    "must_not_do": ["ask user to paste verification codes into chat", "request raw credentials from user", "reuse session after close", "inject credentials into a requesting site's domain just because it initiated an OAuth redirect"]
+  }
+```
+
+### Example: payment task
+
+```
+assess_sensitive_requirements({ task: "Buy this item from my cart" })
+→ { "recommended_mode": "requires_aegis_sensitive_workflow", ... }
+```
+
+### Example: signup task
+
+```
+assess_sensitive_requirements({ task: "Create an account for me" })
+→ { "recommended_mode": "requires_explicit_approval", "unsupported_reason": "Signup Credential Custody is not yet implemented..." }
 ```
 
 ---

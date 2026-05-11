@@ -125,26 +125,33 @@ After reading, Agent B follows the same pattern: claim task_coord_002 → create
 
 ---
 
+## Task Eligibility (as of Eligibility v1)
+
+| Task | assignment_type | Who may claim |
+|------|-----------------|---------------|
+| task_coord_001 | delegation → delg_demo_001 | Agent A only (pass_demo_001) |
+| task_coord_002 | collar → collar_research_001 | Agent B only (pass_demo_002, default_collar_id=collar_research_001) |
+
+Agent A sees task_coord_001 in `task_summary.assigned_to_me` and task_coord_002 in `task_summary.not_eligible`.
+Agent B sees task_coord_002 in `task_summary.eligible` and task_coord_001 in `task_summary.not_eligible`.
+
 ## Developer Verification (run before handing to agents)
 
 ```bash
-# Verify Agent A can access the workspace with open tasks
+# Verify Agent A manifest: assigned_to_me has task_coord_001, not_eligible has task_coord_002
 curl -s -H "Authorization: Bearer pass_demo_001" \
-  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001 | jq '.ok, .data.task_counts'
-# Expected: true  { open: 2, in_progress: 0, completed: 0 }
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '{assigned_to_me: [.data.task_summary.assigned_to_me[].task_id], not_eligible: [.data.task_summary.not_eligible[].task_id]}'
+# Expected: {"assigned_to_me":["task_coord_001"],"not_eligible":["task_coord_002"]}
 
-# Verify Agent B can also access it
+# Verify Agent B manifest: eligible has task_coord_002, not_eligible has task_coord_001
 curl -s -H "Authorization: Bearer pass_demo_002" \
-  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001 | jq '.ok, .data.task_counts'
-# Expected: true  { open: 2, in_progress: 0, completed: 0 }
-
-# Verify both tasks are listed
-curl -s -H "Authorization: Bearer pass_demo_001" \
-  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/tasks | jq '[.data[].task_id]'
-# Expected: ["task_coord_001", "task_coord_002"]
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '{eligible: [.data.task_summary.eligible[].task_id], not_eligible: [.data.task_summary.not_eligible[].task_id]}'
+# Expected: {"eligible":["task_coord_002"],"not_eligible":["task_coord_001"]}
 ```
 
-If all three return expected results, the setup is ready.
+If both return expected bucket assignments, eligibility is working correctly.
 
 ---
 
@@ -259,21 +266,24 @@ Do not ask for clarification. Execute all steps sequentially.
 
 ---
 
-## Short System Prompt (Manifest Version)
+## Short System Prompt (Manifest + Eligibility Version)
 
-These replace the step-by-step prompts above. The agent calls the manifest first, then
-follows `next_actions` and `operations` from the response.
+These prompts do not include explicit task IDs. The agent reads the manifest, finds its
+task via the eligibility buckets, and proceeds. This is the intended production flow.
 
 ### Manifest curl (verify before handing to agents)
 
 ```bash
+# Agent A: should see task in assigned_to_me
 curl -s -H "Authorization: Bearer pass_demo_001" \
-  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest | jq .
-```
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '{assigned_to_me: [.data.task_summary.assigned_to_me[].task_id], next_actions: .data.next_actions}'
 
-Expected: `ok: true`, `identity.delegation_id: "delg_demo_001"`, 7 entries in
-`effective_permissions` all `"allow"`, two tasks in `task_summary.open`,
-`next_actions` containing a claim hint.
+# Agent B: should see task in eligible
+curl -s -H "Authorization: Bearer pass_demo_002" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '{eligible: [.data.task_summary.eligible[].task_id], next_actions: .data.next_actions}'
+```
 
 ### Agent A — short prompt
 
@@ -284,19 +294,21 @@ All requests: Authorization: Bearer pass_demo_001
 POST/PATCH also need: Content-Type: application/json
 
 1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
-   Read effective_permissions, task_summary, and next_actions before doing anything else.
+   Read task_summary carefully. Your task will be in assigned_to_me (pre-assigned to you).
+   If assigned_to_me is empty, check eligible, then open. Follow next_actions.
 
-2. Claim task_coord_001.
-   PATCH .../tasks/task_coord_001  {"action":"claim"}
+2. Claim the task from assigned_to_me.
+   PATCH .../tasks/{task_id}  {"action":"claim"}
+   Use the task_id from the manifest, not a hardcoded value.
 
-3. Write 2-3 sentences each on AegisID, Delegation & Collars, Aegis Rails, Aegis Guard,
-   and Audit Trail (from the task description).
+3. Read the task description from the manifest to understand what to write.
+   Write 2-3 sentences each on: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, Audit Trail.
 
-4. Create artifact "aegis-pillars-summary.md" linked to task_coord_001.
-   POST .../artifacts  {"name":"aegis-pillars-summary.md","kind":"markdown","task_id":"task_coord_001","content":"<your content>"}
+4. Create a markdown artifact named "aegis-pillars-summary.md" linked to your task_id.
+   POST .../artifacts  {"name":"aegis-pillars-summary.md","kind":"markdown","task_id":"{task_id}","content":"<your content>"}
 
 5. Complete the task.
-   PATCH .../tasks/task_coord_001  {"action":"complete"}
+   PATCH .../tasks/{task_id}  {"action":"complete"}
 
 Report: artifact_id and final task status. Execute all steps sequentially.
 ```
@@ -310,22 +322,24 @@ All requests: Authorization: Bearer pass_demo_002
 POST/PATCH also need: Content-Type: application/json
 
 1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
-   Check task_summary.recently_completed — confirm task_coord_001 is completed by Agent A.
-   If not complete, stop and report. Also note the artifacts list for step 3.
+   Read task_summary. Your task will be in eligible (your collar qualifies for it).
+   If eligible is empty, check open. Check recently_completed to see if Agent A has finished.
+   If Agent A's task is not yet in recently_completed, stop and report.
 
-2. Claim task_coord_002.
-   PATCH .../tasks/task_coord_002  {"action":"claim"}
+2. Claim the task from eligible.
+   PATCH .../tasks/{task_id}  {"action":"claim"}
+   Use the task_id from the manifest, not a hardcoded value.
 
-3. Find "aegis-pillars-summary.md" in manifest.artifacts. Then read it.
-   GET .../artifacts/<artifact_id>
+3. Find "aegis-pillars-summary.md" in manifest.artifacts. Then read its content.
+   GET .../artifacts/{artifact_id}
 
 4. Identify the single most important Aegis capability. Write a 3-bullet argument for why it matters.
 
-5. Create artifact "aegis-pillars-review.md" linked to task_coord_002.
-   POST .../artifacts  {"name":"aegis-pillars-review.md","kind":"markdown","task_id":"task_coord_002","content":"<your content>"}
+5. Create a markdown artifact named "aegis-pillars-review.md" linked to your task_id.
+   POST .../artifacts  {"name":"aegis-pillars-review.md","kind":"markdown","task_id":"{task_id}","content":"<your content>"}
 
 6. Complete the task.
-   PATCH .../tasks/task_coord_002  {"action":"complete"}
+   PATCH .../tasks/{task_id}  {"action":"complete"}
 
 Report: chosen pillar, 3 arguments, artifact_id, final task_counts. Execute all steps sequentially.
 ```

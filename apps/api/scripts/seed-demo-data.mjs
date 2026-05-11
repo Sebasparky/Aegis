@@ -965,6 +965,8 @@ const WORKSPACE_TASKS = [
     title: "Summarize the five Aegis product pillars",
     description: "Write 2-3 sentences each on: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
     status: "open",
+    assignment_type: "delegation",
+    assigned_delegation_id: "delg_demo_001",
     created_by_user_id: "user_001",
     created_at: "2026-05-11T00:00:00.000Z",
     updated_at: "2026-05-11T00:00:00.000Z"
@@ -975,6 +977,8 @@ const WORKSPACE_TASKS = [
     title: "Review the pillars summary and produce a prioritization artifact",
     description: "List artifacts in the workspace. Find and read the artifact named `aegis-pillars-summary.md` created by the other agent. Identify the single most important capability Aegis provides. Write a 3-bullet-point argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
     status: "open",
+    assignment_type: "collar",
+    required_collar_id: "collar_research_001",
     created_by_user_id: "user_001",
     created_at: "2026-05-11T00:00:00.000Z",
     updated_at: "2026-05-11T00:00:00.000Z"
@@ -1034,6 +1038,46 @@ const store = {
         },
         created_at: "2026-04-28T01:27:21.845Z",
         updated_at: "2026-04-28T01:27:21.845Z"
+      }
+    ],
+    [
+      "collar_research_001",
+      {
+        id: "collar_research_001",
+        user_id: "user_001",
+        name: "Research Collar",
+        description: "A collar for research and review tasks. Grants the same workspace permissions as the starter collar.",
+        purpose: "Identify agents with research and review capability for collar-required workspace tasks.",
+        status: "active",
+        allowed_actions: [
+          "browse", "search", "read", "compare", "draft",
+          "workspace_read", "workspace_task_list", "workspace_task_claim",
+          "workspace_task_complete", "workspace_artifact_create",
+          "workspace_artifact_list", "workspace_artifact_read"
+        ],
+        approval_required_actions: [
+          "login", "purchase", "payment", "share_email", "share_phone",
+          "submit_form", "post_publicly", "upload_file", "send_email", "create_account"
+        ],
+        blocked_actions: [
+          "subscription", "government_id_upload", "identity_disclosure",
+          "medical_data_disclosure", "financial_data_disclosure", "delete_account"
+        ],
+        spending_limits: {
+          max_without_approval: 0,
+          max_with_approval: 50,
+          subscriptions_allowed: false
+        },
+        counterparty_rules: {
+          sensitive_actions_require_verified_business: false,
+          block_known_prompt_injection_sites: true
+        },
+        session_limits: {
+          max_duration_minutes: 120,
+          max_active_sessions: 3
+        },
+        created_at: "2026-05-11T00:00:00.000Z",
+        updated_at: "2026-05-11T00:00:00.000Z"
       }
     ]
   ],
@@ -1127,7 +1171,7 @@ const store = {
         agent_name: "agent_demo_restricted",
         agent_platform: "api",
         channel: "api",
-        default_collar_id: "collar_demo_starter",
+        default_collar_id: "collar_research_001",
         status: "active",
         token_id: "pass_demo_002",
         skill_access_mode: "only",
@@ -1163,4 +1207,6 @@ console.log("  skill_demo_travel_booking_001       — Demo Flight Booking (Skil
 console.log("  skill_demo_travel_violation_001     — Demo Flight Booking Violation   (aegis_controlled/sensitive, violation demo, pre-installed)");
 console.log("  pay_method_demo_001                 — Aegis Demo Card                 (visa, last4: 4242, metadata only)");
 console.log("  ws_coord_trial_001                  — Coordination Trial Workspace    (collar_demo_starter, 2 participants, 2 open tasks)");
+console.log("  task_coord_001: assignment_type=delegation → Agent A (pass_demo_001, collar_demo_starter)");
+console.log("  task_coord_002: assignment_type=collar    → requires collar_research_001 (Agent B, pass_demo_002)");
 console.log("Workspace trial: Agent A = pass_demo_001 | Agent B = pass_demo_002 | Workspace = ws_coord_trial_001");

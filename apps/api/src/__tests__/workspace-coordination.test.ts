@@ -1202,3 +1202,443 @@ describe("GET /api/agent/v1/workspaces/:id/manifest", () => {
     rules.forEach((r) => expect(typeof r).toBe("string"));
   });
 });
+
+// ─── 10. Task eligibility — claim enforcement ─────────────────────────────────
+
+// Helpers scoped to these tests to avoid ID collisions
+const ELG = {
+  WS: "ws_elg_001",
+  WS_COL: "col_elg_ws_001",
+  // Agent A: collar_demo_starter (IDS.COLLAR)
+  DEL_A: IDS.DELEGATION_ALL,
+  TOK_A: IDS.TOKEN_ALL,
+  // Agent B: a distinct collar (col_elg_b)
+  DEL_B: "delg_elg_b",
+  TOK_B: "tok_elg_b",
+  COL_B: "col_elg_b",
+  // Outsider
+  DEL_OUT: IDS.DELEGATION_OUTSIDER,
+  TOK_OUT: IDS.TOKEN_OUTSIDER,
+} as const;
+
+/** Seeds the eligibility workspace with Agent A (IDS.COLLAR) and Agent B (ELG.COL_B) as participants. */
+function seedEligibilityWorkspace(): void {
+  // Workspace collar: full permissions
+  seedPermCollar(ELG.WS_COL, { allowed: [...ALL_WS_ACTIONS] });
+  // Agent B delegation with its own collar
+  seedPermCollar(ELG.COL_B, { allowed: [...ALL_WS_ACTIONS] });
+  seedPermDelegation(ELG.DEL_B, ELG.TOK_B, ELG.COL_B);
+  // Workspace with both agents
+  seedPermWorkspace(ELG.WS, ELG.WS_COL, [ELG.DEL_A, ELG.DEL_B]);
+}
+
+describe("PATCH .../tasks/:taskId — claim eligibility", () => {
+  // ─ Open tasks (backward compat) ──────────────────────────────────────────────
+
+  it("open task with no assignment_type is claimable by any participant", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_open_001", { workspace_id: ELG.WS });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_open_001`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe("in_progress");
+  });
+
+  it("open task with assignment_type='open' is claimable by any participant", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_open_002", { workspace_id: ELG.WS, assignment_type: "open" });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_open_002`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  // ─ Delegation-assigned tasks ──────────────────────────────────────────────────
+
+  it("delegation-assigned task is claimable only by the assigned delegation", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_del_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_del_001`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.assigned_delegation_id).toBe(ELG.DEL_A);
+  });
+
+  it("delegation-assigned task returns TASK_NOT_ELIGIBLE for another delegation", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_del_002", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_del_002`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+
+  it("delegation-assigned task: re-claiming own in_progress task is idempotent", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_del_idem", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+      status: "in_progress",
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_del_idem`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.is_mine).toBe(true);
+  });
+
+  it("in_progress task owned by another returns TASK_ALREADY_CLAIMED, not TASK_NOT_ELIGIBLE", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_taken", {
+      workspace_id: ELG.WS,
+      status: "in_progress",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_taken`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("TASK_ALREADY_CLAIMED");
+  });
+
+  // ─ Collar-required tasks ──────────────────────────────────────────────────────
+
+  it("collar-required task is claimable by a delegation with matching default_collar_id", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_col_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_col_001`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.assigned_delegation_id).toBe(ELG.DEL_B);
+  });
+
+  it("collar-required task returns TASK_NOT_ELIGIBLE for non-matching collar", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_elg_col_002", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_col_002`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+
+  it("collar-required task returns TASK_NOT_ELIGIBLE when required collar is inactive", async () => {
+    seedEligibilityWorkspace();
+    // Override the collar to inactive; use Agent A (active collar) as the requester so that
+    // checkWorkspacePermission passes and checkTaskEligibility fires the liveness check.
+    seedPermCollar(ELG.COL_B, { allowed: [...ALL_WS_ACTIONS], status: "revoked" });
+    seedOpenTask("task_elg_col_inactive", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/tasks/task_elg_col_inactive`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}`, "content-type": "application/json" },
+      payload: { action: "claim" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+});
+
+// ─── 11. Task eligibility — manifest buckets ──────────────────────────────────
+
+describe("GET .../manifest — task eligibility buckets", () => {
+  it("delegation-type task pre-assigned to caller appears in assigned_to_me", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_atm_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task_summary } = res.json().data;
+    expect(task_summary.assigned_to_me.some((t: { task_id: string }) => t.task_id === "task_mb_atm_001")).toBe(true);
+    expect(task_summary.open).toHaveLength(0);
+    expect(task_summary.eligible).toHaveLength(0);
+  });
+
+  it("delegation-type task pre-assigned to other delegation does not appear in assigned_to_me", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_atm_002", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}` },
+    });
+    const { task_summary } = res.json().data;
+    expect(task_summary.assigned_to_me).toHaveLength(0);
+    expect(task_summary.not_eligible.some((t: { task_id: string }) => t.task_id === "task_mb_atm_002")).toBe(true);
+  });
+
+  it("collar-type task with matching collar appears in eligible", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_el_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}` },
+    });
+    const { task_summary } = res.json().data;
+    expect(task_summary.eligible.some((t: { task_id: string }) => t.task_id === "task_mb_el_001")).toBe(true);
+    expect(task_summary.not_eligible).toHaveLength(0);
+  });
+
+  it("collar-type task with non-matching collar appears in not_eligible with reason", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_nel_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    const { task_summary } = res.json().data;
+    expect(task_summary.eligible).toHaveLength(0);
+    const nel = task_summary.not_eligible as { task_id: string; reason: string }[];
+    const entry = nel.find((t) => t.task_id === "task_mb_nel_001");
+    expect(entry).toBeDefined();
+    expect(entry!.reason).toContain(ELG.COL_B);
+  });
+
+  it("not_eligible reason for other-delegation task is 'assigned_to_other_delegation'", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_nel_del", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}` },
+    });
+    const nel = res.json().data.task_summary.not_eligible as { task_id: string; reason: string }[];
+    const entry = nel.find((t) => t.task_id === "task_mb_nel_del");
+    expect(entry!.reason).toBe("assigned_to_other_delegation");
+  });
+
+  it("open-type tasks appear only in open bucket", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_open_001", { workspace_id: ELG.WS });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    const { task_summary } = res.json().data;
+    expect(task_summary.open.some((t: { task_id: string }) => t.task_id === "task_mb_open_001")).toBe(true);
+    expect(task_summary.assigned_to_me).toHaveLength(0);
+    expect(task_summary.eligible).toHaveLength(0);
+  });
+
+  it("in_progress task claimed by caller appears in mine", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_mine_001", {
+      workspace_id: ELG.WS,
+      status: "in_progress",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    const { task_summary } = res.json().data;
+    expect(task_summary.mine.some((t: { task_id: string }) => t.task_id === "task_mb_mine_001")).toBe(true);
+  });
+
+  it("collar-required task with inactive collar appears in not_eligible with reason 'required_collar_inactive_or_missing'", async () => {
+    seedEligibilityWorkspace();
+    seedPermCollar(ELG.COL_B, { allowed: [...ALL_WS_ACTIONS], status: "revoked" });
+    seedOpenTask("task_mb_inactive_col", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    const nel = res.json().data.task_summary.not_eligible as { task_id: string; reason: string }[];
+    const entry = nel.find((t) => t.task_id === "task_mb_inactive_col");
+    expect(entry!.reason).toBe("required_collar_inactive_or_missing");
+  });
+
+  it("not_eligible tasks never expose owner_user_id or participant_delegation_ids", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_mb_sec_001", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}` },
+    });
+    const payload = JSON.stringify(res.json().data);
+    expect(payload).not.toContain("owner_user_id");
+    expect(payload).not.toContain("participant_delegation_ids");
+  });
+
+  // ─ next_actions priority ──────────────────────────────────────────────────────
+
+  it("next_actions: assigned_to_me hint fires before eligible hint", async () => {
+    seedEligibilityWorkspace();
+    // Agent A: has an assigned task and also an eligible open task
+    seedPermCollar("col_elg_a_extra", { allowed: [...ALL_WS_ACTIONS] });
+    seedOpenTask("task_nxt_atm", {
+      workspace_id: ELG.WS,
+      assignment_type: "delegation",
+      assigned_delegation_id: ELG.DEL_A,
+    });
+    // Give Agent A a second collar match via open-type task (not eligible bucket, but open)
+    seedOpenTask("task_nxt_open", { workspace_id: ELG.WS });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_A}` },
+    });
+    const hints: string[] = res.json().data.next_actions;
+    const atm = hints.findIndex((h) => h.toLowerCase().includes("assigned"));
+    const open = hints.findIndex((h) => h.toLowerCase().includes("open task"));
+    expect(atm).toBeGreaterThanOrEqual(0);
+    // assigned hint exists; open hint suppressed because assigned_to_me is non-empty
+    expect(open).toBe(-1);
+  });
+
+  it("next_actions: eligible hint fires before open hint", async () => {
+    seedEligibilityWorkspace();
+    seedOpenTask("task_nxt_el", {
+      workspace_id: ELG.WS,
+      assignment_type: "collar",
+      required_collar_id: ELG.COL_B,
+    });
+    seedOpenTask("task_nxt_open_b", { workspace_id: ELG.WS });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${ELG.WS}/manifest`,
+      headers: { authorization: `Bearer ${ELG.TOK_B}` },
+    });
+    const hints: string[] = res.json().data.next_actions;
+    const el = hints.findIndex((h) => h.toLowerCase().includes("eligible"));
+    const open = hints.findIndex((h) => h.toLowerCase().includes("open task"));
+    expect(el).toBeGreaterThanOrEqual(0);
+    // open hint suppressed when eligible is non-empty and mine is empty
+    expect(open).toBe(-1);
+  });
+
+  it("next_actions: no claim hint when workspace_task_claim is blocked even with assigned_to_me task", async () => {
+    const WS6 = "ws_elg_nxt_blocked";
+    const WS_COL6 = "col_elg_ws_nxt_blocked";
+    const DEL6 = "del_elg_nxt_blocked";
+    const TOK6 = "tok_elg_nxt_blocked";
+    const DEL_COL6 = "col_elg_del_nxt_blocked";
+
+    seedPermCollar(WS_COL6, {
+      allowed: ALL_WS_ACTIONS.filter((a) => a !== "workspace_task_claim") as string[],
+      blocked: ["workspace_task_claim"],
+    });
+    seedPermCollar(DEL_COL6, { allowed: [...ALL_WS_ACTIONS] });
+    seedPermDelegation(DEL6, TOK6, DEL_COL6);
+    seedPermWorkspace(WS6, WS_COL6, [DEL6]);
+    seedOpenTask("task_nxt_blocked", {
+      workspace_id: WS6,
+      assignment_type: "delegation",
+      assigned_delegation_id: DEL6,
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS6}/manifest`,
+      headers: { authorization: `Bearer ${TOK6}` },
+    });
+    const hints: string[] = res.json().data.next_actions;
+    expect(hints.some((h) => h.toLowerCase().includes("claim"))).toBe(false);
+  });
+});

@@ -46,7 +46,7 @@ import {
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
-import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit, buildEffectivePermissionsMap } from "../lib/workspaceDomain.js";
+import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit, buildEffectivePermissionsMap, checkTaskEligibility } from "../lib/workspaceDomain.js";
 import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
 import { resolutionCodes, searchGmailForChallengeCode, isEmailChallengeSupported } from "../runtime/emailChallengeResolver.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
@@ -1722,13 +1722,46 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       const perms = buildEffectivePermissionsMap(workspaceCollar, delegationCollar);
 
-      // Build task summary
+      // Build task summary — classify open tasks by eligibility
       const allTasks = Array.from(workspaceTasks.values()).filter(
         (t) => t.workspace_id === workspace.workspace_id,
       );
-      const openTasks = allTasks.filter((t) => t.status === "open");
+
+      // assigned_delegation_id dual role:
+      //   assignment_type="delegation" + status="open"  → reserved for that delegation (pre-assigned)
+      //   status="in_progress" (any type)               → the actual claimant
+      const assignedToMe: typeof allTasks = [];
+      const eligible: typeof allTasks = [];
+      const openUnassigned: typeof allTasks = [];
+      const notEligible: { task_id: string; title: string; status: string; reason: string }[] = [];
+
+      for (const t of allTasks) {
+        if (t.status !== "open") continue;
+        const type = t.assignment_type ?? "open";
+        if (type === "delegation") {
+          if (t.assigned_delegation_id === delegation.id) {
+            assignedToMe.push(t);
+          } else {
+            notEligible.push({ task_id: t.task_id, title: t.title, status: t.status, reason: "assigned_to_other_delegation" });
+          }
+        } else if (type === "collar") {
+          // Omit tasks whose required collar is inactive/missing from all buckets
+          const rc = t.required_collar_id ? collars.get(t.required_collar_id) : undefined;
+          if (!rc || rc.status !== "active") {
+            notEligible.push({ task_id: t.task_id, title: t.title, status: t.status, reason: "required_collar_inactive_or_missing" });
+          } else if (delegation.default_collar_id === t.required_collar_id) {
+            eligible.push(t);
+          } else {
+            notEligible.push({ task_id: t.task_id, title: t.title, status: t.status, reason: `requires_collar:${t.required_collar_id}` });
+          }
+        } else {
+          // "open" or absent — any participant may claim
+          openUnassigned.push(t);
+        }
+      }
+
       const mineTasks = allTasks.filter(
-        (t) => t.assigned_delegation_id === delegation.id && t.status !== "cancelled",
+        (t) => t.assigned_delegation_id === delegation.id && t.status === "in_progress",
       );
       const recentlyCompleted = allTasks
         .filter((t) => t.status === "completed")
@@ -1740,34 +1773,33 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         (a) => a.workspace_id === workspace.workspace_id,
       );
 
-      // Compute next_actions
+      // Compute next_actions — priority: assigned_to_me > eligible > open > complete > artifact > read
       const nextActions: string[] = [];
-      const mineInProgress = mineTasks.filter((t) => t.status === "in_progress");
-      const openUnassigned = openTasks.filter((t) => !t.assigned_delegation_id);
+      const wsPath = `/api/agent/v1/workspaces/${workspace.workspace_id}`;
+      const canClaim = perms.workspace_task_claim === "allow";
 
-      if (perms.workspace_task_claim === "allow" && openUnassigned.length > 0 && mineInProgress.length === 0) {
-        nextActions.push(
-          `Claim an available task: PATCH /api/agent/v1/workspaces/${workspace.workspace_id}/tasks/{taskId} {"action":"claim"}`,
-        );
+      if (canClaim && assignedToMe.length > 0 && mineTasks.length === 0) {
+        nextActions.push(`Claim your assigned task: PATCH ${wsPath}/tasks/{taskId} {"action":"claim"}`);
       }
-      if (mineInProgress.length > 0) {
-        nextActions.push(
-          `Complete your in-progress task when done: PATCH /api/agent/v1/workspaces/${workspace.workspace_id}/tasks/{taskId} {"action":"complete"}`,
-        );
+      if (canClaim && eligible.length > 0 && mineTasks.length === 0 && assignedToMe.length === 0) {
+        nextActions.push(`Claim an eligible task (your collar qualifies): PATCH ${wsPath}/tasks/{taskId} {"action":"claim"}`);
       }
-      if (mineInProgress.length > 0 && perms.workspace_artifact_create === "allow") {
-        nextActions.push(
-          `Create an artifact for your task: POST /api/agent/v1/workspaces/${workspace.workspace_id}/artifacts`,
-        );
+      if (canClaim && openUnassigned.length > 0 && mineTasks.length === 0 && assignedToMe.length === 0 && eligible.length === 0) {
+        nextActions.push(`Claim an open task: PATCH ${wsPath}/tasks/{taskId} {"action":"claim"}`);
+      }
+      if (mineTasks.length > 0) {
+        nextActions.push(`Complete your in-progress task when done: PATCH ${wsPath}/tasks/{taskId} {"action":"complete"}`);
+      }
+      if (mineTasks.length > 0 && perms.workspace_artifact_create === "allow") {
+        nextActions.push(`Create an artifact for your task: POST ${wsPath}/artifacts`);
       }
       if (allArtifacts.length > 0 && perms.workspace_artifact_read === "allow") {
         const firstId = allArtifacts[0].artifact_id;
-        nextActions.push(
-          `Read artifact content by ID: GET /api/agent/v1/workspaces/${workspace.workspace_id}/artifacts/${firstId}`,
-        );
+        nextActions.push(`Read artifact content by ID: GET ${wsPath}/artifacts/${firstId}`);
       }
       if (nextActions.length === 0) {
-        if (openTasks.length === 0 && mineTasks.every((t) => t.status === "completed" || t.status === "cancelled")) {
+        const allOpen = assignedToMe.length + eligible.length + openUnassigned.length;
+        if (allOpen === 0 && mineTasks.length === 0) {
           nextActions.push("All tasks are done or claimed. Check the artifact list for results from other agents.");
         } else {
           nextActions.push("No actions available. Check your effective_permissions or contact the workspace owner.");
@@ -1841,7 +1873,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             status: workspace.status,
             participant_count: workspace.participant_delegation_ids.length,
             task_counts: {
-              open: openTasks.length,
+              open: allTasks.filter((t) => t.status === "open").length,
               in_progress: allTasks.filter((t) => t.status === "in_progress").length,
               completed: allTasks.filter((t) => t.status === "completed").length,
             },
@@ -1854,7 +1886,26 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           },
           effective_permissions: perms,
           task_summary: {
-            open: openTasks.map((t) => ({
+            assigned_to_me: assignedToMe.map((t) => ({
+              task_id: t.task_id,
+              title: t.title,
+              description: t.description,
+              status: t.status,
+              assignment_type: t.assignment_type,
+              created_at: t.created_at,
+              updated_at: t.updated_at,
+            })),
+            eligible: eligible.map((t) => ({
+              task_id: t.task_id,
+              title: t.title,
+              description: t.description,
+              status: t.status,
+              assignment_type: t.assignment_type,
+              required_collar_id: t.required_collar_id,
+              created_at: t.created_at,
+              updated_at: t.updated_at,
+            })),
+            open: openUnassigned.map((t) => ({
               task_id: t.task_id,
               title: t.title,
               description: t.description,
@@ -1877,6 +1928,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               completed_at: t.completed_at,
               assigned_delegation_id: t.assigned_delegation_id,
             })),
+            not_eligible: notEligible,
           },
           artifacts: allArtifacts.map((a) => ({
             artifact_id: a.artifact_id,
@@ -1949,7 +2001,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   /**
    * PATCH /api/agent/v1/workspaces/:workspaceId/tasks/:taskId
    * Body: { action: "claim" | "complete" }
-   * claim  — set status=in_progress, assigned_delegation_id = delegation.id (idempotent if already mine)
+   * claim    — enforce eligibility, then set status=in_progress (idempotent if already mine)
+   *            assigned_delegation_id on an open/delegation task = reserved claimant;
+   *            once in_progress it becomes the actual claimant (same field, different semantic).
    * complete — set status=completed (only if assigned to this delegation)
    */
   server.patch(
@@ -1983,12 +2037,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
 
       if (action === "claim") {
+        // Idempotent: already claimed by this delegation
         if (task.status === "in_progress" && task.assigned_delegation_id === delegation.id) {
-          // Idempotent — already claimed by this delegation
           return reply.send({ ok: true, data: { ...task, is_mine: true } });
         }
+        // Already claimed by someone else
+        if (task.status === "in_progress") {
+          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is already claimed by another agent.");
+        }
         if (task.status !== "open") {
-          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is not open. It may already be claimed by another agent.");
+          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is not open.");
+        }
+        // Eligibility check: assignment_type governs who may claim an open task
+        const eligibility = checkTaskEligibility(task, delegation);
+        if (!eligibility.ok) {
+          return sendError(reply, 403, eligibility.code, eligibility.message);
         }
         const now = new Date().toISOString();
         task.status = "in_progress";

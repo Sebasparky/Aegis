@@ -1795,8 +1795,21 @@ export interface WorkspaceTask {
   title: string;
   description?: string;
   status: WorkspaceTaskStatus;
-  /** Delegation that claimed this task. */
+  /**
+   * Eligibility mode for this task. Missing or undefined is treated as "open".
+   *   "open"       — any participant with workspace_task_claim permission may claim
+   *   "delegation" — only the delegation whose id matches assigned_delegation_id may claim
+   *   "collar"     — only a delegation whose default_collar_id matches required_collar_id may claim
+   */
+  assignment_type?: "open" | "delegation" | "collar";
+  /**
+   * Dual role:
+   *   assignment_type="delegation" + status="open"  → the delegation reserved for this task
+   *   status="in_progress" (any type)               → the delegation that claimed this task
+   */
   assigned_delegation_id?: string;
+  /** Only meaningful when assignment_type="collar". The collar ID the claiming delegation must carry. */
+  required_collar_id?: string;
   created_by_user_id: string;
   created_at: string;
   updated_at: string;

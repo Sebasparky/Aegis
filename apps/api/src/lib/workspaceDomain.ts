@@ -9,7 +9,7 @@
  *     and the delegation's default collar — the stricter limit wins.
  */
 
-import type { AegisWorkspace, AgentDelegation, ActionType, Collar } from "@aegis/types";
+import type { AegisWorkspace, AgentDelegation, ActionType, Collar, WorkspaceTask } from "@aegis/types";
 import {
   aegisWorkspaces,
   collars,
@@ -23,7 +23,8 @@ export type WorkspaceAccessError =
   | "WORKSPACE_ACCESS_DENIED"
   | "WORKSPACE_COLLAR_INACTIVE"
   | "WORKSPACE_PERMISSION_DENIED"
-  | "WORKSPACE_PERMISSION_REQUIRES_APPROVAL";
+  | "WORKSPACE_PERMISSION_REQUIRES_APPROVAL"
+  | "TASK_NOT_ELIGIBLE";
 
 export interface WorkspaceAccessResult {
   ok: true;
@@ -123,6 +124,59 @@ export function checkWorkspacePermission(
     };
   }
 
+  return { ok: true };
+}
+
+/**
+ * Checks whether a delegation is eligible to claim a specific task based on assignment_type.
+ * Called after workspace access and permission checks have already passed.
+ *
+ * assignment_type semantics:
+ *   "open" (or absent) — any participant may claim
+ *   "delegation"       — only assigned_delegation_id may claim;
+ *                        assigned_delegation_id on an open task = reserved claimant
+ *   "collar"           — only a delegation whose default_collar_id matches required_collar_id
+ */
+export function checkTaskEligibility(
+  task: WorkspaceTask,
+  delegation: AgentDelegation,
+): { ok: true } | WorkspaceAccessDenied {
+  const type = task.assignment_type ?? "open";
+
+  if (type === "open") return { ok: true };
+
+  if (type === "delegation") {
+    if (task.assigned_delegation_id === delegation.id) return { ok: true };
+    return {
+      ok: false,
+      code: "TASK_NOT_ELIGIBLE",
+      message: "This task is assigned to a specific delegation and cannot be claimed by others.",
+    };
+  }
+
+  // type === "collar"
+  if (!task.required_collar_id) {
+    return {
+      ok: false,
+      code: "TASK_NOT_ELIGIBLE",
+      message: "This task requires a collar but none is configured.",
+    };
+  }
+  const requiredCollar = collars.get(task.required_collar_id);
+  if (!requiredCollar || requiredCollar.status !== "active") {
+    return {
+      ok: false,
+      code: "TASK_NOT_ELIGIBLE",
+      message: "Required collar is inactive or missing.",
+    };
+  }
+  if (delegation.default_collar_id !== task.required_collar_id) {
+    return {
+      ok: false,
+      code: "TASK_NOT_ELIGIBLE",
+      message: `Your delegation collar does not match the required collar.`,
+    };
+  }
   return { ok: true };
 }
 

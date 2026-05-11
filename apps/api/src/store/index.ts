@@ -24,6 +24,9 @@ import type {
   CredentialUseAuthorization,
   SecurityChallenge,
   ChallengeEmailResolution,
+  AegisWorkspace,
+  WorkspaceTask,
+  WorkspaceArtifact,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -211,6 +214,31 @@ export const securityChallenges = new Map<string, SecurityChallenge>();
 // Email resolution requests for Connected Email Challenge Resolver v1.
 // resolutionCodes (resolved codes) live in emailChallengeResolver.resolutionCodes (memory-only, never persisted).
 export const challengeEmailResolutions = new Map<string, ChallengeEmailResolution>();
+
+// ─── Aegis Workspaces v0 ──────────────────────────────────────────────────────
+
+export const aegisWorkspaces = new Map<string, AegisWorkspace>();
+
+export const workspaceTasks = new Map<string, WorkspaceTask>();
+
+export const workspaceArtifacts = new Map<string, WorkspaceArtifact>();
+
+/**
+ * Lightweight audit events for workspace operations.
+ * Not wired into signed receipts or the sensitive timeline in v0.
+ * TODO(v1): integrate into sensitiveReceiptsRouter derivation as event_group "workspace".
+ */
+export interface WorkspaceAuditEvent {
+  event_id: string;
+  workspace_id: string;
+  task_id?: string;
+  artifact_id?: string;
+  delegation_id: string;
+  event_type: "task_claimed" | "task_completed" | "artifact_created";
+  created_at: string;
+}
+
+export const workspaceAuditEvents = new Map<string, WorkspaceAuditEvent>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

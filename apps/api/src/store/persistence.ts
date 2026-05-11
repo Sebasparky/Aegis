@@ -65,7 +65,12 @@ export async function seedDefaultData(): Promise<void> {
       "A general-purpose starter collar. Browse and research freely. Require approval before committing to anything.",
     purpose: "Safely delegate research and action tasks to an outside agent.",
     status: "active",
-    allowed_actions: ["browse", "search", "read", "compare", "draft", "add_to_cart"],
+    allowed_actions: [
+      "browse", "search", "read", "compare", "draft", "add_to_cart",
+      "workspace_read", "workspace_task_list", "workspace_task_claim",
+      "workspace_task_complete", "workspace_artifact_create",
+      "workspace_artifact_list", "workspace_artifact_read",
+    ],
     approval_required_actions: [
       "login",
       "purchase",

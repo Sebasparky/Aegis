@@ -19,6 +19,7 @@ import type {
   SecurityChallengeStatus,
   ChallengeEmailResolution,
   ChallengeEmailResolutionStatus,
+  WorkspaceArtifactKind,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -39,9 +40,13 @@ import {
   credentialUseAuthorizations,
   securityChallenges,
   challengeEmailResolutions,
+  aegisWorkspaces,
+  workspaceTasks,
+  workspaceArtifacts,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
+import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit } from "../lib/workspaceDomain.js";
 import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
 import { resolutionCodes, searchGmailForChallengeCode, isEmailChallengeSupported } from "../runtime/emailChallengeResolver.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
@@ -1624,6 +1629,330 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           next_action: challenge.status === "code_injected"
             ? "Code injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you."
             : `Injection failed: ${challenge.error ?? "unknown error"}. Ensure the browser is still open on the challenge page. Ask the user to submit the code again in the Aegis UI.`,
+        },
+      });
+    },
+  );
+
+  // ─── Workspaces v0 ────────────────────────────────────────────────────────────
+
+  const VALID_ARTIFACT_KINDS = new Set<WorkspaceArtifactKind>(["text", "json", "csv", "markdown"]);
+  const ARTIFACT_MAX_BYTES = 50 * 1024; // 50KB
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId
+   * Returns workspace metadata for participants. Never exposes owner_user_id or full participant list.
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId",
+    async (req: FastifyRequest<{ Params: { workspaceId: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_read");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const taskList = Array.from(workspaceTasks.values()).filter(
+        (t) => t.workspace_id === workspace.workspace_id,
+      );
+      const artifactList = Array.from(workspaceArtifacts.values()).filter(
+        (a) => a.workspace_id === workspace.workspace_id,
+      );
+
+      return reply.send({
+        ok: true,
+        data: {
+          workspace_id: workspace.workspace_id,
+          name: workspace.name,
+          description: workspace.description,
+          collar_id: workspace.collar_id,
+          status: workspace.status,
+          participant_count: workspace.participant_delegation_ids.length,
+          task_counts: {
+            open: taskList.filter((t) => t.status === "open").length,
+            in_progress: taskList.filter((t) => t.status === "in_progress").length,
+            completed: taskList.filter((t) => t.status === "completed").length,
+          },
+          artifact_count: artifactList.length,
+          created_at: workspace.created_at,
+        },
+      });
+    },
+  );
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId/tasks
+   * Lists open tasks and tasks assigned to the calling delegation.
+   * Optional ?status= filter (open | in_progress | completed | cancelled).
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId/tasks",
+    async (req: FastifyRequest<{ Params: { workspaceId: string }; Querystring: { status?: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_task_list");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      let tasks = Array.from(workspaceTasks.values()).filter(
+        (t) => t.workspace_id === workspace.workspace_id,
+      );
+
+      const statusFilter = req.query.status;
+      if (statusFilter) {
+        tasks = tasks.filter((t) => t.status === statusFilter);
+      } else {
+        // Default: open tasks + tasks assigned to this delegation
+        tasks = tasks.filter(
+          (t) => t.status === "open" || t.assigned_delegation_id === delegation.id,
+        );
+      }
+
+      return reply.send({
+        ok: true,
+        data: tasks.map((t) => ({
+          task_id: t.task_id,
+          title: t.title,
+          description: t.description,
+          status: t.status,
+          is_mine: t.assigned_delegation_id === delegation.id,
+          created_at: t.created_at,
+          updated_at: t.updated_at,
+          completed_at: t.completed_at,
+        })),
+      });
+    },
+  );
+
+  /**
+   * PATCH /api/agent/v1/workspaces/:workspaceId/tasks/:taskId
+   * Body: { action: "claim" | "complete" }
+   * claim  — set status=in_progress, assigned_delegation_id = delegation.id (idempotent if already mine)
+   * complete — set status=completed (only if assigned to this delegation)
+   */
+  server.patch(
+    "/api/agent/v1/workspaces/:workspaceId/tasks/:taskId",
+    async (req: FastifyRequest<{ Params: { workspaceId: string; taskId: string }; Body: { action?: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+
+      const { action } = req.body ?? {};
+
+      // Validate action before permission check so unknown actions always return INVALID_ACTION
+      if (action !== "claim" && action !== "complete") {
+        return sendError(reply, 400, "INVALID_ACTION", "action must be \"claim\" or \"complete\".");
+      }
+
+      const wsAction = action === "complete" ? "workspace_task_complete" : "workspace_task_claim";
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, wsAction);
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const task = workspaceTasks.get(req.params.taskId);
+      if (!task || task.workspace_id !== workspace.workspace_id) {
+        return sendError(reply, 404, "TASK_NOT_FOUND", "Task not found in this workspace.");
+      }
+
+      if (action === "claim") {
+        if (task.status === "in_progress" && task.assigned_delegation_id === delegation.id) {
+          // Idempotent — already claimed by this delegation
+          return reply.send({ ok: true, data: { ...task, is_mine: true } });
+        }
+        if (task.status !== "open") {
+          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is not open. It may already be claimed by another agent.");
+        }
+        const now = new Date().toISOString();
+        task.status = "in_progress";
+        task.assigned_delegation_id = delegation.id;
+        task.updated_at = now;
+        workspaceTasks.set(task.task_id, task);
+        emitWorkspaceAudit({ workspace_id: workspace.workspace_id, task_id: task.task_id, delegation_id: delegation.id, event_type: "task_claimed" });
+        return reply.send({ ok: true, data: { ...task, is_mine: true } });
+      }
+
+      if (task.assigned_delegation_id !== delegation.id) {
+        return sendError(reply, 403, "TASK_NOT_ASSIGNED", "You can only complete tasks assigned to your delegation.");
+      }
+      if (task.status !== "in_progress") {
+        return sendError(reply, 409, "TASK_NOT_IN_PROGRESS", "Task must be in_progress to complete.");
+      }
+      const now = new Date().toISOString();
+      task.status = "completed";
+      task.completed_at = now;
+      task.updated_at = now;
+      workspaceTasks.set(task.task_id, task);
+      emitWorkspaceAudit({ workspace_id: workspace.workspace_id, task_id: task.task_id, delegation_id: delegation.id, event_type: "task_completed" });
+      return reply.send({ ok: true, data: { ...task, is_mine: true } });
+    },
+  );
+
+  /**
+   * POST /api/agent/v1/workspaces/:workspaceId/artifacts
+   * Creates a text artifact. Content max 50KB. Never returns content in the response.
+   */
+  server.post(
+    "/api/agent/v1/workspaces/:workspaceId/artifacts",
+    async (req: FastifyRequest<{ Params: { workspaceId: string }; Body: { name?: string; kind?: string; content?: string; task_id?: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_artifact_create");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const { name, kind, content, task_id } = req.body ?? {};
+
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return sendError(reply, 400, "MISSING_NAME", "name is required.");
+      }
+      if (!kind || !VALID_ARTIFACT_KINDS.has(kind as WorkspaceArtifactKind)) {
+        return sendError(reply, 400, "INVALID_ARTIFACT_KIND", `kind must be one of: ${[...VALID_ARTIFACT_KINDS].join(", ")}.`);
+      }
+      if (typeof content !== "string") {
+        return sendError(reply, 400, "MISSING_CONTENT", "content is required and must be a string.");
+      }
+      if (Buffer.byteLength(content, "utf8") > ARTIFACT_MAX_BYTES) {
+        return sendError(reply, 400, "ARTIFACT_TOO_LARGE", "Artifact content exceeds 50KB limit.");
+      }
+      if (task_id !== undefined) {
+        const linkedTask = workspaceTasks.get(task_id);
+        if (!linkedTask || linkedTask.workspace_id !== workspace.workspace_id) {
+          return sendError(reply, 400, "INVALID_TASK_REFERENCE", "task_id does not reference a task in this workspace.");
+        }
+      }
+
+      const now = new Date().toISOString();
+      const artifact = {
+        artifact_id: newId("artifact"),
+        workspace_id: workspace.workspace_id,
+        name: name.trim(),
+        kind: kind as WorkspaceArtifactKind,
+        content,
+        ...(task_id !== undefined ? { task_id } : {}),
+        created_by_delegation_id: delegation.id,
+        created_at: now,
+      };
+      workspaceArtifacts.set(artifact.artifact_id, artifact);
+      emitWorkspaceAudit({ workspace_id: workspace.workspace_id, artifact_id: artifact.artifact_id, task_id, delegation_id: delegation.id, event_type: "artifact_created" });
+
+      // Never return content in POST response
+      return reply.status(201).send({
+        ok: true,
+        data: {
+          artifact_id: artifact.artifact_id,
+          workspace_id: artifact.workspace_id,
+          name: artifact.name,
+          kind: artifact.kind,
+          size_bytes: Buffer.byteLength(content, "utf8"),
+          ...(task_id !== undefined ? { task_id } : {}),
+          created_by_delegation_id: artifact.created_by_delegation_id,
+          created_at: artifact.created_at,
+        },
+      });
+    },
+  );
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId/artifacts
+   * Lists artifact metadata. Never includes content.
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId/artifacts",
+    async (req: FastifyRequest<{ Params: { workspaceId: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_artifact_list");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const artifacts = Array.from(workspaceArtifacts.values())
+        .filter((a) => a.workspace_id === workspace.workspace_id)
+        .map((a) => ({
+          artifact_id: a.artifact_id,
+          workspace_id: a.workspace_id,
+          name: a.name,
+          kind: a.kind,
+          size_bytes: Buffer.byteLength(a.content, "utf8"),
+          task_id: a.task_id,
+          created_by_delegation_id: a.created_by_delegation_id,
+          created_at: a.created_at,
+        }));
+
+      return reply.send({ ok: true, data: artifacts });
+    },
+  );
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId/artifacts/:artifactId
+   * Returns artifact including content. Participant access only.
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId/artifacts/:artifactId",
+    async (req: FastifyRequest<{ Params: { workspaceId: string; artifactId: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_artifact_read");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const artifact = workspaceArtifacts.get(req.params.artifactId);
+      if (!artifact || artifact.workspace_id !== workspace.workspace_id) {
+        return sendError(reply, 404, "ARTIFACT_NOT_FOUND", "Artifact not found in this workspace.");
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          artifact_id: artifact.artifact_id,
+          workspace_id: artifact.workspace_id,
+          name: artifact.name,
+          kind: artifact.kind,
+          content: artifact.content,
+          size_bytes: Buffer.byteLength(artifact.content, "utf8"),
+          task_id: artifact.task_id,
+          created_by_delegation_id: artifact.created_by_delegation_id,
+          created_at: artifact.created_at,
         },
       });
     },

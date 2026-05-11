@@ -45,6 +45,7 @@ import { expireInactiveTaskBrowserSessions } from "./runtime/taskBrowserSessions
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
+import { workspaceRoutes } from "./routes/workspaces.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -108,6 +109,7 @@ async function main() {
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);
+  await server.register(workspaceRoutes);
   await server.register(agentApiRoutes);
 
   if (process.env.NODE_ENV !== "production") {

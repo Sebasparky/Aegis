@@ -131,7 +131,14 @@ export type ActionType =
   | "oauth_authorize"
   | "save_credential"
   | "save_payment_method"
-  | "enable_persistence";
+  | "enable_persistence"
+  | "workspace_read"
+  | "workspace_task_list"
+  | "workspace_task_claim"
+  | "workspace_task_complete"
+  | "workspace_artifact_create"
+  | "workspace_artifact_list"
+  | "workspace_artifact_read";
 
 export interface SpendingLimits {
   max_without_approval: number;
@@ -1758,4 +1765,54 @@ export interface SensitiveActionTimelineItem {
   authorization_id?: string;
   challenge_id?: string;
   resolution_id?: string;
+}
+
+// ─── Aegis Workspaces v0 ────────────────────────────────────────────────────
+
+export type WorkspaceStatus = "active" | "archived";
+export type WorkspaceTaskStatus = "open" | "in_progress" | "completed" | "cancelled";
+export type WorkspaceArtifactKind = "text" | "json" | "csv" | "markdown";
+
+/** A shared, permissioned context where multiple delegated agents coordinate. */
+export interface AegisWorkspace {
+  workspace_id: string;
+  owner_user_id: string;
+  name: string;
+  description?: string;
+  /** Workspace collar governs agent access. Must be active. */
+  collar_id: string;
+  /** Delegations with read/write access to this workspace. */
+  participant_delegation_ids: string[];
+  status: WorkspaceStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A task within a workspace that agents can claim and complete. */
+export interface WorkspaceTask {
+  task_id: string;
+  workspace_id: string;
+  title: string;
+  description?: string;
+  status: WorkspaceTaskStatus;
+  /** Delegation that claimed this task. */
+  assigned_delegation_id?: string;
+  created_by_user_id: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+/** A text artifact produced by an agent within a workspace. */
+export interface WorkspaceArtifact {
+  artifact_id: string;
+  workspace_id: string;
+  name: string;
+  kind: WorkspaceArtifactKind;
+  /** Raw text content. Max 50KB enforced at API layer. */
+  content: string;
+  /** Task that produced this artifact, if any. */
+  task_id?: string;
+  created_by_delegation_id?: string;
+  created_at: string;
 }

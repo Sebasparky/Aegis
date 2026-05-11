@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { skillRoutes } from "../routes/skills.js";
 import { routeRunRoutes } from "../routes/route-runs.js";
 import { receiptRoutes } from "../routes/receipts.js";
+import { workspaceRoutes } from "../routes/workspaces.js";
+import { agentApiRoutes } from "../routes/agent-api.js";
 import {
   users,
   collars,
@@ -11,6 +13,11 @@ import {
   routeRuns,
   routeRunReceipts,
   agentDelegations,
+  aegisWorkspaces,
+  workspaceTasks,
+  workspaceArtifacts,
+  workspaceAuditEvents,
+  MOCK_USER_ID,
 } from "../store/index.js";
 import type {
   AgentDelegation,
@@ -19,6 +26,8 @@ import type {
   InstalledSkill,
   RouteRun,
   RouteRunStatus,
+  AegisWorkspace,
+  WorkspaceTask,
 } from "@aegis/types";
 
 export const IDS = {
@@ -34,6 +43,12 @@ export const IDS = {
   ROUTE_WIKI: "route_demo_wikipedia_001",
   ROUTE_PURCHASE: "route_demo_purchase_001",
   ROUTE_BLOCKED: "route_demo_blocked_001",
+  // Workspace test IDs
+  DELEGATION_B: "delg_test_agent_b",
+  TOKEN_B: "token_test_agent_b",
+  DELEGATION_OUTSIDER: "delg_test_outsider",
+  TOKEN_OUTSIDER: "token_test_outsider",
+  WORKSPACE: "ws_test_001",
 } as const;
 
 export function resetStore(): void {
@@ -45,6 +60,10 @@ export function resetStore(): void {
   routes.clear();
   routeRuns.clear();
   routeRunReceipts.clear();
+  aegisWorkspaces.clear();
+  workspaceTasks.clear();
+  workspaceArtifacts.clear();
+  workspaceAuditEvents.clear();
 }
 
 export function seedTestData(): void {
@@ -66,7 +85,12 @@ export function seedTestData(): void {
     description: "A general-purpose starter collar.",
     purpose: "Safely delegate research tasks.",
     status: "active",
-    allowed_actions: ["browse", "search", "read", "compare", "draft", "add_to_cart"],
+    allowed_actions: [
+      "browse", "search", "read", "compare", "draft", "add_to_cart",
+      "workspace_read", "workspace_task_list", "workspace_task_claim",
+      "workspace_task_complete", "workspace_artifact_create",
+      "workspace_artifact_list", "workspace_artifact_read",
+    ],
     approval_required_actions: [
       "login",
       "purchase",
@@ -287,4 +311,88 @@ export async function buildTestServer(): Promise<FastifyInstance> {
   await server.register(receiptRoutes);
   await server.ready();
   return server;
+}
+
+/** Test server that includes workspace internal + agent-api routes. */
+export async function buildWorkspaceTestServer(): Promise<FastifyInstance> {
+  const server = Fastify({ logger: false });
+  await server.register(workspaceRoutes);
+  await server.register(agentApiRoutes);
+  await server.ready();
+  return server;
+}
+
+/** Seeds the two extra delegations needed for workspace coordination tests. */
+export function seedWorkspaceDelegations(): void {
+  const NOW = "2026-05-01T00:00:00.000Z";
+
+  const delegationB: AgentDelegation = {
+    id: IDS.DELEGATION_B,
+    user_id: MOCK_USER_ID,
+    user_aegis_id: "aid_user_001",
+    agent_name: "agent_test_b",
+    agent_platform: "api",
+    channel: "api",
+    default_collar_id: IDS.COLLAR,
+    status: "active",
+    token_id: IDS.TOKEN_B,
+    skill_access_mode: "all",
+    skill_access_skill_ids: [],
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  agentDelegations.set(delegationB.id, delegationB);
+
+  const delegationOutsider: AgentDelegation = {
+    id: IDS.DELEGATION_OUTSIDER,
+    user_id: MOCK_USER_ID,
+    user_aegis_id: "aid_user_001",
+    agent_name: "agent_test_outsider",
+    agent_platform: "api",
+    channel: "api",
+    default_collar_id: IDS.COLLAR,
+    status: "active",
+    token_id: IDS.TOKEN_OUTSIDER,
+    skill_access_mode: "all",
+    skill_access_skill_ids: [],
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  agentDelegations.set(delegationOutsider.id, delegationOutsider);
+}
+
+/** Seeds a workspace with delegation_all and delegation_b as participants. */
+export function seedTestWorkspace(): AegisWorkspace {
+  const NOW = "2026-05-01T00:00:00.000Z";
+  const workspace: AegisWorkspace = {
+    workspace_id: IDS.WORKSPACE,
+    owner_user_id: MOCK_USER_ID,
+    name: "Test Workspace",
+    description: "Workspace for coordination tests",
+    collar_id: IDS.COLLAR,
+    participant_delegation_ids: [IDS.DELEGATION_ALL, IDS.DELEGATION_B],
+    status: "active",
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  aegisWorkspaces.set(workspace.workspace_id, workspace);
+  return workspace;
+}
+
+/** Seeds an open task in the test workspace. */
+export function seedOpenTask(taskId: string, overrides: Partial<WorkspaceTask> = {}): WorkspaceTask {
+  const NOW = "2026-05-01T00:00:00.000Z";
+  const task: WorkspaceTask = {
+    task_id: taskId,
+    workspace_id: IDS.WORKSPACE,
+    title: "Test Task",
+    description: "A test task",
+    status: "open",
+    created_by_user_id: MOCK_USER_ID,
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+  workspaceTasks.set(task.task_id, task);
+  return task;
 }

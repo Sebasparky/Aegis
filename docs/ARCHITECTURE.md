@@ -538,6 +538,52 @@ Example trust claim:
 
 Agents backed by this AegisID have completed 18 shopping interactions with verified businesses and no disputes.
 
+## Component 11: Multi-Agent Workspaces
+
+Workspaces are shared, permissioned coordination contexts for multiple delegated agents working on a common goal.
+
+### Structure
+
+- `AegisWorkspace` — named context with an owner, a workspace collar, and a list of participant delegations.
+- `WorkspaceTask` — claimable unit of work; status ladder: `open → in_progress → completed / cancelled`.
+- `WorkspaceArtifact` — text output produced by an agent within a workspace (max 50 KB); kinds: `text`, `json`, `csv`, `markdown`.
+- `WorkspaceAuditEvent` — lightweight record of `task_claimed`, `task_completed`, and `artifact_created` events.
+
+### Access model (v1)
+
+Access to any workspace operation requires three guards, checked in order:
+
+1. **Workspace guard** — workspace exists and `status === "active"`.
+2. **Collar liveness guard** — `workspace.collar_id` references an active collar.
+3. **Participant guard** — calling delegation is in `participant_delegation_ids`.
+
+### Effective permissions (v1)
+
+Per-operation enforcement uses the **intersection** of two collars — the stricter limit wins:
+
+- **Workspace collar** — set by the workspace owner; governs what all participants may do in this workspace.
+- **Delegation collar** — `delegation.default_collar_id`; governs what the specific agent is permitted to do globally.
+
+Seven workspace-scoped `ActionType` values: `workspace_read`, `workspace_task_list`, `workspace_task_claim`, `workspace_task_complete`, `workspace_artifact_create`, `workspace_artifact_list`, `workspace_artifact_read`.
+
+Semantics follow existing collar rules: absent from both `allowed_actions` and `approval_required_actions` = hard block (strict opt-in). `approval_required` from either collar returns `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (403) — no workspace CRUD approval flow exists yet.
+
+### Invariants
+
+- Non-participant denied before permission evaluation.
+- Archived workspace denied before permission evaluation.
+- Inactive workspace collar denied before operation permission evaluation.
+- Content is never returned in POST artifact responses.
+- No workspace operations are exposed via MCP tools in v1.
+- No Supabase persistence, no UI, no invite flow in v1.
+
+### Implementation
+
+- Domain logic: `apps/api/src/lib/workspaceDomain.ts` — `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`
+- Agent API endpoints: `apps/api/src/routes/agent-api.ts` (six handlers under `/api/agent/v1/workspaces/`)
+- User-facing endpoints: `apps/api/src/routes/workspaces.ts` — `POST /api/workspaces`, `GET /api/workspaces`
+- Tests: `apps/api/src/__tests__/workspace-coordination.test.ts` — 35 passing tests
+
 ## Main System Flows
 
 ### Flow 1: Agent starts protected web session

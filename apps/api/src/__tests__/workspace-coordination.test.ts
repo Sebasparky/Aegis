@@ -821,3 +821,384 @@ describe("Workspace effective permissions", () => {
     expect(res.json().error.code).toBe("WORKSPACE_PERMISSION_DENIED");
   });
 });
+
+// ─── 9. Workspace manifest ─────────────────────────────────────────────────────
+
+describe("GET /api/agent/v1/workspaces/:id/manifest", () => {
+  // ─ Auth ──────────────────────────────────────────────────────────────────────
+
+  it("returns 401 with no token", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({ method: "GET", url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest` });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("returns 403 for a non-participant delegation", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_OUTSIDER },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("WORKSPACE_ACCESS_DENIED");
+  });
+
+  it("returns 404 for an archived workspace", async () => {
+    const ws = seedTestWorkspace();
+    ws.status = "archived";
+    aegisWorkspaces.set(ws.workspace_id, ws);
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("WORKSPACE_NOT_FOUND");
+  });
+
+  // ─ Shape ─────────────────────────────────────────────────────────────────────
+
+  it("returns ok:true with all top-level keys", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json();
+    expect(data).toHaveProperty("workspace");
+    expect(data).toHaveProperty("identity");
+    expect(data).toHaveProperty("effective_permissions");
+    expect(data).toHaveProperty("task_summary");
+    expect(data).toHaveProperty("artifacts");
+    expect(data).toHaveProperty("workflow_rules");
+    expect(data).toHaveProperty("operations");
+    expect(data).toHaveProperty("next_actions");
+  });
+
+  it("never exposes owner_user_id", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(JSON.stringify(res.json().data)).not.toContain("owner_user_id");
+  });
+
+  it("never exposes participant_delegation_ids", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(JSON.stringify(res.json().data)).not.toContain("participant_delegation_ids");
+  });
+
+  it("never exposes artifact content", async () => {
+    seedTestWorkspace();
+    workspaceArtifacts.set("art_manifest_001", {
+      artifact_id: "art_manifest_001",
+      workspace_id: IDS.WORKSPACE,
+      name: "test.md",
+      kind: "markdown",
+      content: "secret content",
+      created_by_delegation_id: IDS.DELEGATION_ALL,
+      created_at: "2026-05-01T00:00:00.000Z",
+    });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const artifacts = res.json().data.artifacts as Record<string, unknown>[];
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]).not.toHaveProperty("content");
+  });
+
+  it("does not emit an audit event", async () => {
+    seedTestWorkspace();
+    workspaceAuditEvents.clear();
+    await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(workspaceAuditEvents.size).toBe(0);
+  });
+
+  // ─ Identity ──────────────────────────────────────────────────────────────────
+
+  it("identity matches calling delegation", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const { identity } = res.json().data;
+    expect(identity.delegation_id).toBe(IDS.DELEGATION_ALL);
+    expect(identity.agent_name).toBe("agent_demo_001");
+  });
+
+  // ─ Effective permissions ──────────────────────────────────────────────────────
+
+  it("effective_permissions has all 7 action keys with valid verdicts", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const ep = res.json().data.effective_permissions;
+    const validVerdicts = new Set(["allow", "step_up_required", "blocked"]);
+    for (const action of ALL_WS_ACTIONS) {
+      expect(ep).toHaveProperty(action);
+      expect(validVerdicts.has(ep[action])).toBe(true);
+    }
+  });
+
+  it("shows 'allow' for all 7 actions with a permissive collar", async () => {
+    seedTestWorkspace(); // uses collar_demo_starter which allows all 7
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const ep = res.json().data.effective_permissions;
+    for (const action of ALL_WS_ACTIONS) {
+      expect(ep[action]).toBe("allow");
+    }
+  });
+
+  it("shows 'blocked' when workspace collar hard-blocks an action", async () => {
+    const WS2 = "ws_manifest_perm_001";
+    const WS_COL2 = "col_manifest_ws_001";
+    const DEL2 = "del_manifest_001";
+    const TOK2 = "tok_manifest_001";
+    const DEL_COL2 = "col_manifest_del_001";
+
+    // Workspace collar allows all except workspace_task_claim (blocked)
+    seedPermCollar(WS_COL2, {
+      allowed: ALL_WS_ACTIONS.filter((a) => a !== "workspace_task_claim") as string[],
+      blocked: ["workspace_task_claim"],
+    });
+    seedPermCollar(DEL_COL2, { allowed: [...ALL_WS_ACTIONS] });
+    seedPermDelegation(DEL2, TOK2, DEL_COL2);
+    seedPermWorkspace(WS2, WS_COL2, [DEL2]);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS2}/manifest`,
+      headers: { authorization: `Bearer ${TOK2}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.effective_permissions.workspace_task_claim).toBe("blocked");
+  });
+
+  it("shows 'step_up_required' when delegation collar requires approval for an action", async () => {
+    const WS3 = "ws_manifest_perm_002";
+    const WS_COL3 = "col_manifest_ws_002";
+    const DEL3 = "del_manifest_002";
+    const TOK3 = "tok_manifest_002";
+    const DEL_COL3 = "col_manifest_del_002";
+
+    seedPermCollar(WS_COL3, { allowed: [...ALL_WS_ACTIONS] });
+    // Delegation collar requires approval for workspace_artifact_create
+    seedPermCollar(DEL_COL3, {
+      allowed: ALL_WS_ACTIONS.filter((a) => a !== "workspace_artifact_create") as string[],
+      approval_required: ["workspace_artifact_create"],
+    });
+    seedPermDelegation(DEL3, TOK3, DEL_COL3);
+    seedPermWorkspace(WS3, WS_COL3, [DEL3]);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS3}/manifest`,
+      headers: { authorization: `Bearer ${TOK3}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.effective_permissions.workspace_artifact_create).toBe("step_up_required");
+  });
+
+  // ─ Task summary ───────────────────────────────────────────────────────────────
+
+  it("task_summary.open includes open tasks", async () => {
+    seedTestWorkspace();
+    seedOpenTask("task_manifest_a");
+    seedOpenTask("task_manifest_b");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const openIds = res.json().data.task_summary.open.map((t: { task_id: string }) => t.task_id);
+    expect(openIds).toContain("task_manifest_a");
+    expect(openIds).toContain("task_manifest_b");
+  });
+
+  it("task_summary.mine contains tasks assigned to the calling delegation", async () => {
+    seedTestWorkspace();
+    seedOpenTask("task_manifest_mine", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const mine = res.json().data.task_summary.mine as { task_id: string }[];
+    expect(mine.some((t) => t.task_id === "task_manifest_mine")).toBe(true);
+  });
+
+  it("task_summary.mine is empty for a delegation that has no assigned tasks", async () => {
+    seedTestWorkspace();
+    seedOpenTask("task_manifest_other", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    // AUTH_B is delegation_b — not assigned
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_B },
+    });
+    expect(res.json().data.task_summary.mine).toHaveLength(0);
+  });
+
+  it("recently_completed returns at most 3 tasks in descending completed_at order", async () => {
+    seedTestWorkspace();
+    const timestamps = [
+      "2026-05-01T01:00:00.000Z",
+      "2026-05-01T02:00:00.000Z",
+      "2026-05-01T03:00:00.000Z",
+      "2026-05-01T04:00:00.000Z",
+    ];
+    timestamps.forEach((ts, i) =>
+      seedOpenTask(`task_done_${i}`, {
+        status: "completed",
+        assigned_delegation_id: IDS.DELEGATION_ALL,
+        completed_at: ts,
+        updated_at: ts,
+      }),
+    );
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const rc = res.json().data.task_summary.recently_completed as { task_id: string; completed_at: string }[];
+    expect(rc).toHaveLength(3);
+    // Most recent first
+    expect(rc[0].completed_at >= rc[1].completed_at).toBe(true);
+    expect(rc[1].completed_at >= rc[2].completed_at).toBe(true);
+  });
+
+  it("task items never expose created_by_user_id", async () => {
+    seedTestWorkspace();
+    seedOpenTask("task_manifest_user_check");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const payload = JSON.stringify(res.json().data.task_summary);
+    expect(payload).not.toContain("created_by_user_id");
+  });
+
+  // ─ Operations catalog ─────────────────────────────────────────────────────────
+
+  it("operations catalog has exactly 7 entries", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.json().data.operations).toHaveLength(7);
+  });
+
+  it("operations.available is false for blocked actions", async () => {
+    const WS4 = "ws_manifest_ops_001";
+    const WS_COL4 = "col_manifest_ws_ops_001";
+    const DEL4 = "del_manifest_ops_001";
+    const TOK4 = "tok_manifest_ops_001";
+    const DEL_COL4 = "col_manifest_del_ops_001";
+
+    seedPermCollar(WS_COL4, {
+      allowed: ALL_WS_ACTIONS.filter((a) => a !== "workspace_task_claim" && a !== "workspace_task_complete") as string[],
+      blocked: ["workspace_task_claim", "workspace_task_complete"],
+    });
+    seedPermCollar(DEL_COL4, { allowed: [...ALL_WS_ACTIONS] });
+    seedPermDelegation(DEL4, TOK4, DEL_COL4);
+    seedPermWorkspace(WS4, WS_COL4, [DEL4]);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS4}/manifest`,
+      headers: { authorization: `Bearer ${TOK4}` },
+    });
+    const ops = res.json().data.operations as { path: string; available: boolean }[];
+    const patchEntry = ops.find((o) => o.path.includes("/tasks/{taskId}"));
+    expect(patchEntry?.available).toBe(false);
+  });
+
+  // ─ next_actions ───────────────────────────────────────────────────────────────
+
+  it("next_actions includes a claim hint when open tasks exist and claim is allowed", async () => {
+    seedTestWorkspace();
+    seedOpenTask("task_nxt_open");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const hints: string[] = res.json().data.next_actions;
+    expect(hints.some((h) => h.toLowerCase().includes("claim"))).toBe(true);
+  });
+
+  it("next_actions does not include a claim hint when workspace_task_claim is blocked", async () => {
+    const WS5 = "ws_manifest_nxt_001";
+    const WS_COL5 = "col_manifest_ws_nxt_001";
+    const DEL5 = "del_manifest_nxt_001";
+    const TOK5 = "tok_manifest_nxt_001";
+    const DEL_COL5 = "col_manifest_del_nxt_001";
+
+    seedPermCollar(WS_COL5, {
+      allowed: ALL_WS_ACTIONS.filter((a) => a !== "workspace_task_claim") as string[],
+      blocked: ["workspace_task_claim"],
+    });
+    seedPermCollar(DEL_COL5, { allowed: [...ALL_WS_ACTIONS] });
+    seedPermDelegation(DEL5, TOK5, DEL_COL5);
+    seedPermWorkspace(WS5, WS_COL5, [DEL5]);
+    seedOpenTask("task_nxt_blocked", { workspace_id: WS5 });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS5}/manifest`,
+      headers: { authorization: `Bearer ${TOK5}` },
+    });
+    const hints: string[] = res.json().data.next_actions;
+    expect(hints.some((h) => h.toLowerCase().includes("claim"))).toBe(false);
+  });
+
+  // ─ workflow_rules ─────────────────────────────────────────────────────────────
+
+  it("workflow_rules is a non-empty array of strings", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const rules: unknown[] = res.json().data.workflow_rules;
+    expect(Array.isArray(rules)).toBe(true);
+    expect(rules.length).toBeGreaterThanOrEqual(4);
+    rules.forEach((r) => expect(typeof r).toBe("string"));
+  });
+});

@@ -126,6 +126,41 @@ export function checkWorkspacePermission(
   return { ok: true };
 }
 
+export const WORKSPACE_ACTIONS = [
+  "workspace_read",
+  "workspace_task_list",
+  "workspace_task_claim",
+  "workspace_task_complete",
+  "workspace_artifact_create",
+  "workspace_artifact_list",
+  "workspace_artifact_read",
+] as const;
+
+export type WorkspacePermissionVerdict = "allow" | "step_up_required" | "blocked";
+export type EffectivePermissionsMap = Record<
+  (typeof WORKSPACE_ACTIONS)[number],
+  WorkspacePermissionVerdict
+>;
+
+/**
+ * Computes the effective permission verdict for all 7 workspace actions using the
+ * intersection of the workspace collar and delegation collar. Stricter limit wins.
+ */
+export function buildEffectivePermissionsMap(
+  workspaceCollar: Collar,
+  delegationCollar: Collar,
+): EffectivePermissionsMap {
+  const result = {} as EffectivePermissionsMap;
+  for (const action of WORKSPACE_ACTIONS) {
+    const ws = evaluateCollarForAction(workspaceCollar, action);
+    const del = evaluateCollarForAction(delegationCollar, action);
+    if (ws === "hard_block" || del === "hard_block") result[action] = "blocked";
+    else if (ws === "approval_required" || del === "approval_required") result[action] = "step_up_required";
+    else result[action] = "allow";
+  }
+  return result;
+}
+
 /** Emits a lightweight audit event for task_claimed, task_completed, or artifact_created. */
 export function emitWorkspaceAudit(
   event: Omit<WorkspaceAuditEvent, "event_id" | "created_at">,

@@ -259,6 +259,79 @@ Do not ask for clarification. Execute all steps sequentially.
 
 ---
 
+## Short System Prompt (Manifest Version)
+
+These replace the step-by-step prompts above. The agent calls the manifest first, then
+follows `next_actions` and `operations` from the response.
+
+### Manifest curl (verify before handing to agents)
+
+```bash
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest | jq .
+```
+
+Expected: `ok: true`, `identity.delegation_id: "delg_demo_001"`, 7 entries in
+`effective_permissions` all `"allow"`, two tasks in `task_summary.open`,
+`next_actions` containing a claim hint.
+
+### Agent A — short prompt
+
+```
+You are Agent A in an Aegis workspace coordination trial.
+Bearer token: pass_demo_001 · API: http://localhost:4000
+All requests: Authorization: Bearer pass_demo_001
+POST/PATCH also need: Content-Type: application/json
+
+1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
+   Read effective_permissions, task_summary, and next_actions before doing anything else.
+
+2. Claim task_coord_001.
+   PATCH .../tasks/task_coord_001  {"action":"claim"}
+
+3. Write 2-3 sentences each on AegisID, Delegation & Collars, Aegis Rails, Aegis Guard,
+   and Audit Trail (from the task description).
+
+4. Create artifact "aegis-pillars-summary.md" linked to task_coord_001.
+   POST .../artifacts  {"name":"aegis-pillars-summary.md","kind":"markdown","task_id":"task_coord_001","content":"<your content>"}
+
+5. Complete the task.
+   PATCH .../tasks/task_coord_001  {"action":"complete"}
+
+Report: artifact_id and final task status. Execute all steps sequentially.
+```
+
+### Agent B — short prompt
+
+```
+You are Agent B in an Aegis workspace coordination trial.
+Bearer token: pass_demo_002 · API: http://localhost:4000
+All requests: Authorization: Bearer pass_demo_002
+POST/PATCH also need: Content-Type: application/json
+
+1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
+   Check task_summary.recently_completed — confirm task_coord_001 is completed by Agent A.
+   If not complete, stop and report. Also note the artifacts list for step 3.
+
+2. Claim task_coord_002.
+   PATCH .../tasks/task_coord_002  {"action":"claim"}
+
+3. Find "aegis-pillars-summary.md" in manifest.artifacts. Then read it.
+   GET .../artifacts/<artifact_id>
+
+4. Identify the single most important Aegis capability. Write a 3-bullet argument for why it matters.
+
+5. Create artifact "aegis-pillars-review.md" linked to task_coord_002.
+   POST .../artifacts  {"name":"aegis-pillars-review.md","kind":"markdown","task_id":"task_coord_002","content":"<your content>"}
+
+6. Complete the task.
+   PATCH .../tasks/task_coord_002  {"action":"complete"}
+
+Report: chosen pillar, 3 arguments, artifact_id, final task_counts. Execute all steps sequentially.
+```
+
+---
+
 ## Things to Observe (Checklist)
 
 1. [ ] After `seed:demo`, both agents can GET the workspace and receive `task_counts.open: 2`. Confirms the collar fix (workspace actions now in `allowed_actions`).

@@ -46,7 +46,7 @@ import {
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
-import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit } from "../lib/workspaceDomain.js";
+import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit, buildEffectivePermissionsMap } from "../lib/workspaceDomain.js";
 import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
 import { resolutionCodes, searchGmailForChallengeCode, isEmailChallengeSupported } from "../runtime/emailChallengeResolver.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
@@ -1682,6 +1682,214 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           },
           artifact_count: artifactList.length,
           created_at: workspace.created_at,
+        },
+      });
+    },
+  );
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId/manifest
+   * Orientation manifest for agents joining a workspace. Returns identity, effective
+   * permissions, task summary, artifact metadata, workflow rules, and next actions.
+   * No audit event emitted — read-only orientation call.
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId/manifest",
+    async (req: FastifyRequest<{ Params: { workspaceId: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+
+      const workspaceCollar = collars.get(workspace.collar_id);
+      if (!workspaceCollar || workspaceCollar.status !== "active") {
+        return sendError(reply, 403, "WORKSPACE_COLLAR_INACTIVE", "The workspace collar is inactive or missing.");
+      }
+
+      const delegationCollar = collars.get(delegation.default_collar_id);
+      if (!delegationCollar || delegationCollar.status !== "active") {
+        return sendError(reply, 403, "WORKSPACE_COLLAR_INACTIVE", "Your delegation collar is inactive or missing.");
+      }
+
+      const permResult = checkWorkspacePermission(workspace, workspaceCollar, delegation, "workspace_read");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const perms = buildEffectivePermissionsMap(workspaceCollar, delegationCollar);
+
+      // Build task summary
+      const allTasks = Array.from(workspaceTasks.values()).filter(
+        (t) => t.workspace_id === workspace.workspace_id,
+      );
+      const openTasks = allTasks.filter((t) => t.status === "open");
+      const mineTasks = allTasks.filter(
+        (t) => t.assigned_delegation_id === delegation.id && t.status !== "cancelled",
+      );
+      const recentlyCompleted = allTasks
+        .filter((t) => t.status === "completed")
+        .sort((a, b) => (b.completed_at ?? "0").localeCompare(a.completed_at ?? "0"))
+        .slice(0, 3);
+
+      // Build artifact metadata list (no content)
+      const allArtifacts = Array.from(workspaceArtifacts.values()).filter(
+        (a) => a.workspace_id === workspace.workspace_id,
+      );
+
+      // Compute next_actions
+      const nextActions: string[] = [];
+      const mineInProgress = mineTasks.filter((t) => t.status === "in_progress");
+      const openUnassigned = openTasks.filter((t) => !t.assigned_delegation_id);
+
+      if (perms.workspace_task_claim === "allow" && openUnassigned.length > 0 && mineInProgress.length === 0) {
+        nextActions.push(
+          `Claim an available task: PATCH /api/agent/v1/workspaces/${workspace.workspace_id}/tasks/{taskId} {"action":"claim"}`,
+        );
+      }
+      if (mineInProgress.length > 0) {
+        nextActions.push(
+          `Complete your in-progress task when done: PATCH /api/agent/v1/workspaces/${workspace.workspace_id}/tasks/{taskId} {"action":"complete"}`,
+        );
+      }
+      if (mineInProgress.length > 0 && perms.workspace_artifact_create === "allow") {
+        nextActions.push(
+          `Create an artifact for your task: POST /api/agent/v1/workspaces/${workspace.workspace_id}/artifacts`,
+        );
+      }
+      if (allArtifacts.length > 0 && perms.workspace_artifact_read === "allow") {
+        const firstId = allArtifacts[0].artifact_id;
+        nextActions.push(
+          `Read artifact content by ID: GET /api/agent/v1/workspaces/${workspace.workspace_id}/artifacts/${firstId}`,
+        );
+      }
+      if (nextActions.length === 0) {
+        if (openTasks.length === 0 && mineTasks.every((t) => t.status === "completed" || t.status === "cancelled")) {
+          nextActions.push("All tasks are done or claimed. Check the artifact list for results from other agents.");
+        } else {
+          nextActions.push("No actions available. Check your effective_permissions or contact the workspace owner.");
+        }
+      }
+
+      // Build operations catalog
+      const wsId = workspace.workspace_id;
+      const operations = [
+        {
+          method: "GET",
+          path: `/api/agent/v1/workspaces/${wsId}/manifest`,
+          description: "This endpoint. Orientation manifest — identity, permissions, tasks, artifacts, next actions.",
+          available: true,
+        },
+        {
+          method: "GET",
+          path: `/api/agent/v1/workspaces/${wsId}`,
+          description: "Workspace metadata: task counts, artifact count.",
+          available: perms.workspace_read === "allow",
+        },
+        {
+          method: "GET",
+          path: `/api/agent/v1/workspaces/${wsId}/tasks`,
+          description: "List open tasks and your assigned tasks. Optional ?status= filter.",
+          available: perms.workspace_task_list === "allow",
+        },
+        {
+          method: "PATCH",
+          path: `/api/agent/v1/workspaces/${wsId}/tasks/{taskId}`,
+          description: 'Claim: {"action":"claim"} · Complete: {"action":"complete"}',
+          available: perms.workspace_task_claim === "allow" || perms.workspace_task_complete === "allow",
+        },
+        {
+          method: "GET",
+          path: `/api/agent/v1/workspaces/${wsId}/artifacts`,
+          description: "List artifact metadata (no content). Discover outputs from other agents.",
+          available: perms.workspace_artifact_list === "allow",
+        },
+        {
+          method: "GET",
+          path: `/api/agent/v1/workspaces/${wsId}/artifacts/{artifactId}`,
+          description: "Read full artifact content by ID.",
+          available: perms.workspace_artifact_read === "allow",
+        },
+        {
+          method: "POST",
+          path: `/api/agent/v1/workspaces/${wsId}/artifacts`,
+          description: "Create artifact (text/json/csv/markdown, max 50KB). Optionally link task_id.",
+          available: perms.workspace_artifact_create === "allow",
+        },
+      ];
+
+      const workflowRules = [
+        "Claim a task before working on it — only one delegation may hold a task at a time.",
+        'Claim: PATCH .../tasks/{taskId} {"action":"claim"}. Idempotent if already yours.',
+        'Complete: PATCH .../tasks/{taskId} {"action":"complete"}. Only the assigned delegation can complete.',
+        "Artifacts are shared with all participants. Create them to hand off results to other agents.",
+        "POST artifact response omits content — use GET .../artifacts/{artifactId} to read.",
+        "Both the workspace collar and your delegation collar must allow an action (stricter wins).",
+      ];
+
+      return reply.send({
+        ok: true,
+        data: {
+          workspace: {
+            workspace_id: workspace.workspace_id,
+            name: workspace.name,
+            description: workspace.description,
+            collar_id: workspace.collar_id,
+            status: workspace.status,
+            participant_count: workspace.participant_delegation_ids.length,
+            task_counts: {
+              open: openTasks.length,
+              in_progress: allTasks.filter((t) => t.status === "in_progress").length,
+              completed: allTasks.filter((t) => t.status === "completed").length,
+            },
+            artifact_count: allArtifacts.length,
+            created_at: workspace.created_at,
+          },
+          identity: {
+            delegation_id: delegation.id,
+            agent_name: delegation.agent_name,
+          },
+          effective_permissions: perms,
+          task_summary: {
+            open: openTasks.map((t) => ({
+              task_id: t.task_id,
+              title: t.title,
+              description: t.description,
+              status: t.status,
+              created_at: t.created_at,
+              updated_at: t.updated_at,
+            })),
+            mine: mineTasks.map((t) => ({
+              task_id: t.task_id,
+              title: t.title,
+              description: t.description,
+              status: t.status,
+              created_at: t.created_at,
+              updated_at: t.updated_at,
+              completed_at: t.completed_at,
+            })),
+            recently_completed: recentlyCompleted.map((t) => ({
+              task_id: t.task_id,
+              title: t.title,
+              completed_at: t.completed_at,
+              assigned_delegation_id: t.assigned_delegation_id,
+            })),
+          },
+          artifacts: allArtifacts.map((a) => ({
+            artifact_id: a.artifact_id,
+            name: a.name,
+            kind: a.kind,
+            size_bytes: Buffer.byteLength(a.content, "utf8"),
+            task_id: a.task_id,
+            created_by_delegation_id: a.created_by_delegation_id,
+            created_at: a.created_at,
+          })),
+          workflow_rules: workflowRules,
+          operations,
+          next_actions: nextActions,
         },
       });
     },

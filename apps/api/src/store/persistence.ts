@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact } from "@aegis/types";
 import {
   users,
   collars,
@@ -34,8 +34,12 @@ import {
   credentialUseAuthorizations,
   securityChallenges,
   challengeEmailResolutions,
+  aegisWorkspaces,
+  workspaceTasks,
+  workspaceArtifacts,
+  workspaceAuditEvents,
 } from "./index.js";
-import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest } from "./index.js";
+import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 import { getKmsProvider } from "../lib/kms.js";
 
@@ -58,7 +62,7 @@ export async function seedDefaultData(): Promise<void> {
   };
 
   const STARTER_COLLAR: Collar = {
-    id: `collar_${randomUUID()}`,
+    id: "collar_demo_starter",
     user_id: "user_001",
     name: "Research & Action Starter",
     description:
@@ -110,6 +114,64 @@ export async function seedDefaultData(): Promise<void> {
 
   users.set(MOCK_USER.id, MOCK_USER);
   collars.set(STARTER_COLLAR.id, STARTER_COLLAR);
+
+  if (!agentDelegations.has("delg_demo_001")) {
+    agentDelegations.set("delg_demo_001", {
+      id: "delg_demo_001", user_id: "user_001", user_aegis_id: "aid_user_001",
+      agent_name: "agent_demo_001", agent_platform: "api", channel: "api",
+      default_collar_id: "collar_demo_starter", status: "active",
+      token_id: "pass_demo_001", skill_access_mode: "all", skill_access_skill_ids: [],
+      created_at: "2026-04-30T12:00:00.000Z", updated_at: "2026-04-30T12:00:00.000Z",
+    });
+  }
+  if (!agentDelegations.has("delg_demo_restricted")) {
+    agentDelegations.set("delg_demo_restricted", {
+      id: "delg_demo_restricted", user_id: "user_001", user_aegis_id: "aid_user_001",
+      agent_name: "agent_demo_restricted", agent_platform: "api", channel: "api",
+      default_collar_id: "collar_demo_starter", status: "active",
+      token_id: "pass_demo_002", skill_access_mode: "only", skill_access_skill_ids: [],
+      created_at: "2026-04-30T12:00:01.000Z", updated_at: "2026-04-30T12:00:01.000Z",
+    });
+  }
+
+  if (!aegisWorkspaces.has("ws_coord_trial_001")) {
+    aegisWorkspaces.set("ws_coord_trial_001", {
+      workspace_id: "ws_coord_trial_001",
+      owner_user_id: "user_001",
+      name: "Coordination Trial Workspace",
+      description: "Two-agent coordination trial. Agent A authors a product summary; Agent B reviews it.",
+      collar_id: "collar_demo_starter",
+      participant_delegation_ids: ["delg_demo_001", "delg_demo_restricted"],
+      status: "active",
+      created_at: "2026-05-11T00:00:00.000Z",
+      updated_at: "2026-05-11T00:00:00.000Z",
+    });
+  }
+  if (!workspaceTasks.has("task_coord_001")) {
+    workspaceTasks.set("task_coord_001", {
+      task_id: "task_coord_001",
+      workspace_id: "ws_coord_trial_001",
+      title: "Summarize the five Aegis product pillars",
+      description: "Write 2-3 sentences each on: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
+      status: "open",
+      created_by_user_id: "user_001",
+      created_at: "2026-05-11T00:00:00.000Z",
+      updated_at: "2026-05-11T00:00:00.000Z",
+    });
+  }
+  if (!workspaceTasks.has("task_coord_002")) {
+    workspaceTasks.set("task_coord_002", {
+      task_id: "task_coord_002",
+      workspace_id: "ws_coord_trial_001",
+      title: "Review the pillars summary and produce a prioritization artifact",
+      description: "List artifacts in the workspace. Find and read the artifact named `aegis-pillars-summary.md` created by the other agent. Identify the single most important capability Aegis provides. Write a 3-bullet-point argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
+      status: "open",
+      created_by_user_id: "user_001",
+      created_at: "2026-05-11T00:00:00.000Z",
+      updated_at: "2026-05-11T00:00:00.000Z",
+    });
+  }
+
   ensureWebsiteTrustSeeds(NOW);
 
   // Seed demo vault pass metadata (also needed after resetStoreForDemo clears all maps)
@@ -238,6 +300,10 @@ export function persistStore(): void {
       credentialUseAuthorizations: Array.from(credentialUseAuthorizations.entries()),
       securityChallenges: Array.from(securityChallenges.entries()),
       challengeEmailResolutions: Array.from(challengeEmailResolutions.entries()),
+      aegisWorkspaces: Array.from(aegisWorkspaces.entries()),
+      workspaceTasks: Array.from(workspaceTasks.entries()),
+      workspaceArtifacts: Array.from(workspaceArtifacts.entries()),
+      workspaceAuditEvents: Array.from(workspaceAuditEvents.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -302,6 +368,11 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
     for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
     for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
+
+    for (const [k, v] of (data.aegisWorkspaces ?? [])) aegisWorkspaces.set(k, v as AegisWorkspace);
+    for (const [k, v] of (data.workspaceTasks ?? [])) workspaceTasks.set(k, v as WorkspaceTask);
+    for (const [k, v] of (data.workspaceArtifacts ?? [])) workspaceArtifacts.set(k, v as WorkspaceArtifact);
+    for (const [k, v] of (data.workspaceAuditEvents ?? [])) workspaceAuditEvents.set(k, v as WorkspaceAuditEvent);
 
     // Injection requests cannot survive restart — CDP browser context is gone.
     for (const [k, v] of (data.secretFieldInjections ?? [])) {
@@ -420,6 +491,10 @@ export async function resetStoreForDemo(): Promise<void> {
   credentialUseAuthorizations.clear();
   securityChallenges.clear();
   challengeEmailResolutions.clear();
+  aegisWorkspaces.clear();
+  workspaceTasks.clear();
+  workspaceArtifacts.clear();
+  workspaceAuditEvents.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

@@ -946,6 +946,41 @@ const installedSkills = [
   ]
 ];
 
+const WORKSPACE = {
+  workspace_id: "ws_coord_trial_001",
+  owner_user_id: "user_001",
+  name: "Coordination Trial Workspace",
+  description: "Two-agent coordination trial. Agent A authors a product summary; Agent B reviews it.",
+  collar_id: "collar_demo_starter",
+  participant_delegation_ids: ["delg_demo_001", "delg_demo_restricted"],
+  status: "active",
+  created_at: "2026-05-11T00:00:00.000Z",
+  updated_at: "2026-05-11T00:00:00.000Z"
+};
+
+const WORKSPACE_TASKS = [
+  ["task_coord_001", {
+    task_id: "task_coord_001",
+    workspace_id: "ws_coord_trial_001",
+    title: "Summarize the five Aegis product pillars",
+    description: "Write 2-3 sentences each on: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
+    status: "open",
+    created_by_user_id: "user_001",
+    created_at: "2026-05-11T00:00:00.000Z",
+    updated_at: "2026-05-11T00:00:00.000Z"
+  }],
+  ["task_coord_002", {
+    task_id: "task_coord_002",
+    workspace_id: "ws_coord_trial_001",
+    title: "Review the pillars summary and produce a prioritization artifact",
+    description: "List artifacts in the workspace. Find and read the artifact named `aegis-pillars-summary.md` created by the other agent. Identify the single most important capability Aegis provides. Write a 3-bullet-point argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
+    status: "open",
+    created_by_user_id: "user_001",
+    created_at: "2026-05-11T00:00:00.000Z",
+    updated_at: "2026-05-11T00:00:00.000Z"
+  }]
+];
+
 const store = {
   users: [
     [
@@ -970,7 +1005,12 @@ const store = {
         description: "A general-purpose starter collar. Browse and research freely. Require approval before committing to anything.",
         purpose: "Safely delegate research and action tasks to an outside agent.",
         status: "active",
-        allowed_actions: ["browse", "search", "read", "compare", "draft", "add_to_cart"],
+        allowed_actions: [
+          "browse", "search", "read", "compare", "draft", "add_to_cart",
+          "workspace_read", "workspace_task_list", "workspace_task_claim",
+          "workspace_task_complete", "workspace_artifact_create",
+          "workspace_artifact_list", "workspace_artifact_read"
+        ],
         approval_required_actions: [
           "login", "purchase", "payment", "travel_booking", "share_email", "share_phone",
           "submit_form", "post_publicly", "upload_file", "send_email", "create_account"
@@ -1101,11 +1141,15 @@ const store = {
   skills,
   installedSkills,
   aegisVaultPasses: [["pass_vault_demo_login_001", DEMO_VAULT_PASS]],
-  paymentMethods: [["pay_method_demo_001", DEMO_PAYMENT_METHOD]]
+  paymentMethods: [["pay_method_demo_001", DEMO_PAYMENT_METHOD]],
+  aegisWorkspaces: [["ws_coord_trial_001", WORKSPACE]],
+  workspaceTasks: WORKSPACE_TASKS,
+  workspaceArtifacts: [],
+  workspaceAuditEvents: []
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 1 payment method written.");
+console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 1 workspace, 2 tasks, 1 payment method written.");
 console.log("  route_demo_banking_001              — Demo Banking Workflow           (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001            — Wikipedia Search                (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
 console.log("  route_demo_draft_001                — Account Statement Draft         (localhost, unverified_draft)");
@@ -1118,3 +1162,5 @@ console.log("  skill_demo_login_001                — Demo Login (Skill)       
 console.log("  skill_demo_travel_booking_001       — Demo Flight Booking (Skill)     (aegis_controlled/sensitive, pre-installed)");
 console.log("  skill_demo_travel_violation_001     — Demo Flight Booking Violation   (aegis_controlled/sensitive, violation demo, pre-installed)");
 console.log("  pay_method_demo_001                 — Aegis Demo Card                 (visa, last4: 4242, metadata only)");
+console.log("  ws_coord_trial_001                  — Coordination Trial Workspace    (collar_demo_starter, 2 participants, 2 open tasks)");
+console.log("Workspace trial: Agent A = pass_demo_001 | Agent B = pass_demo_002 | Workspace = ws_coord_trial_001");

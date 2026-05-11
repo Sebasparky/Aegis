@@ -59,6 +59,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Sensitive Requirement Assessment v1. It is complete. Do not re-implement `assessSensitiveRequirements`, the `assess_sensitive_requirements` MCP tool schema, or the switch case in `examples/aegis-tool-server.mjs`. Agent autonomy boundary is defined in `docs/AGENT_INTEGRATION_CONTRACT.md` and `CLAUDE.md`. `plan_aegis_action` behavior and semantics are unchanged — its description was updated with a disambiguation note only.**
 
+> **Also: do NOT rebuild Aegis Workspaces v0 or Workspace Effective Permissions v1. Both are complete. Do not re-implement `AegisWorkspace`, `WorkspaceTask`, `WorkspaceArtifact`, `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`, the seven workspace `ActionType` values, or any of the six agent-facing workspace endpoints. Do not add Supabase persistence, MCP tools, UI, or a workspace invite flow for workspaces unless explicitly requested. `approval_required` workspace actions currently return `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (403) — there is no workspace CRUD approval inbox in v1.**
+
 > **Also: do NOT rebuild Security Challenge Expiry / Stale Approval Cleanup v1. It is complete. Do not re-implement lazy expiry in `GET /api/internal/security-challenges` (marks pending_user/code_submitted challenges expired, filters terminal statuses by default, supports `?include_terminal=true`), lazy expiry in `GET /api/internal/challenge-email-resolutions` (marks non-terminal resolutions expired when their linked challenge has expired), the `isExpired` setTimeout in `PendingChallengeCard`, the expired card early return, the auto-refresh `useEffect` on `challenges.length`, or the `isEmailTypeChallenge` generalization. Gmail button copy reads "Aegis only searches for this live verification request after you approve." Gmail resolution remains user-initiated (click = approval). Do not remove `TERMINAL_STATUSES` set from `security-challenges.ts`.**
 
 ---
@@ -560,6 +562,59 @@ Do not rebuild unless explicitly requested.
 **Connected Email Challenge Resolver v1.1 — complete (2026-05-07).**
 
 Two-phase Gmail search with restricted body-fetch fallback. Phase 1: metadata scan (subject + snippet extraction). Phase 2: `format=FULL` body fetch for the best candidate only if Phase 1 fails (at most 2 body fetches, body capped at 20,000 chars, immediately discarded). Provider architecture generalized via `VERIFICATION_EMAIL_POLICIES` registry — GitHub is the only provider in v1.1; future providers (Google, Microsoft, etc.) can be added without rewriting the resolver. `extraction_source` ("subject_snippet" | "body_text") is safe metadata on `ChallengeEmailResolution`. Domain check uses `isEmailChallengeSupported(domain)` from registry (replaces hardcoded "github.com" check in both route files). Body text is function-local — never stored, logged, or returned. Manual fallback retained on `not_found`. Do not rebuild.
+
+**Aegis Workspaces v0 + Workspace Effective Permissions v1 — complete (2026-05-11).**
+
+Backend-only multi-agent coordination layer. Multiple delegated agents can share tasks and artifacts within a permissioned workspace.
+
+Data model (all in `packages/types/src/index.ts`):
+- `AegisWorkspace` — named context with a workspace collar and participant delegation list
+- `WorkspaceTask` — claimable work unit; `open → in_progress → completed / cancelled`
+- `WorkspaceArtifact` — text output (max 50 KB); kinds `text`, `json`, `csv`, `markdown`
+
+Access model:
+- Three guards in order: workspace active → workspace collar active → delegation is a participant
+- Effective permission = intersection of workspace collar and `delegation.default_collar_id` collar; stricter wins
+- Seven new `ActionType` values: `workspace_read`, `workspace_task_list`, `workspace_task_claim`, `workspace_task_complete`, `workspace_artifact_create`, `workspace_artifact_list`, `workspace_artifact_read`
+- Strict opt-in: absent from both `allowed_actions` and `approval_required_actions` = hard block
+- `approval_required` from either collar → 403 `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (no approval inbox in v1)
+- PATCH /tasks/:taskId validates `action` ("claim" or "complete") before the permission check — `INVALID_ACTION` always returns 400
+
+Agent API endpoints (all under `/api/agent/v1/workspaces/`):
+- `GET /:id` — workspace metadata; never exposes `owner_user_id`
+- `GET /:id/tasks` — task list (open + mine by default; optional `?status=` filter)
+- `PATCH /:id/tasks/:taskId` — claim or complete a task; claim is idempotent if already mine
+- `POST /:id/artifacts` — create artifact; content never returned in POST response
+- `GET /:id/artifacts` — list artifact metadata (no content)
+- `GET /:id/artifacts/:artifactId` — read artifact with content
+
+User-facing endpoints: `POST /api/workspaces`, `GET /api/workspaces`
+
+Key files:
+- `apps/api/src/lib/workspaceDomain.ts` — `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`
+- `apps/api/src/routes/agent-api.ts` — six workspace handlers
+- `apps/api/src/routes/workspaces.ts` — user-facing CRUD
+- `apps/api/src/__tests__/workspace-coordination.test.ts` — 35 passing tests
+
+Not yet built: Supabase persistence, MCP tools, UI, workspace invite flow, workspace CRUD approval inbox.
+
+Do not rebuild unless explicitly requested.
+
+**Real-Agent Workspace Trial Setup — complete (2026-05-11).**
+
+Minimal setup to hand two real Claude agents bearer tokens and observe actual integration behavior.
+
+Key additions:
+- `collar_demo_starter.allowed_actions` in `seed-demo-data.mjs` now includes all seven workspace action types — workspace ops were previously hard-blocked after `npm run seed:demo`
+- `ws_coord_trial_001` workspace seeded with `delg_demo_001` (Agent A) and `delg_demo_restricted` (Agent B) as participants; two open tasks (`task_coord_001`, `task_coord_002`)
+- Workspace maps (`aegisWorkspaces`, `workspaceTasks`, `workspaceArtifacts`, `workspaceAuditEvents`) wired into `persistStore()`, `loadStore()`, and `resetStoreForDemo()` in `persistence.ts` — artifacts survive server restart
+- `STARTER_COLLAR.id` fixed to `"collar_demo_starter"` (was `randomUUID()`) in `seedDefaultData()` — workspace collar reference resolves on fresh-start path
+- Both demo delegations (`delg_demo_001`, `delg_demo_restricted`) now seeded in `seedDefaultData()` — workspace participant checks resolve on fresh-start path
+- `docs/WORKSPACE_TRIAL_RUNBOOK.md` — runbook with 7 curl examples, Agent A and Agent B system prompts, 12-item observation checklist, and observed-roadblocks table
+
+Trial flow: `npm run seed:demo` → `npm run dev` → hand tokens → observe. Agent A: `pass_demo_001`. Agent B: `pass_demo_002`. Workspace: `ws_coord_trial_001`.
+
+Do not rebuild these seed/persistence additions unless explicitly requested.
 
 **Candidate next milestones:**
 

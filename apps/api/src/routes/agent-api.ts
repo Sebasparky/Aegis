@@ -46,7 +46,7 @@ import {
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
-import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit, buildEffectivePermissionsMap, checkTaskEligibility } from "../lib/workspaceDomain.js";
+import { requireWorkspaceAccess, checkWorkspacePermission, emitWorkspaceAudit, buildEffectivePermissionsMap, checkTaskEligibility, enrichTaskForManifest, buildWorkQueue, computeTaskReadiness, buildWorkspaceArtifactNames } from "../lib/workspaceDomain.js";
 import { challengeCodes, executeChallengeInjectionViaCDP } from "../runtime/challengeInjection.js";
 import { resolutionCodes, searchGmailForChallengeCode, isEmailChallengeSupported } from "../runtime/emailChallengeResolver.js";
 import { getVaultRepository } from "../repositories/vaultRepository.js";
@@ -1773,6 +1773,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         (a) => a.workspace_id === workspace.workspace_id,
       );
 
+      // Build recommended_work_queue — per-task enriched entries sorted by priority/readiness
+      const artifactNameSet = buildWorkspaceArtifactNames(workspace.workspace_id);
+      const enrichedEntries = allTasks.map((t) =>
+        enrichTaskForManifest(t, delegation.id, delegation.default_collar_id, allTasks, artifactNameSet),
+      );
+      const recommendedWorkQueue = buildWorkQueue(enrichedEntries, allTasks);
+
       // Compute next_actions — priority: assigned_to_me > eligible > open > complete > artifact > read
       const nextActions: string[] = [];
       const wsPath = `/api/agent/v1/workspaces/${workspace.workspace_id}`;
@@ -1860,6 +1867,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         "Artifacts are shared with all participants. Create them to hand off results to other agents.",
         "POST artifact response omits content — use GET .../artifacts/{artifactId} to read.",
         "Both the workspace collar and your delegation collar must allow an action (stricter wins).",
+        "Tasks have a readiness status — only ready tasks can be claimed; blocked tasks must wait for dependencies or artifacts.",
+        "task_mode='plan_first' signals you should draft an approach before executing (advisory only).",
       ];
 
       return reply.send({
@@ -1885,6 +1894,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             agent_name: delegation.agent_name,
           },
           effective_permissions: perms,
+          recommended_work_queue: recommendedWorkQueue,
           task_summary: {
             assigned_to_me: assignedToMe.map((t) => ({
               task_id: t.task_id,
@@ -2052,6 +2062,24 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         const eligibility = checkTaskEligibility(task, delegation);
         if (!eligibility.ok) {
           return sendError(reply, 403, eligibility.code, eligibility.message);
+        }
+        // Readiness check: blocked tasks (unmet deps or missing artifacts) cannot be claimed
+        const claimArtifactNames = buildWorkspaceArtifactNames(workspace.workspace_id);
+        const claimAllTasks = Array.from(workspaceTasks.values()).filter(
+          (t) => t.workspace_id === workspace.workspace_id,
+        );
+        const { readiness: claimReadiness, blockers: claimBlockers } = computeTaskReadiness(
+          task,
+          delegation.id,
+          claimAllTasks,
+          claimArtifactNames,
+        );
+        if (claimReadiness === "blocked") {
+          return reply.status(409).send({
+            ok: false,
+            error: { code: "TASK_NOT_READY", message: "Task cannot be claimed until its dependencies are met." },
+            blocker_reasons: claimBlockers,
+          });
         }
         const now = new Date().toISOString();
         task.status = "in_progress";

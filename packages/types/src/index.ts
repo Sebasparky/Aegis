@@ -1772,6 +1772,19 @@ export interface SensitiveActionTimelineItem {
 export type WorkspaceStatus = "active" | "archived";
 export type WorkspaceTaskStatus = "open" | "in_progress" | "completed" | "cancelled";
 export type WorkspaceArtifactKind = "text" | "json" | "csv" | "markdown";
+export type TaskKind =
+  | "research"
+  | "analysis"
+  | "draft"
+  | "review"
+  | "shopping"
+  | "coding"
+  | "planning"
+  | "approval_prep"
+  | "execution"
+  | "other";
+export type TaskMode = "direct" | "plan_first";
+export type TaskPriority = "low" | "normal" | "high" | "urgent";
 
 /** A shared, permissioned context where multiple delegated agents coordinate. */
 export interface AegisWorkspace {
@@ -1810,6 +1823,16 @@ export interface WorkspaceTask {
   assigned_delegation_id?: string;
   /** Only meaningful when assignment_type="collar". The collar ID the claiming delegation must carry. */
   required_collar_id?: string;
+  /** Categorizes the nature of work. Advisory — used for manifest guidance. Default: "other". */
+  task_kind?: TaskKind;
+  /** Workflow hint for the claiming agent. "plan_first" = draft an approach before executing. Advisory only. */
+  task_mode?: TaskMode;
+  /** Scheduling priority. Default: "normal". */
+  priority?: TaskPriority;
+  /** Task IDs whose status must be "completed" before this task is considered ready. */
+  depends_on_task_ids?: string[];
+  /** Artifact names that must exist in the workspace before this task is considered ready. */
+  required_artifact_names?: string[];
   created_by_user_id: string;
   created_at: string;
   updated_at: string;
@@ -1828,4 +1851,43 @@ export interface WorkspaceArtifact {
   task_id?: string;
   created_by_delegation_id?: string;
   created_at: string;
+}
+
+export type TaskEligibilityLabel = "eligible" | "not_eligible" | "assigned_to_me" | "open";
+export type TaskReadinessLabel =
+  | "ready"
+  | "blocked"
+  | "in_progress_mine"
+  | "in_progress_other"
+  | "completed"
+  | "cancelled";
+export type TaskRecommendedAction =
+  | "claim"
+  | "continue_work"
+  | "wait"
+  | "read_artifact"
+  | "complete_when_done"
+  | "none";
+
+export interface TaskBlockerReasons {
+  incomplete_dependency_task_ids?: string[];
+  missing_artifact_names?: string[];
+  claimed_by_other?: boolean;
+  not_eligible_reason?: string;
+}
+
+/** Per-task enriched entry in the recommended_work_queue returned by the manifest. */
+export interface WorkspaceTaskManifestEntry {
+  task_id: string;
+  title: string;
+  description?: string;
+  task_kind: TaskKind;
+  task_mode: TaskMode;
+  priority: TaskPriority;
+  status: WorkspaceTaskStatus;
+  eligibility: TaskEligibilityLabel;
+  readiness: TaskReadinessLabel;
+  blocker_reasons?: TaskBlockerReasons;
+  recommended_action: TaskRecommendedAction;
+  reason: string;
 }

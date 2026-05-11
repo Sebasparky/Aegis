@@ -950,7 +950,7 @@ const WORKSPACE = {
   workspace_id: "ws_coord_trial_001",
   owner_user_id: "user_001",
   name: "Coordination Trial Workspace",
-  description: "Two-agent coordination trial. Agent A authors a product summary; Agent B reviews it.",
+  description: "Three-task coordination trial. collar_demo_starter agents handle research and review; any agent handles the open analysis task.",
   collar_id: "collar_demo_starter",
   participant_delegation_ids: ["delg_demo_001", "delg_demo_restricted"],
   status: "active",
@@ -962,11 +962,16 @@ const WORKSPACE_TASKS = [
   ["task_coord_001", {
     task_id: "task_coord_001",
     workspace_id: "ws_coord_trial_001",
-    title: "Summarize the five Aegis product pillars",
-    description: "Write 2-3 sentences each on: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
+    title: "Research Aegis product pillars",
+    description: "Research and document the five Aegis pillars: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Write 2-3 sentences each. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
     status: "open",
-    assignment_type: "delegation",
-    assigned_delegation_id: "delg_demo_001",
+    assignment_type: "collar",
+    required_collar_id: "collar_demo_starter",
+    task_kind: "research",
+    task_mode: "direct",
+    priority: "high",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
     created_by_user_id: "user_001",
     created_at: "2026-05-11T00:00:00.000Z",
     updated_at: "2026-05-11T00:00:00.000Z"
@@ -974,14 +979,35 @@ const WORKSPACE_TASKS = [
   ["task_coord_002", {
     task_id: "task_coord_002",
     workspace_id: "ws_coord_trial_001",
-    title: "Review the pillars summary and produce a prioritization artifact",
-    description: "List artifacts in the workspace. Find and read the artifact named `aegis-pillars-summary.md` created by the other agent. Identify the single most important capability Aegis provides. Write a 3-bullet-point argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
+    title: "Review and prioritize Aegis pillars",
+    description: "Read the `aegis-pillars-summary.md` artifact. Identify the most important Aegis capability and write a 3-bullet argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
     status: "open",
     assignment_type: "collar",
-    required_collar_id: "collar_research_001",
+    required_collar_id: "collar_demo_starter",
+    task_kind: "review",
+    task_mode: "plan_first",
+    priority: "normal",
+    depends_on_task_ids: ["task_coord_001"],
+    required_artifact_names: ["aegis-pillars-summary.md"],
     created_by_user_id: "user_001",
-    created_at: "2026-05-11T00:00:00.000Z",
-    updated_at: "2026-05-11T00:00:00.000Z"
+    created_at: "2026-05-11T00:01:00.000Z",
+    updated_at: "2026-05-11T00:01:00.000Z"
+  }],
+  ["task_coord_003", {
+    task_id: "task_coord_003",
+    workspace_id: "ws_coord_trial_001",
+    title: "Analyze workspace usage patterns",
+    description: "Review the artifacts created in this workspace and produce a brief analysis of how agents used it. Create a markdown artifact named `workspace-usage-analysis.md` linked to this task. Mark the task complete after creating the artifact.",
+    status: "open",
+    assignment_type: "open",
+    task_kind: "analysis",
+    task_mode: "direct",
+    priority: "low",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
+    created_by_user_id: "user_001",
+    created_at: "2026-05-11T00:02:00.000Z",
+    updated_at: "2026-05-11T00:02:00.000Z"
   }]
 ];
 
@@ -1193,7 +1219,7 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 1 workspace, 2 tasks, 1 payment method written.");
+console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 1 workspace, 3 tasks, 1 payment method written.");
 console.log("  route_demo_banking_001              — Demo Banking Workflow           (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001            — Wikipedia Search                (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
 console.log("  route_demo_draft_001                — Account Statement Draft         (localhost, unverified_draft)");
@@ -1206,7 +1232,8 @@ console.log("  skill_demo_login_001                — Demo Login (Skill)       
 console.log("  skill_demo_travel_booking_001       — Demo Flight Booking (Skill)     (aegis_controlled/sensitive, pre-installed)");
 console.log("  skill_demo_travel_violation_001     — Demo Flight Booking Violation   (aegis_controlled/sensitive, violation demo, pre-installed)");
 console.log("  pay_method_demo_001                 — Aegis Demo Card                 (visa, last4: 4242, metadata only)");
-console.log("  ws_coord_trial_001                  — Coordination Trial Workspace    (collar_demo_starter, 2 participants, 2 open tasks)");
-console.log("  task_coord_001: assignment_type=delegation → Agent A (pass_demo_001, collar_demo_starter)");
-console.log("  task_coord_002: assignment_type=collar    → requires collar_research_001 (Agent B, pass_demo_002)");
+console.log("  ws_coord_trial_001                  — Coordination Trial Workspace    (collar_demo_starter, 2 participants, 3 open tasks)");
+console.log("  task_coord_001: collar=collar_demo_starter, kind=research, priority=high, ready");
+console.log("  task_coord_002: collar=collar_demo_starter, kind=review,   priority=normal, blocked by task_coord_001 + aegis-pillars-summary.md");
+console.log("  task_coord_003: assignment_type=open,      kind=analysis,  priority=low,   ready");
 console.log("Workspace trial: Agent A = pass_demo_001 | Agent B = pass_demo_002 | Workspace = ws_coord_trial_001");

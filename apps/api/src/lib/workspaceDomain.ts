@@ -9,10 +9,25 @@
  *     and the delegation's default collar — the stricter limit wins.
  */
 
-import type { AegisWorkspace, AgentDelegation, ActionType, Collar, WorkspaceTask } from "@aegis/types";
+import type {
+  AegisWorkspace,
+  AgentDelegation,
+  ActionType,
+  Collar,
+  WorkspaceTask,
+  TaskKind,
+  TaskMode,
+  TaskPriority,
+  TaskEligibilityLabel,
+  TaskReadinessLabel,
+  TaskBlockerReasons,
+  TaskRecommendedAction,
+  WorkspaceTaskManifestEntry,
+} from "@aegis/types";
 import {
   aegisWorkspaces,
   collars,
+  workspaceArtifacts,
   workspaceAuditEvents,
   newId,
   type WorkspaceAuditEvent,
@@ -24,7 +39,8 @@ export type WorkspaceAccessError =
   | "WORKSPACE_COLLAR_INACTIVE"
   | "WORKSPACE_PERMISSION_DENIED"
   | "WORKSPACE_PERMISSION_REQUIRES_APPROVAL"
-  | "TASK_NOT_ELIGIBLE";
+  | "TASK_NOT_ELIGIBLE"
+  | "TASK_NOT_READY";
 
 export interface WorkspaceAccessResult {
   ok: true;
@@ -225,4 +241,232 @@ export function emitWorkspaceAudit(
     created_at: new Date().toISOString(),
   };
   workspaceAuditEvents.set(record.event_id, record);
+}
+
+// ─── Task Readiness and Work Queue ──────────────────────────────────────────
+
+export interface TaskReadinessResult {
+  readiness: TaskReadinessLabel;
+  blockers?: TaskBlockerReasons;
+}
+
+/**
+ * Determines whether a task's preconditions are satisfied.
+ * Does NOT consider eligibility — call checkTaskEligibility separately.
+ * For non-open tasks, derives status-based readiness labels directly.
+ */
+export function computeTaskReadiness(
+  task: WorkspaceTask,
+  callingDelegationId: string,
+  allTasks: WorkspaceTask[],
+  artifactNames: Set<string>,
+): TaskReadinessResult {
+  if (task.status === "in_progress") {
+    return {
+      readiness:
+        task.assigned_delegation_id === callingDelegationId ? "in_progress_mine" : "in_progress_other",
+    };
+  }
+  if (task.status === "completed") return { readiness: "completed" };
+  if (task.status === "cancelled") return { readiness: "cancelled" };
+
+  // task.status === "open" — check dependency and artifact preconditions
+  const incompleteDeps: string[] = [];
+  for (const depId of task.depends_on_task_ids ?? []) {
+    const dep = allTasks.find((t) => t.task_id === depId);
+    if (!dep || dep.status !== "completed") incompleteDeps.push(depId);
+  }
+
+  const missingArtifacts: string[] = [];
+  for (const name of task.required_artifact_names ?? []) {
+    if (!artifactNames.has(name)) missingArtifacts.push(name);
+  }
+
+  if (incompleteDeps.length > 0 || missingArtifacts.length > 0) {
+    const blockers: TaskBlockerReasons = {};
+    if (incompleteDeps.length > 0) blockers.incomplete_dependency_task_ids = incompleteDeps;
+    if (missingArtifacts.length > 0) blockers.missing_artifact_names = missingArtifacts;
+    return { readiness: "blocked", blockers };
+  }
+
+  return { readiness: "ready" };
+}
+
+/**
+ * Builds a WorkspaceTaskManifestEntry for a single task from the calling delegation's perspective.
+ * Eligibility mirrors the manifest bucket logic; readiness checks dependencies and artifacts.
+ */
+export function enrichTaskForManifest(
+  task: WorkspaceTask,
+  callingDelegationId: string,
+  callingDelegationCollarId: string,
+  allTasks: WorkspaceTask[],
+  artifactNames: Set<string>,
+): WorkspaceTaskManifestEntry {
+  const task_kind: TaskKind = task.task_kind ?? "other";
+  const task_mode: TaskMode = task.task_mode ?? "direct";
+  const priority: TaskPriority = task.priority ?? "normal";
+
+  // Determine eligibility label
+  let eligibility: TaskEligibilityLabel;
+  const type = task.assignment_type ?? "open";
+
+  if (task.status === "in_progress" && task.assigned_delegation_id === callingDelegationId) {
+    eligibility = "assigned_to_me";
+  } else if (type === "delegation") {
+    eligibility =
+      task.assigned_delegation_id === callingDelegationId ? "assigned_to_me" : "not_eligible";
+  } else if (type === "collar") {
+    const rc = task.required_collar_id ? collars.get(task.required_collar_id) : undefined;
+    if (!rc || rc.status !== "active") {
+      eligibility = "not_eligible";
+    } else if (callingDelegationCollarId === task.required_collar_id) {
+      eligibility = "eligible";
+    } else {
+      eligibility = "not_eligible";
+    }
+  } else {
+    eligibility = "open";
+  }
+
+  // Compute readiness
+  const { readiness, blockers } = computeTaskReadiness(task, callingDelegationId, allTasks, artifactNames);
+
+  // Build blocker_reasons — include not_eligible_reason when ineligible
+  let blocker_reasons: TaskBlockerReasons | undefined = blockers ? { ...blockers } : undefined;
+  if (eligibility === "not_eligible") {
+    blocker_reasons = blocker_reasons ?? {};
+    if (type === "delegation") {
+      blocker_reasons.not_eligible_reason = "assigned_to_other_delegation";
+    } else if (type === "collar") {
+      const rc = task.required_collar_id ? collars.get(task.required_collar_id) : undefined;
+      if (!rc || rc.status !== "active") {
+        blocker_reasons.not_eligible_reason = "required_collar_inactive_or_missing";
+      } else {
+        blocker_reasons.not_eligible_reason = `requires_collar:${task.required_collar_id}`;
+      }
+    }
+  }
+  if (readiness === "in_progress_other") {
+    blocker_reasons = blocker_reasons ?? {};
+    blocker_reasons.claimed_by_other = true;
+  }
+
+  // Derive recommended_action
+  let recommended_action: TaskRecommendedAction;
+  let reason: string;
+
+  if (readiness === "in_progress_mine") {
+    recommended_action = "continue_work";
+    reason = "You have claimed this task. Continue working and complete it when done.";
+  } else if (readiness === "in_progress_other") {
+    recommended_action = "wait";
+    reason = "This task is in progress by another agent.";
+  } else if (readiness === "completed") {
+    recommended_action = "none";
+    reason = "Task is complete.";
+  } else if (readiness === "cancelled") {
+    recommended_action = "none";
+    reason = "Task is cancelled.";
+  } else if (eligibility === "not_eligible") {
+    recommended_action = "none";
+    reason = blocker_reasons?.not_eligible_reason ?? "Not eligible to claim this task.";
+  } else if (readiness === "ready") {
+    recommended_action = "claim";
+    reason =
+      task_mode === "plan_first"
+        ? "Ready to claim. plan_first: draft an approach before executing."
+        : "Ready to claim.";
+  } else {
+    // blocked + eligible
+    recommended_action = "wait";
+    const parts: string[] = [];
+    if (blockers?.incomplete_dependency_task_ids?.length) {
+      parts.push(`waiting on tasks: ${blockers.incomplete_dependency_task_ids.join(", ")}`);
+    }
+    if (blockers?.missing_artifact_names?.length) {
+      parts.push(`missing artifacts: ${blockers.missing_artifact_names.join(", ")}`);
+    }
+    reason = `Blocked — ${parts.join("; ")}.`;
+  }
+
+  const entry: WorkspaceTaskManifestEntry = {
+    task_id: task.task_id,
+    title: task.title,
+    description: task.description,
+    task_kind,
+    task_mode,
+    priority,
+    status: task.status,
+    eligibility,
+    readiness,
+    recommended_action,
+    reason,
+  };
+  if (blocker_reasons && Object.keys(blocker_reasons).length > 0) {
+    entry.blocker_reasons = blocker_reasons;
+  }
+  return entry;
+}
+
+/**
+ * Sorts enriched manifest entries into the recommended_work_queue.
+ *
+ * Tier 0 — in_progress_mine (continue_work)
+ * Tier 1 — ready + eligible/assigned_to_me/open  (sorted by priority, unblock count, created_at)
+ * Tier 2 — blocked + eligible/assigned_to_me/open
+ * Tier 3 — not_eligible
+ * Tier 4 — completed or cancelled
+ */
+export function buildWorkQueue(
+  entries: WorkspaceTaskManifestEntry[],
+  allTasks: WorkspaceTask[],
+): WorkspaceTaskManifestEntry[] {
+  const PRIORITY_RANK: Record<TaskPriority, number> = { urgent: 4, high: 3, normal: 2, low: 1 };
+
+  // Precompute how many other tasks depend on each task_id
+  const unblockCount = new Map<string, number>();
+  for (const t of allTasks) {
+    for (const depId of t.depends_on_task_ids ?? []) {
+      unblockCount.set(depId, (unblockCount.get(depId) ?? 0) + 1);
+    }
+  }
+
+  // Map task_id → created_at for stable tiebreaking
+  const createdAt = new Map<string, string>(allTasks.map((t) => [t.task_id, t.created_at]));
+
+  function tier(e: WorkspaceTaskManifestEntry): number {
+    if (e.readiness === "in_progress_mine") return 0;
+    if (e.eligibility !== "not_eligible") {
+      if (e.readiness === "ready") return 1;
+      if (e.readiness === "blocked") return 2;
+    }
+    if (e.eligibility === "not_eligible") return 3;
+    return 4; // completed / cancelled
+  }
+
+  return [...entries].sort((a, b) => {
+    const ta = tier(a);
+    const tb = tier(b);
+    if (ta !== tb) return ta - tb;
+    if (ta === 1) {
+      const pDiff = PRIORITY_RANK[b.priority] - PRIORITY_RANK[a.priority];
+      if (pDiff !== 0) return pDiff;
+      const ucDiff = (unblockCount.get(b.task_id) ?? 0) - (unblockCount.get(a.task_id) ?? 0);
+      if (ucDiff !== 0) return ucDiff;
+    }
+    return (createdAt.get(a.task_id) ?? "").localeCompare(createdAt.get(b.task_id) ?? "");
+  });
+}
+
+/**
+ * Builds the artifact name set for a workspace — used by computeTaskReadiness.
+ * Pass the workspace_id to filter to the correct workspace.
+ */
+export function buildWorkspaceArtifactNames(workspaceId: string): Set<string> {
+  const names = new Set<string>();
+  for (const a of workspaceArtifacts.values()) {
+    if (a.workspace_id === workspaceId) names.add(a.name);
+  }
+  return names;
 }

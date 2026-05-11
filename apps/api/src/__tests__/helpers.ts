@@ -396,3 +396,86 @@ export function seedOpenTask(taskId: string, overrides: Partial<WorkspaceTask> =
   workspaceTasks.set(task.task_id, task);
   return task;
 }
+
+/** Seeds the ws_coord_trial_001 workspace and its three tasks for Section 14 tests. */
+export function seedTrialWorkspace(): void {
+  const NOW_TRIAL = "2026-05-11T00:00:00.000Z";
+  aegisWorkspaces.set("ws_coord_trial_001", {
+    workspace_id: "ws_coord_trial_001",
+    owner_user_id: MOCK_USER_ID,
+    name: "Coordination Trial Workspace",
+    description: "Three-task coordination trial.",
+    collar_id: IDS.COLLAR,
+    participant_delegation_ids: [IDS.DELEGATION_ALL, IDS.DELEGATION_RESTRICTED],
+    status: "active",
+    created_at: NOW_TRIAL,
+    updated_at: NOW_TRIAL,
+  });
+  workspaceTasks.set("task_coord_001", {
+    task_id: "task_coord_001",
+    workspace_id: "ws_coord_trial_001",
+    title: "Research Aegis product pillars",
+    description: "Write a summary. Create aegis-pillars-summary.md.",
+    status: "open",
+    assignment_type: "collar",
+    required_collar_id: IDS.COLLAR,
+    task_kind: "research",
+    task_mode: "direct",
+    priority: "high",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:00:00.000Z",
+    updated_at: "2026-05-11T00:00:00.000Z",
+  });
+  workspaceTasks.set("task_coord_002", {
+    task_id: "task_coord_002",
+    workspace_id: "ws_coord_trial_001",
+    title: "Review and prioritize Aegis pillars",
+    description: "Read the artifact, write review. Create aegis-pillars-review.md.",
+    status: "open",
+    assignment_type: "collar",
+    required_collar_id: IDS.COLLAR,
+    task_kind: "review",
+    task_mode: "plan_first",
+    priority: "normal",
+    depends_on_task_ids: ["task_coord_001"],
+    required_artifact_names: ["aegis-pillars-summary.md"],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:01:00.000Z",
+    updated_at: "2026-05-11T00:01:00.000Z",
+  });
+  workspaceTasks.set("task_coord_003", {
+    task_id: "task_coord_003",
+    workspace_id: "ws_coord_trial_001",
+    title: "Analyze workspace usage patterns",
+    description: "Analyze and create workspace-usage-analysis.md.",
+    status: "open",
+    assignment_type: "open",
+    task_kind: "analysis",
+    task_mode: "direct",
+    priority: "low",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:02:00.000Z",
+    updated_at: "2026-05-11T00:02:00.000Z",
+  });
+}
+
+/** Seeds a workspace artifact for readiness tests. */
+export function seedWorkspaceArtifact(
+  artifactId: string,
+  name: string,
+  overrides: { workspace_id?: string; kind?: "text" | "json" | "csv" | "markdown"; task_id?: string } = {},
+): void {
+  workspaceArtifacts.set(artifactId, {
+    artifact_id: artifactId,
+    workspace_id: overrides.workspace_id ?? IDS.WORKSPACE,
+    name,
+    kind: overrides.kind ?? "markdown",
+    content: `# ${name}`,
+    task_id: overrides.task_id,
+    created_at: "2026-05-01T00:00:00.000Z",
+  });
+}

@@ -58,6 +58,8 @@ import {
   seedWorkspaceDelegations,
   seedTestWorkspace,
   seedOpenTask,
+  seedWorkspaceArtifact,
+  seedTrialWorkspace,
   resetStore,
   IDS,
 } from "./helpers.js";
@@ -872,6 +874,7 @@ describe("GET /api/agent/v1/workspaces/:id/manifest", () => {
     expect(data).toHaveProperty("identity");
     expect(data).toHaveProperty("effective_permissions");
     expect(data).toHaveProperty("task_summary");
+    expect(data).toHaveProperty("recommended_work_queue");
     expect(data).toHaveProperty("artifacts");
     expect(data).toHaveProperty("workflow_rules");
     expect(data).toHaveProperty("operations");
@@ -1640,5 +1643,478 @@ describe("GET .../manifest — task eligibility buckets", () => {
     });
     const hints: string[] = res.json().data.next_actions;
     expect(hints.some((h) => h.toLowerCase().includes("claim"))).toBe(false);
+  });
+});
+
+// ─── Section 12: recommended_work_queue in manifest ──────────────────────────
+
+describe("Section 12: recommended_work_queue in manifest", () => {
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedWorkspaceDelegations();
+    seedTestWorkspace();
+  });
+
+  it("recommended_work_queue is present and is an array", async () => {
+    seedOpenTask("task_rwq_basic");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json();
+    expect(Array.isArray(data.recommended_work_queue)).toBe(true);
+  });
+
+  it("each entry has required shape fields", async () => {
+    seedOpenTask("task_rwq_shape");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue: unknown[] = res.json().data.recommended_work_queue;
+    expect(queue.length).toBeGreaterThan(0);
+    const entry = queue[0] as Record<string, unknown>;
+    expect(entry).toHaveProperty("task_id");
+    expect(entry).toHaveProperty("title");
+    expect(entry).toHaveProperty("task_kind");
+    expect(entry).toHaveProperty("task_mode");
+    expect(entry).toHaveProperty("priority");
+    expect(entry).toHaveProperty("status");
+    expect(entry).toHaveProperty("eligibility");
+    expect(entry).toHaveProperty("readiness");
+    expect(entry).toHaveProperty("recommended_action");
+    expect(entry).toHaveProperty("reason");
+  });
+
+  it("open task with no deps gets readiness=ready and recommended_action=claim", async () => {
+    seedOpenTask("task_rwq_ready");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_ready");
+    expect(entry?.readiness).toBe("ready");
+    expect(entry?.recommended_action).toBe("claim");
+  });
+
+  it("open task with incomplete dep gets readiness=blocked with blocker_reasons", async () => {
+    seedOpenTask("task_rwq_dep_a");
+    seedOpenTask("task_rwq_dep_b", { depends_on_task_ids: ["task_rwq_dep_a"] });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_dep_b") as Record<string, unknown>;
+    expect(entry.readiness).toBe("blocked");
+    expect(entry.recommended_action).toBe("wait");
+    const blockers = entry.blocker_reasons as Record<string, unknown>;
+    expect(blockers.incomplete_dependency_task_ids).toContain("task_rwq_dep_a");
+  });
+
+  it("open task with missing required artifact gets readiness=blocked", async () => {
+    seedOpenTask("task_rwq_art_blocked", { required_artifact_names: ["missing.md"] });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_art_blocked") as Record<string, unknown>;
+    expect(entry.readiness).toBe("blocked");
+    const blockers = entry.blocker_reasons as Record<string, unknown>;
+    expect(blockers.missing_artifact_names).toContain("missing.md");
+  });
+
+  it("task with completed dep gets readiness=ready", async () => {
+    seedOpenTask("task_rwq_dep_done", { status: "completed", completed_at: "2026-05-01T01:00:00.000Z" });
+    seedOpenTask("task_rwq_after_done", { depends_on_task_ids: ["task_rwq_dep_done"] });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_after_done");
+    expect(entry?.readiness).toBe("ready");
+  });
+
+  it("task with required artifact present gets readiness=ready", async () => {
+    seedWorkspaceArtifact("art_rwq_001", "present.md");
+    seedOpenTask("task_rwq_art_ready", { required_artifact_names: ["present.md"] });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_art_ready");
+    expect(entry?.readiness).toBe("ready");
+  });
+
+  it("in_progress task owned by caller gets readiness=in_progress_mine and recommended_action=continue_work", async () => {
+    seedOpenTask("task_rwq_mine", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_mine");
+    expect(entry?.readiness).toBe("in_progress_mine");
+    expect(entry?.recommended_action).toBe("continue_work");
+  });
+
+  it("in_progress task owned by other gets readiness=in_progress_other and recommended_action=wait", async () => {
+    seedOpenTask("task_rwq_other", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_B,
+    });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_other");
+    expect(entry?.readiness).toBe("in_progress_other");
+    expect(entry?.recommended_action).toBe("wait");
+  });
+
+  it("sort: in_progress_mine appears before ready eligible tasks", async () => {
+    seedOpenTask("task_rwq_ready_first", { created_at: "2026-05-01T00:00:00.000Z" });
+    seedOpenTask("task_rwq_mine_sort", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const mineIdx = queue.findIndex((e) => e.task_id === "task_rwq_mine_sort");
+    const readyIdx = queue.findIndex((e) => e.task_id === "task_rwq_ready_first");
+    expect(mineIdx).toBeGreaterThanOrEqual(0);
+    expect(readyIdx).toBeGreaterThanOrEqual(0);
+    expect(mineIdx).toBeLessThan(readyIdx);
+  });
+
+  it("sort: urgent priority task appears before high priority task in ready tier", async () => {
+    seedOpenTask("task_rwq_high", { priority: "high", created_at: "2026-04-30T00:00:00.000Z" });
+    seedOpenTask("task_rwq_urgent", { priority: "urgent", created_at: "2026-05-01T00:00:00.000Z" });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const urgentIdx = queue.findIndex((e) => e.task_id === "task_rwq_urgent");
+    const highIdx = queue.findIndex((e) => e.task_id === "task_rwq_high");
+    expect(urgentIdx).toBeLessThan(highIdx);
+  });
+
+  it("sort: higher unblock count sorts before same-priority task with lower unblock count", async () => {
+    // task_rwq_unblock_a is depended on by 2 other tasks; task_rwq_unblock_b by 0
+    seedOpenTask("task_rwq_unblock_a", { priority: "normal", created_at: "2026-05-01T00:00:00.000Z" });
+    seedOpenTask("task_rwq_unblock_b", { priority: "normal", created_at: "2026-05-01T00:00:00.000Z" });
+    seedOpenTask("task_rwq_dep_1", { depends_on_task_ids: ["task_rwq_unblock_a"], status: "completed", completed_at: "2026-05-01T01:00:00.000Z" });
+    seedOpenTask("task_rwq_dep_2", { depends_on_task_ids: ["task_rwq_unblock_a"], status: "completed", completed_at: "2026-05-01T01:00:00.000Z" });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const aIdx = queue.findIndex((e) => e.task_id === "task_rwq_unblock_a");
+    const bIdx = queue.findIndex((e) => e.task_id === "task_rwq_unblock_b");
+    expect(aIdx).toBeLessThan(bIdx);
+  });
+
+  it("not_eligible task gets eligibility=not_eligible, recommended_action=none, and appears after eligible tasks", async () => {
+    // Seed a collar that AUTH_A's delegation does not carry
+    const SPECIAL_COLLAR = "col_rwq_special";
+    seedPermCollar(SPECIAL_COLLAR, { allowed: ["workspace_read", "workspace_task_list", "workspace_task_claim",
+      "workspace_task_complete", "workspace_artifact_create", "workspace_artifact_list", "workspace_artifact_read"] });
+    seedOpenTask("task_rwq_not_eligible", { assignment_type: "collar", required_collar_id: SPECIAL_COLLAR });
+    seedOpenTask("task_rwq_eligible_open");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A }, // AUTH_A uses collar_demo_starter, not SPECIAL_COLLAR
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const notElEntry = queue.find((e) => e.task_id === "task_rwq_not_eligible") as Record<string, unknown>;
+    const eligibleEntry = queue.find((e) => e.task_id === "task_rwq_eligible_open");
+    expect(notElEntry.eligibility).toBe("not_eligible");
+    expect(notElEntry.recommended_action).toBe("none");
+    const notElIdx = queue.findIndex((e) => e.task_id === "task_rwq_not_eligible");
+    const eligibleIdx = queue.findIndex((e) => e.task_id === "task_rwq_eligible_open");
+    expect(eligibleIdx).toBeLessThan(notElIdx);
+    expect(eligibleEntry).toBeDefined();
+  });
+
+  it("task_kind and task_mode are carried through to manifest entry", async () => {
+    seedOpenTask("task_rwq_kind", { task_kind: "research", task_mode: "plan_first" });
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_kind");
+    expect(entry?.task_kind).toBe("research");
+    expect(entry?.task_mode).toBe("plan_first");
+  });
+
+  it("task with no kind or priority fields defaults to task_kind=other and priority=normal", async () => {
+    seedOpenTask("task_rwq_defaults");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const entry = queue.find((e) => e.task_id === "task_rwq_defaults");
+    expect(entry?.task_kind).toBe("other");
+    expect(entry?.priority).toBe("normal");
+    expect(entry?.task_mode).toBe("direct");
+  });
+
+  it("blocked tasks appear after ready tasks in the queue", async () => {
+    seedOpenTask("task_rwq_dep_blocker");
+    seedOpenTask("task_rwq_blocked_by_dep", { depends_on_task_ids: ["task_rwq_dep_blocker"] });
+    seedOpenTask("task_rwq_ready_sibling");
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const blockedIdx = queue.findIndex((e) => e.task_id === "task_rwq_blocked_by_dep");
+    const readyIdx = queue.findIndex((e) => e.task_id === "task_rwq_ready_sibling");
+    expect(readyIdx).toBeLessThan(blockedIdx);
+  });
+});
+
+// ─── Section 13: Claim with TASK_NOT_READY denial ────────────────────────────
+
+describe("Section 13: Claim blocked/ready/ineligible behavior", () => {
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedWorkspaceDelegations();
+    seedTestWorkspace();
+  });
+
+  it("claiming a dep-blocked task returns 409 TASK_NOT_READY with blocker_reasons", async () => {
+    seedOpenTask("task_clm_dep_a");
+    seedOpenTask("task_clm_dep_b", { depends_on_task_ids: ["task_clm_dep_a"] });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_dep_b`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("TASK_NOT_READY");
+    expect(body.blocker_reasons.incomplete_dependency_task_ids).toContain("task_clm_dep_a");
+  });
+
+  it("claiming a task blocked by missing artifact returns 409 TASK_NOT_READY with missing_artifact_names", async () => {
+    seedOpenTask("task_clm_art_blocked", { required_artifact_names: ["required.md"] });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_art_blocked`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("TASK_NOT_READY");
+    expect(body.blocker_reasons.missing_artifact_names).toContain("required.md");
+  });
+
+  it("claiming a ready task succeeds with HTTP 200 and no blocker_reasons", async () => {
+    seedOpenTask("task_clm_ready");
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_ready`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json();
+    expect(data.status).toBe("in_progress");
+    expect(data).not.toHaveProperty("blocker_reasons");
+  });
+
+  it("not-eligible task returns 403 TASK_NOT_ELIGIBLE before readiness is checked", async () => {
+    const SPECIAL_COLLAR2 = "col_clm_special";
+    seedPermCollar(SPECIAL_COLLAR2, { allowed: ["workspace_read", "workspace_task_list", "workspace_task_claim",
+      "workspace_task_complete", "workspace_artifact_create", "workspace_artifact_list", "workspace_artifact_read"] });
+    // Task is also dep-blocked but should fail with TASK_NOT_ELIGIBLE first
+    seedOpenTask("task_clm_ineligible", {
+      assignment_type: "collar",
+      required_collar_id: SPECIAL_COLLAR2,
+      depends_on_task_ids: ["nonexistent_dep"],
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_ineligible`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+
+  it("claiming a blocked task that becomes ready after dep completes succeeds", async () => {
+    seedOpenTask("task_clm_will_complete");
+    seedOpenTask("task_clm_after", { depends_on_task_ids: ["task_clm_will_complete"] });
+
+    // First attempt while dep is open — should fail
+    const res1 = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_after`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res1.statusCode).toBe(409);
+    expect(res1.json().error.code).toBe("TASK_NOT_READY");
+
+    // Complete the dependency
+    workspaceTasks.get("task_clm_will_complete")!.status = "in_progress";
+    workspaceTasks.get("task_clm_will_complete")!.assigned_delegation_id = IDS.DELEGATION_B;
+    workspaceTasks.get("task_clm_will_complete")!.status = "completed";
+    workspaceTasks.get("task_clm_will_complete")!.completed_at = new Date().toISOString();
+
+    // Second attempt after dep is completed — should succeed
+    const res2 = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/tasks/task_clm_after`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res2.statusCode).toBe(200);
+    expect(res2.json().data.status).toBe("in_progress");
+  });
+});
+
+// ─── Section 14: Seed data validation ────────────────────────────────────────
+
+describe("Section 14: Seed data validation", () => {
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedWorkspaceDelegations();
+    seedTrialWorkspace();
+  });
+
+  it("fresh manifest for ws_coord_trial_001 shows task_coord_002 as blocked", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/ws_coord_trial_001/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const t002 = queue.find((e) => e.task_id === "task_coord_002") as Record<string, unknown>;
+    expect(t002).toBeDefined();
+    expect(t002.readiness).toBe("blocked");
+    expect(t002.recommended_action).toBe("wait");
+    const blockers = t002.blocker_reasons as Record<string, unknown>;
+    expect(blockers.incomplete_dependency_task_ids).toContain("task_coord_001");
+    expect(blockers.missing_artifact_names).toContain("aegis-pillars-summary.md");
+  });
+
+  it("fresh manifest shows task_coord_001 as ready/high priority and task_coord_003 as ready/low priority, with 001 first", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/ws_coord_trial_001/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const t001Idx = queue.findIndex((e) => e.task_id === "task_coord_001");
+    const t003Idx = queue.findIndex((e) => e.task_id === "task_coord_003");
+    const t001 = queue[t001Idx] as Record<string, unknown>;
+    const t003 = queue[t003Idx] as Record<string, unknown>;
+    expect(t001.readiness).toBe("ready");
+    expect(t001.recommended_action).toBe("claim");
+    expect(t001.priority).toBe("high");
+    expect(t003.readiness).toBe("ready");
+    expect(t003.recommended_action).toBe("claim");
+    expect(t003.priority).toBe("low");
+    expect(t001Idx).toBeLessThan(t003Idx);
+  });
+
+  it("claiming task_coord_002 before task_coord_001 is complete returns TASK_NOT_READY", async () => {
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/ws_coord_trial_001/tasks/task_coord_002`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("TASK_NOT_READY");
+  });
+
+  it("task_coord_002 becomes ready after completing task_coord_001 and creating aegis-pillars-summary.md", async () => {
+    // Complete the dependency
+    const t001 = workspaceTasks.get("task_coord_001")!;
+    t001.status = "in_progress";
+    t001.assigned_delegation_id = IDS.DELEGATION_ALL;
+    workspaceTasks.set("task_coord_001", t001);
+    t001.status = "completed";
+    t001.completed_at = new Date().toISOString();
+    workspaceTasks.set("task_coord_001", t001);
+
+    // Create the required artifact
+    workspaceArtifacts.set("art_seed_summary", {
+      artifact_id: "art_seed_summary",
+      workspace_id: "ws_coord_trial_001",
+      name: "aegis-pillars-summary.md",
+      kind: "markdown",
+      content: "# Aegis Pillars",
+      task_id: "task_coord_001",
+      created_by_delegation_id: IDS.DELEGATION_ALL,
+      created_at: new Date().toISOString(),
+    });
+
+    // Manifest should now show task_coord_002 as ready
+    const manifestRes = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/ws_coord_trial_001/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    const queue = manifestRes.json().data.recommended_work_queue as Record<string, unknown>[];
+    const t002 = queue.find((e) => e.task_id === "task_coord_002");
+    expect(t002?.readiness).toBe("ready");
+    expect(t002?.recommended_action).toBe("claim");
+
+    // Claim should also succeed
+    const claimRes = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/ws_coord_trial_001/tasks/task_coord_002`,
+      headers: { authorization: AUTH_A, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(claimRes.statusCode).toBe(200);
+    expect(claimRes.json().data.status).toBe("in_progress");
   });
 });

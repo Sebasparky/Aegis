@@ -1205,6 +1205,41 @@ describe("GET /api/agent/v1/workspaces/:id/manifest", () => {
     expect(rules.length).toBeGreaterThanOrEqual(4);
     rules.forEach((r) => expect(typeof r).toBe("string"));
   });
+
+  // ─ Operations body_schema ─────────────────────────────────────────────────────
+
+  it("POST /artifacts operation has body_schema with name, kind, content, task_id", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const ops = res.json().data.operations as { method: string; path: string; body_schema?: Record<string, string> }[];
+    const postArtifacts = ops.find((o) => o.method === "POST" && o.path.includes("/artifacts"));
+    expect(postArtifacts).toBeDefined();
+    expect(postArtifacts?.body_schema).toBeDefined();
+    expect(postArtifacts?.body_schema?.name).toContain("required");
+    expect(postArtifacts?.body_schema?.kind).toContain("markdown");
+    expect(postArtifacts?.body_schema?.content).toContain("required");
+    expect(postArtifacts?.body_schema?.task_id).toContain("optional");
+  });
+
+  it("PATCH /tasks operation has body_schema with action field", async () => {
+    seedTestWorkspace();
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { authorization: AUTH_A },
+    });
+    expect(res.statusCode).toBe(200);
+    const ops = res.json().data.operations as { method: string; path: string; body_schema?: Record<string, string> }[];
+    const patchTasks = ops.find((o) => o.method === "PATCH" && o.path.includes("/tasks/"));
+    expect(patchTasks).toBeDefined();
+    expect(patchTasks?.body_schema).toBeDefined();
+    expect(patchTasks?.body_schema?.action).toBeDefined();
+  });
 });
 
 // ─── 10. Task eligibility — claim enforcement ─────────────────────────────────
@@ -1339,6 +1374,7 @@ describe("PATCH .../tasks/:taskId — claim eligibility", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("TASK_ALREADY_CLAIMED");
+    expect(res.json().error.recovery_hint).toBe("refresh_manifest");
   });
 
   // ─ Collar-required tasks ──────────────────────────────────────────────────────
@@ -1931,6 +1967,7 @@ describe("Section 13: Claim blocked/ready/ineligible behavior", () => {
     expect(res.statusCode).toBe(409);
     const body = res.json();
     expect(body.error.code).toBe("TASK_NOT_READY");
+    expect(body.error.recovery_hint).toBe("refresh_manifest");
     expect(body.blocker_reasons.incomplete_dependency_task_ids).toContain("task_clm_dep_a");
   });
 

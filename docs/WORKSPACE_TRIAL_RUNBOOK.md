@@ -75,6 +75,9 @@ Expected: `status: "in_progress"`, `is_mine: true`.
 
 ### 4. POST — Agent A creates the summary artifact
 
+The POST body requires `{ name, kind, content, task_id? }`. Use `kind`, not `content_type`.
+Supported `kind` values: `text`, `json`, `csv`, `markdown`.
+
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer pass_demo_001" \
@@ -85,6 +88,26 @@ curl -s -X POST \
     "task_id": "task_coord_001",
     "content": "# Aegis Product Pillars\n\n## AegisID\n...\n\n## Delegation and Collars\n...\n\n## Aegis Rails\n...\n\n## Aegis Guard\n...\n\n## Audit Trail\n..."
   }' \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/artifacts | jq .
+```
+
+For larger markdown content (tables, multi-paragraph sections), shell quoting inside `-d` can cause issues.
+Use `--data-binary @file.json` instead:
+
+```bash
+cat > /tmp/artifact.json <<'EOF'
+{
+  "name": "aegis-pillars-summary.md",
+  "kind": "markdown",
+  "task_id": "task_coord_001",
+  "content": "# Aegis Product Pillars\n\nFull content here..."
+}
+EOF
+
+curl -s -X POST \
+  -H "Authorization: Bearer pass_demo_001" \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/artifact.json \
   http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/artifacts | jq .
 ```
 

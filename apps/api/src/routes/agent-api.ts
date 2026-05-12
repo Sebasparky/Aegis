@@ -1838,6 +1838,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           method: "PATCH",
           path: `/api/agent/v1/workspaces/${wsId}/tasks/{taskId}`,
           description: 'Claim: {"action":"claim"} · Complete: {"action":"complete"}',
+          body_schema: { action: '"claim" | "complete"' },
           available: perms.workspace_task_claim === "allow" || perms.workspace_task_complete === "allow",
         },
         {
@@ -1856,6 +1857,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           method: "POST",
           path: `/api/agent/v1/workspaces/${wsId}/artifacts`,
           description: "Create artifact (text/json/csv/markdown, max 50KB). Optionally link task_id.",
+          body_schema: {
+            name: "string (required)",
+            kind: '"text" | "json" | "csv" | "markdown" (required)',
+            content: "string (required, max 50KB)",
+            task_id: "string (optional)",
+          },
           available: perms.workspace_artifact_create === "allow",
         },
       ];
@@ -2055,10 +2062,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
         // Already claimed by someone else
         if (task.status === "in_progress") {
-          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is already claimed by another agent.");
+          return reply.status(409).send({
+            ok: false,
+            error: { code: "TASK_ALREADY_CLAIMED", message: "Task is already claimed by another agent.", recovery_hint: "refresh_manifest" },
+          });
         }
         if (task.status !== "open") {
-          return sendError(reply, 409, "TASK_ALREADY_CLAIMED", "Task is not open.");
+          return reply.status(409).send({
+            ok: false,
+            error: { code: "TASK_ALREADY_CLAIMED", message: "Task is not open.", recovery_hint: "refresh_manifest" },
+          });
         }
         // Eligibility check: assignment_type governs who may claim an open task
         const eligibility = checkTaskEligibility(task, delegation);
@@ -2079,7 +2092,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         if (claimReadiness === "blocked") {
           return reply.status(409).send({
             ok: false,
-            error: { code: "TASK_NOT_READY", message: "Task cannot be claimed until its dependencies are met." },
+            error: { code: "TASK_NOT_READY", message: "Task cannot be claimed until its dependencies are met.", recovery_hint: "refresh_manifest" },
             blocker_reasons: claimBlockers,
           });
         }

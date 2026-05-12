@@ -1642,6 +1642,113 @@ async function waitForCredentialAuthorization({
   };
 }
 
+// ─── Workspace handlers ───────────────────────────────────────────────────────
+
+async function getWorkspaceManifest({ workspace_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  const res = await request("GET", `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/manifest`);
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to get workspace manifest.",
+    };
+  }
+  return res.data;
+}
+
+async function claimWorkspaceTask({ workspace_id, task_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  if (!task_id) return { error: "VALIDATION_ERROR", message: "task_id is required." };
+  const res = await request(
+    "PATCH",
+    `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/tasks/${encodeURIComponent(task_id)}`,
+    { action: "claim" },
+  );
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to claim task.",
+      ...(res.error?.recovery_hint !== undefined ? { recovery_hint: res.error.recovery_hint } : {}),
+      ...(res.error?.blocker_reasons !== undefined ? { blocker_reasons: res.error.blocker_reasons } : {}),
+    };
+  }
+  return res.data;
+}
+
+async function completeWorkspaceTask({ workspace_id, task_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  if (!task_id) return { error: "VALIDATION_ERROR", message: "task_id is required." };
+  const res = await request(
+    "PATCH",
+    `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/tasks/${encodeURIComponent(task_id)}`,
+    { action: "complete" },
+  );
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to complete task.",
+    };
+  }
+  return res.data;
+}
+
+async function listWorkspaceArtifacts({ workspace_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  const res = await request("GET", `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/artifacts`);
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to list workspace artifacts.",
+    };
+  }
+  return { artifacts: res.data };
+}
+
+async function readWorkspaceArtifact({ workspace_id, artifact_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  if (!artifact_id) return { error: "VALIDATION_ERROR", message: "artifact_id is required." };
+  const res = await request(
+    "GET",
+    `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/artifacts/${encodeURIComponent(artifact_id)}`,
+  );
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to read artifact.",
+    };
+  }
+  return res.data;
+}
+
+const ARTIFACT_MAX_BYTES = 50 * 1024;
+const VALID_ARTIFACT_KINDS = ["text", "json", "csv", "markdown"];
+
+async function createWorkspaceArtifact({ workspace_id, name, kind, content, task_id } = {}) {
+  if (!workspace_id) return { error: "VALIDATION_ERROR", message: "workspace_id is required." };
+  if (!name || typeof name !== "string" || !name.trim())
+    return { error: "VALIDATION_ERROR", message: "name is required." };
+  if (!kind || !VALID_ARTIFACT_KINDS.includes(kind))
+    return { error: "VALIDATION_ERROR", message: `kind must be one of: ${VALID_ARTIFACT_KINDS.join(", ")}.` };
+  if (typeof content !== "string" || content.length === 0)
+    return { error: "VALIDATION_ERROR", message: "content is required." };
+  if (Buffer.byteLength(content, "utf8") > ARTIFACT_MAX_BYTES)
+    return { error: "VALIDATION_ERROR", message: `content exceeds the 50 KB limit (${ARTIFACT_MAX_BYTES} bytes UTF-8).` };
+  const body = { name: name.trim(), kind, content };
+  if (task_id) body.task_id = task_id;
+  const res = await request(
+    "POST",
+    `/api/agent/v1/workspaces/${encodeURIComponent(workspace_id)}/artifacts`,
+    body,
+  );
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to create artifact.",
+    };
+  }
+  return res.data;
+}
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -2571,6 +2678,157 @@ const TOOLS = [
       required: ["authorization_id"],
     },
   },
+
+  // ─── Workspace tools ────────────────────────────────────────────────────────
+
+  {
+    name: "get_workspace_manifest",
+    description:
+      "Returns the full orientation manifest for an Aegis workspace. " +
+      "Always call this first before any other workspace tool. " +
+      "The manifest contains: effective_permissions (what actions this agent's collar allows), " +
+      "recommended_work_queue (tasks sorted by readiness and priority, with blocker reasons), " +
+      "artifact metadata, workflow_rules, and next_actions. " +
+      "Use recommended_work_queue to find the next task to claim — it surfaces eligible, ready tasks first. " +
+      "Re-call this tool whenever you receive TASK_ALREADY_CLAIMED or TASK_NOT_READY from claim_workspace_task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID, e.g. 'ws_coord_trial_001'.",
+        },
+      },
+      required: ["workspace_id"],
+    },
+  },
+  {
+    name: "claim_workspace_task",
+    description:
+      "Claims a workspace task, setting its status to in_progress. " +
+      "Before calling, check recommended_work_queue from get_workspace_manifest to confirm the task is ready and eligible for this agent. " +
+      "On success, the task is yours — proceed with the work and create any required artifacts before calling complete_workspace_task.\n\n" +
+      "Error handling:\n" +
+      "- TASK_ALREADY_CLAIMED (409): another agent claimed the task. The response includes recovery_hint='refresh_manifest'. " +
+      "Call get_workspace_manifest to see updated state and pick a different task.\n" +
+      "- TASK_NOT_READY (409): the task has unmet dependencies or missing required artifacts. " +
+      "The response includes recovery_hint='refresh_manifest' and blocker_reasons listing what is missing. " +
+      "Call get_workspace_manifest to check progress.\n" +
+      "- TASK_NOT_ELIGIBLE / TASK_NOT_ASSIGNED (403): your collar does not match this task's required_collar_id or assignment. " +
+      "Pick a different task from recommended_work_queue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID.",
+        },
+        task_id: {
+          type: "string",
+          description: "The task_id to claim. Get this from recommended_work_queue in get_workspace_manifest.",
+        },
+      },
+      required: ["workspace_id", "task_id"],
+    },
+  },
+  {
+    name: "complete_workspace_task",
+    description:
+      "Marks a workspace task as completed. " +
+      "Only call this after the work is done and any required artifacts have been created with create_workspace_artifact. " +
+      "Only the delegation that claimed the task can complete it. " +
+      "Completing a task may unblock other tasks that depend on it — call get_workspace_manifest after completion to see the updated work queue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID.",
+        },
+        task_id: {
+          type: "string",
+          description: "The task_id to mark completed. Must be a task you have claimed (status in_progress).",
+        },
+      },
+      required: ["workspace_id", "task_id"],
+    },
+  },
+  {
+    name: "list_workspace_artifacts",
+    description:
+      "Lists all artifacts in the workspace. Returns metadata only — artifact_id, name, kind, size_bytes, task_id, created_by_delegation_id, created_at. " +
+      "Content is not included; use read_workspace_artifact to fetch the content of a specific artifact. " +
+      "Use this to check whether a required artifact already exists before claiming a task that depends on it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID.",
+        },
+      },
+      required: ["workspace_id"],
+    },
+  },
+  {
+    name: "read_workspace_artifact",
+    description:
+      "Returns the full content of a workspace artifact. " +
+      "Get artifact_id from list_workspace_artifacts or from the artifacts array in get_workspace_manifest. " +
+      "Use this to read work produced by other agents before building on it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID.",
+        },
+        artifact_id: {
+          type: "string",
+          description: "The artifact_id from list_workspace_artifacts or the manifest artifacts array.",
+        },
+      },
+      required: ["workspace_id", "artifact_id"],
+    },
+  },
+  {
+    name: "create_workspace_artifact",
+    description:
+      "Creates a text artifact in the workspace. " +
+      "Pass content as a plain string — no shell quoting, no base64, no escaping required. " +
+      "Supported kinds: text, json, csv, markdown. Content limit: 50 KB. " +
+      "Optionally link the artifact to the task that produced it via task_id. " +
+      "Create artifacts before calling complete_workspace_task when the task specifies required_artifact_names — " +
+      "completing a task without its required artifact will not unblock downstream tasks. " +
+      "Content is not returned in the response; use read_workspace_artifact to verify.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace_id: {
+          type: "string",
+          description: "The workspace ID.",
+        },
+        name: {
+          type: "string",
+          description: "Artifact filename, e.g. 'aegis-pillars-summary.md'. Must match the name expected by dependent tasks.",
+        },
+        kind: {
+          type: "string",
+          enum: ["text", "json", "csv", "markdown"],
+          description: "Content type. Use 'markdown' for .md files, 'json' for structured data, 'csv' for tabular data, 'text' for plain text.",
+        },
+        content: {
+          type: "string",
+          description: "The full artifact content as a string. Maximum 50 KB (UTF-8 encoded).",
+        },
+        task_id: {
+          type: "string",
+          description: "Optional. The task_id this artifact was produced for.",
+        },
+      },
+      required: ["workspace_id", "name", "kind", "content"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -2708,6 +2966,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "inject_challenge_email_code":
       result = await injectChallengeEmailCode(a);
+      break;
+    case "get_workspace_manifest":
+      result = await getWorkspaceManifest(a);
+      break;
+    case "claim_workspace_task":
+      result = await claimWorkspaceTask(a);
+      break;
+    case "complete_workspace_task":
+      result = await completeWorkspaceTask(a);
+      break;
+    case "list_workspace_artifacts":
+      result = await listWorkspaceArtifacts(a);
+      break;
+    case "read_workspace_artifact":
+      result = await readWorkspaceArtifact(a);
+      break;
+    case "create_workspace_artifact":
+      result = await createWorkspaceArtifact(a);
       break;
     default:
       return {

@@ -1,5 +1,18 @@
 # Aegis Workspace Trial Runbook
 
+## Current Trial Status
+
+| Trial | Status | Date |
+|-------|--------|------|
+| Trial 1: Basic coordination (Agent A → artifact → Agent B) | Passed | 2026-05-11 |
+| Trial 2: Collar-routing (research collar / review collar / open task) | Passed | 2026-05-11 |
+| Trial 3: Concurrent real-agent trial (two live Claude agents, collar routing, task_coord_003 contention) | Passed | 2026-05-11/12 |
+| Workspace Manifest Operations Schema + 409 Recovery Hints | Applied | 2026-05-12 |
+
+Friction addressed after Trial 3: agents used `content_type` instead of `kind` on artifact POST. Fixed by adding `body_schema` to manifest operations stubs (POST /artifacts and PATCH /tasks). `TASK_ALREADY_CLAIMED` and `TASK_NOT_READY` now include `error.recovery_hint: "refresh_manifest"`.
+
+---
+
 Two real Claude agents coordinate through the Aegis external agent HTTP API.
 Agent A authors a product summary artifact. Agent B reads it and produces a follow-on review.
 No browser, no UI interaction, no external services — raw HTTP calls only.

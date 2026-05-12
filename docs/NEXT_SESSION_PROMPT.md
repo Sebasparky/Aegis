@@ -616,23 +616,47 @@ Trial flow: `npm run seed:demo` → `npm run dev` → hand tokens → observe. A
 
 Do not rebuild these seed/persistence additions unless explicitly requested.
 
+**Collar-Routing Trial — passed (2026-05-11).**
+
+Sequential real-agent trial with two differentiated collar delegations. Research-collared delegation (pass_demo_001 / collar_research_001) completed task_coord_001 and created `aegis-pillars-summary.md`. Review-collared delegation (pass_demo_002 / collar_review_001) completed task_coord_002 after task_coord_001 and the artifact existed. Open task task_coord_003 was claimable by either delegation. No duplicate completion. Collar-based eligibility and artifact-gated readiness worked correctly end-to-end. See `docs/WORKSPACE_TRIAL_RUNBOOK.md` Trial 2.
+
+**Concurrent Real-Agent Trial — passed (2026-05-11/12).**
+
+Two real Claude agents ran concurrently against `ws_coord_trial_001`. Research delegation claimed task_coord_001 and created the artifact. Review delegation saw task_coord_002 blocked, claimed task_coord_003 while waiting, created `workspace-usage-analysis.md`, then refreshed and completed task_coord_002 after unblocking. Research delegation saw task_coord_003 in_progress by another, received `TASK_ALREADY_CLAIMED`, refreshed and stopped correctly. Final state: all tasks completed, correct delegations, no duplicate work, all artifacts created. See `docs/WORKSPACE_TRIAL_RUNBOOK.md` Trial 3.
+
+Observed friction addressed in next increment: agents used `content_type` instead of `kind` on artifact POST; no machine-readable recovery hint on 409 errors.
+
+**Workspace Manifest Operations Schema + 409 Recovery Hints — complete (2026-05-12).**
+
+Manifest polish increment based on concurrent trial observations.
+
+Changes:
+- `GET /manifest` operations stubs now include `body_schema` for write operations:
+  - PATCH /tasks/{taskId}: `{ action: '"claim" | "complete"' }`
+  - POST /artifacts: `{ name: "string (required)", kind: '"text"|"json"|"csv"|"markdown" (required)', content: "string (required, max 50KB)", task_id: "string (optional)" }`
+- `TASK_ALREADY_CLAIMED` (409) now includes `error.recovery_hint: "refresh_manifest"`
+- `TASK_NOT_READY` (409) now includes `error.recovery_hint: "refresh_manifest"`
+- `docs/WORKSPACE_TRIAL_RUNBOOK.md` updated with explicit `kind` field guidance and `--data-binary @artifact.json` curl pattern for large markdown artifacts
+
+Verification: 114 workspace tests passing, typecheck clean.
+
+Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Vault schema migration for Credential Provider Model** — add `provider_id?: string` to `AegisVaultPass`; populate from `findCredentialProviderByDomain` at write time; fall back to domain inference for existing records
-2. **Password import / migration UI v1** — bulk import credentials with provider selection
-3. **Signup Credential Custody v1** — extend the provider model to cover new account creation flows
-4. **Agent Tool Routing Policy v1** — persistent routing preferences, per-agent or per-domain login path policy (e.g. "always use CDP injection for github.com")
-5. **Approval Policy Memory v1** — remember user approval patterns and pre-approve low-risk repeat authorizations within a session
-6. **Website Policy Risk Scanner v1** — crawl-lite that detects sensitive form fields and buttons on declared path prefixes
-7. **Agent-safe screenshot redaction v1** — redacted screenshots with sensitive regions blurred/masked
-8. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
-9. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **Workspace MCP tools** — expose manifest, task claim/complete, artifact create/read as MCP tools so Claude Code agents can participate in workspaces natively; no new API endpoints needed
+2. **Workspace UI / monitoring surface** — owner view of tasks, artifacts, participant status, and audit events; no approval inbox yet
+3. **Task-scoped sensitive grants** — per-task autonomy configuration (e.g. "this task may login without additional approval"); deferred until trial feedback indicates need
+4. **Stale task claim leases** — heartbeat + automatic reclaim for abandoned `in_progress` tasks; deferred until trial demonstrates the problem
+5. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+6. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context
 - Collar restrictions always win
 - Sensitive steps go through the existing Runner / approval flow
 - Do not break the existing `/demo` flow
+- Use real Claude-agent trials for workspace feature validation; avoid fake external agent scripts unless explicitly requested
 
 ---
 

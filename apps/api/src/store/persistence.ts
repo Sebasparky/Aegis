@@ -115,11 +115,70 @@ export async function seedDefaultData(): Promise<void> {
   users.set(MOCK_USER.id, MOCK_USER);
   collars.set(STARTER_COLLAR.id, STARTER_COLLAR);
 
+  if (!collars.has("collar_research_001")) {
+    collars.set("collar_research_001", {
+      id: "collar_research_001",
+      user_id: "user_001",
+      name: "Research Collar",
+      description: "A collar for research tasks. Grants the same workspace permissions as the starter collar.",
+      purpose: "Identify agents with research capability for collar-required workspace tasks.",
+      status: "active",
+      allowed_actions: [
+        "browse", "search", "read", "compare", "draft",
+        "workspace_read", "workspace_task_list", "workspace_task_claim",
+        "workspace_task_complete", "workspace_artifact_create",
+        "workspace_artifact_list", "workspace_artifact_read",
+      ],
+      approval_required_actions: [
+        "login", "purchase", "payment", "share_email", "share_phone",
+        "submit_form", "post_publicly", "upload_file", "send_email", "create_account",
+      ],
+      blocked_actions: [
+        "subscription", "government_id_upload", "identity_disclosure",
+        "medical_data_disclosure", "financial_data_disclosure", "delete_account",
+      ],
+      spending_limits: { max_without_approval: 0, max_with_approval: 50, subscriptions_allowed: false },
+      counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: true },
+      session_limits: { max_duration_minutes: 120, max_active_sessions: 3 },
+      created_at: "2026-05-11T00:00:00.000Z",
+      updated_at: "2026-05-11T00:00:00.000Z",
+    });
+  }
+  if (!collars.has("collar_review_001")) {
+    collars.set("collar_review_001", {
+      id: "collar_review_001",
+      user_id: "user_001",
+      name: "Review Collar",
+      description: "A collar for review tasks. Grants the same workspace permissions as the research collar.",
+      purpose: "Identify agents with review capability for collar-required workspace tasks.",
+      status: "active",
+      allowed_actions: [
+        "browse", "search", "read", "compare", "draft",
+        "workspace_read", "workspace_task_list", "workspace_task_claim",
+        "workspace_task_complete", "workspace_artifact_create",
+        "workspace_artifact_list", "workspace_artifact_read",
+      ],
+      approval_required_actions: [
+        "login", "purchase", "payment", "travel_booking", "share_email", "share_phone",
+        "submit_form", "post_publicly", "upload_file", "send_email", "create_account",
+      ],
+      blocked_actions: [
+        "subscription", "government_id_upload", "identity_disclosure",
+        "medical_data_disclosure", "financial_data_disclosure", "delete_account",
+      ],
+      spending_limits: { max_without_approval: 0, max_with_approval: 50, subscriptions_allowed: false },
+      counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: true },
+      session_limits: { max_duration_minutes: 120, max_active_sessions: 3 },
+      created_at: "2026-05-11T00:00:00.000Z",
+      updated_at: "2026-05-11T00:00:00.000Z",
+    });
+  }
+
   if (!agentDelegations.has("delg_demo_001")) {
     agentDelegations.set("delg_demo_001", {
       id: "delg_demo_001", user_id: "user_001", user_aegis_id: "aid_user_001",
       agent_name: "agent_demo_001", agent_platform: "api", channel: "api",
-      default_collar_id: "collar_demo_starter", status: "active",
+      default_collar_id: "collar_research_001", status: "active",
       token_id: "pass_demo_001", skill_access_mode: "all", skill_access_skill_ids: [],
       created_at: "2026-04-30T12:00:00.000Z", updated_at: "2026-04-30T12:00:00.000Z",
     });
@@ -128,7 +187,7 @@ export async function seedDefaultData(): Promise<void> {
     agentDelegations.set("delg_demo_restricted", {
       id: "delg_demo_restricted", user_id: "user_001", user_aegis_id: "aid_user_001",
       agent_name: "agent_demo_restricted", agent_platform: "api", channel: "api",
-      default_collar_id: "collar_demo_starter", status: "active",
+      default_collar_id: "collar_review_001", status: "active",
       token_id: "pass_demo_002", skill_access_mode: "only", skill_access_skill_ids: [],
       created_at: "2026-04-30T12:00:01.000Z", updated_at: "2026-04-30T12:00:01.000Z",
     });
@@ -155,7 +214,7 @@ export async function seedDefaultData(): Promise<void> {
       description: "Research and document the five Aegis pillars: AegisID, Delegation & Collars, Aegis Rails, Aegis Guard, and Audit Trail. Write 2-3 sentences each. Create a markdown artifact named `aegis-pillars-summary.md` linked to this task. Mark the task complete after creating the artifact.",
       status: "open",
       assignment_type: "collar",
-      required_collar_id: "collar_demo_starter",
+      required_collar_id: "collar_research_001",
       task_kind: "research",
       task_mode: "direct",
       priority: "high",
@@ -174,7 +233,7 @@ export async function seedDefaultData(): Promise<void> {
       description: "Read the `aegis-pillars-summary.md` artifact. Identify the most important Aegis capability and write a 3-bullet argument for why it matters. Create a markdown artifact named `aegis-pillars-review.md` linked to this task. Mark the task complete after creating the artifact.",
       status: "open",
       assignment_type: "collar",
-      required_collar_id: "collar_demo_starter",
+      required_collar_id: "collar_review_001",
       task_kind: "review",
       task_mode: "plan_first",
       priority: "normal",

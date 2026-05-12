@@ -379,3 +379,84 @@ Report: chosen pillar, 3 arguments, artifact_id, final task_counts. Execute all 
 - Does it need better endpoint discovery (a workspace manifest endpoint)?
 - Would MCP tools reduce friction enough to be worth building?
 - Does raw HTTP work at all, or is prompt overhead too high?
+
+---
+
+## Trial 2: Collar-Routing Trial
+
+This trial proves that different agents, carrying different collars, are routed to different tasks.
+Agent A carries `collar_research_001` and sees `task_coord_001` as eligible.
+Agent B carries `collar_review_001` and sees `task_coord_002` as eligible (blocked until Task 1 completes).
+Task 3 (`task_coord_003`) is open — either agent may claim it.
+
+### Agent Identities (Collar Routing Trial)
+
+| Agent   | Bearer Token   | Delegation ID        | Collar              |
+|---------|----------------|----------------------|---------------------|
+| Agent A | pass_demo_001  | delg_demo_001        | collar_research_001 |
+| Agent B | pass_demo_002  | delg_demo_restricted | collar_review_001   |
+
+### Expected Manifest Behavior
+
+| Task            | Agent A (research)     | Agent B (review)            |
+|-----------------|------------------------|-----------------------------|
+| task_coord_001  | eligible / ready       | not_eligible                |
+| task_coord_002  | not_eligible           | eligible / blocked          |
+| task_coord_003  | open / ready           | open / ready                |
+
+### Developer Verification (collar routing)
+
+```bash
+# Agent A: task_coord_001 eligible/ready, task_coord_002 not_eligible
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '[.data.recommended_work_queue[] | {task_id, eligibility, readiness, recommended_action}]'
+# Expected: task_coord_001 eligible/ready/claim, task_coord_002 not_eligible/none, task_coord_003 open/ready/claim
+
+# Agent B: task_coord_002 eligible/blocked, task_coord_001 not_eligible
+curl -s -H "Authorization: Bearer pass_demo_002" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '[.data.recommended_work_queue[] | {task_id, eligibility, readiness, recommended_action}]'
+# Expected: task_coord_001 not_eligible/none, task_coord_002 eligible/blocked/wait, task_coord_003 open/ready/claim
+
+# Agent A tries to claim task_coord_002 → 403 TASK_NOT_ELIGIBLE
+curl -s -X PATCH -H "Authorization: Bearer pass_demo_001" \
+  -H "Content-Type: application/json" -d '{"action":"claim"}' \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/tasks/task_coord_002 | jq '{code: .error.code}'
+
+# Agent B tries to claim task_coord_001 → 403 TASK_NOT_ELIGIBLE
+curl -s -X PATCH -H "Authorization: Bearer pass_demo_002" \
+  -H "Content-Type: application/json" -d '{"action":"claim"}' \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/tasks/task_coord_001 | jq '{code: .error.code}'
+
+# Agent B tries to claim task_coord_002 before task_coord_001 is done → 409 TASK_NOT_READY
+curl -s -X PATCH -H "Authorization: Bearer pass_demo_002" \
+  -H "Content-Type: application/json" -d '{"action":"claim"}' \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/tasks/task_coord_002 | jq '{code: .error.code, blockers: .blocker_reasons}'
+```
+
+### Collar-Routing Checklist
+
+1. [ ] Agent A manifest shows `task_coord_001` with `eligibility: "eligible"`, `readiness: "ready"`.
+2. [ ] Agent A manifest shows `task_coord_002` with `eligibility: "not_eligible"`, `blocker_reasons.not_eligible_reason` containing `collar_review_001`.
+3. [ ] Agent B manifest shows `task_coord_002` with `eligibility: "eligible"`, `readiness: "blocked"`.
+4. [ ] Agent B manifest shows `task_coord_001` with `eligibility: "not_eligible"`, `blocker_reasons.not_eligible_reason` containing `collar_research_001`.
+5. [ ] Agent A claiming `task_coord_002` returns `403 TASK_NOT_ELIGIBLE`.
+6. [ ] Agent B claiming `task_coord_001` returns `403 TASK_NOT_ELIGIBLE`.
+7. [ ] Agent B claiming `task_coord_002` before Task 1 is complete returns `409 TASK_NOT_READY` with `blocker_reasons`.
+8. [ ] After Agent A completes `task_coord_001` and creates `aegis-pillars-summary.md`, Agent B's manifest shows `task_coord_002` as `eligible / ready`.
+9. [ ] Agent B can then claim and complete `task_coord_002`.
+10. [ ] Either agent can claim `task_coord_003` (open, no collar requirement).
+
+---
+
+## Next Trial (Prerequisite: Collar-Routing Trial)
+
+**Trial 3: Concurrent Real-Agent Trial**
+
+Two live Claude agent instances run against the API simultaneously — Agent A and Agent B each receive the short manifest prompt. They race to complete their respective tasks, discover each other's artifacts, and produce coordinated output without explicit coordination. This trial validates collar routing holds under concurrent load and tests artifact cross-reference across agents running in parallel.
+
+Prerequisites:
+- Trial 2 (Collar-Routing Trial) verified with curl — collar routing confirmed working
+- API running with `collar_research_001` and `collar_review_001` seeded
+- Both agent prompts updated to reference the `recommended_work_queue` (collar-aware flow, not hardcoded task IDs)

@@ -60,6 +60,7 @@ import {
   seedOpenTask,
   seedWorkspaceArtifact,
   seedTrialWorkspace,
+  seedCollarRoutingTrial,
   resetStore,
   IDS,
 } from "./helpers.js";
@@ -2116,5 +2117,176 @@ describe("Section 14: Seed data validation", () => {
     });
     expect(claimRes.statusCode).toBe(200);
     expect(claimRes.json().data.status).toBe("in_progress");
+  });
+});
+
+// ─── Section 15: Collar Routing Trial ────────────────────────────────────────
+
+describe("Section 15: Collar Routing Trial", () => {
+  const AUTH_RESEARCH = "Bearer tok_routing_research";
+  const AUTH_REVIEW = "Bearer tok_routing_review";
+  const WS = "ws_routing_trial";
+
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedCollarRoutingTrial();
+  });
+
+  it("research agent manifest: task_routing_001 eligible/ready, task_routing_002 not_eligible, task_routing_003 open/ready", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS}/manifest`,
+      headers: { authorization: AUTH_RESEARCH },
+    });
+    expect(res.statusCode).toBe(200);
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+
+    const t001 = queue.find((e) => e.task_id === "task_routing_001") as Record<string, unknown>;
+    expect(t001.eligibility).toBe("eligible");
+    expect(t001.readiness).toBe("ready");
+    expect(t001.recommended_action).toBe("claim");
+
+    const t002 = queue.find((e) => e.task_id === "task_routing_002") as Record<string, unknown>;
+    expect(t002.eligibility).toBe("not_eligible");
+    expect(t002.recommended_action).toBe("none");
+    const blockers002 = t002.blocker_reasons as Record<string, unknown>;
+    expect(String(blockers002.not_eligible_reason ?? "")).toContain("col_routing_review");
+
+    const t003 = queue.find((e) => e.task_id === "task_routing_003") as Record<string, unknown>;
+    expect(t003.eligibility).toBe("open");
+    expect(t003.readiness).toBe("ready");
+  });
+
+  it("review agent manifest: task_routing_001 not_eligible, task_routing_002 eligible/blocked, task_routing_003 open/ready", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS}/manifest`,
+      headers: { authorization: AUTH_REVIEW },
+    });
+    expect(res.statusCode).toBe(200);
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+
+    const t001 = queue.find((e) => e.task_id === "task_routing_001") as Record<string, unknown>;
+    expect(t001.eligibility).toBe("not_eligible");
+    const blockers001 = t001.blocker_reasons as Record<string, unknown>;
+    expect(String(blockers001.not_eligible_reason ?? "")).toContain("col_routing_research");
+
+    const t002 = queue.find((e) => e.task_id === "task_routing_002") as Record<string, unknown>;
+    expect(t002.eligibility).toBe("eligible");
+    expect(t002.readiness).toBe("blocked");
+    expect(t002.recommended_action).toBe("wait");
+    const blockers002 = t002.blocker_reasons as Record<string, unknown>;
+    expect(blockers002.incomplete_dependency_task_ids as string[]).toContain("task_routing_001");
+    expect(blockers002.missing_artifact_names as string[]).toContain("routing-summary.md");
+
+    const t003 = queue.find((e) => e.task_id === "task_routing_003") as Record<string, unknown>;
+    expect(t003.eligibility).toBe("open");
+    expect(t003.readiness).toBe("ready");
+  });
+
+  it("research agent can claim task_routing_001 → 200 in_progress", async () => {
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${WS}/tasks/task_routing_001`,
+      headers: { authorization: AUTH_RESEARCH, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe("in_progress");
+    expect(res.json().data.assigned_delegation_id).toBe("delg_routing_research");
+  });
+
+  it("research agent cannot claim task_routing_002 → 403 TASK_NOT_ELIGIBLE", async () => {
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${WS}/tasks/task_routing_002`,
+      headers: { authorization: AUTH_RESEARCH, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+
+  it("review agent cannot claim task_routing_001 → 403 TASK_NOT_ELIGIBLE", async () => {
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${WS}/tasks/task_routing_001`,
+      headers: { authorization: AUTH_REVIEW, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("TASK_NOT_ELIGIBLE");
+  });
+
+  it("review agent cannot claim task_routing_002 before task_routing_001 completes → 409 TASK_NOT_READY", async () => {
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${WS}/tasks/task_routing_002`,
+      headers: { authorization: AUTH_REVIEW, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("TASK_NOT_READY");
+    const blockers = res.json().blocker_reasons as Record<string, unknown>;
+    expect(blockers.incomplete_dependency_task_ids as string[]).toContain("task_routing_001");
+    expect(blockers.missing_artifact_names as string[]).toContain("routing-summary.md");
+  });
+
+  it("after task_routing_001 completed + routing-summary.md created, review agent sees task_routing_002 as ready+eligible", async () => {
+    const t001 = workspaceTasks.get("task_routing_001")!;
+    t001.status = "completed";
+    t001.assigned_delegation_id = "delg_routing_research";
+    t001.completed_at = new Date().toISOString();
+    workspaceTasks.set("task_routing_001", t001);
+    workspaceArtifacts.set("art_routing_summary", {
+      artifact_id: "art_routing_summary",
+      workspace_id: WS,
+      name: "routing-summary.md",
+      kind: "markdown",
+      content: "# Routing Summary",
+      task_id: "task_routing_001",
+      created_by_delegation_id: "delg_routing_research",
+      created_at: new Date().toISOString(),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${WS}/manifest`,
+      headers: { authorization: AUTH_REVIEW },
+    });
+    const queue = res.json().data.recommended_work_queue as Record<string, unknown>[];
+    const t002 = queue.find((e) => e.task_id === "task_routing_002") as Record<string, unknown>;
+    expect(t002.eligibility).toBe("eligible");
+    expect(t002.readiness).toBe("ready");
+    expect(t002.recommended_action).toBe("claim");
+  });
+
+  it("review agent claims task_routing_002 after readiness met → 200 in_progress", async () => {
+    const t001 = workspaceTasks.get("task_routing_001")!;
+    t001.status = "completed";
+    t001.assigned_delegation_id = "delg_routing_research";
+    t001.completed_at = new Date().toISOString();
+    workspaceTasks.set("task_routing_001", t001);
+    workspaceArtifacts.set("art_routing_summary_2", {
+      artifact_id: "art_routing_summary_2",
+      workspace_id: WS,
+      name: "routing-summary.md",
+      kind: "markdown",
+      content: "# Routing Summary",
+      task_id: "task_routing_001",
+      created_by_delegation_id: "delg_routing_research",
+      created_at: new Date().toISOString(),
+    });
+
+    const res = await server.inject({
+      method: "PATCH",
+      url: `/api/agent/v1/workspaces/${WS}/tasks/task_routing_002`,
+      headers: { authorization: AUTH_REVIEW, "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim" }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe("in_progress");
+    expect(res.json().data.assigned_delegation_id).toBe("delg_routing_review");
   });
 });

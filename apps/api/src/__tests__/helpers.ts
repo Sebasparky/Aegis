@@ -21,6 +21,7 @@ import {
 } from "../store/index.js";
 import type {
   AgentDelegation,
+  Collar,
   Skill,
   AegisRoute,
   InstalledSkill,
@@ -477,5 +478,157 @@ export function seedWorkspaceArtifact(
     content: `# ${name}`,
     task_id: overrides.task_id,
     created_at: "2026-05-01T00:00:00.000Z",
+  });
+}
+
+/**
+ * Seeds the collar-routing trial workspace with two collar-differentiated agents.
+ * Agent A (tok_routing_research) carries col_routing_research — eligible only for task_routing_001.
+ * Agent B (tok_routing_review) carries col_routing_review — eligible only for task_routing_002.
+ * task_routing_003 is open (any participant may claim).
+ * The workspace collar is IDS.COLLAR (collar_demo_starter) — both routing collars include
+ * all 7 workspace actions, so the collar intersection always resolves to allow.
+ */
+export function seedCollarRoutingTrial(): void {
+  const NOW = "2026-05-11T00:00:00.000Z";
+  const WS_ACTIONS = [
+    "workspace_read", "workspace_task_list", "workspace_task_claim",
+    "workspace_task_complete", "workspace_artifact_create",
+    "workspace_artifact_list", "workspace_artifact_read",
+  ] as const;
+
+  const researchCollar: Collar = {
+    id: "col_routing_research",
+    user_id: MOCK_USER_ID,
+    name: "Routing Research Collar",
+    description: "Research collar for collar routing trial.",
+    purpose: "Collar routing trial — research agent.",
+    status: "active",
+    allowed_actions: ["browse", "search", "read", "compare", "draft", ...WS_ACTIONS] as any,
+    approval_required_actions: ["login", "purchase", "payment"] as any,
+    blocked_actions: ["identity_disclosure", "delete_account"] as any,
+    spending_limits: { max_without_approval: 0, max_with_approval: 50, subscriptions_allowed: false },
+    counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: true },
+    session_limits: { max_duration_minutes: 120, max_active_sessions: 3 },
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  collars.set("col_routing_research", researchCollar);
+
+  const reviewCollar: Collar = {
+    id: "col_routing_review",
+    user_id: MOCK_USER_ID,
+    name: "Routing Review Collar",
+    description: "Review collar for collar routing trial.",
+    purpose: "Collar routing trial — review agent.",
+    status: "active",
+    allowed_actions: ["browse", "search", "read", "compare", "draft", ...WS_ACTIONS] as any,
+    approval_required_actions: ["login", "purchase", "payment"] as any,
+    blocked_actions: ["identity_disclosure", "delete_account"] as any,
+    spending_limits: { max_without_approval: 0, max_with_approval: 50, subscriptions_allowed: false },
+    counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: true },
+    session_limits: { max_duration_minutes: 120, max_active_sessions: 3 },
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  collars.set("col_routing_review", reviewCollar);
+
+  agentDelegations.set("delg_routing_research", {
+    id: "delg_routing_research",
+    user_id: MOCK_USER_ID,
+    user_aegis_id: "aid_user_001",
+    agent_name: "agent_routing_research",
+    agent_platform: "api",
+    channel: "api",
+    default_collar_id: "col_routing_research",
+    status: "active",
+    token_id: "tok_routing_research",
+    skill_access_mode: "all",
+    skill_access_skill_ids: [],
+    created_at: NOW,
+    updated_at: NOW,
+  });
+
+  agentDelegations.set("delg_routing_review", {
+    id: "delg_routing_review",
+    user_id: MOCK_USER_ID,
+    user_aegis_id: "aid_user_001",
+    agent_name: "agent_routing_review",
+    agent_platform: "api",
+    channel: "api",
+    default_collar_id: "col_routing_review",
+    status: "active",
+    token_id: "tok_routing_review",
+    skill_access_mode: "all",
+    skill_access_skill_ids: [],
+    created_at: NOW,
+    updated_at: NOW,
+  });
+
+  // Workspace uses IDS.COLLAR (collar_demo_starter) — both routing collars include all 7 workspace
+  // actions, so the intersection with collar_demo_starter resolves to allow for every operation.
+  aegisWorkspaces.set("ws_routing_trial", {
+    workspace_id: "ws_routing_trial",
+    owner_user_id: MOCK_USER_ID,
+    name: "Collar Routing Trial Workspace",
+    description: "Two collar-routed tasks plus one open task.",
+    collar_id: IDS.COLLAR,
+    participant_delegation_ids: ["delg_routing_research", "delg_routing_review"],
+    status: "active",
+    created_at: NOW,
+    updated_at: NOW,
+  });
+
+  workspaceTasks.set("task_routing_001", {
+    task_id: "task_routing_001",
+    workspace_id: "ws_routing_trial",
+    title: "Research routing task",
+    description: "Do research work. Create routing-summary.md linked to this task.",
+    status: "open",
+    assignment_type: "collar",
+    required_collar_id: "col_routing_research",
+    task_kind: "research",
+    task_mode: "direct",
+    priority: "high",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:00:00.000Z",
+    updated_at: "2026-05-11T00:00:00.000Z",
+  });
+
+  workspaceTasks.set("task_routing_002", {
+    task_id: "task_routing_002",
+    workspace_id: "ws_routing_trial",
+    title: "Review routing task",
+    description: "Read routing-summary.md and produce a review artifact.",
+    status: "open",
+    assignment_type: "collar",
+    required_collar_id: "col_routing_review",
+    task_kind: "review",
+    task_mode: "plan_first",
+    priority: "normal",
+    depends_on_task_ids: ["task_routing_001"],
+    required_artifact_names: ["routing-summary.md"],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:01:00.000Z",
+    updated_at: "2026-05-11T00:01:00.000Z",
+  });
+
+  workspaceTasks.set("task_routing_003", {
+    task_id: "task_routing_003",
+    workspace_id: "ws_routing_trial",
+    title: "Open analysis task",
+    description: "Any agent may claim this.",
+    status: "open",
+    assignment_type: "open",
+    task_kind: "analysis",
+    task_mode: "direct",
+    priority: "low",
+    depends_on_task_ids: [],
+    required_artifact_names: [],
+    created_by_user_id: MOCK_USER_ID,
+    created_at: "2026-05-11T00:02:00.000Z",
+    updated_at: "2026-05-11T00:02:00.000Z",
   });
 }

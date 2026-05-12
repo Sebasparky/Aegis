@@ -33,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <NavLink href="/aegis-id" label="AegisID" />
           <NavLink href="/website-aegis-id" label="Website AegisID" />
           <NavLink href="/counterparty-agent" label="Agent Verification" />
+          <NavLink href="/workspaces" label="Workspaces" />
           <NavLink href="/tasks" label="Agent Tasks" />
           <NavLink href="/delegations" label="Delegations" />
           <NavLink href="/route-run-approvals" label="Run Approvals" />

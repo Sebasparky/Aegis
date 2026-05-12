@@ -22,6 +22,14 @@ import type {
   RouteRunReceipt,
   RouteRun,
   SensitiveActionTimelineItem,
+  AegisWorkspace,
+  WorkspaceTask,
+  WorkspaceArtifactKind,
+  TaskKind,
+  TaskMode,
+  TaskPriority,
+  TaskReadinessLabel,
+  TaskBlockerReasons,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -600,6 +608,63 @@ export const cancelChallengeEmailResolution = (resolutionId: string) =>
     `/api/internal/challenge-email-resolutions/${resolutionId}/cancel`,
     { method: "POST", body: JSON.stringify({}) },
   );
+
+// ─── Workspace Control Surface ───────────────────────────────────────────────
+
+export type WorkspaceTaskWithReadiness = WorkspaceTask & {
+  readiness: TaskReadinessLabel;
+  blocker_reasons?: TaskBlockerReasons;
+};
+
+export type WorkspaceArtifactMeta = {
+  artifact_id: string;
+  workspace_id: string;
+  name: string;
+  kind: WorkspaceArtifactKind;
+  task_id?: string;
+  created_by_delegation_id?: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export type WorkspaceArtifactFull = WorkspaceArtifactMeta & { content: string };
+
+export type WorkspaceWithCounts = AegisWorkspace & {
+  task_counts: { open: number; in_progress: number; completed: number; cancelled: number };
+  artifact_count: number;
+};
+
+export const listWorkspaces = () => request<WorkspaceWithCounts[]>("/api/workspaces");
+export const getWorkspace = (id: string) => request<WorkspaceWithCounts>(`/api/workspaces/${id}`);
+export const listWorkspaceTasks = (workspaceId: string) =>
+  request<WorkspaceTaskWithReadiness[]>(`/api/workspaces/${workspaceId}/tasks`);
+export const createWorkspaceTask = (
+  workspaceId: string,
+  body: {
+    title: string;
+    description?: string;
+    task_kind?: TaskKind;
+    task_mode?: TaskMode;
+    priority?: TaskPriority;
+    assignment_type?: "open" | "delegation" | "collar";
+    assigned_delegation_id?: string;
+    required_collar_id?: string;
+    depends_on_task_ids?: string[];
+    required_artifact_names?: string[];
+  },
+) => request<WorkspaceTask>(`/api/workspaces/${workspaceId}/tasks`, { method: "POST", body: JSON.stringify(body) });
+export const listWorkspaceArtifacts = (workspaceId: string) =>
+  request<WorkspaceArtifactMeta[]>(`/api/workspaces/${workspaceId}/artifacts`);
+export const getWorkspaceArtifact = (workspaceId: string, artifactId: string) =>
+  request<WorkspaceArtifactFull>(`/api/workspaces/${workspaceId}/artifacts/${artifactId}`);
+export const createWorkspaceArtifact = (
+  workspaceId: string,
+  body: { name: string; kind: WorkspaceArtifactKind; content: string; task_id?: string },
+) =>
+  request<WorkspaceArtifactMeta>(`/api/workspaces/${workspaceId}/artifacts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 // ─── Sensitive Action Receipt Timeline v1 ────────────────────────────────────
 

@@ -450,13 +450,239 @@ curl -s -X PATCH -H "Authorization: Bearer pass_demo_002" \
 
 ---
 
-## Next Trial (Prerequisite: Collar-Routing Trial)
+---
 
-**Trial 3: Concurrent Real-Agent Trial**
+## Trial 3: Concurrent Real-Agent Trial
 
-Two live Claude agent instances run against the API simultaneously — Agent A and Agent B each receive the short manifest prompt. They race to complete their respective tasks, discover each other's artifacts, and produce coordinated output without explicit coordination. This trial validates collar routing holds under concurrent load and tests artifact cross-reference across agents running in parallel.
+Two live Claude agents run simultaneously. Agent A (research collar) and Agent B (review collar) each receive their prompt at roughly the same time. They self-route using the manifest, avoid duplicate work, and hand off through an artifact — without being told which task to claim.
 
-Prerequisites:
-- Trial 2 (Collar-Routing Trial) verified with curl — collar routing confirmed working
-- API running with `collar_research_001` and `collar_review_001` seeded
-- Both agent prompts updated to reference the `recommended_work_queue` (collar-aware flow, not hardcoded task IDs)
+### Setup
+
+```bash
+npm run seed:demo          # from repo root — resets to clean state
+cd apps/api && npm run dev # server at http://localhost:4000
+
+# Pre-flight: verify collar routing before handing to agents
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '[.data.recommended_work_queue[] | {task_id,eligibility,readiness,recommended_action}]'
+# Expected: task_coord_001 eligible/ready/claim, task_coord_002 not_eligible/none, task_coord_003 open/ready/claim
+
+curl -s -H "Authorization: Bearer pass_demo_002" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '[.data.recommended_work_queue[] | {task_id,eligibility,readiness,recommended_action}]'
+# Expected: task_coord_001 not_eligible/none, task_coord_002 eligible/blocked/wait, task_coord_003 open/ready/claim
+
+# Confirm workflow_rules has 10 entries (two 409-recovery rules added in Trial 3 prep)
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/manifest \
+  | jq '.data.workflow_rules | length'
+# Expected: 10
+```
+
+Open two separate Claude sessions. Start both prompts within ~30 seconds of each other.
+
+---
+
+### Agent A Prompt — Research Agent (concurrent)
+
+```
+You are Research Agent in an Aegis workspace coordination trial.
+Bearer token: pass_demo_001 · API: http://localhost:4000
+Authorization: Bearer pass_demo_001 on every request.
+POST/PATCH also need: Content-Type: application/json
+
+1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
+   Read recommended_work_queue. Find the task with eligibility="eligible" and readiness="ready".
+   That is your primary task. Note its task_id and read its description carefully.
+   If no eligible task is ready, fall back to eligibility="open" with readiness="ready".
+   Pick the highest-priority ready task.
+
+2. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"claim"}
+   On 409 TASK_ALREADY_CLAIMED: refresh manifest (repeat step 1), pick the next ready task.
+   On 409 TASK_NOT_READY: stop and report — your eligible task is still blocked.
+   On 200: proceed.
+
+3. Do the work described in the task.
+   For task_coord_001 (research): write 2–3 sentences each on:
+   AegisID · Delegation & Collars · Aegis Rails · Aegis Guard · Audit Trail.
+
+4. Create a markdown artifact. Use the artifact name stated in the task description.
+   POST /api/agent/v1/workspaces/ws_coord_trial_001/artifacts
+   Body: {"name":"<name from task>","kind":"markdown","task_id":"{task_id}","content":"<your content>"}
+   Note the artifact_id from the response.
+
+5. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"complete"}
+   Only complete the task you claimed.
+
+6. Report: task_id claimed, artifact_id created, final task status.
+Execute all steps sequentially. Do not ask for clarification.
+```
+
+---
+
+### Agent B Prompt — Review Agent (concurrent, with polling)
+
+```
+You are Review Agent in an Aegis workspace coordination trial.
+Bearer token: pass_demo_002 · API: http://localhost:4000
+Authorization: Bearer pass_demo_002 on every request.
+POST/PATCH also need: Content-Type: application/json
+
+Your collar qualifies you for a review task. That task may be blocked at the start —
+another agent must finish work before you can proceed. Follow the steps below.
+
+1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
+   Read recommended_work_queue. Identify:
+   - Your primary task: eligibility="eligible" (your collar qualifies for it).
+   - Any fallback tasks: eligibility="open", readiness="ready".
+
+2. Check your primary task's readiness:
+   - readiness="ready": claim it now (step 3).
+   - readiness="blocked": your primary task is waiting on another agent.
+     Check for an open task with readiness="ready". If one exists, claim and complete it
+     (steps 3–7), then repeat from step 1 to check if your primary task has unblocked.
+     If no open task is available either, wait 60 seconds and repeat step 1.
+     Do not attempt to claim a blocked task — the manifest shows recommended_action="wait".
+
+3. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"claim"}
+   On 409 TASK_ALREADY_CLAIMED: refresh manifest (step 1), pick the next ready task.
+   On 409 TASK_NOT_READY: your primary task is still blocked — repeat from step 2.
+   On 200: proceed.
+
+4. If you claimed a review task: discover the artifact it depends on.
+   GET /api/agent/v1/workspaces/ws_coord_trial_001/artifacts
+   Find the artifact named in the task description. Note its artifact_id.
+   GET /api/agent/v1/workspaces/ws_coord_trial_001/artifacts/{artifact_id}
+   Read the full content.
+
+5. Do the work described in the task.
+   For task_coord_002 (review): identify the most important Aegis capability
+   from the artifact you just read. Write a 3-bullet argument for why it matters.
+
+6. Create a markdown artifact. Use the artifact name stated in the task description.
+   POST /api/agent/v1/workspaces/ws_coord_trial_001/artifacts
+   Body: {"name":"<name from task>","kind":"markdown","task_id":"{task_id}","content":"<your content>"}
+   Note the artifact_id.
+
+7. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"complete"}
+   Only complete the task you claimed.
+
+8. Report: all task_ids claimed, artifact_ids created, final task_counts.
+Execute all steps. Do not ask for clarification. If your primary task remains blocked
+after completing an interim task, re-run step 1 until it unblocks.
+```
+
+---
+
+### Optional: Open-Task Contention Prompt
+
+Use this to stress-test 409 recovery when two agents race for `task_coord_003`.
+Run the same prompt simultaneously in two sessions — one with `pass_demo_001`, one with `pass_demo_002`.
+One agent wins the claim; the other hits 409 TASK_ALREADY_CLAIMED and must recover.
+
+Most naturally occurs during the concurrent trial when Agent B is waiting for task_coord_002
+to unblock and both agents consider task_coord_003 at the same time.
+
+```
+You are a workspace agent in an Aegis coordination trial.
+Bearer token: <YOUR_TOKEN> · API: http://localhost:4000
+Authorization: Bearer <YOUR_TOKEN> on every request.
+POST/PATCH also need: Content-Type: application/json
+
+1. GET /api/agent/v1/workspaces/ws_coord_trial_001/manifest
+   Read recommended_work_queue. Find any task with readiness="ready" and
+   eligibility="eligible" OR eligibility="open". Pick the highest-priority one.
+
+2. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"claim"}
+   On 200: proceed to step 3.
+   On 409 TASK_ALREADY_CLAIMED: refresh manifest (step 1), pick the next highest-priority ready task.
+   On 409 TASK_NOT_READY: skip this task, pick the next ready task from the manifest.
+
+3. Do the work described in the task. One paragraph summary is enough.
+
+4. POST /api/agent/v1/workspaces/ws_coord_trial_001/artifacts
+   Body: {"name":"<task-id>-output.md","kind":"markdown","task_id":"{task_id}","content":"<your content>"}
+
+5. PATCH /api/agent/v1/workspaces/ws_coord_trial_001/tasks/{task_id}
+   Body: {"action":"complete"}
+
+6. Report: task_id, result of every claim attempt (including any 409 errors), final task status.
+Execute all steps. Do not ask for clarification.
+```
+
+---
+
+### Expected Timeline
+
+| Time | Agent A | Agent B |
+|---|---|---|
+| T+0s | GET manifest → task_coord_001 eligible/ready | GET manifest → task_coord_002 eligible/blocked |
+| T+10s | Claims task_coord_001 → 200 | Sees task_coord_003 open/ready → claims it |
+| T+15s | (if contention on task_coord_003) | May get 409 TASK_ALREADY_CLAIMED → refreshes, waits |
+| T+30s–2min | Does research, drafts content | Completes task_coord_003; re-polls manifest |
+| T+2min | POSTs aegis-pillars-summary.md artifact | Polls manifest → task_coord_002 still blocked |
+| T+2.5min | COMPLETEs task_coord_001 | Polls manifest → task_coord_002 now ready |
+| T+3min | Done | Claims task_coord_002 → 200 |
+| T+4–5min | — | Reads artifact, drafts review, posts artifact, completes |
+| T+5min | — | Final counts: {open:0, in_progress:0, completed:3} |
+
+---
+
+### Verification Curls
+
+```bash
+# Current task status snapshot (run at any point during trial)
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/tasks \
+  | jq '[.data[] | {task_id, status, assigned_delegation_id}]'
+
+# Artifacts created so far
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/artifacts \
+  | jq '[.data[] | {artifact_id, name, created_by_delegation_id}]'
+
+# Final workspace counts
+curl -s -H "Authorization: Bearer pass_demo_001" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001 \
+  | jq '.data.task_counts'
+# Expected at end: {"open":0,"in_progress":0,"completed":3}
+
+# Read Agent A's artifact (replace <artifact_id> from artifacts list above)
+curl -s -H "Authorization: Bearer pass_demo_002" \
+  http://localhost:4000/api/agent/v1/workspaces/ws_coord_trial_001/artifacts/<artifact_id> \
+  | jq '.data.content'
+```
+
+---
+
+### What to Observe (Checklist)
+
+1. [ ] Agent A manifest shows task_coord_001 eligible/ready and task_coord_002 not_eligible — collar routing works.
+2. [ ] Agent B manifest shows task_coord_002 eligible/blocked and task_coord_001 not_eligible.
+3. [ ] Agent A claims task_coord_001. Agent B does NOT attempt task_coord_001 (manifest shows not_eligible).
+4. [ ] Agent B claims task_coord_003 or waits while task_coord_002 is blocked.
+5. [ ] After Agent A posts aegis-pillars-summary.md and completes task_coord_001, Agent B's next manifest GET shows task_coord_002 as eligible/ready.
+6. [ ] Agent B claims task_coord_002 after readiness unblocks.
+7. [ ] Agent B's review artifact quotes or references specific content from Agent A's artifact (proves actual read, not fabrication).
+8. [ ] No agent attempts to complete a task it does not own (would get 403 TASK_NOT_ASSIGNED).
+9. [ ] If task_coord_003 contention occurs: the losing agent reports 409 TASK_ALREADY_CLAIMED and recovers.
+10. [ ] Final task_counts: {open:0, in_progress:0, completed:3}.
+
+---
+
+### Failure Modes
+
+| Failure | Signal | Recovery |
+|---|---|---|
+| Agent B tries to claim task_coord_002 while blocked | 409 TASK_NOT_READY + blocker_reasons | workflow_rules string #9 tells agent to re-poll manifest |
+| Both agents race for task_coord_003 | One gets 409 TASK_ALREADY_CLAIMED | workflow_rules string #8 tells agent to refresh and pick next |
+| Agent A misreads manifest and tries task_coord_002 | 403 TASK_NOT_ELIGIBLE (collar mismatch) | Manifest already marks it not_eligible; agent should skip |
+| Agent B tries to complete a task it didn't claim | 403 TASK_NOT_ASSIGNED | Task completion is delegation-scoped; not a coordination failure |
+| Agent B polls indefinitely because Agent A stalls | No API error | Intervene manually; check Agent A's session state |
+| Both agents claim task_coord_001 simultaneously | Collar routing fires first — Agent B gets 403 TASK_NOT_ELIGIBLE before any race logic | Not a real race condition; collar enforcement prevents it |

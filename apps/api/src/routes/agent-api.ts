@@ -1869,6 +1869,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         "Both the workspace collar and your delegation collar must allow an action (stricter wins).",
         "Tasks have a readiness status — only ready tasks can be claimed; blocked tasks must wait for dependencies or artifacts.",
         "task_mode='plan_first' signals you should draft an approach before executing (advisory only).",
+        "If a claim returns 409 TASK_ALREADY_CLAIMED, another agent took it — refresh the manifest and pick the next ready eligible task.",
+        "If a claim returns 409 TASK_NOT_READY, the task's dependencies are not yet met — pick another ready task or re-poll the manifest until readiness changes.",
       ];
 
       return reply.send({

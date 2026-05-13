@@ -200,8 +200,23 @@ export async function workspaceRoutes(server: FastifyInstance) {
       required_artifact_names?: string[];
     };
 
-    if (!body.title || typeof body.title !== "string" || !body.title.trim()) {
-      return sendError(reply, 400, "MISSING_TITLE", "title is required.");
+    // Title
+    const trimmedTitle = typeof body.title === "string" ? body.title.trim() : "";
+    if (!trimmedTitle) {
+      return sendError(reply, 400, "INVALID_TASK_TITLE", "title is required.");
+    }
+    if (trimmedTitle.length > 200) {
+      return sendError(reply, 400, "INVALID_TASK_TITLE", "title must be 200 characters or fewer.");
+    }
+
+    // Description
+    if (body.description !== undefined) {
+      if (typeof body.description !== "string") {
+        return sendError(reply, 400, "INVALID_TASK_DESCRIPTION", "description must be a string.");
+      }
+      if (body.description.length > 2000) {
+        return sendError(reply, 400, "INVALID_TASK_DESCRIPTION", "description must be 2000 characters or fewer.");
+      }
     }
 
     const VALID_KINDS: TaskKind[] = [
@@ -219,37 +234,84 @@ export async function workspaceRoutes(server: FastifyInstance) {
       return sendError(reply, 400, "INVALID_TASK_MODE", "Invalid task_mode.");
     }
     if (body.priority && !VALID_PRIORITIES.includes(body.priority)) {
-      return sendError(reply, 400, "INVALID_PRIORITY", "Invalid priority.");
+      return sendError(reply, 400, "INVALID_TASK_PRIORITY", "Invalid priority.");
     }
     if (body.assignment_type && !VALID_ASSIGNMENT.includes(body.assignment_type)) {
       return sendError(reply, 400, "INVALID_ASSIGNMENT_TYPE", "Invalid assignment_type.");
     }
 
-    // Validate depends_on_task_ids reference this workspace
-    if (body.depends_on_task_ids) {
-      for (const depId of body.depends_on_task_ids) {
-        const dep = workspaceTasks.get(depId);
-        if (!dep || dep.workspace_id !== workspaceId) {
-          return sendError(reply, 400, "INVALID_DEPENDENCY", `Task ${depId} not found in this workspace.`);
-        }
+    // Assignment type cross-field validation
+    const assignmentType = body.assignment_type ?? "open";
+
+    if (assignmentType === "delegation") {
+      if (!body.assigned_delegation_id) {
+        return sendError(reply, 400, "MISSING_ASSIGNED_DELEGATION", "assigned_delegation_id is required when assignment_type is 'delegation'.");
+      }
+      const delegation = agentDelegations.get(body.assigned_delegation_id);
+      if (!delegation || delegation.user_id !== MOCK_USER_ID) {
+        return sendError(reply, 400, "INVALID_ASSIGNED_DELEGATION", "Delegation not found.");
+      }
+      if (delegation.status !== "active") {
+        return sendError(reply, 400, "INVALID_ASSIGNED_DELEGATION", "Delegation is not active.");
+      }
+      if (!workspace.participant_delegation_ids.includes(body.assigned_delegation_id)) {
+        return sendError(reply, 400, "INVALID_ASSIGNED_DELEGATION", "Delegation is not a participant in this workspace.");
       }
     }
+
+    if (assignmentType === "collar") {
+      if (!body.required_collar_id) {
+        return sendError(reply, 400, "MISSING_REQUIRED_COLLAR", "required_collar_id is required when assignment_type is 'collar'.");
+      }
+      const requiredCollar = collars.get(body.required_collar_id);
+      if (!requiredCollar) {
+        return sendError(reply, 400, "INVALID_REQUIRED_COLLAR", "Collar not found.");
+      }
+      if (requiredCollar.status !== "active") {
+        return sendError(reply, 400, "INVALID_REQUIRED_COLLAR", "Collar is not active.");
+      }
+    }
+
+    // Dependency validation — deduplicate then verify each exists in this workspace
+    const uniqueDeps = [...new Set(body.depends_on_task_ids ?? [])];
+    for (const depId of uniqueDeps) {
+      const dep = workspaceTasks.get(depId);
+      if (!dep || dep.workspace_id !== workspaceId) {
+        return sendError(reply, 400, "INVALID_TASK_DEPENDENCY", `Task ${depId} not found in this workspace.`);
+      }
+    }
+
+    // Required artifact names — trim, reject empty/long, deduplicate, enforce count limit
+    const rawNames = body.required_artifact_names ?? [];
+    if (rawNames.length > 20) {
+      return sendError(reply, 400, "INVALID_REQUIRED_ARTIFACT_NAME", "required_artifact_names must have 20 or fewer entries.");
+    }
+    const trimmedNames = rawNames.map((n) => (typeof n === "string" ? n.trim() : ""));
+    const emptyIdx = trimmedNames.findIndex((n) => !n);
+    if (emptyIdx !== -1) {
+      return sendError(reply, 400, "INVALID_REQUIRED_ARTIFACT_NAME", "required_artifact_names must not contain empty or whitespace-only strings.");
+    }
+    const longName = trimmedNames.find((n) => n.length > 100);
+    if (longName) {
+      return sendError(reply, 400, "INVALID_REQUIRED_ARTIFACT_NAME", `Artifact name exceeds maximum length of 100 characters.`);
+    }
+    const dedupedNames = [...new Set(trimmedNames)];
 
     const now = new Date().toISOString();
     const task: WorkspaceTask = {
       task_id: newId("task"),
       workspace_id: workspaceId,
-      title: body.title.trim(),
+      title: trimmedTitle,
       description: body.description,
       status: "open",
-      assignment_type: body.assignment_type ?? "open",
-      assigned_delegation_id: body.assigned_delegation_id,
-      required_collar_id: body.required_collar_id,
+      assignment_type: assignmentType,
+      assigned_delegation_id: assignmentType === "delegation" ? body.assigned_delegation_id : undefined,
+      required_collar_id: assignmentType === "collar" ? body.required_collar_id : undefined,
       task_kind: body.task_kind ?? "other",
       task_mode: body.task_mode ?? "direct",
       priority: body.priority ?? "normal",
-      depends_on_task_ids: body.depends_on_task_ids ?? [],
-      required_artifact_names: body.required_artifact_names ?? [],
+      depends_on_task_ids: uniqueDeps,
+      required_artifact_names: dedupedNames,
       created_by_user_id: MOCK_USER_ID,
       created_at: now,
       updated_at: now,

@@ -2327,3 +2327,229 @@ describe("Section 15: Collar Routing Trial", () => {
     expect(res.json().data.assigned_delegation_id).toBe("delg_routing_review");
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/workspaces/:id/tasks — input validation
+// ---------------------------------------------------------------------------
+describe("POST /api/workspaces/:id/tasks — validation", () => {
+  let srv: FastifyInstance;
+
+  beforeAll(async () => {
+    srv = await buildWorkspaceTestServer();
+  });
+
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedWorkspaceDelegations();
+    seedTestWorkspace();
+  });
+
+  afterAll(async () => {
+    await srv.close();
+  });
+
+  function post(body: Record<string, unknown>) {
+    return srv.inject({
+      method: "POST",
+      url: `/api/workspaces/${IDS.WORKSPACE}/tasks`,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  // --- title ---
+  it("rejects missing title → 400 INVALID_TASK_TITLE", async () => {
+    const res = await post({});
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_TITLE");
+  });
+
+  it("rejects empty title → 400 INVALID_TASK_TITLE", async () => {
+    const res = await post({ title: "   " });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_TITLE");
+  });
+
+  it("rejects title over 200 chars → 400 INVALID_TASK_TITLE", async () => {
+    const res = await post({ title: "x".repeat(201) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_TITLE");
+  });
+
+  // --- description ---
+  it("rejects description over 2000 chars → 400 INVALID_TASK_DESCRIPTION", async () => {
+    const res = await post({ title: "Valid", description: "x".repeat(2001) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_DESCRIPTION");
+  });
+
+  // --- enum fields ---
+  it("rejects invalid task_kind → 400 INVALID_TASK_KIND", async () => {
+    const res = await post({ title: "T", task_kind: "hacking" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_KIND");
+  });
+
+  it("rejects invalid task_mode → 400 INVALID_TASK_MODE", async () => {
+    const res = await post({ title: "T", task_mode: "random" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_MODE");
+  });
+
+  it("rejects invalid priority → 400 INVALID_TASK_PRIORITY", async () => {
+    const res = await post({ title: "T", priority: "critical" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_PRIORITY");
+  });
+
+  it("rejects invalid assignment_type → 400 INVALID_ASSIGNMENT_TYPE", async () => {
+    const res = await post({ title: "T", assignment_type: "random" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_ASSIGNMENT_TYPE");
+  });
+
+  // --- assignment_type="delegation" ---
+  it("rejects delegation type without assigned_delegation_id → 400 MISSING_ASSIGNED_DELEGATION", async () => {
+    const res = await post({ title: "T", assignment_type: "delegation" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("MISSING_ASSIGNED_DELEGATION");
+  });
+
+  it("rejects delegation type with unknown delegation → 400 INVALID_ASSIGNED_DELEGATION", async () => {
+    const res = await post({ title: "T", assignment_type: "delegation", assigned_delegation_id: "delg_does_not_exist" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_ASSIGNED_DELEGATION");
+  });
+
+  it("rejects delegation type with inactive delegation → 400 INVALID_ASSIGNED_DELEGATION", async () => {
+    const d = agentDelegations.get(IDS.DELEGATION_ALL)!;
+    agentDelegations.set(d.id, { ...d, status: "revoked" });
+    const res = await post({ title: "T", assignment_type: "delegation", assigned_delegation_id: IDS.DELEGATION_ALL });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_ASSIGNED_DELEGATION");
+  });
+
+  it("rejects delegation type with non-participant delegation → 400 INVALID_ASSIGNED_DELEGATION", async () => {
+    // DELEGATION_OUTSIDER is seeded but not in the workspace participant list
+    const res = await post({ title: "T", assignment_type: "delegation", assigned_delegation_id: IDS.DELEGATION_OUTSIDER });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_ASSIGNED_DELEGATION");
+  });
+
+  it("accepts delegation type with valid participant → 201", async () => {
+    const res = await post({ title: "Delegated Task", assignment_type: "delegation", assigned_delegation_id: IDS.DELEGATION_ALL });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.assignment_type).toBe("delegation");
+    expect(res.json().data.assigned_delegation_id).toBe(IDS.DELEGATION_ALL);
+  });
+
+  // --- assignment_type="collar" ---
+  it("rejects collar type without required_collar_id → 400 MISSING_REQUIRED_COLLAR", async () => {
+    const res = await post({ title: "T", assignment_type: "collar" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("MISSING_REQUIRED_COLLAR");
+  });
+
+  it("rejects collar type with unknown collar → 400 INVALID_REQUIRED_COLLAR", async () => {
+    const res = await post({ title: "T", assignment_type: "collar", required_collar_id: "collar_does_not_exist" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_COLLAR");
+  });
+
+  it("rejects collar type with revoked collar → 400 INVALID_REQUIRED_COLLAR", async () => {
+    const c = collars.get(IDS.COLLAR)!;
+    collars.set(c.id, { ...c, status: "revoked" });
+    const res = await post({ title: "T", assignment_type: "collar", required_collar_id: IDS.COLLAR });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_COLLAR");
+  });
+
+  it("accepts collar type with active collar → 201", async () => {
+    const res = await post({ title: "Collar Task", assignment_type: "collar", required_collar_id: IDS.COLLAR });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.assignment_type).toBe("collar");
+    expect(res.json().data.required_collar_id).toBe(IDS.COLLAR);
+  });
+
+  // --- assignment_type="open" — strip spurious fields ---
+  it("strips assigned_delegation_id and required_collar_id for open tasks → 201", async () => {
+    const res = await post({
+      title: "Open Task",
+      assignment_type: "open",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+      required_collar_id: IDS.COLLAR,
+    });
+    expect(res.statusCode).toBe(201);
+    const data = res.json().data;
+    expect(data.assigned_delegation_id).toBeUndefined();
+    expect(data.required_collar_id).toBeUndefined();
+  });
+
+  // --- dependencies ---
+  it("rejects depends_on_task_ids referencing unknown task → 400 INVALID_TASK_DEPENDENCY", async () => {
+    const res = await post({ title: "T", depends_on_task_ids: ["task_does_not_exist"] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_TASK_DEPENDENCY");
+  });
+
+  it("deduplicates depends_on_task_ids → 201", async () => {
+    seedOpenTask("task_dep_001");
+    const res = await post({ title: "T", depends_on_task_ids: ["task_dep_001", "task_dep_001"] });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.depends_on_task_ids).toEqual(["task_dep_001"]);
+  });
+
+  // --- required_artifact_names ---
+  it("rejects more than 20 required_artifact_names → 400 INVALID_REQUIRED_ARTIFACT_NAME", async () => {
+    const res = await post({ title: "T", required_artifact_names: Array.from({ length: 21 }, (_, i) => `artifact-${i}`) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_ARTIFACT_NAME");
+  });
+
+  it("rejects empty required_artifact_name → 400 INVALID_REQUIRED_ARTIFACT_NAME", async () => {
+    const res = await post({ title: "T", required_artifact_names: ["valid-name", ""] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_ARTIFACT_NAME");
+  });
+
+  it("rejects whitespace-only required_artifact_name → 400 INVALID_REQUIRED_ARTIFACT_NAME", async () => {
+    const res = await post({ title: "T", required_artifact_names: ["   "] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_ARTIFACT_NAME");
+  });
+
+  it("rejects required_artifact_name over 100 chars → 400 INVALID_REQUIRED_ARTIFACT_NAME", async () => {
+    const res = await post({ title: "T", required_artifact_names: ["x".repeat(101)] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_REQUIRED_ARTIFACT_NAME");
+  });
+
+  it("trims and deduplicates required_artifact_names → 201", async () => {
+    const res = await post({ title: "T", required_artifact_names: ["  report.md  ", "report.md", "summary.txt"] });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.required_artifact_names).toEqual(["report.md", "summary.txt"]);
+  });
+
+  // --- happy path ---
+  it("creates a valid open task with all optional fields → 201", async () => {
+    seedOpenTask("task_dep_happy");
+    const res = await post({
+      title: "  My Task  ",
+      description: "A well-formed task.",
+      task_kind: "research",
+      task_mode: "plan_first",
+      priority: "high",
+      assignment_type: "open",
+      depends_on_task_ids: ["task_dep_happy"],
+      required_artifact_names: ["  report.md  ", "summary.txt"],
+    });
+    expect(res.statusCode).toBe(201);
+    const data = res.json().data;
+    expect(data.title).toBe("My Task");
+    expect(data.task_kind).toBe("research");
+    expect(data.priority).toBe("high");
+    expect(data.depends_on_task_ids).toEqual(["task_dep_happy"]);
+    expect(data.required_artifact_names).toEqual(["report.md", "summary.txt"]);
+  });
+});

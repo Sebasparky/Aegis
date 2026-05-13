@@ -455,6 +455,8 @@ function CreateTaskForm({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim()) { setErr("Title is required."); return; }
+    if (assignmentType === "delegation" && !assignedDelegationId) { setErr("Select a delegation to assign this task."); return; }
+    if (assignmentType === "collar" && !requiredCollarId.trim()) { setErr("Enter a collar ID for collar-assigned tasks."); return; }
     setSubmitting(true);
     setErr(null);
     try {

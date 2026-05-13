@@ -6,6 +6,7 @@ dotenv.config({ path: resolve(dirname(__filename), "../../../.env") });
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import { loadStore } from "./store/persistence.js";
 import { userRoutes } from "./routes/user.js";
 import { collarRoutes } from "./routes/collars.js";
@@ -63,6 +64,10 @@ async function main() {
 
   await server.register(cors, {
     origin: ["http://localhost:3000", "http://localhost:3001"],
+  });
+
+  await server.register(multipart, {
+    limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 4, fieldSize: 1024 },
   });
 
   server.get("/health", async () => {

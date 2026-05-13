@@ -1,8 +1,13 @@
+import { createReadStream, createWriteStream, existsSync } from "fs";
+import { pipeline } from "stream/promises";
+import { extname } from "path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   AegisWorkspace,
   WorkspaceTask,
   WorkspaceArtifact,
+  WorkspaceTextArtifact,
+  WorkspaceFileArtifact,
   WorkspaceArtifactKind,
   TaskKind,
   TaskMode,
@@ -20,10 +25,24 @@ import {
   newId,
 } from "../store/index.js";
 import { buildWorkspaceArtifactNames } from "../lib/workspaceDomain.js";
+import { schedulePersist } from "../store/persistence.js";
+import {
+  ALLOWED_MIME_TYPES,
+  ALLOWED_EXTENSIONS,
+  FILE_MAX_BYTES,
+  sanitizeFilename,
+  getArtifactFilePath,
+  ensureArtifactDir,
+  deleteArtifactFile,
+  getFileExtension,
+} from "../lib/artifactStorage.js";
 
 function sendError(reply: FastifyReply, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
 }
+
+// "file" kind is created via POST /artifacts/upload — not accepted here
+const TEXT_ARTIFACT_KINDS: WorkspaceArtifactKind[] = ["text", "json", "csv", "markdown"];
 
 export async function workspaceRoutes(server: FastifyInstance) {
   /**
@@ -241,7 +260,7 @@ export async function workspaceRoutes(server: FastifyInstance) {
 
   /**
    * GET /api/workspaces/:workspaceId/artifacts
-   * Owner-facing artifact list (metadata only, no content).
+   * Owner-facing artifact list (metadata only, no content, no local_path).
    */
   server.get("/api/workspaces/:workspaceId/artifacts", async (req, reply) => {
     const { workspaceId } = req.params as { workspaceId: string };
@@ -251,17 +270,48 @@ export async function workspaceRoutes(server: FastifyInstance) {
     }
     const list = Array.from(workspaceArtifacts.values())
       .filter((a) => a.workspace_id === workspaceId)
-      .map(({ content: _content, ...meta }) => ({
-        ...meta,
-        size_bytes: Buffer.byteLength(_content, "utf8"),
-      }))
+      .map((a) => {
+        if (a.kind === "file") {
+          const { local_path: _lp, ...rest } = a as WorkspaceFileArtifact;
+          return rest;
+        }
+        const { content: _c, ...meta } = a as WorkspaceTextArtifact;
+        return { ...meta, size_bytes: Buffer.byteLength(_c, "utf8") };
+      })
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
     return reply.send({ ok: true, data: list });
   });
 
   /**
+   * GET /api/workspaces/:workspaceId/artifacts/:artifactId/download
+   * Owner-facing file artifact download. Must be registered before /:artifactId.
+   */
+  server.get("/api/workspaces/:workspaceId/artifacts/:artifactId/download", async (req, reply) => {
+    const { workspaceId, artifactId } = req.params as { workspaceId: string; artifactId: string };
+    const workspace = aegisWorkspaces.get(workspaceId);
+    if (!workspace || workspace.owner_user_id !== MOCK_USER_ID) {
+      return sendError(reply, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
+    }
+    const artifact = workspaceArtifacts.get(artifactId);
+    if (!artifact || artifact.workspace_id !== workspaceId) {
+      return sendError(reply, 404, "ARTIFACT_NOT_FOUND", "Artifact not found.");
+    }
+    if (artifact.kind !== "file") {
+      return sendError(reply, 400, "NOT_A_FILE", "This artifact is not a file artifact.");
+    }
+    const fa = artifact as WorkspaceFileArtifact;
+    if (!existsSync(fa.local_path)) {
+      return sendError(reply, 404, "FILE_NOT_FOUND", "File not found on disk.");
+    }
+    reply.header("Content-Type", fa.mime_type);
+    reply.header("Content-Disposition", `attachment; filename="${fa.name}"`);
+    reply.header("Content-Length", String(fa.size_bytes));
+    return reply.send(createReadStream(fa.local_path));
+  });
+
+  /**
    * GET /api/workspaces/:workspaceId/artifacts/:artifactId
-   * Owner-facing artifact with full content.
+   * Owner-facing artifact with full content. local_path is never returned.
    */
   server.get("/api/workspaces/:workspaceId/artifacts/:artifactId", async (req, reply) => {
     const { workspaceId, artifactId } = req.params as { workspaceId: string; artifactId: string };
@@ -273,12 +323,130 @@ export async function workspaceRoutes(server: FastifyInstance) {
     if (!artifact || artifact.workspace_id !== workspaceId) {
       return sendError(reply, 404, "ARTIFACT_NOT_FOUND", "Artifact not found.");
     }
+    if (artifact.kind === "file") {
+      const { local_path: _lp, ...safe } = artifact as WorkspaceFileArtifact;
+      return reply.send({ ok: true, data: safe });
+    }
     return reply.send({ ok: true, data: artifact });
   });
 
   /**
+   * POST /api/workspaces/:workspaceId/artifacts/upload
+   * Owner-facing file artifact upload. Must be registered before POST /artifacts.
+   * Accepts multipart/form-data with fields: name (string), task_id? (string), file (binary).
+   */
+  server.post("/api/workspaces/:workspaceId/artifacts/upload", async (req, reply) => {
+    const { workspaceId } = req.params as { workspaceId: string };
+    const workspace = aegisWorkspaces.get(workspaceId);
+    if (!workspace || workspace.owner_user_id !== MOCK_USER_ID) {
+      return sendError(reply, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
+    }
+
+    let artifactName = "";
+    let taskId: string | undefined;
+    let filePart: import("@fastify/multipart").MultipartFile | undefined;
+
+    for await (const part of req.parts()) {
+      if (part.type === "field") {
+        if (part.fieldname === "name") artifactName = String(part.value ?? "").trim();
+        else if (part.fieldname === "task_id") taskId = String(part.value ?? "").trim() || undefined;
+      } else if (part.type === "file") {
+        filePart = part;
+        break; // only one file expected
+      }
+    }
+
+    if (!artifactName) {
+      return sendError(reply, 400, "MISSING_NAME", "name field is required.");
+    }
+    if (!filePart) {
+      return sendError(reply, 400, "MISSING_FILE", "file part is required.");
+    }
+
+    const mimeType = filePart.mimetype;
+    if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+      await filePart.toBuffer().catch(() => {}); // drain stream
+      return sendError(reply, 400, "INVALID_MIME_TYPE", `MIME type '${mimeType}' is not allowed.`);
+    }
+
+    const ext = getFileExtension(filePart.filename || "");
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      await filePart.toBuffer().catch(() => {});
+      return sendError(reply, 400, "INVALID_EXTENSION", `File extension '${ext}' is not allowed.`);
+    }
+
+    let safeFilename: string;
+    try {
+      safeFilename = sanitizeFilename(filePart.filename || "upload");
+    } catch {
+      return sendError(reply, 400, "INVALID_FILENAME", "Filename contains invalid characters.");
+    }
+
+    if (taskId) {
+      const task = workspaceTasks.get(taskId);
+      if (!task || task.workspace_id !== workspaceId) {
+        return sendError(reply, 400, "INVALID_TASK", "task_id not found in this workspace.");
+      }
+    }
+
+    const artifactId = newId("art");
+    ensureArtifactDir(workspaceId);
+    const destPath = getArtifactFilePath(workspaceId, artifactId, safeFilename);
+
+    let sizeBytes = 0;
+    const dest = createWriteStream(destPath);
+    let sizeExceeded = false;
+
+    try {
+      await pipeline(
+        filePart.file,
+        async function* (source) {
+          for await (const chunk of source) {
+            sizeBytes += chunk.length;
+            if (sizeBytes > FILE_MAX_BYTES) {
+              sizeExceeded = true;
+              return;
+            }
+            yield chunk;
+          }
+        },
+        dest,
+      );
+    } catch {
+      deleteArtifactFile(destPath);
+      if (sizeExceeded) {
+        return sendError(reply, 400, "FILE_TOO_LARGE", `File exceeds the ${FILE_MAX_BYTES / 1024 / 1024}MB limit.`);
+      }
+      return sendError(reply, 500, "UPLOAD_FAILED", "Failed to write file.");
+    }
+
+    if (sizeExceeded) {
+      deleteArtifactFile(destPath);
+      return sendError(reply, 400, "FILE_TOO_LARGE", `File exceeds the ${FILE_MAX_BYTES / 1024 / 1024}MB limit.`);
+    }
+
+    const now = new Date().toISOString();
+    const artifact: WorkspaceFileArtifact = {
+      artifact_id: artifactId,
+      workspace_id: workspaceId,
+      name: artifactName,
+      kind: "file",
+      mime_type: mimeType,
+      size_bytes: sizeBytes,
+      local_path: destPath,
+      task_id: taskId,
+      created_at: now,
+    };
+    workspaceArtifacts.set(artifactId, artifact);
+    schedulePersist();
+
+    const { local_path: _lp, ...meta } = artifact;
+    return reply.status(201).send({ ok: true, data: meta });
+  });
+
+  /**
    * POST /api/workspaces/:workspaceId/artifacts
-   * Owner-facing artifact creation (text/json/csv/markdown only).
+   * Owner-facing text artifact creation (text/json/csv/markdown only).
    */
   server.post("/api/workspaces/:workspaceId/artifacts", async (req, reply) => {
     const { workspaceId } = req.params as { workspaceId: string };
@@ -297,8 +465,7 @@ export async function workspaceRoutes(server: FastifyInstance) {
     if (!body.name || typeof body.name !== "string" || !body.name.trim()) {
       return sendError(reply, 400, "MISSING_NAME", "name is required.");
     }
-    const VALID_KINDS: WorkspaceArtifactKind[] = ["text", "json", "csv", "markdown"];
-    if (!body.kind || !VALID_KINDS.includes(body.kind)) {
+    if (!body.kind || !TEXT_ARTIFACT_KINDS.includes(body.kind)) {
       return sendError(reply, 400, "INVALID_KIND", "kind must be one of: text, json, csv, markdown.");
     }
     if (typeof body.content !== "string") {
@@ -315,11 +482,11 @@ export async function workspaceRoutes(server: FastifyInstance) {
     }
 
     const now = new Date().toISOString();
-    const artifact: WorkspaceArtifact = {
+    const artifact: WorkspaceTextArtifact = {
       artifact_id: newId("art"),
       workspace_id: workspaceId,
       name: body.name.trim(),
-      kind: body.kind,
+      kind: body.kind as "text" | "json" | "csv" | "markdown",
       content: body.content,
       task_id: body.task_id,
       created_at: now,

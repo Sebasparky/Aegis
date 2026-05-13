@@ -11,6 +11,8 @@ import {
   listWorkspaceArtifacts,
   getWorkspaceArtifact,
   createWorkspaceArtifact,
+  uploadWorkspaceArtifact,
+  getArtifactDownloadUrl,
   listDelegations,
   type WorkspaceWithCounts,
   type WorkspaceTaskWithReadiness,
@@ -39,7 +41,7 @@ export default function WorkspaceDetailPage() {
   const [artifactLoading, setArtifactLoading] = useState(false);
 
   const [showTaskForm, setShowTaskForm] = useState(false);
-  const [showArtifactForm, setShowArtifactForm] = useState(false);
+  const [artifactFormMode, setArtifactFormMode] = useState<"none" | "text" | "file">("none");
 
   async function load() {
     try {
@@ -144,7 +146,7 @@ export default function WorkspaceDetailPage() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium uppercase tracking-widest text-gray-500">Tasks</h2>
           <button
-            onClick={() => { setShowTaskForm((s) => !s); setShowArtifactForm(false); }}
+            onClick={() => { setShowTaskForm((s) => !s); setArtifactFormMode("none"); }}
             className="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors"
           >
             {showTaskForm ? "Cancel" : "+ Create Task"}
@@ -176,28 +178,43 @@ export default function WorkspaceDetailPage() {
       <section className="mb-8">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium uppercase tracking-widest text-gray-500">Artifacts</h2>
-          <button
-            onClick={() => { setShowArtifactForm((s) => !s); setShowTaskForm(false); }}
-            className="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors"
-          >
-            {showArtifactForm ? "Cancel" : "+ Add Artifact"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setArtifactFormMode((m) => m === "text" ? "none" : "text"); setShowTaskForm(false); }}
+              className="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors"
+            >
+              {artifactFormMode === "text" ? "Cancel" : "+ Text"}
+            </button>
+            <button
+              onClick={() => { setArtifactFormMode((m) => m === "file" ? "none" : "file"); setShowTaskForm(false); }}
+              className="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors"
+            >
+              {artifactFormMode === "file" ? "Cancel" : "+ Upload File"}
+            </button>
+          </div>
         </div>
 
-        {showArtifactForm && (
+        {artifactFormMode === "text" && (
           <CreateArtifactForm
             workspaceId={workspaceId}
             tasks={tasks}
-            onCreated={() => { setShowArtifactForm(false); load(); }}
+            onCreated={() => { setArtifactFormMode("none"); load(); }}
           />
         )}
 
-        {artifacts.length === 0 && !showArtifactForm && (
+        {artifactFormMode === "file" && (
+          <UploadArtifactForm
+            workspaceId={workspaceId}
+            tasks={tasks}
+            onCreated={() => { setArtifactFormMode("none"); load(); }}
+          />
+        )}
+
+        {artifacts.length === 0 && artifactFormMode === "none" && (
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 text-center">
             <p className="text-xs text-gray-500">
               No artifacts yet. Agents create artifacts when completing tasks, or you can add one above.
             </p>
-            <p className="text-xs text-gray-600 mt-2">File uploads (PDF, images, docs) coming next.</p>
           </div>
         )}
 
@@ -215,19 +232,30 @@ export default function WorkspaceDetailPage() {
                     {a.task_id && <span>task: {a.task_id}</span>}
                     {a.created_by_delegation_id && <span>by: {a.created_by_delegation_id}</span>}
                     <span>{formatBytes(a.size_bytes)}</span>
+                    {a.kind === "file" && a.mime_type && <span>{a.mime_type}</span>}
                   </div>
                 </div>
-                <button
-                  onClick={() =>
-                    viewingArtifact?.artifact_id === a.artifact_id
-                      ? setViewingArtifact(null)
-                      : handleViewArtifact(a.artifact_id)
-                  }
-                  disabled={artifactLoading}
-                  className="shrink-0 text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors disabled:opacity-50"
-                >
-                  {viewingArtifact?.artifact_id === a.artifact_id ? "Hide" : "View"}
-                </button>
+                {a.kind === "file" ? (
+                  <a
+                    href={getArtifactDownloadUrl(workspaceId, a.artifact_id)}
+                    download={a.name}
+                    className="shrink-0 text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors"
+                  >
+                    Download
+                  </a>
+                ) : (
+                  <button
+                    onClick={() =>
+                      viewingArtifact?.artifact_id === a.artifact_id
+                        ? setViewingArtifact(null)
+                        : handleViewArtifact(a.artifact_id)
+                    }
+                    disabled={artifactLoading}
+                    className="shrink-0 text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-gray-700 rounded-md transition-colors disabled:opacity-50"
+                  >
+                    {viewingArtifact?.artifact_id === a.artifact_id ? "Hide" : "View"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -245,10 +273,6 @@ export default function WorkspaceDetailPage() {
               {viewingArtifact.content}
             </pre>
           </div>
-        )}
-
-        {artifacts.length > 0 && (
-          <p className="text-xs text-gray-600 mt-2 text-center">File uploads (PDF, images, docs) coming next.</p>
         )}
       </section>
 
@@ -654,8 +678,8 @@ function CreateArtifactForm({
 
   return (
     <form onSubmit={handleSubmit} className="bg-gray-900 border border-indigo-800 rounded-lg p-5 mb-4 space-y-4">
-      <div className="text-xs font-medium uppercase tracking-widest text-indigo-400 mb-1">New Artifact</div>
-      <p className="text-xs text-gray-600">Supports text, markdown, JSON, and CSV. File uploads coming next.</p>
+      <div className="text-xs font-medium uppercase tracking-widest text-indigo-400 mb-1">New Text Artifact</div>
+      <p className="text-xs text-gray-600">Supports text, markdown, JSON, and CSV. Max 50 KB.</p>
 
       {err && <p className="text-xs text-red-400">{err}</p>}
 
@@ -718,6 +742,103 @@ function CreateArtifactForm({
   );
 }
 
+// ─── Upload Artifact Form ─────────────────────────────────────────────────────
+
+function UploadArtifactForm({
+  workspaceId,
+  tasks,
+  onCreated,
+}: {
+  workspaceId: string;
+  tasks: WorkspaceTaskWithReadiness[];
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [taskId, setTaskId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0] ?? null;
+    setFile(f);
+    if (f && !name) setName(f.name);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!file) { setErr("Please select a file."); return; }
+    if (!name.trim()) { setErr("Name is required."); return; }
+    setSubmitting(true);
+    setErr(null);
+    try {
+      await uploadWorkspaceArtifact(workspaceId, file, name.trim(), taskId || undefined);
+      onCreated();
+    } catch (ex: unknown) {
+      setErr(ex instanceof Error ? ex.message : "Upload failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const inputCls = "w-full bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-md px-3 py-2 focus:outline-none focus:border-indigo-500";
+  const labelCls = "block text-xs text-gray-400 mb-1";
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-gray-900 border border-indigo-800 rounded-lg p-5 mb-4 space-y-4">
+      <div className="text-xs font-medium uppercase tracking-widest text-indigo-400 mb-1">Upload File</div>
+      <p className="text-xs text-gray-600">PDF, PNG, JPEG, TXT, CSV, JSON, DOCX. Max 10 MB.</p>
+
+      {err && <p className="text-xs text-red-400">{err}</p>}
+
+      <div>
+        <label className={labelCls}>File *</label>
+        <input
+          type="file"
+          accept=".pdf,.png,.jpg,.jpeg,.txt,.csv,.json,.docx"
+          onChange={handleFileChange}
+          className="w-full text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-gray-700 file:text-gray-300 hover:file:bg-gray-600"
+          required
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>Name *</label>
+          <input
+            className={inputCls}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="report.pdf"
+            required
+          />
+        </div>
+        {tasks.length > 0 && (
+          <div>
+            <label className={labelCls}>Linked task (optional)</label>
+            <select className={inputCls} value={taskId} onChange={(e) => setTaskId(e.target.value)}>
+              <option value="">— none —</option>
+              {tasks.map((t) => (
+                <option key={t.task_id} value={t.task_id}>{t.title}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end pt-1">
+        <button
+          type="submit"
+          disabled={submitting}
+          className="text-xs bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white px-4 py-2 rounded-md transition-colors"
+        >
+          {submitting ? "Uploading…" : "Upload"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 // ─── Shared UI helpers ────────────────────────────────────────────────────────
 
 function StatusPill({ status }: { status: string }) {
@@ -771,6 +892,7 @@ function KindBadge({ kind }: { kind: string }) {
     json: "bg-yellow-900 text-yellow-400",
     csv: "bg-green-900 text-green-400",
     text: "bg-gray-800 text-gray-400",
+    file: "bg-purple-900 text-purple-300",
   };
   return (
     <span className={`px-2 py-0.5 rounded text-xs font-mono font-medium ${colors[kind] ?? "bg-gray-800 text-gray-400"}`}>

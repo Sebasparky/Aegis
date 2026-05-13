@@ -1,3 +1,4 @@
+import { existsSync, createReadStream } from "fs";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type {
   AgentDelegation,
@@ -1636,6 +1637,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
   // ─── Workspaces v0 ────────────────────────────────────────────────────────────
 
+  // "file" kind is owner-upload-only via POST /artifacts/upload — agents cannot create file artifacts
   const VALID_ARTIFACT_KINDS = new Set<WorkspaceArtifactKind>(["text", "json", "csv", "markdown"]);
   const ARTIFACT_MAX_BYTES = 50 * 1024; // 50KB
 
@@ -1953,7 +1955,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             artifact_id: a.artifact_id,
             name: a.name,
             kind: a.kind,
-            size_bytes: Buffer.byteLength(a.content, "utf8"),
+            size_bytes: a.kind === "file" ? a.size_bytes : Buffer.byteLength(a.content, "utf8"),
+            ...(a.kind === "file" ? { mime_type: a.mime_type } : {}),
             task_id: a.task_id,
             created_by_delegation_id: a.created_by_delegation_id,
             created_at: a.created_at,
@@ -2167,7 +2170,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         artifact_id: newId("artifact"),
         workspace_id: workspace.workspace_id,
         name: name.trim(),
-        kind: kind as WorkspaceArtifactKind,
+        kind: kind as "text" | "json" | "csv" | "markdown",
         content,
         ...(task_id !== undefined ? { task_id } : {}),
         created_by_delegation_id: delegation.id,
@@ -2215,16 +2218,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       const artifacts = Array.from(workspaceArtifacts.values())
         .filter((a) => a.workspace_id === workspace.workspace_id)
-        .map((a) => ({
-          artifact_id: a.artifact_id,
-          workspace_id: a.workspace_id,
-          name: a.name,
-          kind: a.kind,
-          size_bytes: Buffer.byteLength(a.content, "utf8"),
-          task_id: a.task_id,
-          created_by_delegation_id: a.created_by_delegation_id,
-          created_at: a.created_at,
-        }));
+        .map((a) => {
+          const base = {
+            artifact_id: a.artifact_id,
+            workspace_id: a.workspace_id,
+            name: a.name,
+            kind: a.kind,
+            task_id: a.task_id,
+            created_by_delegation_id: a.created_by_delegation_id,
+            created_at: a.created_at,
+          };
+          if (a.kind === "file") {
+            return { ...base, size_bytes: a.size_bytes, mime_type: a.mime_type };
+          }
+          return { ...base, size_bytes: Buffer.byteLength(a.content, "utf8") };
+        });
 
       return reply.send({ ok: true, data: artifacts });
     },
@@ -2255,6 +2263,24 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 404, "ARTIFACT_NOT_FOUND", "Artifact not found in this workspace.");
       }
 
+      if (artifact.kind === "file") {
+        return reply.send({
+          ok: true,
+          data: {
+            artifact_id: artifact.artifact_id,
+            workspace_id: artifact.workspace_id,
+            name: artifact.name,
+            kind: artifact.kind,
+            mime_type: artifact.mime_type,
+            size_bytes: artifact.size_bytes,
+            task_id: artifact.task_id,
+            created_by_delegation_id: artifact.created_by_delegation_id,
+            created_at: artifact.created_at,
+            note: "File artifact — binary content not available inline.",
+          },
+        });
+      }
+
       return reply.send({
         ok: true,
         data: {
@@ -2269,6 +2295,45 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           created_at: artifact.created_at,
         },
       });
+    },
+  );
+
+  /**
+   * GET /api/agent/v1/workspaces/:workspaceId/artifacts/:artifactId/download
+   * Download a file artifact. Gated by workspace_artifact_read collar permission.
+   * local_path is never returned to agents.
+   */
+  server.get(
+    "/api/agent/v1/workspaces/:workspaceId/artifacts/:artifactId/download",
+    async (req: FastifyRequest<{ Params: { workspaceId: string; artifactId: string } }>, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const result = requireWorkspaceAccess(req.params.workspaceId, delegation);
+      if (!result.ok) {
+        return sendError(reply, result.code === "WORKSPACE_NOT_FOUND" ? 404 : 403, result.code, result.message);
+      }
+      const { workspace } = result;
+      const permResult = checkWorkspacePermission(workspace, collars.get(workspace.collar_id)!, delegation, "workspace_artifact_read");
+      if (!permResult.ok) {
+        return sendError(reply, 403, permResult.code, permResult.message);
+      }
+
+      const artifact = workspaceArtifacts.get(req.params.artifactId);
+      if (!artifact || artifact.workspace_id !== workspace.workspace_id) {
+        return sendError(reply, 404, "ARTIFACT_NOT_FOUND", "Artifact not found in this workspace.");
+      }
+      if (artifact.kind !== "file") {
+        return sendError(reply, 400, "NOT_A_FILE", "This artifact is not a file artifact.");
+      }
+
+      if (!existsSync(artifact.local_path)) {
+        return sendError(reply, 404, "FILE_NOT_FOUND", "File not found on disk.");
+      }
+      reply.header("Content-Type", artifact.mime_type);
+      reply.header("Content-Disposition", `attachment; filename="${artifact.name}"`);
+      reply.header("Content-Length", String(artifact.size_bytes));
+      return reply.send(createReadStream(artifact.local_path));
     },
   );
 }

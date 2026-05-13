@@ -1771,7 +1771,7 @@ export interface SensitiveActionTimelineItem {
 
 export type WorkspaceStatus = "active" | "archived";
 export type WorkspaceTaskStatus = "open" | "in_progress" | "completed" | "cancelled";
-export type WorkspaceArtifactKind = "text" | "json" | "csv" | "markdown";
+export type WorkspaceArtifactKind = "text" | "json" | "csv" | "markdown" | "file";
 export type TaskKind =
   | "research"
   | "analysis"
@@ -1839,19 +1839,32 @@ export interface WorkspaceTask {
   completed_at?: string;
 }
 
-/** A text artifact produced by an agent within a workspace. */
-export interface WorkspaceArtifact {
+interface WorkspaceArtifactBase {
   artifact_id: string;
   workspace_id: string;
   name: string;
-  kind: WorkspaceArtifactKind;
-  /** Raw text content. Max 50KB enforced at API layer. */
-  content: string;
-  /** Task that produced this artifact, if any. */
   task_id?: string;
   created_by_delegation_id?: string;
   created_at: string;
 }
+
+/** Text artifact (text/json/csv/markdown) produced within a workspace. */
+export interface WorkspaceTextArtifact extends WorkspaceArtifactBase {
+  kind: "text" | "json" | "csv" | "markdown";
+  content: string;
+}
+
+/** File artifact uploaded by a workspace owner. Binary stored on disk; metadata only in JSON store. */
+export interface WorkspaceFileArtifact extends WorkspaceArtifactBase {
+  kind: "file";
+  mime_type: string;
+  size_bytes: number;
+  /** Absolute path on API server disk. Never returned in API responses. */
+  local_path: string;
+  content?: never;
+}
+
+export type WorkspaceArtifact = WorkspaceTextArtifact | WorkspaceFileArtifact;
 
 export type TaskEligibilityLabel = "eligible" | "not_eligible" | "assigned_to_me" | "open";
 export type TaskReadinessLabel =

@@ -8,6 +8,7 @@ build
 .env.*
 !.env.example
 apps/api/.data
+apps/api/.aegis-artifacts
 .DS_Store
 
 .claude/settings.json

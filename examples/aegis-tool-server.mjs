@@ -2757,7 +2757,8 @@ const TOOLS = [
     name: "list_workspace_artifacts",
     description:
       "Lists all artifacts in the workspace. Returns metadata only — artifact_id, name, kind, size_bytes, task_id, created_by_delegation_id, created_at. " +
-      "Content is not included; use read_workspace_artifact to fetch the content of a specific artifact. " +
+      "For kind='file' artifacts (uploaded by the workspace owner), mime_type is also returned. " +
+      "Content is not included for any artifact kind; use read_workspace_artifact to fetch text artifact content. " +
       "Use this to check whether a required artifact already exists before claiming a task that depends on it.",
     inputSchema: {
       type: "object",
@@ -2774,6 +2775,8 @@ const TOOLS = [
     name: "read_workspace_artifact",
     description:
       "Returns the full content of a workspace artifact. " +
+      "For kind='text', 'json', 'csv', or 'markdown', the content string is returned. " +
+      "For kind='file' (uploaded binary files), only metadata is returned — content is not available inline. " +
       "Get artifact_id from list_workspace_artifacts or from the artifacts array in get_workspace_manifest. " +
       "Use this to read work produced by other agents before building on it.",
     inputSchema: {

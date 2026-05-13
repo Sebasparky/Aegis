@@ -624,10 +624,11 @@ export type WorkspaceArtifactMeta = {
   task_id?: string;
   created_by_delegation_id?: string;
   size_bytes: number;
+  mime_type?: string; // present for kind="file"
   created_at: string;
 };
 
-export type WorkspaceArtifactFull = WorkspaceArtifactMeta & { content: string };
+export type WorkspaceArtifactFull = WorkspaceArtifactMeta & { content?: string };
 
 export type WorkspaceWithCounts = AegisWorkspace & {
   task_counts: { open: number; in_progress: number; completed: number; cancelled: number };
@@ -665,6 +666,30 @@ export const createWorkspaceArtifact = (
     method: "POST",
     body: JSON.stringify(body),
   });
+
+export async function uploadWorkspaceArtifact(
+  workspaceId: string,
+  file: File,
+  name: string,
+  task_id?: string,
+): Promise<WorkspaceArtifactMeta> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("name", name);
+  if (task_id) form.append("task_id", task_id);
+  // No Content-Type header — browser sets multipart/form-data with boundary automatically
+  const res = await fetch(`${BASE}/api/workspaces/${workspaceId}/artifacts/upload`, {
+    method: "POST",
+    body: form,
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error?.message ?? "Upload failed");
+  return json.data as WorkspaceArtifactMeta;
+}
+
+export function getArtifactDownloadUrl(workspaceId: string, artifactId: string): string {
+  return `${BASE}/api/workspaces/${workspaceId}/artifacts/${artifactId}/download`;
+}
 
 // ─── Sensitive Action Receipt Timeline v1 ────────────────────────────────────
 

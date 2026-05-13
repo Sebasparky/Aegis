@@ -738,7 +738,7 @@ Same seeded entities as Trial 3. `AEGIS_AGENT_TOKEN` set to the bearer token val
 
 ### What passed
 
-The MCP-only trial validated both collar-routed work and open-task work through MCP tools. The research-collared delegation completed task_coord_001 and created `aegis-pillars-summary.md`. The review-collared delegation completed task_coord_002 after the dependency artifact existed. The open task task_coord_003 was completed through the MCP tool flow. Final state: open 0, in_progress 0, completed 3.
+The MCP-only trial validated both collar-routed work and open-task work through MCP tools. The research-collared delegation completed task_coord_001 and created aegis-pillars-summary.md. The review-collared delegation completed task_coord_002 after the dependency artifact existed. The open task task_coord_003 was completed through the MCP tool flow. Final state: open 0, in_progress 0, completed 3.
 
 ### Key observation
 

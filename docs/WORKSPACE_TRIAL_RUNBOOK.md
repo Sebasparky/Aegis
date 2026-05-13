@@ -8,6 +8,7 @@
 | Trial 2: Collar-routing (research collar / review collar / open task) | Passed | 2026-05-11 |
 | Trial 3: Concurrent real-agent trial (two live Claude agents, collar routing, task_coord_003 contention) | Passed | 2026-05-11/12 |
 | Workspace Manifest Operations Schema + 409 Recovery Hints | Applied | 2026-05-12 |
+| Trial 4: MCP-only trial (research + review collars, no curl, Claude Code native MCP tools) | Passed | 2026-05-12 |
 
 Friction addressed after Trial 3: agents used `content_type` instead of `kind` on artifact POST. Fixed by adding `body_schema` to manifest operations stubs (POST /artifacts and PATCH /tasks). `TASK_ALREADY_CLAIMED` and `TASK_NOT_READY` now include `error.recovery_hint: "refresh_manifest"`.
 
@@ -722,3 +723,23 @@ curl -s -H "Authorization: Bearer pass_demo_002" \
 | Agent B tries to complete a task it didn't claim | 403 TASK_NOT_ASSIGNED | Task completion is delegation-scoped; not a coordination failure |
 | Agent B polls indefinitely because Agent A stalls | No API error | Intervene manually; check Agent A's session state |
 | Both agents claim task_coord_001 simultaneously | Collar routing fires first — Agent B gets 403 TASK_NOT_ELIGIBLE before any race logic | Not a real race condition; collar enforcement prevents it |
+
+---
+
+## Trial 4: MCP-Only Trial — Workspace MCP Tools v1
+
+**Status: Passed — 2026-05-12**
+
+Two Claude Code agents coordinated through `ws_coord_trial_001` using only the six new MCP workspace tools — no raw curl required.
+
+### Setup
+
+Same seeded entities as Trial 3. `AEGIS_AGENT_TOKEN` set to the bearer token value (`pass_demo_001` for the research-collared delegation, `pass_demo_002` for the review-collared delegation) — not the delegation ID.
+
+### What passed
+
+The MCP-only trial validated both collar-routed work and open-task work through MCP tools. The research-collared delegation completed task_coord_001 and created `aegis-pillars-summary.md`. The review-collared delegation completed task_coord_002 after the dependency artifact existed. The open task task_coord_003 was completed through the MCP tool flow. Final state: open 0, in_progress 0, completed 3.
+
+### Key observation
+
+No backend or API changes were required — the six MCP tools wrap the existing `/api/agent/v1/workspaces/*` HTTP API directly. Manifest-driven orientation (`get_workspace_manifest` first, refresh on 409) worked correctly without agent-specific prompting.

@@ -61,6 +61,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Aegis Workspaces v0 or Workspace Effective Permissions v1. Both are complete. Do not re-implement `AegisWorkspace`, `WorkspaceTask`, `WorkspaceArtifact`, `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`, the seven workspace `ActionType` values, or any of the six agent-facing workspace endpoints. Do not add Supabase persistence, MCP tools, UI, or a workspace invite flow for workspaces unless explicitly requested. `approval_required` workspace actions currently return `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (403) — there is no workspace CRUD approval inbox in v1.**
 
+> **Also: do NOT rebuild Workspace MCP Tools v1. It is complete. Do not re-implement `getWorkspaceManifest`, `claimWorkspaceTask`, `completeWorkspaceTask`, `listWorkspaceArtifacts`, `readWorkspaceArtifact`, or `createWorkspaceArtifact` in `examples/aegis-tool-server.mjs`. All six tools wrap the existing `/api/agent/v1/workspaces/*` endpoints — no new API endpoints were required. `AEGIS_AGENT_TOKEN` must be the bearer token value (e.g. `pass_demo_001`), not the delegation ID.**
+
 > **Also: do NOT rebuild Security Challenge Expiry / Stale Approval Cleanup v1. It is complete. Do not re-implement lazy expiry in `GET /api/internal/security-challenges` (marks pending_user/code_submitted challenges expired, filters terminal statuses by default, supports `?include_terminal=true`), lazy expiry in `GET /api/internal/challenge-email-resolutions` (marks non-terminal resolutions expired when their linked challenge has expired), the `isExpired` setTimeout in `PendingChallengeCard`, the expired card early return, the auto-refresh `useEffect` on `challenges.length`, or the `isEmailTypeChallenge` generalization. Gmail button copy reads "Aegis only searches for this live verification request after you approve." Gmail resolution remains user-initiated (click = approval). Do not remove `TERMINAL_STATUSES` set from `security-challenges.ts`.**
 
 ---
@@ -642,14 +644,31 @@ Verification: 114 workspace tests passing, typecheck clean.
 
 Do not rebuild unless explicitly requested.
 
+**Workspace MCP Tools v1 — complete (2026-05-12).**
+
+Six workspace MCP tools added to `examples/aegis-tool-server.mjs` exposing the existing workspace HTTP API natively to Claude Code agents. No backend or API changes were required.
+
+Tools added:
+- `get_workspace_manifest` — orientation manifest; call first; refresh on TASK_ALREADY_CLAIMED / TASK_NOT_READY
+- `claim_workspace_task` — set task in_progress; returns 409 with recovery_hint on contention
+- `complete_workspace_task` — mark task completed after required artifacts are created
+- `list_workspace_artifacts` — metadata only; use read_workspace_artifact for content
+- `read_workspace_artifact` — fetch artifact content by ID
+- `create_workspace_artifact` — POST artifact with `{ name, kind, content, task_id? }`; use `kind` not `content_type`
+
+MCP-only trial passed with research-collared (`pass_demo_001`) and review-collared (`pass_demo_002`) delegations. The research-collared delegation completed task_coord_001 and created `aegis-pillars-summary.md`. The review-collared delegation completed task_coord_002 after the dependency artifact existed. The open task task_coord_003 was completed through the MCP tool flow. Final state: open 0, in_progress 0, completed 3. No raw curl needed.
+
+Key invariant: `AEGIS_AGENT_TOKEN` must be set to the bearer token value (e.g. `pass_demo_001` or `pass_demo_002`) — not the delegation ID. The tool server uses this for all workspace calls.
+
+Do not rebuild unless explicitly requested.
+
 **Candidate next milestones:**
 
-1. **Workspace MCP tools** — expose manifest, task claim/complete, artifact create/read as MCP tools so Claude Code agents can participate in workspaces natively; no new API endpoints needed
-2. **Workspace UI / monitoring surface** — owner view of tasks, artifacts, participant status, and audit events; no approval inbox yet
-3. **Task-scoped sensitive grants** — per-task autonomy configuration (e.g. "this task may login without additional approval"); deferred until trial feedback indicates need
-4. **Stale task claim leases** — heartbeat + automatic reclaim for abandoned `in_progress` tasks; deferred until trial demonstrates the problem
-5. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
-6. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **Workspace UI / monitoring surface** — owner view of tasks, artifacts, participant status, and audit events; no approval inbox yet
+2. **Task-scoped sensitive grants** — per-task autonomy configuration (e.g. "this task may login without additional approval"); deferred until trial feedback indicates need
+3. **Stale task claim leases** — heartbeat + automatic reclaim for abandoned `in_progress` tasks; deferred until trial demonstrates the problem
+4. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`
+5. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 Constraints for any of the above:
 - Agents never receive a Playwright handle or browser context

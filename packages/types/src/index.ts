@@ -536,7 +536,11 @@ export interface ActionAuthorizationReceipt {
 // ─── Signed User Approval Receipts v1 ────────────────────────────────────────
 
 export type UserApprovalDecision = "approved" | "denied";
-export type UserApprovalSource = "approval_request" | "route_run_rejection";
+export type UserApprovalSource =
+  | "approval_request"
+  | "route_run_rejection"
+  | "credential_authorization"   // credential injection approve path
+  | "challenge_code_submission"; // security challenge code submit path
 export type UserApprovalOutcome = "pending" | "completed" | "failed" | "not_applicable";
 
 /**
@@ -633,6 +637,58 @@ export interface UserApprovalReceiptVerificationResult {
   stored_hash?: string;
   jws_payload?: UserApprovalJwsPayload;
   error?: string;
+}
+
+// ─── Task-Scoped Sensitive Grants v1 ────────────────────────────────────────
+// Active-authority objects created at approval time, linked to a signed UserApprovalReceipt.
+// Grants are NOT signed themselves — integrity is verified via the linked UAR (linked_uar_id).
+// v1 grant types: credential_injection (from CredentialUseAuthorization approval) and
+// challenge_resolution (from security challenge code submission).
+
+export type SensitiveGrantType =
+  | "credential_injection"    // user approved a CredentialUseAuthorization
+  | "challenge_resolution";   // user submitted a challenge code via /submit-code
+
+export type SensitiveGrantStatus =
+  | "active"     // grant is live and not yet expired or consumed
+  | "consumed"   // single-use grant was used
+  | "expired"    // TTL elapsed before use
+  | "revoked";   // explicitly invalidated by owner
+
+export interface SensitiveGrantScope {
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  task_id?: string;           // present if approval occurred in a task context
+  workspace_id?: string;
+  route_run_id?: string;
+  pass_id?: string;           // credential_injection only — vault pass ID, never a raw secret
+  challenge_id?: string;      // challenge_resolution only — challenge ID, never the raw code
+  authorization_id?: string;  // credential_injection only — CredentialUseAuthorization.authorization_id
+}
+
+export interface SensitiveGrant {
+  grant_id: string;             // "sg_..."
+  grant_type: SensitiveGrantType;
+  schema_version: "1.0";
+  issuer: "aegis";
+  created_at: string;
+  expires_at: string;           // copied from the linked authorization/challenge TTL
+
+  scope: SensitiveGrantScope;
+
+  // Required — the signed UserApprovalReceipt that authorized this grant.
+  // Integrity is verified by looking up this UAR and calling verifyStoredUserApprovalReceipt.
+  linked_uar_id: string;
+
+  status: SensitiveGrantStatus;
+  consumed_at?: string;
+  revoked_at?: string;
+  revoke_reason?: string;
+
+  // Privacy literals — always write as the literal false, never through a variable.
+  secret_exposed_to_agent: false;
+  raw_credentials_in_grant: false;
 }
 
 // ─── Website Violation Receipts v1 ──────────────────────────────────────────

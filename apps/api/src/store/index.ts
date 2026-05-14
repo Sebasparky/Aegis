@@ -30,6 +30,7 @@ import type {
   UserApprovalReceipt,
   WebsiteTrustProfile,
   WebsiteViolationReceipt,
+  SensitiveGrant,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -228,6 +229,11 @@ export const securityChallenges = new Map<string, SecurityChallenge>();
 // Email resolution requests for Connected Email Challenge Resolver v1.
 // resolutionCodes (resolved codes) live in emailChallengeResolver.resolutionCodes (memory-only, never persisted).
 export const challengeEmailResolutions = new Map<string, ChallengeEmailResolution>();
+
+// Task-scoped sensitive grants — created at credential authorization approval and challenge code
+// submission. Each grant links to a signed UserApprovalReceipt (linked_uar_id) as the liability proof.
+// Active grants are session-bound: they are expired on restart (same pattern as credentialUseAuthorizations).
+export const sensitiveGrants = new Map<string, SensitiveGrant>();
 
 // ─── Aegis Workspaces v0 ──────────────────────────────────────────────────────
 

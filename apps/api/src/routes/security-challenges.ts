@@ -1,8 +1,60 @@
 import type { FastifyInstance } from "fastify";
 import type { SecurityChallenge } from "@aegis/types";
-import { MOCK_USER_ID, securityChallenges } from "../store/index.js";
+import { MOCK_USER_ID, securityChallenges, userApprovalReceipts, sensitiveGrants, newId } from "../store/index.js";
 import { challengeCodes } from "../runtime/challengeInjection.js";
 import { schedulePersist } from "../store/persistence.js";
+import { buildSignedUserApprovalReceipt } from "../lib/userApprovalReceiptSigning.js";
+import { buildSensitiveGrant } from "../lib/sensitiveGrants.js";
+
+/**
+ * Create a UserApprovalReceipt + SensitiveGrant for a challenge code submission.
+ * Code is NEVER stored here — only the challenge_id is recorded in the grant scope.
+ * Non-blocking: caller wraps in .catch().
+ * Constraint: a grant is only created when a valid UAR can be produced first.
+ */
+async function createChallengeGrant(challenge: SecurityChallenge, codeExpiresAt: string): Promise<void> {
+  const now = new Date().toISOString();
+  const uarId = newId("uar");
+
+  const uar = await buildSignedUserApprovalReceipt({
+    receipt_id: uarId,
+    receipt_type: "user_approval",
+    schema_version: "1.0",
+    issuer: "aegis",
+    created_at: now,
+    user_id: challenge.user_id,
+    delegation_id: challenge.delegation_id,
+    approval_id: challenge.challenge_id,
+    approval_source: "challenge_code_submission",
+    target_domain: challenge.domain,
+    risk_level: "high",
+    decision: "approved",
+    decided_at: challenge.submitted_at ?? now,
+    decision_source: "user_click",
+    raw_secrets_in_receipt: false,
+    raw_credentials_in_receipt: false,
+  });
+
+  userApprovalReceipts.set(uarId, uar);
+
+  const grant = buildSensitiveGrant({
+    grant_id: newId("sg"),
+    grant_type: "challenge_resolution",
+    scope: {
+      user_id: challenge.user_id,
+      delegation_id: challenge.delegation_id,
+      domain: challenge.domain,
+      challenge_id: challenge.challenge_id,
+      // task_id is not set: SecurityChallenge does not directly carry task_id in v1
+    },
+    expires_at: codeExpiresAt,
+    linked_uar_id: uarId,
+    created_at: now,
+  });
+
+  sensitiveGrants.set(grant.grant_id, grant);
+  schedulePersist();
+}
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -99,6 +151,14 @@ export async function securityChallengeRoutes(server: FastifyInstance): Promise<
       challenge.status = "code_submitted";
       challenge.submitted_at = new Date().toISOString();
       securityChallenges.set(challenge.challenge_id, challenge);
+
+      // Non-blocking: create UserApprovalReceipt + SensitiveGrant for this code submission.
+      // The raw code is NEVER stored in the grant — only the challenge_id is recorded.
+      // If UAR signing fails, no grant is created (grant invariant: must link to a valid UAR).
+      createChallengeGrant(challenge, codeExpiresAt).catch((err) => {
+        console.error("[security-challenges] Failed to create sensitive grant:", err);
+      });
+
       schedulePersist();
 
       return reply.send({ ok: true, data: safeChallenge(challenge) });

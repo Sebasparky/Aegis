@@ -1,7 +1,59 @@
 import type { FastifyInstance } from "fastify";
-import type { SecretFieldInjection } from "@aegis/types";
-import { MOCK_USER_ID, secretFieldInjections, credentialUseAuthorizations } from "../store/index.js";
+import type { CredentialUseAuthorization, SecretFieldInjection } from "@aegis/types";
+import { MOCK_USER_ID, secretFieldInjections, credentialUseAuthorizations, userApprovalReceipts, sensitiveGrants, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
+import { buildSignedUserApprovalReceipt } from "../lib/userApprovalReceiptSigning.js";
+import { buildSensitiveGrant } from "../lib/sensitiveGrants.js";
+
+/**
+ * Create a UserApprovalReceipt + SensitiveGrant for a credential injection approval.
+ * Non-blocking: if UAR creation fails, no grant is created. Caller wraps in .catch().
+ * Constraint: a grant is only created when a valid UAR can be produced first.
+ */
+async function createCredentialGrant(auth: CredentialUseAuthorization): Promise<void> {
+  const now = new Date().toISOString();
+  const uarId = newId("uar");
+
+  const uar = await buildSignedUserApprovalReceipt({
+    receipt_id: uarId,
+    receipt_type: "user_approval",
+    schema_version: "1.0",
+    issuer: "aegis",
+    created_at: now,
+    user_id: auth.user_id,
+    delegation_id: auth.delegation_id,
+    approval_id: auth.authorization_id,
+    approval_source: "credential_authorization",
+    action_type: "login",
+    target_domain: auth.domain,
+    risk_level: "high",
+    decision: "approved",
+    decided_at: auth.approved_at ?? now,
+    decision_source: "user_click",
+    raw_secrets_in_receipt: false,
+    raw_credentials_in_receipt: false,
+  });
+
+  userApprovalReceipts.set(uarId, uar);
+
+  const grant = buildSensitiveGrant({
+    grant_id: newId("sg"),
+    grant_type: "credential_injection",
+    scope: {
+      user_id: auth.user_id,
+      delegation_id: auth.delegation_id,
+      domain: auth.domain,
+      pass_id: auth.pass_id,
+      authorization_id: auth.authorization_id,
+    },
+    expires_at: auth.expires_at,
+    linked_uar_id: uarId,
+    created_at: now,
+  });
+
+  sensitiveGrants.set(grant.grant_id, grant);
+  schedulePersist();
+}
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -61,6 +113,13 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
       auth.status = "approved";
       auth.approved_at = new Date().toISOString();
       credentialUseAuthorizations.set(auth.authorization_id, auth);
+
+      // Non-blocking: create UserApprovalReceipt + SensitiveGrant for this approval.
+      // If UAR signing fails, no grant is created (grant invariant: must link to a valid UAR).
+      // Parent endpoint always returns 200 regardless of grant creation success.
+      createCredentialGrant(auth).catch((err) => {
+        console.error("[credential-authorizations] Failed to create sensitive grant:", err);
+      });
 
       // Promote all linked pending injections
       for (const inj of secretFieldInjections.values()) {

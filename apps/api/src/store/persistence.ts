@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -42,6 +42,7 @@ import {
   workspaceAuditEvents,
   websiteTrustProfiles,
   websiteViolationReceipts,
+  sensitiveGrants,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -484,6 +485,7 @@ export function persistStore(): void {
       workspaceAuditEvents: Array.from(workspaceAuditEvents.entries()),
       websiteTrustProfiles: Array.from(websiteTrustProfiles.entries()),
       websiteViolationReceipts: Array.from(websiteViolationReceipts.entries()),
+      sensitiveGrants: Array.from(sensitiveGrants.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -591,6 +593,16 @@ export async function loadStore(): Promise<void> {
       securityChallenges.set(k, ch);
     }
 
+    // Sensitive grants are session-bound — active grants are expired on restart because the
+    // linked CredentialUseAuthorization or SecurityChallenge is also expired after restart.
+    for (const [k, v] of (data.sensitiveGrants ?? [])) {
+      const grant = v as SensitiveGrant;
+      if (grant.status === "active") {
+        grant.status = "expired";
+      }
+      sensitiveGrants.set(k, grant);
+    }
+
     // Email resolution requests — pending/searching states cannot resume after restart
     // (Gmail search cannot be re-triggered automatically; resolutionCodes are memory-only and gone).
     for (const [k, v] of (data.challengeEmailResolutions ?? [])) {
@@ -682,6 +694,7 @@ export async function resetStoreForDemo(): Promise<void> {
   workspaceAuditEvents.clear();
   websiteTrustProfiles.clear();
   websiteViolationReceipts.clear();
+  sensitiveGrants.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

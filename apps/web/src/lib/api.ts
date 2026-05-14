@@ -30,6 +30,12 @@ import type {
   TaskPriority,
   TaskReadinessLabel,
   TaskBlockerReasons,
+  UserApprovalReceipt,
+  UserApprovalReceiptVerificationResult,
+  WebsiteTrustProfile,
+  WebsiteTrustProfileVerificationResult,
+  WebsiteViolationReceipt,
+  WebsiteViolationReceiptVerificationResult,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -88,6 +94,37 @@ export const listReceipts = () => request<Receipt[]>("/api/receipts");
 // Route Run Receipts
 export const listRouteRunReceipts = () => request<RouteRunReceipt[]>("/api/route-run-receipts");
 export const getRouteRunReceipt = (receiptId: string) => request<RouteRunReceipt>(`/api/route-run-receipts/${receiptId}`);
+
+// User Approval Receipts
+export const listUserApprovalReceipts = (params?: { decision?: string; source?: string }) => {
+  const q = new URLSearchParams(Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v))).toString();
+  return request<UserApprovalReceipt[]>(`/api/user-approval-receipts${q ? `?${q}` : ""}`);
+};
+export const getUserApprovalReceipt = (id: string) =>
+  request<UserApprovalReceipt>(`/api/user-approval-receipts/${id}`);
+export const verifyUserApprovalReceipt = (id: string) =>
+  request<UserApprovalReceiptVerificationResult>(`/api/user-approval-receipts/${id}/verify`);
+
+// Website Trust Profiles
+export const listWebsiteTrustProfiles = () =>
+  request<WebsiteTrustProfile[]>("/api/website-trust-profiles");
+export const verifyWebsiteTrustProfile = (id: string) =>
+  request<WebsiteTrustProfileVerificationResult>(`/api/website-trust-profiles/${id}/verify`);
+
+// Website Violation Receipts
+export const listWebsiteViolationReceipts = (params?: {
+  domain?: string;
+  violation_type?: string;
+  severity?: string;
+  decision?: string;
+}) => {
+  const q = new URLSearchParams(Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v))).toString();
+  return request<{ receipts: WebsiteViolationReceipt[]; count: number }>(`/api/website-violation-receipts${q ? `?${q}` : ""}`);
+};
+export const getWebsiteViolationReceipt = (id: string) =>
+  request<WebsiteViolationReceipt>(`/api/website-violation-receipts/${id}`);
+export const verifyWebsiteViolationReceipt = (id: string) =>
+  request<WebsiteViolationReceiptVerificationResult>(`/api/website-violation-receipts/${id}/verify`);
 
 // Reputation
 export const getReputationSummary = () => request<ReputationSummary>("/api/reputation/summary");

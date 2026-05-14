@@ -1,287 +1,380 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ProtectedSession, ApprovalRequest, Receipt, ReputationSummary } from "@aegis/types";
+import type {
+  AgentDelegation,
+  ApprovalRequest,
+  UserApprovalReceipt,
+  SensitiveGrant,
+} from "@aegis/types";
 import {
-  listSessions,
+  listDelegations,
   listApprovals,
-  listReceipts,
-  getReputationSummary,
-  approveRequest,
-  denyRequest,
+  listSensitiveGrants,
+  listUserApprovalReceipts,
+  listWebsiteViolationReceipts,
+  listVaultPasses,
 } from "@/lib/api";
 
-const STATUS_COLORS: Record<string, string> = {
-  active: "bg-green-900 text-green-400",
-  waiting_for_approval: "bg-indigo-900 text-indigo-400",
-  paused: "bg-yellow-900 text-yellow-400",
-  revoked: "bg-red-900 text-red-400",
-  expired: "bg-gray-800 text-gray-500",
-  closed: "bg-gray-800 text-gray-500",
-  error: "bg-red-900 text-red-400",
-};
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
-const RISK_COLORS: Record<string, string> = {
-  low: "bg-gray-800 text-gray-400",
-  medium: "bg-yellow-900 text-yellow-400",
-  high: "bg-orange-900 text-orange-400",
-  critical: "bg-red-900 text-red-400",
-};
-
-const DECISION_COLORS: Record<string, string> = {
-  allowed: "text-green-400",
-  approved_by_user: "text-green-400",
-  completed_by_runner: "text-indigo-400",
-  blocked: "text-red-400",
-  denied_by_user: "text-red-400",
-};
-
-export default function Dashboard() {
-  const [sessions, setSessions] = useState<ProtectedSession[]>([]);
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
-  const [receipts, setReceipts] = useState<Receipt[]>([]);
-  const [summary, setSummary] = useState<ReputationSummary | null>(null);
+export default function CommandPage() {
+  const [delegations, setDelegations] = useState<AgentDelegation[]>([]);
+  const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
+  const [activeGrants, setActiveGrants] = useState<SensitiveGrant[]>([]);
+  const [userApprovalReceipts, setUserApprovalReceipts] = useState<UserApprovalReceipt[]>([]);
+  const [violationCount, setViolationCount] = useState<number | null>(null);
+  const [criticalViolation, setCriticalViolation] = useState(false);
+  const [vaultCount, setVaultCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [acting, setActing] = useState<string | null>(null);
-
-  async function load() {
-    const [s, a, r, rep] = await Promise.allSettled([
-      listSessions(),
-      listApprovals(),
-      listReceipts(),
-      getReputationSummary(),
-    ]);
-    if (s.status === "fulfilled") setSessions(s.value);
-    if (a.status === "fulfilled") setApprovals(a.value);
-    if (r.status === "fulfilled") setReceipts(r.value);
-    if (rep.status === "fulfilled") setSummary(rep.value);
-  }
 
   useEffect(() => {
-    load().finally(() => setLoading(false));
+    Promise.allSettled([
+      listDelegations(),
+      listApprovals("pending"),
+      listSensitiveGrants({ status: "active" }),
+      listUserApprovalReceipts(),
+      listWebsiteViolationReceipts(),
+      listVaultPasses(),
+    ]).then(([dels, apps, grants, uars, violations, vault]) => {
+      if (dels.status === "fulfilled") setDelegations(dels.value);
+      if (apps.status === "fulfilled") setPendingApprovals(apps.value);
+      if (grants.status === "fulfilled") setActiveGrants(grants.value);
+      if (uars.status === "fulfilled") setUserApprovalReceipts(uars.value);
+      if (violations.status === "fulfilled") {
+        setViolationCount(violations.value.count);
+        setCriticalViolation(violations.value.receipts.some((r) => r.severity === "critical"));
+      }
+      if (vault.status === "fulfilled") setVaultCount(vault.value.length);
+    }).finally(() => setLoading(false));
   }, []);
 
-  async function handleApprove(id: string) {
-    setActing(id);
-    try {
-      await approveRequest(id);
-      await load();
-    } catch {
-      // silently ignore; user can use /approvals page
-    } finally {
-      setActing(null);
-    }
-  }
-
-  async function handleDeny(id: string) {
-    setActing(id);
-    try {
-      await denyRequest(id);
-      await load();
-    } catch {
-      // silently ignore
-    } finally {
-      setActing(null);
-    }
-  }
-
-  const activeSessions = sessions.filter(
-    (s) => s.status === "active" || s.status === "waiting_for_approval"
-  );
-  const pendingApprovals = approvals.filter((a) => a.status === "pending");
-  const recentReceipts = [...receipts]
+  const recentProofs = [...userApprovalReceipts]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 5);
 
+  const attentionItems: Array<{ label: string; href: string }> = [];
+  if (pendingApprovals.length > 0) {
+    attentionItems.push({
+      label: `${pendingApprovals.length} approval request${pendingApprovals.length !== 1 ? "s" : ""} waiting for your decision`,
+      href: "/route-run-approvals",
+    });
+  }
+  if (activeGrants.length > 0) {
+    attentionItems.push({
+      label: `${activeGrants.length} sensitive grant${activeGrants.length !== 1 ? "s" : ""} currently active`,
+      href: "/sensitive-grants",
+    });
+  }
+  if (criticalViolation) {
+    attentionItems.push({
+      label: "Critical website violation recorded",
+      href: "/receipts",
+    });
+  }
+
+  const trustSteps = [
+    { step: "1", label: "Connect agent", href: "/delegations" },
+    { step: "2", label: "Attach collar", href: "/collars" },
+    { step: "3", label: "Approve authority", href: "/route-run-approvals" },
+    { step: "4", label: "Verify receipt", href: "/receipts" },
+  ];
+
   return (
-    <div className="max-w-4xl">
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-white">Your agents are protected.</h1>
-        <p className="mt-1 text-gray-400">
-          Aegis watches for sensitive actions so your agents can work without holding your secrets.
+    <div className="max-w-4xl space-y-10">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-semibold text-white">Command</h1>
+        <p className="mt-1 text-gray-400 text-sm">
+          Trust layer status. Agents act, Aegis enforces, receipts prove it.
         </p>
       </div>
 
-      {/* Status summary */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
-        <StatCard label="Active Sessions" value={loading ? "—" : String(activeSessions.length)} />
-        <StatCard
-          label="Pending Approvals"
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <MetricCard
+          label="Agents secured"
+          value={loading ? "—" : String(delegations.filter((d) => d.status === "active").length)}
+          href="/delegations"
+        />
+        <MetricCard
+          label="Pending approvals"
           value={loading ? "—" : String(pendingApprovals.length)}
-          highlight
+          href="/route-run-approvals"
+          highlight={!loading && pendingApprovals.length > 0}
         />
-        <StatCard
-          label="Blocked Actions"
-          value={loading ? "—" : String(summary?.risky_actions_blocked ?? 0)}
+        <MetricCard
+          label="Active grants"
+          value={loading ? "—" : String(activeGrants.length)}
+          href="/sensitive-grants"
+          highlight={!loading && activeGrants.length > 0}
         />
-        <StatCard
-          label="Receipts Created"
-          value={loading ? "—" : String(summary?.receipts_created ?? receipts.length)}
+        <MetricCard
+          label="Signed receipts"
+          value={loading ? "—" : String(userApprovalReceipts.length)}
+          href="/receipts"
         />
-        <StatCard
-          label="Issues Reported"
-          value={loading ? "—" : String(summary?.issues_reported ?? 0)}
+        <MetricCard
+          label="Website violations"
+          value={loading ? "—" : violationCount === null ? "–" : String(violationCount)}
+          href="/receipts"
+          highlight={!loading && criticalViolation}
         />
-        <StatCard
-          label="Runner Tasks"
-          value={loading ? "—" : String(summary?.runner_tasks_completed ?? 0)}
+        <MetricCard
+          label="Secrets sealed"
+          value={loading ? "—" : vaultCount === null ? "–" : String(vaultCount)}
+          href="/passes"
         />
       </div>
 
+      {/* Needs attention */}
+      <Section title="Needs attention">
+        {loading ? (
+          <p className="text-xs text-gray-500 py-2">Loading…</p>
+        ) : attentionItems.length === 0 ? (
+          <p className="text-sm text-gray-500 py-1">
+            No pending actions. All agents operating within bounds.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {attentionItems.map((item, i) => (
+              <a
+                key={i}
+                href={item.href}
+                className="flex items-center justify-between rounded-lg border border-amber-900 bg-amber-950/40 px-4 py-3 hover:bg-amber-950/70 transition-colors"
+              >
+                <span className="text-sm text-amber-300">{item.label}</span>
+                <span className="text-xs text-amber-500 shrink-0">Review →</span>
+              </a>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      {/* Two-column: agents + approvals */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Active agents */}
-        <Section title="Active Agents">
+        {/* Connected agents */}
+        <Section title="Connected agents">
           {loading ? (
             <p className="text-xs text-gray-500 py-4 text-center">Loading…</p>
-          ) : activeSessions.length === 0 ? (
+          ) : delegations.length === 0 ? (
             <Empty
-              headline="No agents protected yet."
-              body="Create an Aegis Pass to secure an agent built anywhere."
-              cta="Secure a New Agent"
-              href="/passes"
+              headline="No agents connected yet."
+              body="Delegations give agents a signed identity with scoped permissions."
+              cta="Add agent"
+              href="/delegations"
             />
           ) : (
-            <div className="space-y-3">
-              {activeSessions.map((session) => (
-                <div key={session.id} className="border border-gray-800 rounded-md p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-mono text-gray-400 truncate">{session.id}</span>
-                    <span
-                      className={`text-xs px-1.5 py-0.5 rounded-full shrink-0 ${STATUS_COLORS[session.status] ?? "bg-gray-800 text-gray-400"}`}
-                    >
-                      {session.status}
-                    </span>
+            <div className="space-y-2">
+              {delegations.slice(0, 5).map((d) => (
+                <div
+                  key={d.id}
+                  className="flex items-center justify-between rounded-md border border-gray-800 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm text-gray-200 truncate">{d.agent_name}</p>
+                    <p className="text-xs text-gray-600">{d.channel}</p>
                   </div>
-                  <p className="text-xs text-gray-500 truncate">
-                    {session.current_url ?? "No URL yet"}
-                  </p>
-                  <p className="text-xs text-gray-600 mt-0.5">Mode: {session.mode}</p>
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
+                      d.status === "active"
+                        ? "bg-green-950 text-green-400 border border-green-900"
+                        : "bg-gray-800 text-gray-500"
+                    }`}
+                  >
+                    {d.status}
+                  </span>
                 </div>
               ))}
+              {delegations.length > 5 && (
+                <a
+                  href="/delegations"
+                  className="text-xs text-indigo-400 hover:underline block text-center pt-1"
+                >
+                  View all {delegations.length} agents →
+                </a>
+              )}
             </div>
           )}
         </Section>
 
-        {/* Pending approvals */}
-        <Section title="Pending Approvals">
+        {/* Pending approvals — summary only, no inline decide */}
+        <Section title="Pending approvals">
           {loading ? (
             <p className="text-xs text-gray-500 py-4 text-center">Loading…</p>
           ) : pendingApprovals.length === 0 ? (
             <Empty
               headline="No approvals waiting."
-              body="Aegis will notify you when an agent tries to do something sensitive."
+              body="When an agent needs sensitive authority, it will appear here."
             />
           ) : (
             <div className="space-y-3">
-              {pendingApprovals.map((approval) => (
-                <div key={approval.id} className="border border-indigo-900 rounded-md p-3">
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <p className="text-xs text-gray-300 leading-snug">{approval.summary}</p>
-                    <span
-                      className={`text-xs px-1.5 py-0.5 rounded-full shrink-0 ${RISK_COLORS[approval.risk_level] ?? "bg-gray-800 text-gray-400"}`}
-                    >
-                      {approval.risk_level}
-                    </span>
-                  </div>
-                  {approval.domain && (
-                    <p className="text-xs text-gray-600 mb-2">{approval.domain}</p>
-                  )}
-                  <div className="flex gap-2">
-                    <button
-                      disabled={acting === approval.id}
-                      onClick={() => handleApprove(approval.id)}
-                      className="text-xs bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white px-3 py-1 rounded transition-colors"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      disabled={acting === approval.id}
-                      onClick={() => handleDeny(approval.id)}
-                      className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 px-3 py-1 border border-gray-700 rounded transition-colors"
-                    >
-                      Deny
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Section>
-
-        {/* Recent activity */}
-        <Section title="Recent Activity" className="md:col-span-2">
-          {loading ? (
-            <p className="text-xs text-gray-500 py-4 text-center">Loading…</p>
-          ) : recentReceipts.length === 0 ? (
-            <Empty
-              headline="No activity yet."
-              body="Trust-relevant events will appear here once an agent session starts."
-            />
-          ) : (
-            <div className="divide-y divide-gray-800">
-              {recentReceipts.map((receipt) => (
-                <div
-                  key={receipt.id}
-                  className="py-2.5 flex items-center justify-between gap-4"
+              {pendingApprovals.slice(0, 3).map((a) => (
+                <a
+                  key={a.id}
+                  href="/route-run-approvals"
+                  className="block rounded-md border border-indigo-900 px-3 py-2.5 hover:bg-indigo-950/40 transition-colors"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-0.5">
+                    <p className="text-xs text-gray-300 truncate">{a.summary}</p>
                     <span
-                      className={`text-xs font-medium shrink-0 ${DECISION_COLORS[receipt.decision] ?? "text-gray-400"}`}
+                      className={`text-xs px-1.5 py-0.5 rounded-full shrink-0 ${
+                        a.risk_level === "critical"
+                          ? "bg-red-950 text-red-400 border border-red-900"
+                          : a.risk_level === "high"
+                          ? "bg-orange-950 text-orange-400 border border-orange-900"
+                          : a.risk_level === "medium"
+                          ? "bg-amber-950 text-amber-400 border border-amber-900"
+                          : "bg-gray-800 text-gray-400"
+                      }`}
                     >
-                      {receipt.decision}
+                      {a.risk_level}
                     </span>
-                    <span className="text-xs text-gray-400 font-mono shrink-0">
-                      {receipt.action_type}
-                    </span>
-                    {receipt.domain && (
-                      <span className="text-xs text-gray-600 truncate">{receipt.domain}</span>
-                    )}
                   </div>
-                  <span className="text-xs text-gray-600 shrink-0">
-                    {new Date(receipt.created_at).toLocaleTimeString()}
-                  </span>
-                </div>
+                  {a.domain && <p className="text-xs text-gray-600">{a.domain}</p>}
+                </a>
               ))}
+              <a
+                href="/route-run-approvals"
+                className="text-xs text-indigo-400 hover:underline block text-center pt-1"
+              >
+                Review all in Approvals →
+              </a>
             </div>
           )}
         </Section>
+      </div>
+
+      {/* Recent proofs */}
+      <Section title="Recent proofs">
+        {loading ? (
+          <p className="text-xs text-gray-500 py-4 text-center">Loading…</p>
+        ) : recentProofs.length === 0 ? (
+          <Empty
+            headline="No signed receipts yet."
+            body="UserApprovalReceipts appear after approval decisions are recorded."
+            cta="View receipts"
+            href="/receipts"
+          />
+        ) : (
+          <div className="divide-y divide-gray-800">
+            {recentProofs.map((r) => (
+              <a
+                key={r.receipt_id}
+                href="/receipts"
+                className="py-2.5 flex items-center justify-between gap-4 hover:bg-gray-800/30 px-2 -mx-2 transition-colors"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <span
+                    className={`text-xs font-medium shrink-0 ${
+                      r.decision === "approved" ? "text-green-400" : "text-red-400"
+                    }`}
+                  >
+                    {r.decision}
+                  </span>
+                  {r.agent_name && (
+                    <span className="text-xs text-gray-400 shrink-0">{r.agent_name}</span>
+                  )}
+                  {(r.target_domain ?? r.action_type) && (
+                    <span className="text-xs text-gray-600 font-mono truncate">
+                      {r.target_domain ?? r.action_type}
+                    </span>
+                  )}
+                  {r.risk_level && r.risk_level !== "low" && (
+                    <span
+                      className={`text-xs px-1.5 py-0.5 rounded shrink-0 ${
+                        r.risk_level === "critical"
+                          ? "bg-red-950 text-red-400"
+                          : r.risk_level === "high"
+                          ? "bg-orange-950 text-orange-400"
+                          : "bg-amber-950 text-amber-400"
+                      }`}
+                    >
+                      {r.risk_level}
+                    </span>
+                  )}
+                </div>
+                <span className="text-xs text-gray-600 shrink-0">
+                  {timeAgo(r.decided_at)}
+                </span>
+              </a>
+            ))}
+            <div className="pt-3">
+              <a href="/receipts" className="text-xs text-indigo-400 hover:underline">
+                View all receipts →
+              </a>
+            </div>
+          </div>
+        )}
+      </Section>
+
+      {/* Trust setup strip */}
+      <div className="border-t border-gray-800 pt-8">
+        <p className="text-xs text-gray-600 uppercase tracking-widest mb-4">Trust setup</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          {trustSteps.map((s, i) => (
+            <div key={s.step} className="flex items-center gap-2">
+              <a
+                href={s.href}
+                className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-4 py-2.5 hover:border-indigo-800 hover:bg-indigo-950/40 transition-colors"
+              >
+                <span className="text-xs text-indigo-400 font-mono">{s.step}</span>
+                <span className="text-sm text-gray-300">{s.label}</span>
+              </a>
+              {i < trustSteps.length - 1 && (
+                <span className="text-gray-700 text-sm">→</span>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-function StatCard({
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function MetricCard({
   label,
   value,
+  href,
   highlight,
 }: {
   label: string;
   value: string;
+  href: string;
   highlight?: boolean;
 }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+    <a
+      href={href}
+      className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors block"
+    >
       <p className="text-xs text-gray-500 uppercase tracking-wider">{label}</p>
-      <p
-        className={`text-2xl font-semibold mt-1 ${highlight ? "text-indigo-400" : "text-white"}`}
-      >
+      <p className={`text-2xl font-semibold mt-1 ${highlight ? "text-amber-400" : "text-white"}`}>
         {value}
       </p>
-    </div>
+    </a>
   );
 }
 
 function Section({
   title,
   children,
-  className,
 }: {
   title: string;
   children: React.ReactNode;
-  className?: string;
 }) {
   return (
-    <div className={`bg-gray-900 border border-gray-800 rounded-lg p-5 ${className ?? ""}`}>
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-5">
       <h2 className="text-sm font-medium text-gray-300 mb-4">{title}</h2>
       {children}
     </div>
@@ -306,7 +399,7 @@ function Empty({
       {cta && href && (
         <a
           href={href}
-          className="mt-4 inline-block text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-4 py-2 rounded-md transition-colors"
+          className="mt-4 inline-block text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-4 py-2 rounded-md transition-colors"
         >
           {cta}
         </a>

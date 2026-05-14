@@ -26,6 +26,7 @@ import {
   getChallengeEmailResolutions,
   startChallengeEmailResolution,
   cancelChallengeEmailResolution,
+  listSensitiveGrants,
   type RouteRunWithSummary,
   type CredentialSessionView,
   type RunApprovalContext,
@@ -39,6 +40,7 @@ import {
   type ChallengeEmailResolutionView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
+import type { SensitiveGrant } from "@aegis/types";
 
 // ─── Tone helpers ─────────────────────────────────────────────────────────────
 
@@ -67,6 +69,14 @@ function riskLabel(riskTier: string): string {
   if (riskTier === "critical") return "Critical risk";
   if (riskTier === "medium") return "Medium risk";
   return "Low risk";
+}
+
+function formatExpiry(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "expired";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `in ${mins} min`;
+  return `in ${Math.round(mins / 60)} hr`;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -336,13 +346,24 @@ function PendingRunCard({
 
   if (approved) {
     return (
-      <div className="bg-gray-900 border border-emerald-900 rounded-xl p-5">
-        <p className="text-sm text-emerald-400 font-medium">
-          Approved — Aegis is executing this safely.
-        </p>
-        <p className="text-xs text-gray-500 mt-1">
-          {run.skill_summary?.name ?? run.skill_id} · {run.domain}
-        </p>
+      <div className="bg-gray-900 border border-emerald-900 rounded-xl p-5 space-y-3">
+        <div>
+          <p className="text-sm text-emerald-400 font-medium">
+            Decision recorded — Aegis is executing this safely.
+          </p>
+          <p className="text-xs text-gray-500 mt-1">
+            {run.skill_summary?.name ?? run.skill_id} · {run.domain}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <a href="/receipts" className="text-xs text-indigo-400 hover:underline">
+            View receipts →
+          </a>
+          <span className="text-gray-700">·</span>
+          <a href="/sensitive-grants" className="text-xs text-indigo-400 hover:underline">
+            View sensitive grants →
+          </a>
+        </div>
       </div>
     );
   }
@@ -463,6 +484,13 @@ function PendingRunCard({
           </div>
         )}
 
+        {/* What Aegis records */}
+        <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-500 space-y-1">
+          <p className="font-medium text-gray-400">Approving this will:</p>
+          <p>· Create a signed execution receipt linked to your decision</p>
+          <p>· Execute the route within your collar boundaries — sensitive steps are Aegis-verified</p>
+        </div>
+
         {/* Actions */}
         <div className="flex items-center gap-3 pt-1">
           {isBlocked && !stepUpApproved ? (
@@ -572,6 +600,14 @@ function PendingAuthSessionCard({
         </ul>
       </div>
 
+      {/* What Aegis records */}
+      <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-500 space-y-1">
+        <p className="font-medium text-gray-400">Approving this will:</p>
+        <p>· Create a signed approval receipt recording your decision</p>
+        <p>· Aegis performs the login using your vault credential — the agent receives only a session handle</p>
+        {session.expires_at && <p>· Session handle expires {formatExpiry(session.expires_at)}</p>}
+      </div>
+
       {/* Actions */}
       <div className="flex items-center gap-3 pt-1">
         <button
@@ -675,6 +711,18 @@ function PendingInjectionCard({
             </li>
           ))}
         </ul>
+      </div>
+
+      {/* What Aegis records */}
+      <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-500 space-y-1">
+        <p className="font-medium text-gray-400">Approving this will:</p>
+        <p>· Create a signed UserApprovalReceipt recording your decision</p>
+        <p>· Create a temporary SensitiveGrant — Aegis injects the secret directly, the raw value is never revealed to the agent</p>
+        {injection.expires_at && <p>· Grant expires {formatExpiry(injection.expires_at)}</p>}
+        <p>
+          You can revoke active grants from{" "}
+          <a href="/sensitive-grants" className="text-indigo-400 hover:underline">Sensitive Grants</a>.
+        </p>
       </div>
 
       {/* Actions */}
@@ -789,6 +837,18 @@ function PendingCredAuthCard({
             </li>
           ))}
         </ul>
+      </div>
+
+      {/* What Aegis records */}
+      <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-500 space-y-1">
+        <p className="font-medium text-gray-400">Approving this will:</p>
+        <p>· Create a signed UserApprovalReceipt recording your decision</p>
+        <p>· Create a temporary SensitiveGrant — Aegis injects credentials directly, the raw values are never revealed to the agent</p>
+        {auth.expires_at && <p>· Grant expires {formatExpiry(auth.expires_at)}</p>}
+        <p>
+          You can revoke active grants from{" "}
+          <a href="/sensitive-grants" className="text-indigo-400 hover:underline">Sensitive Grants</a>.
+        </p>
       </div>
 
       {/* Actions */}
@@ -1055,6 +1115,7 @@ function PendingChallengeCard({
             "Aegis injects the code directly into the browser field once.",
             "The agent never sees the code.",
             "Code expires immediately after injection.",
+            "Submitting creates a signed approval receipt. The raw code is not stored in the receipt or grant.",
           ]}
         />
       </div>
@@ -1123,6 +1184,55 @@ function PendingChallengeCard({
   );
 }
 
+// ─── Active grants mini-panel ─────────────────────────────────────────────────
+
+function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
+  const displayed = grants.slice(0, 5);
+  const remaining = grants.length - displayed.length;
+  return (
+    <div className="border-t border-gray-800 pt-8">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-gray-300">Active Sensitive Grants</h2>
+          {grants.length > 0 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-800 text-indigo-400">
+              {grants.length}
+            </span>
+          )}
+        </div>
+        <a href="/sensitive-grants" className="text-xs text-indigo-400 hover:underline">
+          View all →
+        </a>
+      </div>
+      {grants.length === 0 ? (
+        <p className="text-xs text-gray-600">No active grants right now.</p>
+      ) : (
+        <div className="space-y-2">
+          {displayed.map((g) => (
+            <div
+              key={g.grant_id}
+              className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 px-4 py-2"
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-emerald-400">●</span>
+                <span className="text-xs text-gray-300">{g.scope.domain}</span>
+                <span className="text-xs text-gray-700">·</span>
+                <span className="text-xs text-gray-500">
+                  {g.grant_type === "credential_injection" ? "credential injection" : "challenge relay"}
+                </span>
+              </div>
+              <span className="text-xs text-gray-600">{formatExpiry(g.expires_at)}</span>
+            </div>
+          ))}
+          {remaining > 0 && (
+            <p className="text-xs text-gray-600 text-center">and {remaining} more</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function RouteRunApprovalsPage() {
@@ -1137,6 +1247,8 @@ export default function RouteRunApprovalsPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [contexts, setContexts] = useState<Map<string, RunApprovalContext>>(new Map());
   const [loadingContexts, setLoadingContexts] = useState<Set<string>>(new Set());
+  const [activeGrants, setActiveGrants] = useState<SensitiveGrant[]>([]);
+  const [lastDecision, setLastDecision] = useState<{ action: "approved" | "denied"; note: string } | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -1147,8 +1259,9 @@ export default function RouteRunApprovalsPage() {
       listCredentialUseAuthorizations("pending_approval"),
       listSecurityChallenges(),
       getEmailResolverStatus().catch(() => null),
+      listSensitiveGrants({ status: "active" }).catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1156,6 +1269,7 @@ export default function RouteRunApprovalsPage() {
         setCredAuths(auths);
         setChallenges(chlgs);
         setEmailResolverStatus(emailStatus);
+        setActiveGrants(grants);
         // Fetch approval context for each pending run in parallel.
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
@@ -1234,6 +1348,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await approveAuthenticatedSession(sessionId);
       setAuthSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+      setLastDecision({ action: "approved", note: "Login session approved. Aegis is logging in." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to approve login session.");
     }
@@ -1244,6 +1359,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await rejectAuthenticatedSession(sessionId);
       setAuthSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+      setLastDecision({ action: "denied", note: "Login session rejected." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to reject login session.");
     }
@@ -1254,6 +1370,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await approveSecretFieldInjection(id);
       setInjections((prev) => prev.filter((i) => i.injection_request_id !== id));
+      setLastDecision({ action: "approved", note: "Field injection approved. A SensitiveGrant is now active." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to approve injection.");
     }
@@ -1264,6 +1381,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await denySecretFieldInjection(id);
       setInjections((prev) => prev.filter((i) => i.injection_request_id !== id));
+      setLastDecision({ action: "denied", note: "Field injection denied." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to deny injection.");
     }
@@ -1274,6 +1392,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await approveCredentialUseAuthorization(id);
       setCredAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+      setLastDecision({ action: "approved", note: "Credential authorization approved. A SensitiveGrant is now active." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to approve credential authorization.");
     }
@@ -1284,6 +1403,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await denyCredentialUseAuthorization(id);
       setCredAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+      setLastDecision({ action: "denied", note: "Credential authorization denied." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to deny credential authorization.");
     }
@@ -1344,6 +1464,30 @@ export default function RouteRunApprovalsPage() {
       {actionError && (
         <div className="text-xs text-red-400 bg-red-950 border border-red-900 rounded-lg px-4 py-3">
           {actionError}
+        </div>
+      )}
+
+      {lastDecision && (
+        <div
+          className={`text-xs rounded-lg px-4 py-3 flex items-center justify-between gap-4 ${
+            lastDecision.action === "approved"
+              ? "bg-emerald-950 border border-emerald-900 text-emerald-300"
+              : "bg-gray-900 border border-gray-700 text-gray-400"
+          }`}
+        >
+          <span>{lastDecision.note}</span>
+          <div className="flex items-center gap-3 shrink-0">
+            <a href="/receipts" className="text-indigo-400 hover:underline">View receipts</a>
+            {lastDecision.action === "approved" && (
+              <a href="/sensitive-grants" className="text-indigo-400 hover:underline">View grants</a>
+            )}
+            <button
+              onClick={() => setLastDecision(null)}
+              className="text-gray-600 hover:text-gray-400 transition-colors"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -1567,6 +1711,9 @@ export default function RouteRunApprovalsPage() {
           )}
         </div>
       )}
+
+      {/* Active Sensitive Grants */}
+      {!loading && <ActiveGrantsPanel grants={activeGrants} />}
     </div>
   );
 }

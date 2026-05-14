@@ -27,6 +27,7 @@ import type {
   AegisWorkspace,
   WorkspaceTask,
   WorkspaceArtifact,
+  UserApprovalReceipt,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -191,6 +192,10 @@ export const delegationPassports = new Map<string, DelegationPassport>();
 
 // Signed action authorization receipts created at approval time; local JSON persistence only (v1).
 export const actionAuthorizations = new Map<string, ActionAuthorizationReceipt>();
+
+// Signed user approval receipts — liability-grade records of user approve/deny clicks at trust boundaries.
+// Covers: ApprovalRequest approve/deny and route-run rejection. Local JSON persistence (v1).
+export const userApprovalReceipts = new Map<string, UserApprovalReceipt>();
 
 // Signed website trust assertions issued to agents for website handshake; local JSON persistence only (v1).
 export const websiteTrustAssertions = new Map<string, WebsiteTrustAssertion>();

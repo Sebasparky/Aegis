@@ -533,6 +533,108 @@ export interface ActionAuthorizationReceipt {
   };
 }
 
+// ─── Signed User Approval Receipts v1 ────────────────────────────────────────
+
+export type UserApprovalDecision = "approved" | "denied";
+export type UserApprovalSource = "approval_request" | "route_run_rejection";
+export type UserApprovalOutcome = "pending" | "completed" | "failed" | "not_applicable";
+
+/**
+ * Liability-grade signed record of a user's approve/deny click at a trust boundary.
+ * Produced for:
+ *   - ApprovalRequest approved (approval_source: "approval_request", decision: "approved")
+ *   - ApprovalRequest denied  (approval_source: "approval_request", decision: "denied")
+ *   - Route-run rejected      (approval_source: "route_run_rejection", decision: "denied")
+ *
+ * Aegis signs user decision fields + context at decision time.
+ * Workspace audit events are operational records and are separate from these receipts.
+ */
+export interface UserApprovalReceipt {
+  receipt_id: string;              // "uar_..."
+  receipt_type: "user_approval";
+  schema_version: "1.0";
+  issuer: "aegis";
+  created_at: string;
+
+  user_id: string;
+  user_aegis_id?: string;
+
+  delegation_id?: string;
+  agent_name?: string;
+  agent_platform?: string;
+
+  collar_id?: string;
+  approval_id: string;
+  approval_source: UserApprovalSource;
+  route_run_id?: string;
+  workspace_id?: string;
+  task_id?: string;
+
+  action_type?: string;
+  requested_action_summary?: string;
+  target_domain?: string;
+  risk_level?: "low" | "medium" | "high" | "critical";
+
+  decision: UserApprovalDecision;
+  decided_at: string;
+  decision_source: "user_click";
+
+  scope_shown?: {
+    collar_name?: string;
+    approval_required_actions?: string[];
+    spending_limit_max_with_approval?: number;
+    currency?: string;
+  };
+
+  evidence_summary?: {
+    sanitized_reason?: string;
+    session_id?: string;
+    detection_signals_count?: number;
+  };
+
+  // Mutable outcome — excluded from canonical hash so outcome tracking doesn't break the signature.
+  outcome: UserApprovalOutcome;
+  outcome_updated_at?: string;
+
+  // Privacy guarantees — literal false; never set through a variable.
+  raw_secrets_in_receipt: false;
+  raw_credentials_in_receipt: false;
+
+  // Signing — excluded from hash (hash is the pre-image, jws signs the hash).
+  // jws is empty string when signing key is unavailable; jws_present = false in that case.
+  verification: {
+    canonical_payload_hash: string;
+    jws: string;
+    jws_present: boolean;
+    signing_alg: "EdDSA";
+    signed_at: string;
+    signing_key_id?: string;
+  };
+}
+
+export interface UserApprovalJwsPayload {
+  typ: "aegis.user_approval.v1";
+  receipt_id: string;
+  payload_hash: string;
+  issuer: string;
+  issued_at: string;
+  user_id: string;
+  decision: UserApprovalDecision;
+  approval_id: string;
+  approval_source: UserApprovalSource;
+}
+
+export interface UserApprovalReceiptVerificationResult {
+  receipt_id: string;
+  valid: boolean;
+  hash_valid: boolean;
+  signature_valid: boolean;
+  recomputed_hash?: string;
+  stored_hash?: string;
+  jws_payload?: UserApprovalJwsPayload;
+  error?: string;
+}
+
 export interface ApprovalManifestLineItem {
   label: string;
   value: string;

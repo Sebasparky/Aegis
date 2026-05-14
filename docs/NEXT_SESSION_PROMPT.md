@@ -59,6 +59,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Sensitive Requirement Assessment v1. It is complete. Do not re-implement `assessSensitiveRequirements`, the `assess_sensitive_requirements` MCP tool schema, or the switch case in `examples/aegis-tool-server.mjs`. Agent autonomy boundary is defined in `docs/AGENT_INTEGRATION_CONTRACT.md` and `CLAUDE.md`. `plan_aegis_action` behavior and semantics are unchanged — its description was updated with a disambiguation note only.**
 
+> **Also: do NOT rebuild Signed User Approval Receipts v1. It is complete. Do not re-implement `UserApprovalReceipt` type, `userApprovalReceiptSigning.ts`, `user-approval-receipts.ts` routes, `userApprovalReceipts` Map, or the non-blocking receipt creation in the approve/deny/reject handlers. Workspace audit events are operational records and are NOT user approval receipts — do not conflate them. Future receipt types (credential_injected, sensitive_action_blocked, etc.) follow the same pattern but are a separate increment.**
+
 > **Also: do NOT rebuild Aegis Workspaces v0 or Workspace Effective Permissions v1. Both are complete. Do not re-implement `AegisWorkspace`, `WorkspaceTask`, `WorkspaceArtifact`, `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`, the seven workspace `ActionType` values, or any of the six agent-facing workspace endpoints. Do not add Supabase persistence, MCP tools, UI, or a workspace invite flow for workspaces unless explicitly requested. `approval_required` workspace actions currently return `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (403) — there is no workspace CRUD approval inbox in v1.**
 
 > **Also: do NOT rebuild Workspace MCP Tools v1. It is complete. Do not re-implement `getWorkspaceManifest`, `claimWorkspaceTask`, `completeWorkspaceTask`, `listWorkspaceArtifacts`, `readWorkspaceArtifact`, or `createWorkspaceArtifact` in `examples/aegis-tool-server.mjs`. All six tools wrap the existing `/api/agent/v1/workspaces/*` endpoints — no new API endpoints were required. `AEGIS_AGENT_TOKEN` must be the bearer token value (e.g. `pass_demo_001`), not the delegation ID.**
@@ -376,6 +378,26 @@ Everything below is implemented and working.
 - Authorization creation failure in approve endpoint is non-blocking (logs error, run proceeds)
 - No raw secrets, passwords, secret_refs, or private keys in authorization receipts or API responses
 - **Implemented 2026-05-02**
+- Do not rebuild unless explicitly requested
+
+### Signed User Approval Receipts v1
+**Receipts are liability-grade signed records for trust-boundary decisions, not surveillance logs. Aegis does not record every agent action. Only user approve/deny clicks create receipts.**
+- `UserApprovalReceipt`, `UserApprovalJwsPayload`, `UserApprovalReceiptVerificationResult` types added to `packages/types/src/index.ts` after `ActionAuthorizationReceipt`
+- `apps/api/src/lib/userApprovalReceiptSigning.ts` — `hashUserApprovalReceipt` (SHA-256 of sorted-key JSON excluding `outcome`, `outcome_updated_at`, `verification`), `signUserApprovalReceiptJws` (EdDSA, `AEGIS_RECEIPT_JWS_PRIVATE_JWK`), `verifyUserApprovalReceiptJws`, `buildSignedUserApprovalReceipt`, `verifyStoredUserApprovalReceipt`
+- `userApprovalReceipts: Map<string, UserApprovalReceipt>` added to `apps/api/src/store/index.ts`; persisted as `userApprovalReceipts`; cleared on `resetStoreForDemo`
+- `apps/api/src/routes/user-approval-receipts.ts` — `GET /api/user-approval-receipts` (list; omits JWS; supports `?decision=` and `?source=` filters), `GET /api/user-approval-receipts/:receiptId` (full receipt with JWS), `GET /api/user-approval-receipts/:receiptId/verify`
+- Wired (non-blocking) into `POST /api/approvals/:id/approve` and `POST /api/approvals/:id/deny` (`approval_source: "approval_request"`)
+- Wired (non-blocking) into `POST /api/route-runs/:runId/reject` (`approval_source: "route_run_rejection"`) — this path previously had no signed receipt
+- Route-run approval (`POST /api/route-runs/:runId/approve`) is **not** wired — that path already creates a comprehensive `ActionAuthorizationReceipt`; `UserApprovalReceipt` would be redundant there
+- `jws_present: false` + `jws: ""` signals an unsigned receipt (key unavailable); verify endpoint returns `valid: false, error: "SIGNING_KEY_UNAVAILABLE"` — unsigned receipts never look valid
+- All decision fields are included in the canonical hash: `decision`, `decided_at`, `user_id`, `approval_id`, `approval_source`, delegation/agent context, `action_type`, `requested_action_summary`, `target_domain`, `scope_shown`, `evidence_summary`
+- `outcome` and `outcome_updated_at` are mutable and excluded from the hash so outcome tracking never breaks the signature
+- `raw_secrets_in_receipt: false` and `raw_credentials_in_receipt: false` are TypeScript literal types — never set through variables
+- No raw passwords, secrets, 2FA codes, session tokens, or encrypted blobs in receipt fields
+- 22 automated tests in `apps/api/src/__tests__/user-approval-receipts.test.ts` — approve, deny, reject, list, detail, verify untampered, verify tampered (decision/domain), SIGNING_KEY_UNAVAILABLE
+- **Workspace audit events are operational coordination records and are separate from liability receipts**
+- **Future receipt types** (credential_injected, secret_released, sensitive_action_blocked, collar_violation) share the same pattern but are not part of this increment
+- **Implemented 2026-05-14**
 - Do not rebuild unless explicitly requested
 
 ### Demo tooling

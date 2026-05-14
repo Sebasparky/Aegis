@@ -1,11 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier, ApprovalManifest, ApprovalManifestLineItem, RunApprovalContext } from "@aegis/types";
-import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, MOCK_USER_ID, newId } from "../store/index.js";
+import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, userApprovalReceipts, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
 import { resolveRouteStepValue } from "../lib/secretResolution.js";
 import { hashActionAuthorization, signActionAuthorizationJws } from "../lib/actionAuthorizationSigning.js";
+import { buildSignedUserApprovalReceipt } from "../lib/userApprovalReceiptSigning.js";
 
 export function buildReceipt(
   run: RouteRun,
@@ -760,9 +761,55 @@ export async function routeRunRoutes(server: FastifyInstance) {
     if (run.status !== "pending_approval") {
       return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
     }
+    const rejectedAt = new Date().toISOString();
     run.status = "blocked";
     run.error = req.body?.reason ?? "Rejected by user.";
     routeRuns.set(run.run_id, run);
+
+    // Create a signed liability receipt for this user rejection (non-blocking).
+    const delegation = run.delegation_id ? agentDelegations.get(run.delegation_id) : undefined;
+    const collar = run.collar_id ? collars.get(run.collar_id) : undefined;
+    const receipt_id = newId("uar");
+    buildSignedUserApprovalReceipt({
+      receipt_id,
+      receipt_type: "user_approval",
+      schema_version: "1.0",
+      issuer: "aegis",
+      created_at: rejectedAt,
+      user_id: run.user_id,
+      user_aegis_id: users.get(run.user_id)?.aegis_id,
+      delegation_id: delegation?.id,
+      agent_name: delegation?.agent_name,
+      agent_platform: delegation?.agent_platform,
+      collar_id: run.collar_id,
+      approval_id: run.run_id,
+      approval_source: "route_run_rejection",
+      route_run_id: run.run_id,
+      action_type: (run.approval_required_permissions ?? []).join(", ") || undefined,
+      requested_action_summary: (run.approval_required_permissions ?? []).join(", ") || undefined,
+      target_domain: run.domain,
+      decision: "denied",
+      decided_at: rejectedAt,
+      decision_source: "user_click",
+      scope_shown: collar
+        ? {
+            collar_name: collar.name,
+            approval_required_actions: collar.approval_required_actions as string[],
+            spending_limit_max_with_approval: collar.spending_limits.max_with_approval,
+            currency: "USD",
+          }
+        : undefined,
+      raw_secrets_in_receipt: false,
+      raw_credentials_in_receipt: false,
+    })
+      .then((receipt) => {
+        userApprovalReceipts.set(receipt.receipt_id, receipt);
+        schedulePersist();
+      })
+      .catch((err) => {
+        console.error("[route-runs] Failed to create user rejection receipt:", err);
+      });
+
     schedulePersist();
     return { ok: true, data: run };
   });

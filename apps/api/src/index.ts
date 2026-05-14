@@ -33,6 +33,7 @@ import { credentialSessionRoutes } from "./routes/credential-sessions.js";
 import { runtimeSessionRoutes } from "./routes/runtime-sessions.js";
 import { delegationPassportRoutes } from "./routes/delegation-passports.js";
 import { actionAuthorizationRoutes } from "./routes/action-authorizations.js";
+import { userApprovalReceiptRoutes } from "./routes/user-approval-receipts.js";
 import { delegationTrustRoutes } from "./routes/delegation-trust.js";
 import { websiteAssertionRoutes } from "./routes/website-assertions.js";
 import { runtimeObservationRoutes } from "./routes/runtime-observations.js";
@@ -103,6 +104,7 @@ async function main() {
   await server.register(runtimeSessionRoutes);
   await server.register(delegationPassportRoutes);
   await server.register(actionAuthorizationRoutes);
+  await server.register(userApprovalReceiptRoutes);
   await server.register(delegationTrustRoutes);
   await server.register(websiteAssertionRoutes);
   await server.register(runtimeObservationRoutes);

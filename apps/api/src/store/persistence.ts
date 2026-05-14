@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt } from "@aegis/types";
 import {
   users,
   collars,
@@ -27,6 +27,7 @@ import {
   credentialFillRequests,
   delegationPassports,
   actionAuthorizations,
+  userApprovalReceipts,
   websiteTrustAssertions,
   paymentMethods,
   spendingLimitStepUps,
@@ -384,6 +385,7 @@ export function persistStore(): void {
       credentialFillRequests: Array.from(credentialFillRequests.entries()),
       delegationPassports: Array.from(delegationPassports.entries()),
       actionAuthorizations: Array.from(actionAuthorizations.entries()),
+      userApprovalReceipts: Array.from(userApprovalReceipts.entries()),
       websiteTrustAssertionEntries: Array.from(websiteTrustAssertions.entries()),
       paymentMethods: Array.from(paymentMethods.entries()),
       spendingLimitStepUps: Array.from(spendingLimitStepUps.entries()),
@@ -456,6 +458,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.credentialFillRequests ?? [])) credentialFillRequests.set(k, v as CredentialFillRequest);
     for (const [k, v] of (data.delegationPassports ?? [])) delegationPassports.set(k, v as DelegationPassport);
     for (const [k, v] of (data.actionAuthorizations ?? [])) actionAuthorizations.set(k, v as ActionAuthorizationReceipt);
+    for (const [k, v] of (data.userApprovalReceipts ?? [])) userApprovalReceipts.set(k, v as UserApprovalReceipt);
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
     for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
     for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
@@ -575,6 +578,7 @@ export async function resetStoreForDemo(): Promise<void> {
   encryptedSecretVault.clear();
   delegationPassports.clear();
   actionAuthorizations.clear();
+  userApprovalReceipts.clear();
   websiteTrustAssertions.clear();
   paymentMethods.clear();
   spendingLimitStepUps.clear();

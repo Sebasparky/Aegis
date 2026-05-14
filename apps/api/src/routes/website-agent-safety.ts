@@ -9,7 +9,7 @@ import type {
   WebsiteAegisPolicy,
   WebsiteAegisPolicyValidationResult,
 } from "@aegis/types";
-import { routes, domainTrust, MOCK_USER_ID, newId } from "../store/index.js";
+import { routes, domainTrust, websiteViolationReceipts, MOCK_USER_ID, newId } from "../store/index.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
 
@@ -196,6 +196,12 @@ export async function computeWebsiteAgentSafetyProfile(
     if (r.capability_release_summary !== undefined) supportsCapabilityReleaseGate = true;
   }
 
+  // Also count explicit WebsiteViolationReceipts for this domain
+  const domainWVRs = Array.from(websiteViolationReceipts.values()).filter(
+    (r) => r.domain === domain
+  );
+  failedViolationReceipts += domainWVRs.length;
+
   // 5. Capabilities derived from routes
   const hasKnownRoutes = domainRoutes.length > 0;
   const hasSensitiveWorkflowSupport = domainRoutes.some((r) => r.execution_mode === "aegis_controlled");
@@ -290,6 +296,12 @@ export async function computeWebsiteAgentSafetyProfile(
   const disqualifyingSignals: string[] = [];
   if (secretExposureEvents > 0) disqualifyingSignals.push("secret_exposure_events_detected");
   if (failedViolationReceipts > 0) disqualifyingSignals.push("violation_receipts_present");
+  const criticalWVRs = domainWVRs.filter((r) => r.severity === "critical");
+  if (criticalWVRs.length > 0) {
+    disqualifyingSignals.push(
+      `${criticalWVRs.length}_critical_website_violation_receipt(s)_on_record`
+    );
+  }
   if (uncoveredSensitiveEvents > 0) disqualifyingSignals.push("uncovered_sensitive_events_detected");
   if (matchingRoutes.length === 0) disqualifyingSignals.push("no_matching_route_for_task");
   if (validDomainReceipts.length === 0) disqualifyingSignals.push("no_execution_evidence");

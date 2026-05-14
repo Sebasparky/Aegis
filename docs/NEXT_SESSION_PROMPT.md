@@ -61,7 +61,9 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Signed User Approval Receipts v1. It is complete. Do not re-implement `UserApprovalReceipt` type, `userApprovalReceiptSigning.ts`, `user-approval-receipts.ts` routes, `userApprovalReceipts` Map, or the non-blocking receipt creation in the approve/deny/reject handlers. Workspace audit events are operational records and are NOT user approval receipts — do not conflate them. Future receipt types (credential_injected, sensitive_action_blocked, etc.) follow the same pattern but are a separate increment.**
 
-> **Also: do NOT rebuild Website AegisID Trust Promises v1. It is complete. Do not re-implement `WebsiteTrustProfile` type, `websiteTrustProfileSigning.ts`, `website-trust-profiles.ts` routes, `websiteTrustProfiles` Map, `STANDARD_SAFETY_PROMISES`, the two seed profiles (`wtp_demo_localhost_001`, `wtp_demo_example_store_001`), `GET /api/agent/v1/website-trust/:domain`, or the two MCP tools (`get_website_trust_profile`, `verify_website_trust_profile`). This is the website/company-side declared promise snapshot — not Website Violation Receipts (which is the next increment). `WebsiteTrustProfile.profile_hash` is the stable reference future violation receipts will use. `PATCH /status` does not re-sign — original hash is preserved as the historical signed record. Agent endpoint excludes `profile_jws`, `accountability_contact`, and `suspension_reason`. Unsigned profiles verify as invalid with `SIGNING_KEY_UNAVAILABLE` — unsigned profiles must never appear valid.**
+> **Also: do NOT rebuild Website AegisID Trust Promises v1. It is complete. Do not re-implement `WebsiteTrustProfile` type, `websiteTrustProfileSigning.ts`, `website-trust-profiles.ts` routes, `websiteTrustProfiles` Map, `STANDARD_SAFETY_PROMISES`, the two seed profiles (`wtp_demo_localhost_001`, `wtp_demo_example_store_001`), `GET /api/agent/v1/website-trust/:domain`, or the two MCP tools (`get_website_trust_profile`, `verify_website_trust_profile`). This is the website/company-side declared promise snapshot. `WebsiteTrustProfile.profile_hash` is the stable reference violation receipts use. `PATCH /status` does not re-sign — original hash is preserved as the historical signed record. Agent endpoint excludes `profile_jws`, `accountability_contact`, and `suspension_reason`. Unsigned profiles verify as invalid with `SIGNING_KEY_UNAVAILABLE` — unsigned profiles must never appear valid.**
+
+> **Also: do NOT rebuild Website Violation Receipts v1. It is complete. Do not re-implement `WebsiteViolationReceipt` type (in `packages/types/src/index.ts`), `websiteViolationReceiptSigning.ts`, `website-violation-receipts.ts` routes, `websiteViolationReceipts` Map, or the three MCP tools (`list_website_violation_receipts`, `verify_website_violation_receipt`, `create_demo_website_violation_receipt`). Receipts are generated only for committed safety promise violations on active profiles — not for every page view or browser event. `profile_hash` from the active `WebsiteTrustProfile` is snapshotted into every receipt at creation time. `violation_count` on `WebsiteTrustProfile` is inside `profile_hash` and must NOT be mutated post-creation — compute violation counts dynamically from the `websiteViolationReceipts` Map. Three privacy literals (`raw_secrets_in_receipt`, `raw_credentials_in_receipt`, `raw_page_content_in_receipt`) are always `false`. POST is the manual/demo creation path — no live browser detection hooks in v1. `website-agent-safety.ts` `computeWebsiteAgentSafetyProfile()` counts `websiteViolationReceipts` for the domain and adds critical violations as a disqualifying signal.**
 
 > **Also: do NOT rebuild Aegis Workspaces v0 or Workspace Effective Permissions v1. Both are complete. Do not re-implement `AegisWorkspace`, `WorkspaceTask`, `WorkspaceArtifact`, `requireWorkspaceAccess`, `checkWorkspacePermission`, `emitWorkspaceAudit`, the seven workspace `ActionType` values, or any of the six agent-facing workspace endpoints. Do not add Supabase persistence, MCP tools, UI, or a workspace invite flow for workspaces unless explicitly requested. `approval_required` workspace actions currently return `WORKSPACE_PERMISSION_REQUIRES_APPROVAL` (403) — there is no workspace CRUD approval inbox in v1.**
 
@@ -400,6 +402,34 @@ Everything below is implemented and working.
 - **Workspace audit events are operational coordination records and are separate from liability receipts**
 - **Future receipt types** (credential_injected, secret_released, sensitive_action_blocked, collar_violation) share the same pattern but are not part of this increment
 - **Implemented 2026-05-14**
+- Do not rebuild unless explicitly requested
+
+### Website AegisID Trust Profiles v1
+**Completed 2026-05-14.** Signed website/company-side declared promise snapshots for delegated-agent trust.
+- `WebsiteTrustProfile`, `WebsiteSafetyPromise`, `WebsiteAgentPolicyDeclaration`, `WebsiteTrustProfileJwsPayload`, `WebsiteTrustProfileVerificationResult` types in `packages/types/src/index.ts`
+- `apps/api/src/lib/websiteTrustProfileSigning.ts` — `STANDARD_SAFETY_PROMISES`, `hashWebsiteTrustProfile`, `buildSignedWebsiteTrustProfile`, `verifyStoredWebsiteTrustProfile`
+- `websiteTrustProfiles: Map<string, WebsiteTrustProfile>` in store; two seed profiles (`wtp_demo_localhost_001`, `wtp_demo_example_store_001`)
+- `apps/api/src/routes/website-trust-profiles.ts` — POST (create+sign), GET list, by-domain, detail, verify, PATCH /status
+- `GET /api/agent/v1/website-trust/:domain` — agent-safe lookup; committed promises only; excludes `profile_jws`/`accountability_contact`/`suspension_reason`
+- 2 MCP tools: `get_website_trust_profile`, `verify_website_trust_profile`
+- `violation_count` is inside `profile_hash` — cannot be mutated post-creation without breaking the signed snapshot
+- Do not rebuild unless explicitly requested
+
+### Website Violation Receipts v1
+**Completed 2026-05-14.** Signed proof that a website's observed behavior violated a committed safety promise. The website/company liability counterpart to `UserApprovalReceipt`.
+- `WebsiteViolationReceipt`, `WebsiteViolationReceiptJwsPayload`, `WebsiteViolationReceiptVerificationResult`, `WebsiteViolationType`, `WebsiteViolationDecision`, `WebsiteViolationDetectionSource` types in `packages/types/src/index.ts`
+- `apps/api/src/lib/websiteViolationReceiptSigning.ts` — `hashWebsiteViolationReceipt` (SHA-256 of sorted-key JSON excluding `verification`), `signWebsiteViolationReceiptJws` (EdDSA, `aegis-website-violation+jws`), `buildSignedWebsiteViolationReceipt` (non-throwing), `verifyStoredWebsiteViolationReceipt`
+- `websiteViolationReceipts: Map<string, WebsiteViolationReceipt>` added to `apps/api/src/store/index.ts`; persisted and cleared on reset
+- `apps/api/src/routes/website-violation-receipts.ts` — `POST /api/website-violation-receipts` (create; validates active profile + committed promise), `GET` (list; filters: domain, violation_type, severity, decision), `GET /:receiptId`, `GET /:receiptId/verify`
+- Profile snapshot fields (`verification_status_at_violation`, `profile_hash`, `profile_version`, `company_name`, `website_aegis_id`) are copied from the live `WebsiteTrustProfile` at creation time — they anchor the promise that was active when the violation occurred
+- `violation_count` on `WebsiteTrustProfile` must NOT be mutated — it is inside `profile_hash`; compute violation counts dynamically from the `websiteViolationReceipts` Map
+- `target_url_or_origin` query strings are stripped at receipt creation (origin+path only)
+- 3 privacy literals: `raw_secrets_in_receipt: false`, `raw_credentials_in_receipt: false`, `raw_page_content_in_receipt: false`
+- v1 promise validation: active profile required (`WEBSITE_PROFILE_NOT_FOUND`), committed promise required (`PROMISE_NOT_FOUND`, `PROMISE_NOT_COMMITTED`), revoked/superseded profile rejected (`PROFILE_NOT_ACTIVE`)
+- `apps/api/src/routes/website-agent-safety.ts` `computeWebsiteAgentSafetyProfile()` now scans `websiteViolationReceipts` for the domain and adds `failedViolationReceipts` count; critical violations add a disqualifying signal
+- 3 MCP tools: `list_website_violation_receipts`, `verify_website_violation_receipt`, `create_demo_website_violation_receipt` (clearly marked demo/internal)
+- No live browser detection hooks in v1 — POST is manual/demo creation path
+- 26 automated tests in `apps/api/src/__tests__/website-violation-receipts.test.ts`
 - Do not rebuild unless explicitly requested
 
 ### Demo tooling

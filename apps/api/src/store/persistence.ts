@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -41,6 +41,7 @@ import {
   workspaceArtifacts,
   workspaceAuditEvents,
   websiteTrustProfiles,
+  websiteViolationReceipts,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -482,6 +483,7 @@ export function persistStore(): void {
       workspaceArtifacts: Array.from(workspaceArtifacts.entries()),
       workspaceAuditEvents: Array.from(workspaceAuditEvents.entries()),
       websiteTrustProfiles: Array.from(websiteTrustProfiles.entries()),
+      websiteViolationReceipts: Array.from(websiteViolationReceipts.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -546,6 +548,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.userApprovalReceipts ?? [])) userApprovalReceipts.set(k, v as UserApprovalReceipt);
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
     for (const [k, v] of (data.websiteTrustProfiles ?? [])) websiteTrustProfiles.set(k, v as WebsiteTrustProfile);
+    for (const [k, v] of (data.websiteViolationReceipts ?? [])) websiteViolationReceipts.set(k, v as WebsiteViolationReceipt);
     for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
     for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
 
@@ -678,6 +681,7 @@ export async function resetStoreForDemo(): Promise<void> {
   workspaceArtifacts.clear();
   workspaceAuditEvents.clear();
   websiteTrustProfiles.clear();
+  websiteViolationReceipts.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

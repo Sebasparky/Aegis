@@ -35,6 +35,7 @@ import { delegationPassportRoutes } from "./routes/delegation-passports.js";
 import { actionAuthorizationRoutes } from "./routes/action-authorizations.js";
 import { userApprovalReceiptRoutes } from "./routes/user-approval-receipts.js";
 import { websiteTrustProfileRoutes } from "./routes/website-trust-profiles.js";
+import { websiteViolationReceiptRoutes } from "./routes/website-violation-receipts.js";
 import { delegationTrustRoutes } from "./routes/delegation-trust.js";
 import { websiteAssertionRoutes } from "./routes/website-assertions.js";
 import { runtimeObservationRoutes } from "./routes/runtime-observations.js";
@@ -112,6 +113,7 @@ async function main() {
   await server.register(websiteAgentSafetyRoutes);
   await server.register(websiteAegisPolicyRoutes);
   await server.register(websiteTrustProfileRoutes);
+  await server.register(websiteViolationReceiptRoutes);
   await server.register(authenticatedSessionRoutes);
   await server.register(secretFieldInjectionRoutes);
   await server.register(taskBrowserSessionRoutes);

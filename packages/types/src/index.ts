@@ -635,9 +635,121 @@ export interface UserApprovalReceiptVerificationResult {
   error?: string;
 }
 
+// ─── Website Violation Receipts v1 ──────────────────────────────────────────
+// Signed proof that observed website behavior violated a committed safety promise.
+// Generated only for trust-boundary violations; not a general event log.
+// References WebsiteTrustProfile.profile_hash as the historical promise snapshot anchor.
+
+export type WebsiteViolationType =
+  | "prompt_injection_detected"
+  | "secret_request_outside_approved_flow"
+  | "disguised_sensitive_action"
+  | "approval_boundary_violation"
+  | "unclear_sensitive_action_metadata"
+  | "agent_context_exfiltration_attempt"
+  | "collar_policy_override_attempt"
+  | "other";
+
+export type WebsiteViolationDecision =
+  | "warned"
+  | "blocked"
+  | "escalated"
+  | "reputation_penalized"
+  | "recorded_only";
+
+export type WebsiteViolationDetectionSource =
+  | "heuristic"
+  | "policy_check"
+  | "manual_report"
+  | "test_fixture"
+  | "other";
+
+export interface WebsiteViolationReceipt {
+  receipt_id: string;                              // "wvr_..."
+  receipt_type: "website_violation";
+  schema_version: "1.0";
+  issuer: "aegis";
+  created_at: string;
+
+  // Website identity snapshot at time of violation
+  website_profile_id: string;
+  website_aegis_id: string;
+  domain: string;
+  company_name: string;
+  verification_status_at_violation: WebsiteVerificationStatus;
+  profile_hash: string;                            // Promise snapshot anchor
+  profile_version: string;
+
+  // Violated promise
+  violation_type: WebsiteViolationType;
+  violated_promise_id: string;
+  violated_promise_title: string;
+  severity: "low" | "medium" | "high" | "critical";
+
+  // Observed behavior context
+  observed_at: string;
+  target_url_or_origin?: string;                   // Origin only; strip query strings
+  session_id?: string;
+  route_run_id?: string;
+  workspace_id?: string;
+  task_id?: string;
+  delegation_id?: string;
+  agent_name?: string;
+  agent_platform?: string;
+  redacted_evidence_summary: string;               // Human-readable; no raw values
+  evidence_hash?: string;                          // Optional SHA-256 of external evidence
+  detection_source: WebsiteViolationDetectionSource;
+  detection_signals_count?: number;
+
+  // Aegis response
+  decision: WebsiteViolationDecision;
+  blocked_action_type?: string;
+  reputation_delta?: number;
+  followup_required: boolean;
+
+  // Privacy literals — never set through a variable
+  raw_secrets_in_receipt: false;
+  raw_credentials_in_receipt: false;
+  raw_page_content_in_receipt: false;
+
+  // Signing — excluded from canonical hash (hash is the pre-image, jws signs the hash)
+  verification: {
+    canonical_payload_hash: string;
+    jws: string;
+    jws_present: boolean;
+    signing_alg: "EdDSA";
+    signed_at: string;
+    signing_key_id?: string;
+  };
+}
+
+export interface WebsiteViolationReceiptJwsPayload {
+  typ: "aegis.website_violation.v1";
+  receipt_id: string;
+  payload_hash: string;
+  issuer: string;
+  issued_at: string;
+  website_profile_id: string;
+  domain: string;
+  violation_type: WebsiteViolationType;
+  severity: "low" | "medium" | "high" | "critical";
+  decision: WebsiteViolationDecision;
+}
+
+export interface WebsiteViolationReceiptVerificationResult {
+  receipt_id: string;
+  valid: boolean;
+  hash_valid: boolean;
+  signature_valid: boolean;
+  recomputed_hash?: string;
+  stored_hash?: string;
+  jws_payload?: WebsiteViolationReceiptJwsPayload;
+  error?: string;
+}
+
 // ─── Website AegisID Trust Profiles v1 ──────────────────────────────────────
 // Website/company-side declared promise snapshot for delegated-agent trust.
-// Future WebsiteViolationReceipt will reference WebsiteTrustProfile.profile_hash.
+// WebsiteViolationReceipt.profile_hash references WebsiteTrustProfile.profile_hash.
 
 export type WebsiteProfileStatus = "active" | "revoked" | "superseded";
 export type WebsiteVerificationStatus = "unverified" | "verified" | "suspended";

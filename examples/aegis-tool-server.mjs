@@ -2236,6 +2236,134 @@ const TOOLS = [
     },
   },
   {
+    name: "list_website_violation_receipts",
+    description:
+      "List signed Aegis website violation receipts. Violation receipts are generated only when a website's observed behavior violates a committed safety promise from its WebsiteTrustProfile — they are not general event logs. Each receipt includes the violated promise, severity, decision taken by Aegis, and a snapshot of the profile_hash at time of violation. Use to review the violation history for a domain before trusting it with agent actions. Optionally filter by domain, violation_type, severity, or decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "Filter receipts for a specific domain (e.g. 'localhost', 'example.com').",
+        },
+        violation_type: {
+          type: "string",
+          enum: [
+            "prompt_injection_detected",
+            "secret_request_outside_approved_flow",
+            "disguised_sensitive_action",
+            "approval_boundary_violation",
+            "unclear_sensitive_action_metadata",
+            "agent_context_exfiltration_attempt",
+            "collar_policy_override_attempt",
+            "other",
+          ],
+          description: "Filter by violation type.",
+        },
+        severity: {
+          type: "string",
+          enum: ["low", "medium", "high", "critical"],
+          description: "Filter by severity.",
+        },
+        decision: {
+          type: "string",
+          enum: ["warned", "blocked", "escalated", "reputation_penalized", "recorded_only"],
+          description: "Filter by Aegis decision.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "verify_website_violation_receipt",
+    description:
+      "Cryptographically verify a website violation receipt by recomputing its canonical hash and verifying the EdDSA JWS signature. A valid result (valid=true) confirms the violation evidence has not been tampered with since Aegis created this receipt. Returns hash_valid, signature_valid, the JWS payload, and an interpretation. Use when you need to verify the integrity of a specific violation receipt before relying on it as trust evidence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        receipt_id: {
+          type: "string",
+          description: "The receipt_id of the violation receipt to verify (e.g. 'wvr_...').",
+        },
+      },
+      required: ["receipt_id"],
+    },
+  },
+  {
+    name: "create_demo_website_violation_receipt",
+    description:
+      "DEMO/INTERNAL: Create a signed website violation receipt for a committed safety promise on an active WebsiteTrustProfile. This is a manual creation path for testing and demonstration purposes only — in production, violation receipts should only be generated from trusted Aegis detection evidence, not by agents directly. Requires an active WebsiteTrustProfile for the domain and a committed promise (committed: true). Returns the signed receipt with receipt_id and profile_hash snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        website_profile_id: {
+          type: "string",
+          description: "The profile_id of the active WebsiteTrustProfile (preferred over domain).",
+        },
+        domain: {
+          type: "string",
+          description: "The domain to find the active WebsiteTrustProfile for. Used if website_profile_id is not provided.",
+        },
+        violation_type: {
+          type: "string",
+          enum: [
+            "prompt_injection_detected",
+            "secret_request_outside_approved_flow",
+            "disguised_sensitive_action",
+            "approval_boundary_violation",
+            "unclear_sensitive_action_metadata",
+            "agent_context_exfiltration_attempt",
+            "collar_policy_override_attempt",
+            "other",
+          ],
+          description: "The type of trust boundary violation that was observed.",
+        },
+        violated_promise_id: {
+          type: "string",
+          description: "The promise_id from the profile's safety_promises that was violated (e.g. 'site_will_not_prompt_inject_agents'). Must be committed: true.",
+        },
+        redacted_evidence_summary: {
+          type: "string",
+          description: "A brief human-readable description of what was observed. Must not contain raw secrets, credentials, 2FA codes, passwords, page HTML, or raw browser traces.",
+        },
+        detection_source: {
+          type: "string",
+          enum: ["heuristic", "policy_check", "manual_report", "test_fixture", "other"],
+          description: "How the violation was detected.",
+        },
+        decision: {
+          type: "string",
+          enum: ["warned", "blocked", "escalated", "reputation_penalized", "recorded_only"],
+          description: "The action Aegis took in response.",
+        },
+        followup_required: {
+          type: "boolean",
+          description: "Whether this violation requires follow-up review.",
+        },
+        observed_at: {
+          type: "string",
+          description: "ISO 8601 timestamp when the violation was observed. Defaults to now.",
+        },
+        target_url_or_origin: {
+          type: "string",
+          description: "The URL or origin where the violation occurred. Query strings are stripped automatically.",
+        },
+        session_id: { type: "string", description: "Browser session ID if available." },
+        route_run_id: { type: "string", description: "Route run ID if the violation occurred during a route run." },
+        workspace_id: { type: "string", description: "Workspace ID if applicable." },
+        task_id: { type: "string", description: "Task ID if applicable." },
+        delegation_id: { type: "string", description: "Delegation ID if applicable." },
+        agent_name: { type: "string", description: "Name of the agent involved." },
+        agent_platform: { type: "string", description: "Platform of the agent involved." },
+        evidence_hash: { type: "string", description: "Optional SHA-256 hash of external evidence." },
+        detection_signals_count: { type: "number", description: "Number of detection signals that triggered." },
+        blocked_action_type: { type: "string", description: "The specific action type that was blocked, if decision=blocked." },
+        reputation_delta: { type: "number", description: "Reputation change applied, if decision=reputation_penalized." },
+      },
+      required: ["violation_type", "violated_promise_id", "redacted_evidence_summary", "detection_source", "decision"],
+    },
+  },
+  {
     name: "get_website_agent_safety_profile",
     description:
       "Evaluate whether a website is safe for agent interaction for a specific task category. Returns a deterministic profile based on Aegis-observed signals: known routes, verified receipts, runtime coverage violations, interventions, and observation mode. Does not crawl the site live and does not verify business identity. Advisory only — not a guarantee. Use before requesting a skill run to understand the website's Aegis coverage posture for the task.",
@@ -3013,6 +3141,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "verify_website_trust_profile":
       result = await verifyWebsiteTrustProfile(a);
       break;
+    case "list_website_violation_receipts":
+      result = await listWebsiteViolationReceipts(a);
+      break;
+    case "verify_website_violation_receipt":
+      result = await verifyWebsiteViolationReceipt(a);
+      break;
+    case "create_demo_website_violation_receipt":
+      result = await createDemoWebsiteViolationReceipt(a);
+      break;
     case "get_website_agent_safety_profile":
       result = await getWebsiteAgentSafetyProfile(a);
       break;
@@ -3105,6 +3242,132 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
   };
 });
+
+// ─── Website Violation Receipt handlers ──────────────────────────────────────
+
+async function listWebsiteViolationReceipts({ domain, violation_type, severity, decision } = {}) {
+  const params = new URLSearchParams();
+  if (domain) params.set("domain", domain);
+  if (violation_type) params.set("violation_type", violation_type);
+  if (severity) params.set("severity", severity);
+  if (decision) params.set("decision", decision);
+  const qs = params.toString();
+  let res;
+  try {
+    res = await request("GET", `/api/website-violation-receipts${qs ? "?" + qs : ""}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to list violation receipts." };
+  }
+  return {
+    count: res.data.count,
+    receipts: res.data.data,
+    interpretation: res.data.count === 0
+      ? "No website violation receipts found matching the specified filters."
+      : `${res.data.count} violation receipt(s) found. These are signed records of committed safety promise violations — not general event logs.`,
+  };
+}
+
+async function verifyWebsiteViolationReceipt({ receipt_id } = {}) {
+  if (!receipt_id) return { error: "VALIDATION_ERROR", message: "receipt_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-violation-receipts/${encodeURIComponent(receipt_id)}/verify`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to verify violation receipt." };
+  }
+  const v = res.data;
+  return {
+    receipt_id,
+    valid: v.valid,
+    hash_valid: v.hash_valid,
+    signature_valid: v.signature_valid,
+    recomputed_hash: v.recomputed_hash,
+    stored_hash: v.stored_hash,
+    jws_payload: v.jws_payload ?? null,
+    error: v.error ?? null,
+    interpretation: v.valid
+      ? "Violation receipt is cryptographically intact. The evidence has not been tampered with since Aegis signed this receipt."
+      : `Violation receipt is NOT valid: ${v.error ?? "unknown reason"}. Do not rely on this receipt as trusted evidence.`,
+  };
+}
+
+async function createDemoWebsiteViolationReceipt({
+  website_profile_id,
+  domain,
+  violation_type,
+  violated_promise_id,
+  redacted_evidence_summary,
+  detection_source,
+  decision,
+  followup_required,
+  observed_at,
+  target_url_or_origin,
+  session_id,
+  route_run_id,
+  workspace_id,
+  task_id,
+  delegation_id,
+  agent_name,
+  agent_platform,
+  evidence_hash,
+  detection_signals_count,
+  blocked_action_type,
+  reputation_delta,
+} = {}) {
+  if (!violation_type) return { error: "VALIDATION_ERROR", message: "violation_type is required." };
+  if (!violated_promise_id) return { error: "VALIDATION_ERROR", message: "violated_promise_id is required." };
+  if (!redacted_evidence_summary) return { error: "VALIDATION_ERROR", message: "redacted_evidence_summary is required." };
+  if (!detection_source) return { error: "VALIDATION_ERROR", message: "detection_source is required." };
+  if (!decision) return { error: "VALIDATION_ERROR", message: "decision is required." };
+  if (!website_profile_id && !domain) return { error: "VALIDATION_ERROR", message: "Either website_profile_id or domain is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/website-violation-receipts", {
+      website_profile_id, domain, violation_type, violated_promise_id,
+      redacted_evidence_summary, detection_source, decision,
+      followup_required: followup_required ?? false,
+      ...(observed_at !== undefined ? { observed_at } : {}),
+      ...(target_url_or_origin !== undefined ? { target_url_or_origin } : {}),
+      ...(session_id !== undefined ? { session_id } : {}),
+      ...(route_run_id !== undefined ? { route_run_id } : {}),
+      ...(workspace_id !== undefined ? { workspace_id } : {}),
+      ...(task_id !== undefined ? { task_id } : {}),
+      ...(delegation_id !== undefined ? { delegation_id } : {}),
+      ...(agent_name !== undefined ? { agent_name } : {}),
+      ...(agent_platform !== undefined ? { agent_platform } : {}),
+      ...(evidence_hash !== undefined ? { evidence_hash } : {}),
+      ...(detection_signals_count !== undefined ? { detection_signals_count } : {}),
+      ...(blocked_action_type !== undefined ? { blocked_action_type } : {}),
+      ...(reputation_delta !== undefined ? { reputation_delta } : {}),
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create violation receipt." };
+  }
+  const r = res.data;
+  return {
+    receipt_id: r.receipt_id,
+    domain: r.domain,
+    violation_type: r.violation_type,
+    violated_promise_id: r.violated_promise_id,
+    violated_promise_title: r.violated_promise_title,
+    severity: r.severity,
+    decision: r.decision,
+    profile_hash: r.profile_hash,
+    jws_present: r.verification?.jws_present,
+    created_at: r.created_at,
+    interpretation: `Demo violation receipt created for domain '${r.domain}'. violation_type='${r.violation_type}', severity='${r.severity}', decision='${r.decision}'. profile_hash='${r.profile_hash}' anchors the promise snapshot. This is a demo/manual creation path — production violation receipts should only be generated from trusted detection evidence.`,
+  };
+}
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import type {
   Collar,
   AegisPass,
+  SensitiveGrant,
   ProtectedSession,
   ApprovalRequest,
   Receipt,
@@ -751,3 +752,38 @@ export async function listSensitiveReceiptTimeline(params?: {
   if (!res.ok) throw new Error("Failed to fetch sensitive receipt timeline");
   return res.json();
 }
+
+// ─── Sensitive Grants v1 ──────────────────────────────────────────────────────
+
+export interface SensitiveGrantVerifyResult {
+  grant_id: string;
+  linked_uar_id: string;
+  uar_valid: boolean;
+  uar_hash_valid?: boolean;
+  scope_consistent: boolean;
+  grant_status: string;
+  uar_error?: string;
+}
+
+export const listSensitiveGrants = (filters?: {
+  grant_type?: string;
+  status?: string;
+  domain?: string;
+}) => {
+  const q = new URLSearchParams(
+    Object.fromEntries(Object.entries(filters ?? {}).filter(([, v]) => v))
+  ).toString();
+  return request<SensitiveGrant[]>(`/api/sensitive-grants${q ? `?${q}` : ""}`);
+};
+
+export const getSensitiveGrant = (grantId: string) =>
+  request<SensitiveGrant>(`/api/sensitive-grants/${grantId}`);
+
+export const verifySensitiveGrant = (grantId: string) =>
+  request<SensitiveGrantVerifyResult>(`/api/sensitive-grants/${grantId}/verify`);
+
+export const revokeSensitiveGrant = (grantId: string, reason?: string) =>
+  request<{ grant_id: string; status: string }>(
+    `/api/sensitive-grants/${grantId}/revoke`,
+    { method: "POST", body: JSON.stringify({ reason }) },
+  );

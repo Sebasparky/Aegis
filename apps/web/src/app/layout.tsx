@@ -29,6 +29,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <NavLink href="/approvals" label="Approvals" badge />
           <NavLink href="/receipts" label="Receipts" />
           <NavLink href="/sensitive-receipts" label="Sensitive Timeline" />
+          <NavLink href="/sensitive-grants" label="Sensitive Grants" />
           <NavLink href="/runners" label="Runners" />
           <NavLink href="/aegis-id" label="AegisID" />
           <NavLink href="/website-aegis-id" label="Website AegisID" />

@@ -15,29 +15,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <span className="text-lg font-semibold tracking-tight text-white">Aegis</span>
             <p className="text-xs text-gray-500 mt-0.5">Trust layer for AI agents</p>
           </div>
-          <NavLink href="/" label="Dashboard" />
-          <NavLink href="/demo" label="Demo" />
-          <NavLink href="/agent-bridge" label="Agent Bridge" />
-          <NavLink href="/rails" label="Aegis Rails" />
-          <NavLink href="/marketplace-review" label="Marketplace Review" />
-          <NavLink href="/marketplace" label="Marketplace" />
-          <NavLink href="/skill-library" label="Skill Library" />
-          <NavLink href="/passes" label="Passes" />
-          <NavLink href="/vault-import" label="Import CSV" />
+          <NavLink href="/" label="Command" />
+          <NavLink href="/delegations" label="Agents" />
           <NavLink href="/collars" label="Collars" />
-          <NavLink href="/sessions" label="Sessions" />
-          <NavLink href="/approvals" label="Approvals" badge />
-          <NavLink href="/receipts" label="Receipts" />
-          <NavLink href="/sensitive-receipts" label="Sensitive Timeline" />
-          <NavLink href="/sensitive-grants" label="Sensitive Grants" />
-          <NavLink href="/runners" label="Runners" />
-          <NavLink href="/aegis-id" label="AegisID" />
-          <NavLink href="/website-aegis-id" label="Website AegisID" />
-          <NavLink href="/counterparty-agent" label="Agent Verification" />
+          <NavLink href="/route-run-approvals" label="Approvals" badge />
+          <NavLink href="/passes" label="Secrets" />
           <NavLink href="/workspaces" label="Workspaces" />
-          <NavLink href="/tasks" label="Agent Tasks" />
-          <NavLink href="/delegations" label="Delegations" />
-          <NavLink href="/route-run-approvals" label="Run Approvals" />
+          <NavLink href="/rails" label="Rails" />
+          <NavLink href="/receipts" label="Receipts" />
+          <NavLink href="/website-aegis-id" label="Websites" />
+          <NavLink href="/aegis-id" label="Settings" />
         </aside>
         <main className="flex-1 overflow-auto p-8">{children}</main>
       </body>

@@ -3,184 +3,184 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { listApprovals } from "@/lib/api";
+import { listApprovals, getUser } from "@/lib/api";
 
-const NAV_ITEMS = [
-  { href: "/", label: "Command", group: "core" },
-  { href: "/delegations", label: "Agents", group: "core" },
-  { href: "/collars", label: "Collars", group: "core" },
-  { href: "/route-run-approvals", label: "Approvals", group: "core", badge: true },
-  { href: "/passes", label: "Secrets", group: "core" },
-  { href: "/workspaces", label: "Workspaces", group: "core" },
-  { href: "/rails", label: "Rails", group: "infra" },
-  { href: "/receipts", label: "Receipts", group: "infra" },
-  { href: "/website-aegis-id", label: "Websites", group: "infra" },
-  { href: "/aegis-id", label: "Settings", group: "settings" },
-] as const;
+// ── Inline SVG icons ───────────────────────────────────────────────────────
+function Ic({ children, size = 16 }: { children: React.ReactNode; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      {children}
+    </svg>
+  );
+}
 
-const LABEL_MAP: Record<string, string> = {
-  "/": "Command",
-  "/delegations": "Agents",
-  "/collars": "Collars",
+const Icons = {
+  shield:    (s = 16) => <Ic size={s}><path d="M12 3l7 3v6c0 4.5-3.2 7.5-7 9-3.8-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></Ic>,
+  command:   (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></Ic>,
+  agents:    (s = 16) => <Ic size={s}><circle cx="12" cy="9" r="3.2"/><path d="M5 19c1.4-3 4-4.5 7-4.5s5.6 1.5 7 4.5"/></Ic>,
+  collars:   (s = 16) => <Ic size={s}><path d="M12 3l7 3v6c0 4.5-3.2 7.5-7 9-3.8-1.5-7-4.5-7-9V6l7-3z"/></Ic>,
+  approvals: (s = 16) => <Ic size={s}><path d="M5 12l4 4 10-10"/></Ic>,
+  secrets:   (s = 16) => <Ic size={s}><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></Ic>,
+  workspaces:(s = 16) => <Ic size={s}><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></Ic>,
+  rails:     (s = 16) => <Ic size={s}><path d="M5 4v16M19 4v16M5 9h14M5 15h14"/></Ic>,
+  receipts:  (s = 16) => <Ic size={s}><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h4"/></Ic>,
+  websites:  (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></Ic>,
+  settings:  (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></Ic>,
+  bell:      (s = 15) => <Ic size={s}><path d="M6 16V11a6 6 0 0112 0v5l1.5 2H4.5L6 16z"/><path d="M10 20a2 2 0 004 0"/></Ic>,
+};
+
+// ── Nav config ─────────────────────────────────────────────────────────────
+type NavItem = { href: string; label: string; icon: (s?: number) => React.ReactNode; badge?: true };
+
+const NAV_ITEMS: NavItem[] = [
+  { href: "/",                    label: "Command",    icon: Icons.command    },
+  { href: "/delegations",         label: "Agents",     icon: Icons.agents     },
+  { href: "/collars",             label: "Collars",    icon: Icons.collars    },
+  { href: "/route-run-approvals", label: "Approvals",  icon: Icons.approvals, badge: true },
+  { href: "/passes",              label: "Secrets",    icon: Icons.secrets    },
+  { href: "/workspaces",          label: "Workspaces", icon: Icons.workspaces },
+  { href: "/rails",               label: "Rails",      icon: Icons.rails      },
+  { href: "/receipts",            label: "Receipts",   icon: Icons.receipts   },
+  { href: "/website-aegis-id",    label: "Websites",   icon: Icons.websites   },
+  { href: "/aegis-id",            label: "Settings",   icon: Icons.settings   },
+];
+
+const PAGE_LABELS: Record<string, string> = {
+  "/":                    "Command",
+  "/delegations":         "Agents",
+  "/collars":             "Collars",
   "/route-run-approvals": "Approvals",
-  "/passes": "Secrets",
-  "/workspaces": "Workspaces",
-  "/rails": "Rails",
-  "/receipts": "Receipts",
-  "/website-aegis-id": "Websites",
-  "/aegis-id": "Settings",
+  "/passes":              "Secrets",
+  "/workspaces":          "Workspaces",
+  "/rails":               "Rails",
+  "/receipts":            "Receipts",
+  "/website-aegis-id":    "Websites",
+  "/aegis-id":            "Settings",
 };
 
 function getPageLabel(pathname: string): string {
   if (pathname === "/") return "Command";
-  for (const [route, label] of Object.entries(LABEL_MAP)) {
+  for (const [route, label] of Object.entries(PAGE_LABELS)) {
     if (route !== "/" && pathname.startsWith(route)) return label;
   }
   return "Aegis";
 }
 
 function isActive(pathname: string, href: string): boolean {
-  if (href === "/") return pathname === "/";
-  return pathname.startsWith(href);
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }
 
+// ── AppShell ───────────────────────────────────────────────────────────────
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [pendingCount, setPendingCount] = useState(0);
+  const [aegisId, setAegisId]           = useState("aegis://…");
+  const [initials, setInitials]         = useState("?");
 
   useEffect(() => {
     listApprovals("pending")
       .then((items) => setPendingCount(items.length))
       .catch(() => {});
+
+    getUser()
+      .then((u) => {
+        if (u.aegis_id) setAegisId(u.aegis_id);
+        if (u.display_name) {
+          setInitials(
+            u.display_name.split(" ").map((p: string) => p[0]).slice(0, 2).join("").toUpperCase()
+          );
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  const allClear = pendingCount === 0;
   const pageLabel = getPageLabel(pathname);
+  const allClear  = pendingCount === 0;
 
   return (
-    <div className="flex min-h-screen">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 bg-white border-r border-gray-100 flex flex-col">
-        {/* Logo */}
-        <div className="px-5 pt-5 pb-4 border-b border-gray-100">
-          <div className="flex items-center gap-2">
-            <span className="text-blue-600 text-lg leading-none select-none">◆</span>
-            <span className="text-sm font-semibold text-gray-900 tracking-tight">Aegis</span>
+    <div className="shell">
+      {/* ── Sidebar ── */}
+      <aside className="sb">
+        {/* Brand */}
+        <div className="sb__brand">
+          <div className="sb__brand-glyph">
+            <span className="sb__brand-glyph-inner">{Icons.shield(14)}</span>
           </div>
-          <p className="text-[10px] text-gray-400 mt-1 ml-6">Trust layer for AI agents</p>
+          <div>
+            <div className="sb__brand-name">Aegis</div>
+            <div className="sb__brand-tag">TRUST LAYER · v0.4</div>
+          </div>
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 py-3 overflow-y-auto">
-          <NavGroup label="Core">
-            {NAV_ITEMS.filter((n) => n.group === "core").map((item) => (
-              <NavItem
+        <nav className="sb__nav">
+          <span className="sb__trustline" aria-hidden="true" />
+          {NAV_ITEMS.map((item) => {
+            const active = isActive(pathname, item.href);
+            return (
+              <Link
                 key={item.href}
                 href={item.href}
-                label={item.label}
-                active={isActive(pathname, item.href)}
-                badge={"badge" in item && item.badge ? pendingCount : undefined}
-              />
-            ))}
-          </NavGroup>
-
-          <NavGroup label="Infrastructure">
-            {NAV_ITEMS.filter((n) => n.group === "infra").map((item) => (
-              <NavItem
-                key={item.href}
-                href={item.href}
-                label={item.label}
-                active={isActive(pathname, item.href)}
-              />
-            ))}
-          </NavGroup>
-
-          <NavGroup label="">
-            {NAV_ITEMS.filter((n) => n.group === "settings").map((item) => (
-              <NavItem
-                key={item.href}
-                href={item.href}
-                label={item.label}
-                active={isActive(pathname, item.href)}
-              />
-            ))}
-          </NavGroup>
+                className={`sb__item${active ? " sb__item--active" : ""}`}
+              >
+                <span className="sb__item-ic">{item.icon(16)}</span>
+                <span className="sb__item-l">{item.label}</span>
+                {item.badge && pendingCount > 0 && (
+                  <span className="sb__item-badge">{pendingCount}</span>
+                )}
+              </Link>
+            );
+          })}
         </nav>
+
+        {/* User passport */}
+        <div className="sb__pass">
+          <div className="sb__pass-mark">
+            <span className="sb__pass-stamp">{Icons.shield(10)}</span>
+            <span className="sb__pass-eyebrow">User Passport</span>
+          </div>
+          <div className="sb__pass-id">{aegisId}</div>
+          <div className="sb__pass-foot">
+            <span className="a-status a-status--green">
+              <span className="a-status__dot" />
+              Active
+            </span>
+            <span className="sb__pass-meta">v0.4</span>
+          </div>
+        </div>
       </aside>
 
-      {/* Main column */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar */}
-        <header className="h-12 shrink-0 bg-white/90 backdrop-blur-sm border-b border-gray-100/80 flex items-center justify-between px-6">
-          {/* Breadcrumb */}
-          <p className="text-sm font-medium text-gray-700">{pageLabel}</p>
-
-          {/* Trust Fabric pill */}
-          <div
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-              allClear
-                ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                : "bg-amber-50 border-amber-200 text-amber-700"
-            }`}
-          >
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                allClear ? "bg-emerald-500" : "bg-amber-500 animate-pulse"
-              }`}
-            />
-            {allClear ? "Trust Fabric — All clear" : `Trust Fabric — ${pendingCount} pending`}
+      {/* ── Main column ── */}
+      <div className="shell__main">
+        {/* Topbar */}
+        <header className="tb">
+          <div className="tb__crumb">
+            <span className="tb__crumb-org">My Aegis</span>
+            <span className="tb__crumb-sep">/</span>
+            <span className="tb__crumb-page">{pageLabel}</span>
           </div>
 
-          {/* Avatar placeholder */}
-          <div className="w-7 h-7 rounded-full bg-gray-100 border border-gray-200" />
+          <div className="tb__status tb__status--seal">
+            <span className="tb__status-dot" />
+            <span className="tb__status-eyebrow">TRUST FABRIC</span>
+            <span className="tb__status-sep">·</span>
+            <span>{allClear ? "Verified" : `${pendingCount} pending`}</span>
+          </div>
+
+          <div className="tb__right">
+            <button className="tb__icon" title="Notifications" type="button">
+              {Icons.bell(15)}
+              {pendingCount > 0 && (
+                <span className="tb__icon-badge">{pendingCount}</span>
+              )}
+            </button>
+            <div className="tb__avatar">{initials}</div>
+          </div>
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-auto">{children}</main>
+        <main className="shell__page">{children}</main>
       </div>
     </div>
-  );
-}
-
-function NavGroup({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-1">
-      {label && (
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-400 px-4 pt-4 pb-1">
-          {label}
-        </p>
-      )}
-      {children}
-    </div>
-  );
-}
-
-function NavItem({
-  href,
-  label,
-  active,
-  badge,
-}: {
-  href: string;
-  label: string;
-  active: boolean;
-  badge?: number;
-}) {
-  return (
-    <Link
-      href={href}
-      className={`flex items-center justify-between mx-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-        active
-          ? "bg-blue-50 text-blue-700 font-medium border-l-2 border-blue-500 rounded-l-none pl-[10px]"
-          : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-      }`}
-    >
-      {label}
-      {badge !== undefined && badge > 0 && (
-        <span className="text-xs bg-blue-100 text-blue-700 font-semibold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-          {badge}
-        </span>
-      )}
-    </Link>
   );
 }

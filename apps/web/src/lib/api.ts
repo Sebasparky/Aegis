@@ -654,6 +654,8 @@ export const createWorkspaceTask = (
     required_artifact_names?: string[];
   },
 ) => request<WorkspaceTask>(`/api/workspaces/${workspaceId}/tasks`, { method: "POST", body: JSON.stringify(body) });
+export const resetWorkspaceTask = (workspaceId: string, taskId: string) =>
+  request<WorkspaceTask>(`/api/workspaces/${workspaceId}/tasks/${taskId}/reset`, { method: "PATCH" });
 export const listWorkspaceArtifacts = (workspaceId: string) =>
   request<WorkspaceArtifactMeta[]>(`/api/workspaces/${workspaceId}/artifacts`);
 export const getWorkspaceArtifact = (workspaceId: string, artifactId: string) =>

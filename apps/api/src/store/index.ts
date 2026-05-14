@@ -233,8 +233,10 @@ export interface WorkspaceAuditEvent {
   workspace_id: string;
   task_id?: string;
   artifact_id?: string;
-  delegation_id: string;
-  event_type: "task_claimed" | "task_completed" | "artifact_created";
+  delegation_id?: string;
+  actor_type?: "user" | "delegation";
+  actor_id?: string;
+  event_type: "task_claimed" | "task_completed" | "artifact_created" | "task_reset";
   created_at: string;
 }
 

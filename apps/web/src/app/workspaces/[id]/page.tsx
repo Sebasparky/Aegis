@@ -8,6 +8,7 @@ import {
   getWorkspace,
   listWorkspaceTasks,
   createWorkspaceTask,
+  resetWorkspaceTask,
   listWorkspaceArtifacts,
   getWorkspaceArtifact,
   createWorkspaceArtifact,
@@ -62,6 +63,16 @@ export default function WorkspaceDetailPage() {
   }
 
   useEffect(() => { load(); }, [workspaceId]);
+
+  async function handleResetTask(taskId: string) {
+    if (!confirm("Reset this task to open? The current agent claim will be released.")) return;
+    try {
+      await resetWorkspaceTask(workspaceId, taskId);
+      await load();
+    } catch {
+      alert("Failed to reset task.");
+    }
+  }
 
   async function handleViewArtifact(artifactId: string) {
     setArtifactLoading(true);
@@ -163,7 +174,7 @@ export default function WorkspaceDetailPage() {
         )}
 
         <TaskGroup label="Ready" count={ready.length} accent="green" tasks={ready} />
-        <TaskGroup label="In Progress" count={inProgress.length} accent="indigo" tasks={inProgress} />
+        <TaskGroup label="In Progress" count={inProgress.length} accent="indigo" tasks={inProgress} onResetTask={handleResetTask} />
         <TaskGroup label="Blocked" count={blocked.length} accent="amber" tasks={blocked} />
         <TaskGroup
           label="Completed / Cancelled"
@@ -320,12 +331,14 @@ function TaskGroup({
   accent,
   tasks,
   collapsed = false,
+  onResetTask,
 }: {
   label: string;
   count: number;
   accent: "green" | "indigo" | "amber" | "gray";
   tasks: WorkspaceTaskWithReadiness[];
   collapsed?: boolean;
+  onResetTask?: (taskId: string) => void;
 }) {
   const [open, setOpen] = useState(!collapsed);
 
@@ -356,7 +369,7 @@ function TaskGroup({
             <p className="text-xs text-gray-600 py-2">No {label.toLowerCase()} tasks.</p>
           )}
           {tasks.map((task) => (
-            <TaskCard key={task.task_id} task={task} />
+            <TaskCard key={task.task_id} task={task} onReset={onResetTask ? () => onResetTask(task.task_id) : undefined} />
           ))}
         </div>
       )}
@@ -366,7 +379,7 @@ function TaskGroup({
 
 // ─── Task Card ────────────────────────────────────────────────────────────────
 
-function TaskCard({ task }: { task: WorkspaceTaskWithReadiness }) {
+function TaskCard({ task, onReset }: { task: WorkspaceTaskWithReadiness; onReset?: () => void }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
       <div className="flex items-start gap-2 mb-2">
@@ -374,6 +387,14 @@ function TaskCard({ task }: { task: WorkspaceTaskWithReadiness }) {
         <div className="flex items-center gap-1.5 shrink-0">
           <PriorityPill priority={task.priority ?? "normal"} />
           <ReadinessPill readiness={task.readiness} />
+          {task.status === "in_progress" && onReset && (
+            <button
+              onClick={onReset}
+              className="text-xs text-gray-500 hover:text-amber-400 transition-colors px-1.5 py-0.5 rounded border border-gray-700 hover:border-amber-700"
+            >
+              Reset
+            </button>
+          )}
         </div>
       </div>
 

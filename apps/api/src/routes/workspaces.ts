@@ -24,7 +24,7 @@ import {
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
-import { buildWorkspaceArtifactNames } from "../lib/workspaceDomain.js";
+import { buildWorkspaceArtifactNames, emitWorkspaceAudit } from "../lib/workspaceDomain.js";
 import { schedulePersist } from "../store/persistence.js";
 import {
   ALLOWED_MIME_TYPES,
@@ -560,6 +560,47 @@ export async function workspaceRoutes(server: FastifyInstance) {
       ok: true,
       data: { ...meta, size_bytes: Buffer.byteLength(_content, "utf8") },
     });
+  });
+
+  /**
+   * PATCH /api/workspaces/:workspaceId/tasks/:taskId/reset
+   * Owner-facing: release a stale in_progress task back to open.
+   */
+  server.patch("/api/workspaces/:workspaceId/tasks/:taskId/reset", async (req, reply) => {
+    const { workspaceId, taskId } = req.params as { workspaceId: string; taskId: string };
+
+    const workspace = aegisWorkspaces.get(workspaceId);
+    if (!workspace || workspace.owner_user_id !== MOCK_USER_ID) {
+      return sendError(reply, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
+    }
+
+    const task = workspaceTasks.get(taskId);
+    if (!task || task.workspace_id !== workspaceId) {
+      return sendError(reply, 404, "TASK_NOT_FOUND", "Task not found in this workspace.");
+    }
+
+    if (task.status !== "in_progress") {
+      return sendError(reply, 400, "TASK_NOT_IN_PROGRESS", "Only in_progress tasks can be reset.");
+    }
+
+    task.status = "open";
+    delete task.completed_at;
+    if (task.assignment_type !== "delegation") {
+      delete task.assigned_delegation_id;
+    }
+    task.updated_at = new Date().toISOString();
+    workspaceTasks.set(task.task_id, task);
+    schedulePersist();
+
+    emitWorkspaceAudit({
+      workspace_id: workspaceId,
+      task_id: taskId,
+      actor_type: "user",
+      actor_id: MOCK_USER_ID,
+      event_type: "task_reset",
+    });
+
+    return reply.send({ ok: true, data: task });
   });
 }
 

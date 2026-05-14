@@ -2553,3 +2553,134 @@ describe("POST /api/workspaces/:id/tasks — validation", () => {
     expect(data.required_artifact_names).toEqual(["report.md", "summary.txt"]);
   });
 });
+
+// PATCH /api/workspaces/:id/tasks/:taskId/reset — stale in_progress recovery
+// ---------------------------------------------------------------------------
+describe("PATCH /api/workspaces/:id/tasks/:taskId/reset", () => {
+  let srv: FastifyInstance;
+
+  beforeAll(async () => {
+    srv = await buildWorkspaceTestServer();
+  });
+
+  beforeEach(() => {
+    resetStore();
+    seedTestData();
+    seedWorkspaceDelegations();
+    seedTestWorkspace();
+  });
+
+  afterAll(async () => {
+    await srv.close();
+  });
+
+  function reset(taskId: string, workspaceId = IDS.WORKSPACE) {
+    return srv.inject({
+      method: "PATCH",
+      url: `/api/workspaces/${workspaceId}/tasks/${taskId}/reset`,
+    });
+  }
+
+  it("resets in_progress open-type task → status open, assigned_delegation_id cleared", async () => {
+    seedOpenTask("task_r_open", {
+      status: "in_progress",
+      assignment_type: "open",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await reset("task_r_open");
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.status).toBe("open");
+    expect(data.assigned_delegation_id).toBeUndefined();
+  });
+
+  it("resets in_progress collar-type task → status open, assigned_delegation_id cleared", async () => {
+    seedOpenTask("task_r_collar", {
+      status: "in_progress",
+      assignment_type: "collar",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await reset("task_r_collar");
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.status).toBe("open");
+    expect(data.assigned_delegation_id).toBeUndefined();
+  });
+
+  it("resets in_progress delegation-type task → status open, assigned_delegation_id preserved", async () => {
+    seedOpenTask("task_r_delg", {
+      status: "in_progress",
+      assignment_type: "delegation",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    const res = await reset("task_r_delg");
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.status).toBe("open");
+    expect(data.assigned_delegation_id).toBe(IDS.DELEGATION_ALL);
+  });
+
+  it("returns 400 TASK_NOT_IN_PROGRESS for completed task", async () => {
+    seedOpenTask("task_r_done", { status: "completed" });
+    const res = await reset("task_r_done");
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("TASK_NOT_IN_PROGRESS");
+  });
+
+  it("returns 400 TASK_NOT_IN_PROGRESS for open task", async () => {
+    seedOpenTask("task_r_already_open");
+    const res = await reset("task_r_already_open");
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("TASK_NOT_IN_PROGRESS");
+  });
+
+  it("returns 404 TASK_NOT_FOUND for missing task", async () => {
+    const res = await reset("task_does_not_exist");
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("TASK_NOT_FOUND");
+  });
+
+  it("returns 404 TASK_NOT_FOUND when task belongs to a different workspace", async () => {
+    seedOpenTask("task_r_other_ws", {
+      status: "in_progress",
+      workspace_id: "ws_other_999",
+    });
+    const res = await reset("task_r_other_ws");
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("TASK_NOT_FOUND");
+  });
+
+  it("emits task_reset audit event with actor_type=user and actor_id=MOCK_USER_ID", async () => {
+    seedOpenTask("task_r_audit", { status: "in_progress", assigned_delegation_id: IDS.DELEGATION_ALL });
+    const before = workspaceAuditEvents.size;
+    const res = await reset("task_r_audit");
+    expect(res.statusCode).toBe(200);
+    expect(workspaceAuditEvents.size).toBe(before + 1);
+    const event = Array.from(workspaceAuditEvents.values()).find(
+      (e) => e.event_type === "task_reset" && e.task_id === "task_r_audit",
+    );
+    expect(event).toBeDefined();
+    expect(event!.actor_type).toBe("user");
+    expect(event!.actor_id).toBe(MOCK_USER_ID);
+    expect(event!.delegation_id).toBeUndefined();
+  });
+
+  it("after reset, task appears claimable in agent manifest", async () => {
+    seedOpenTask("task_r_manifest", {
+      status: "in_progress",
+      assigned_delegation_id: IDS.DELEGATION_ALL,
+    });
+    await reset("task_r_manifest");
+
+    const manifestRes = await srv.inject({
+      method: "GET",
+      url: `/api/agent/v1/workspaces/${IDS.WORKSPACE}/manifest`,
+      headers: { Authorization: AUTH_A },
+    });
+    expect(manifestRes.statusCode).toBe(200);
+    const queue = manifestRes.json().data.recommended_work_queue as Array<{ task_id: string; recommended_action: string }>;
+    const entry = queue.find((e) => e.task_id === "task_r_manifest");
+    expect(entry).toBeDefined();
+    expect(entry!.recommended_action).not.toBe("wait");
+  });
+});

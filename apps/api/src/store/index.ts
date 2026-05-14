@@ -28,6 +28,7 @@ import type {
   WorkspaceTask,
   WorkspaceArtifact,
   UserApprovalReceipt,
+  WebsiteTrustProfile,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -199,6 +200,10 @@ export const userApprovalReceipts = new Map<string, UserApprovalReceipt>();
 
 // Signed website trust assertions issued to agents for website handshake; local JSON persistence only (v1).
 export const websiteTrustAssertions = new Map<string, WebsiteTrustAssertion>();
+
+// Signed website trust profiles — website/company-side declared promise snapshots (v1).
+// Future WebsiteViolationReceipt will reference WebsiteTrustProfile.profile_hash.
+export const websiteTrustProfiles = new Map<string, WebsiteTrustProfile>();
 
 // Tokenized payment method capabilities — metadata only, no raw card data (no PAN, no CVV).
 export const paymentMethods = new Map<string, PaymentMethodCapability>();

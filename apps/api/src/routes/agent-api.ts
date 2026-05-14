@@ -44,6 +44,7 @@ import {
   aegisWorkspaces,
   workspaceTasks,
   workspaceArtifacts,
+  websiteTrustProfiles,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
@@ -521,6 +522,67 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(result.validation
             ? { validation: { valid: result.validation.valid, errors: result.validation.errors, warnings: result.validation.warnings } }
             : {}),
+        },
+      });
+    }
+  );
+
+  /**
+   * GET /api/agent/v1/website-trust/:domain
+   * Agent-safe lookup of the registered WebsiteTrustProfile for a domain.
+   * Returns an agent-safe subset: policy, committed safety promises, profile_hash, verification status.
+   * Excludes: profile_jws, accountability_contact, suspension_reason, internal notes.
+   */
+  server.get<{ Params: { domain: string } }>(
+    "/api/agent/v1/website-trust/:domain",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const domain = req.params.domain.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].toLowerCase().trim();
+
+      const profile = Array.from(websiteTrustProfiles.values()).find(
+        (p) => p.domain === domain && p.status === "active"
+      );
+
+      if (!profile) {
+        return reply.send({
+          ok: true,
+          data: {
+            domain,
+            profile_found: false,
+            warning: `No active WebsiteTrustProfile registered with Aegis for domain '${domain}'. This domain has not declared its agent commitments. Require user approval for any sensitive actions.`,
+          },
+        });
+      }
+
+      const warnings: string[] = [];
+      if (profile.verification_status !== "verified") {
+        warnings.push(
+          `Trust profile is '${profile.verification_status}' — declarations have not been verified by Aegis.`
+        );
+      }
+      if (profile.status !== "active") {
+        warnings.push(`Trust profile status is '${profile.status}'.`);
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          profile_found: true,
+          profile_id: profile.profile_id,
+          domain: profile.domain,
+          company_name: profile.company_name,
+          verification_status: profile.verification_status,
+          status: profile.status,
+          profile_version: profile.profile_version,
+          agent_policy: profile.agent_policy,
+          // Only committed promises are returned — uncommitted promises are not actionable for agents.
+          safety_promises: profile.safety_promises.filter((p) => p.committed),
+          profile_hash: profile.profile_hash,
+          jws_present: profile.jws_present,
+          violation_count: profile.violation_count,
+          warning: warnings.length > 0 ? warnings.join(" ") : null,
         },
       });
     }

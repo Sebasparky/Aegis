@@ -1051,6 +1051,76 @@ async function verifyWebsiteTrustAssertion({ assertion_id } = {}) {
   };
 }
 
+// ─── Website AegisID Trust Profile handlers ───────────────────────────────────
+
+async function getWebsiteTrustProfile({ domain } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/website-trust/${encodeURIComponent(domain)}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get website trust profile." };
+  }
+  const data = res.data;
+  if (!data.profile_found) {
+    return {
+      domain,
+      profile_found: false,
+      warning: data.warning,
+      interpretation: `No active WebsiteTrustProfile is registered with Aegis for '${domain}'. This domain has not declared its agent commitments. Proceed with caution and require user approval for any sensitive actions.`,
+    };
+  }
+  const verificationNote = data.verification_status === "verified"
+    ? "Profile is Aegis-verified."
+    : `Profile is '${data.verification_status}' — declarations have not been verified by Aegis.`;
+  return {
+    profile_found: true,
+    profile_id: data.profile_id,
+    domain: data.domain,
+    company_name: data.company_name,
+    verification_status: data.verification_status,
+    status: data.status,
+    profile_version: data.profile_version,
+    agent_policy: data.agent_policy,
+    committed_safety_promises: data.safety_promises,
+    profile_hash: data.profile_hash,
+    jws_present: data.jws_present,
+    violation_count: data.violation_count,
+    warning: data.warning ?? null,
+    interpretation: `${verificationNote} ${data.safety_promises?.length ?? 0} committed safety promise(s) declared. This profile represents the website's declared commitments to agents — not a real-time guarantee of compliance. profile_hash='${data.profile_hash}' can be referenced in future violation receipts.`,
+  };
+}
+
+async function verifyWebsiteTrustProfile({ profile_id } = {}) {
+  if (!profile_id) return { error: "VALIDATION_ERROR", message: "profile_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/website-trust-profiles/${encodeURIComponent(profile_id)}/verify`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to verify website trust profile." };
+  }
+  const v = res.data;
+  return {
+    profile_id,
+    valid: v.valid,
+    hash_valid: v.hash_valid,
+    signature_valid: v.signature_valid,
+    recomputed_hash: v.recomputed_hash,
+    stored_hash: v.stored_hash,
+    jws_payload: v.jws_payload ?? null,
+    error: v.error ?? null,
+    interpretation: v.valid
+      ? "Trust profile is cryptographically intact. The declared commitments have not been tampered with since Aegis signed this profile."
+      : `Trust profile is NOT valid: ${v.error ?? "unknown reason"}. Do not rely on this profile for trust decisions.`,
+  };
+}
+
 async function getRuntimeObservation({ session_id } = {}) {
   if (!session_id) return { error: "VALIDATION_ERROR", message: "session_id is required." };
   let res;
@@ -2136,6 +2206,36 @@ const TOOLS = [
     },
   },
   {
+    name: "get_website_trust_profile",
+    description:
+      "Look up the Aegis-registered trust profile for a website domain. Returns the website's declared agent policy (allowed/prohibited actions, approval requirements, credential and payment handling commitments) and its signed safety promises. Distinct from get_website_agent_safety_profile (Aegis-computed evidence view) — this is what the website itself has declared and committed to Aegis. Only returns promises the site has committed to (committed=true). The profile_hash can be referenced in future WebsiteViolationReceipts if the site breaks its promises. Advisory only — represents declarations, not verified compliance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "The domain to look up, e.g. 'localhost', 'example-store.local'.",
+        },
+      },
+      required: ["domain"],
+    },
+  },
+  {
+    name: "verify_website_trust_profile",
+    description:
+      "Verify the cryptographic integrity of an Aegis website trust profile by recomputing its canonical hash and verifying the EdDSA JWS signature. A valid result (valid=true) confirms the profile's declared promises have not been tampered with since Aegis signed them. Returns hash_valid, signature_valid, the JWS payload, and an interpretation. Use after get_website_trust_profile when you need to confirm the profile's integrity before relying on its declared policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        profile_id: {
+          type: "string",
+          description: "The profile_id from get_website_trust_profile (e.g. 'wtp_demo_localhost_001').",
+        },
+      },
+      required: ["profile_id"],
+    },
+  },
+  {
     name: "get_website_agent_safety_profile",
     description:
       "Evaluate whether a website is safe for agent interaction for a specific task category. Returns a deterministic profile based on Aegis-observed signals: known routes, verified receipts, runtime coverage violations, interventions, and observation mode. Does not crawl the site live and does not verify business identity. Advisory only — not a guarantee. Use before requesting a skill run to understand the website's Aegis coverage posture for the task.",
@@ -2906,6 +3006,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "get_runtime_observation_mode":
       result = await getRuntimeObservationMode(a);
+      break;
+    case "get_website_trust_profile":
+      result = await getWebsiteTrustProfile(a);
+      break;
+    case "verify_website_trust_profile":
+      result = await verifyWebsiteTrustProfile(a);
       break;
     case "get_website_agent_safety_profile":
       result = await getWebsiteAgentSafetyProfile(a);

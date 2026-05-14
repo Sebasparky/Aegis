@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile } from "@aegis/types";
+import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
   collars,
@@ -39,6 +40,7 @@ import {
   workspaceTasks,
   workspaceArtifacts,
   workspaceAuditEvents,
+  websiteTrustProfiles,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -265,6 +267,7 @@ export async function seedDefaultData(): Promise<void> {
   }
 
   ensureWebsiteTrustSeeds(NOW);
+  await ensureWebsiteTrustProfileSeeds(NOW);
 
   // Seed demo vault pass metadata (also needed after resetStoreForDemo clears all maps)
   if (!aegisVaultPasses.has("pass_vault_demo_login_001")) {
@@ -357,6 +360,87 @@ function ensureWebsiteTrustSeeds(now?: string): void {
   }
 }
 
+async function ensureWebsiteTrustProfileSeeds(now?: string): Promise<void> {
+  if (websiteTrustProfiles.has("wtp_demo_localhost_001")) return;
+
+  const NOW = now ?? new Date().toISOString();
+
+  const allCommitted = STANDARD_SAFETY_PROMISES.map((p) => ({ ...p, committed: true }));
+  const noneCommitted = STANDARD_SAFETY_PROMISES.map((p) => ({ ...p, committed: false }));
+
+  const verifiedFields: Omit<WebsiteTrustProfile, "profile_hash" | "profile_jws" | "jws_present"> = {
+    profile_id: "wtp_demo_localhost_001",
+    website_aegis_id: "web_aegis_demo_store",
+    domain: "localhost",
+    company_name: "AegisDemo Store",
+    verification_status: "verified",
+    verified_at: NOW,
+    profile_version: "1",
+    status: "active",
+    created_at: NOW,
+    updated_at: NOW,
+    agent_policy: {
+      allowed_agent_actions: ["browse", "search", "add_to_cart", "login"],
+      prohibited_agent_actions: ["account_deletion", "subscription_signup"],
+      sensitive_actions_require_aegis_approval: true,
+      credential_handling_policy:
+        "Credentials handled exclusively via Aegis-controlled injection. No raw credentials accepted by page scripts.",
+      payment_action_policy:
+        "All payment actions require Aegis approval gate. No auto-payment without explicit user confirmation.",
+      data_usage_policy:
+        "Agent session data used only for task completion. Not stored or shared beyond the session.",
+      prompt_injection_commitment:
+        "Page content does not embed agent instruction overrides or hidden system-prompt injections.",
+      agent_safe_interaction_commitment:
+        "All sensitive actions expose machine-readable Aegis metadata for detection and governance.",
+    },
+    safety_promises: allCommitted,
+    reputation_score: 100,
+    last_reviewed_at: NOW,
+    violation_count: 0,
+    accountability_contact: "trust@aegisdemo.local",
+    policy_url: "http://localhost:3000/.well-known/aegis-policy.json",
+  };
+
+  try {
+    const signed = await buildSignedWebsiteTrustProfile(verifiedFields);
+    websiteTrustProfiles.set(signed.profile_id, signed);
+  } catch (err) {
+    console.error("[persistence] Failed to seed localhost WebsiteTrustProfile:", err);
+  }
+
+  const unverifiedFields: Omit<WebsiteTrustProfile, "profile_hash" | "profile_jws" | "jws_present"> = {
+    profile_id: "wtp_demo_example_store_001",
+    website_aegis_id: "web_aegis_example_store",
+    domain: "example-store.local",
+    company_name: "Example Store (Unverified)",
+    verification_status: "unverified",
+    profile_version: "1",
+    status: "active",
+    created_at: NOW,
+    updated_at: NOW,
+    agent_policy: {
+      allowed_agent_actions: ["browse", "search"],
+      prohibited_agent_actions: [],
+      sensitive_actions_require_aegis_approval: false,
+      credential_handling_policy: "Not declared.",
+      payment_action_policy: "Not declared.",
+      data_usage_policy: "Not declared.",
+      prompt_injection_commitment: "Not declared.",
+      agent_safe_interaction_commitment: "Not declared.",
+    },
+    safety_promises: noneCommitted,
+    violation_count: 0,
+  };
+
+  try {
+    const signed = await buildSignedWebsiteTrustProfile(unverifiedFields);
+    websiteTrustProfiles.set(signed.profile_id, signed);
+  } catch (err) {
+    console.error("[persistence] Failed to seed example-store WebsiteTrustProfile:", err);
+  }
+}
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 export function persistStore(): void {
@@ -397,6 +481,7 @@ export function persistStore(): void {
       workspaceTasks: Array.from(workspaceTasks.entries()),
       workspaceArtifacts: Array.from(workspaceArtifacts.entries()),
       workspaceAuditEvents: Array.from(workspaceAuditEvents.entries()),
+      websiteTrustProfiles: Array.from(websiteTrustProfiles.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -460,6 +545,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.actionAuthorizations ?? [])) actionAuthorizations.set(k, v as ActionAuthorizationReceipt);
     for (const [k, v] of (data.userApprovalReceipts ?? [])) userApprovalReceipts.set(k, v as UserApprovalReceipt);
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
+    for (const [k, v] of (data.websiteTrustProfiles ?? [])) websiteTrustProfiles.set(k, v as WebsiteTrustProfile);
     for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
     for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
 
@@ -541,6 +627,7 @@ export async function loadStore(): Promise<void> {
     }
 
     ensureWebsiteTrustSeeds();
+    await ensureWebsiteTrustProfileSeeds();
 
     const errorCount = Array.from(sessions.values()).filter(
       (s) => (s as any).status === "error"
@@ -590,6 +677,7 @@ export async function resetStoreForDemo(): Promise<void> {
   workspaceTasks.clear();
   workspaceArtifacts.clear();
   workspaceAuditEvents.clear();
+  websiteTrustProfiles.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

@@ -635,6 +635,82 @@ export interface UserApprovalReceiptVerificationResult {
   error?: string;
 }
 
+// ─── Website AegisID Trust Profiles v1 ──────────────────────────────────────
+// Website/company-side declared promise snapshot for delegated-agent trust.
+// Future WebsiteViolationReceipt will reference WebsiteTrustProfile.profile_hash.
+
+export type WebsiteProfileStatus = "active" | "revoked" | "superseded";
+export type WebsiteVerificationStatus = "unverified" | "verified" | "suspended";
+
+export interface WebsiteAgentPolicyDeclaration {
+  allowed_agent_actions: string[];
+  prohibited_agent_actions: string[];
+  sensitive_actions_require_aegis_approval: boolean;
+  credential_handling_policy: string;
+  payment_action_policy: string;
+  data_usage_policy: string;
+  prompt_injection_commitment: string;
+  agent_safe_interaction_commitment: string;
+}
+
+export interface WebsiteSafetyPromise {
+  promise_id: string;
+  title: string;
+  description: string;
+  severity_if_violated: "low" | "medium" | "high" | "critical";
+  committed: boolean;
+}
+
+export interface WebsiteTrustProfile {
+  profile_id: string;            // "wtp_..."
+  website_aegis_id: string;
+  domain: string;
+  company_name: string;
+  verification_status: WebsiteVerificationStatus;
+  verified_at?: string;
+  profile_version: string;       // "1"
+  status: WebsiteProfileStatus;
+  created_at: string;
+  updated_at: string;
+
+  agent_policy: WebsiteAgentPolicyDeclaration;
+  safety_promises: WebsiteSafetyPromise[];
+
+  reputation_score?: number;
+  last_reviewed_at?: string;
+  violation_count: number;
+  suspension_reason?: string;
+  accountability_contact?: string;
+  policy_url?: string;
+
+  // Signing metadata — excluded from hash (circular/computed). JWS signs the hash.
+  profile_hash: string;
+  profile_jws?: string;
+  jws_present: boolean;
+}
+
+export interface WebsiteTrustProfileJwsPayload {
+  typ: "aegis.website_trust_profile.v1";
+  profile_id: string;
+  profile_hash: string;
+  domain: string;
+  issuer: string;
+  issued_at: string;
+  verification_status: WebsiteVerificationStatus;
+  status: WebsiteProfileStatus;
+}
+
+export interface WebsiteTrustProfileVerificationResult {
+  profile_id: string;
+  valid: boolean;
+  hash_valid: boolean;
+  signature_valid: boolean;
+  recomputed_hash?: string;
+  stored_hash?: string;
+  jws_payload?: WebsiteTrustProfileJwsPayload;
+  error?: string;
+}
+
 export interface ApprovalManifestLineItem {
   label: string;
   value: string;

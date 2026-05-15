@@ -2,9 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AegisRoute, ActionType, RouteStep, RouteVerificationReport, StepVerificationResult } from "@aegis/types";
-import { listRoutes, recordRoute, deleteRoute, verifyRoute, patchRoute, submitRouteForReview } from "../../lib/api";
+import {
+  listRoutes, recordRoute, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
+  listSkills, installSkill, uninstallSkill,
+} from "../../lib/api";
+import type { SkillWithInstalled } from "../../lib/api";
 
-// ─── Trust tier → friendly label ─────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const TIER_LABEL: Record<string, string> = {
   unverified_draft: "Draft",
@@ -15,23 +19,14 @@ const TIER_LABEL: Record<string, string> = {
   business_official: "Business Official",
 };
 
-const TIER_COLORS: Record<string, string> = {
-  unverified_draft: "text-gray-400 bg-gray-800 border-gray-700",
-  community: "text-blue-400 bg-blue-950 border-blue-900",
-  aegis_scanned: "text-cyan-400 bg-cyan-950 border-cyan-900",
-  aegis_reviewed: "text-green-400 bg-green-950 border-green-900",
-  run_verified: "text-emerald-400 bg-emerald-950 border-emerald-900",
-  business_official: "text-purple-400 bg-purple-950 border-purple-900",
+const TIER_VARIANT: Record<string, string> = {
+  unverified_draft: "graphite",
+  community: "blue",
+  aegis_scanned: "green",
+  aegis_reviewed: "green",
+  run_verified: "green",
+  business_official: "green",
 };
-
-const RISK_COLORS: Record<string, string> = {
-  low: "text-green-400",
-  medium: "text-yellow-400",
-  high: "text-orange-400",
-  critical: "text-red-400",
-};
-
-// ─── Action type → plain-English label ───────────────────────────────────────
 
 const ACTION_LABELS: Partial<Record<ActionType, string>> = {
   browse: "Browse pages",
@@ -66,11 +61,9 @@ const ACTION_LABELS: Partial<Record<ActionType, string>> = {
   oauth_authorize: "Authorize via OAuth",
 };
 
-function friendlyAction(a: ActionType): string {
-  return ACTION_LABELS[a] ?? a;
+function friendlyAction(a: ActionType | string): string {
+  return (ACTION_LABELS as Record<string, string>)[a] ?? a;
 }
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function friendlyDate(iso: string | undefined): string {
   if (!iso || iso === "1970-01-01T00:00:00.000Z") return "Never";
@@ -79,64 +72,108 @@ function friendlyDate(iso: string | undefined): string {
 
 function stepDescription(step: RouteStep): string {
   if (step.description && step.description.trim()) return step.description;
-  const intentLabel = step.intent.replace(/_/g, " ");
-  return `${step.action} — ${intentLabel}`;
+  return `${step.action} — ${step.intent.replace(/_/g, " ")}`;
 }
 
-// ─── Route capability helpers ─────────────────────────────────────────────────
-
-function routeOrigin(domain: string): 'local' | 'wikipedia' | 'external' {
-  if (domain === 'localhost' || domain === '127.0.0.1') return 'local';
-  if (domain === 'en.wikipedia.org') return 'wikipedia';
-  return 'external';
+function routeOrigin(domain: string): "local" | "wikipedia" | "external" {
+  if (domain === "localhost" || domain === "127.0.0.1") return "local";
+  if (domain === "en.wikipedia.org") return "wikipedia";
+  return "external";
 }
 
 function hasVisualReplay(domain: string): boolean {
   const o = routeOrigin(domain);
-  return o === 'local' || o === 'wikipedia';
+  return o === "local" || o === "wikipedia";
 }
 
-const VERIFIED_TIERS = new Set(['aegis_scanned', 'aegis_reviewed', 'run_verified', 'business_official']);
+const VERIFIED_TIERS = new Set(["aegis_scanned", "aegis_reviewed", "run_verified", "business_official"]);
 
 function isRouteVerified(tier: string): boolean {
   return VERIFIED_TIERS.has(tier);
 }
 
 function hasSensitiveValues(steps: RouteStep[]): boolean {
-  return steps.some(s => s.value_policy?.type === 'sensitive_redacted');
+  return steps.some(s => s.value_policy?.type === "sensitive_redacted");
 }
 
 function hasFillSteps(steps: RouteStep[]): boolean {
-  return steps.some(s => s.action === 'fill');
+  return steps.some(s => s.action === "fill");
 }
 
 function locatorQuality(steps: RouteStep[]): { high: number; low: number } {
   let high = 0, low = 0;
   for (const step of steps) {
     const t = step.target.preferred_locator.type;
-    if (t === 'role' || t === 'label' || t === 'placeholder') high++;
+    if (t === "role" || t === "label" || t === "placeholder") high++;
     else low++;
   }
   return { high, low };
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── Design primitives ────────────────────────────────────────────────────────
 
-function StatusBadge({ tier }: { tier: string }) {
+type PillColor = "green" | "amber" | "red" | "blue" | "graphite";
+
+function pillStyle(color: PillColor): React.CSSProperties {
+  const map: Record<PillColor, React.CSSProperties> = {
+    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)"    },
+    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)"    },
+    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"      },
+    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)"     },
+    graphite: { background: "var(--graphite-soft)", color: "var(--ink-3)",         border: "1px solid var(--hairline)"      },
+  };
+  return { ...map[color], fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, display: "inline-flex", alignItems: "center" };
+}
+
+function riskPillColor(level: string): PillColor {
+  if (level === "low") return "green";
+  if (level === "medium") return "amber";
+  return "red";
+}
+
+function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
   return (
-    <span className={`text-xs px-2 py-0.5 rounded border font-medium ${TIER_COLORS[tier] ?? TIER_COLORS.unverified_draft}`}>
-      {TIER_LABEL[tier] ?? tier}
+    <div>
+      <div style={{ fontFamily: '"Newsreader", Georgia, serif', fontSize: 30, fontWeight: 400, color: "var(--ink-1)", lineHeight: 1 }}>
+        {loading ? "—" : value}
+      </div>
+      <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-4)", marginTop: 4 }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function AStatus({ label, variant = "graphite" }: { label: string; variant?: string }) {
+  return (
+    <span className={`a-status a-status--${variant}`}>
+      <span className="a-status__dot" />
+      {label}
     </span>
   );
 }
 
-function PrivateBadge() {
+// ─── SVG icons ────────────────────────────────────────────────────────────────
+
+function RouteSVG() {
   return (
-    <span className="text-xs px-2 py-0.5 rounded border border-gray-700 text-gray-500 bg-gray-800">
-      Private
-    </span>
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h4l3-9 4 18 3-9h4" />
+    </svg>
   );
 }
+
+function ShopSVG() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z" />
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <path d="M16 10a4 4 0 01-8 0" />
+    </svg>
+  );
+}
+
+// ─── StepRow ──────────────────────────────────────────────────────────────────
 
 function StepRow({ step }: { step: RouteStep }) {
   const locType = step.target.preferred_locator.type;
@@ -146,81 +183,68 @@ function StepRow({ step }: { step: RouteStep }) {
     step.target.preferred_locator.role ?? "";
 
   return (
-    <div className="flex items-start gap-3 py-2.5 border-b border-gray-800 last:border-0">
-      <span className="shrink-0 w-6 h-6 flex items-center justify-center bg-gray-800 rounded text-xs text-gray-400 font-mono">
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--hairline)" }}>
+      <span style={{ flexShrink: 0, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--graphite-soft)", borderRadius: "var(--r-1)", fontSize: 11, color: "var(--ink-3)", fontFamily: "monospace" }}>
         {step.order}
       </span>
-      <div className="flex-1 min-w-0 space-y-0.5">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-mono text-indigo-300">{step.action}</span>
-          <span className="text-xs text-gray-400 truncate">{step.intent}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11.5, fontFamily: "monospace", color: "oklch(0.45 0.09 240)" }}>{step.action}</span>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{step.intent}</span>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-gray-600">
-            {locType}: <span className="text-gray-400 font-mono truncate">{locDisplay}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+          <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+            {locType}: <span style={{ fontFamily: "monospace", color: "var(--ink-3)" }}>{locDisplay}</span>
           </span>
-          <span className="text-xs text-gray-600">
-            conf:{" "}
-            <span className={step.target.confidence >= 0.8 ? "text-green-400" : "text-yellow-400"}>
-              {(step.target.confidence * 100).toFixed(0)}%
-            </span>
+          <span style={{ fontSize: 11, color: step.target.confidence >= 0.8 ? "oklch(0.42 0.09 150)" : "oklch(0.45 0.12 75)" }}>
+            {(step.target.confidence * 100).toFixed(0)}% conf
           </span>
         </div>
       </div>
     </div>
   );
 }
+
+// ─── VerificationStepRow ──────────────────────────────────────────────────────
 
 function VerificationStepRow({ step, result }: { step: RouteStep; result: StepVerificationResult }) {
   return (
-    <div className="flex items-center gap-2 text-xs py-1 border-b border-gray-800 last:border-0">
-      <span className={`shrink-0 w-4 text-center font-mono ${result.passed ? "text-cyan-400" : "text-red-400"}`}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "6px 12px", borderBottom: "1px solid var(--hairline)" }}>
+      <span style={{ flexShrink: 0, width: 14, textAlign: "center", color: result.passed ? "oklch(0.42 0.09 150)" : "oklch(0.45 0.13 25)", fontFamily: "monospace" }}>
         {result.passed ? "✓" : "✗"}
       </span>
-      <span className="text-gray-400 flex-1 truncate">{step.intent.replace(/_/g, " ")}</span>
+      <span style={{ color: "var(--ink-2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {step.intent.replace(/_/g, " ")}
+      </span>
       {result.selected_locator && (
-        <span className="text-gray-600 font-mono shrink-0">
-          via {result.selected_locator.type}
-        </span>
+        <span style={{ color: "var(--ink-4)", fontFamily: "monospace", flexShrink: 0, fontSize: 11 }}>via {result.selected_locator.type}</span>
       )}
       {result.locator_attempts.length > 1 && (
-        <span className="text-gray-700 shrink-0">
-          ({result.locator_attempts.length} attempts)
-        </span>
+        <span style={{ color: "var(--ink-4)", flexShrink: 0, fontSize: 11 }}>({result.locator_attempts.length} attempts)</span>
       )}
     </div>
   );
 }
 
-// ─── Health Row ───────────────────────────────────────────────────────────────
+// ─── HealthRow ────────────────────────────────────────────────────────────────
 
-function HealthRow({
-  ok,
-  label,
-  detail,
-  neutral = false,
-}: {
-  ok: boolean;
-  label: string;
-  detail?: string;
-  neutral?: boolean;
-}) {
+function HealthRow({ ok, label, detail, neutral = false }: { ok: boolean; label: string; detail?: string; neutral?: boolean }) {
+  const iconColor = neutral ? "var(--ink-4)" : ok ? "oklch(0.42 0.09 150)" : "oklch(0.45 0.12 75)";
+  const labelColor = neutral ? "var(--ink-3)" : ok ? "var(--ink-2)" : "oklch(0.45 0.12 75)";
   return (
-    <div className="flex items-start gap-2 text-xs">
-      <span className={`shrink-0 font-mono mt-0.5 w-3 text-center ${neutral ? 'text-gray-600' : ok ? 'text-green-400' : 'text-yellow-500'}`}>
-        {neutral ? '·' : ok ? '✓' : '○'}
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12 }}>
+      <span style={{ flexShrink: 0, width: 14, textAlign: "center", marginTop: 1, color: iconColor, fontFamily: "monospace" }}>
+        {neutral ? "·" : ok ? "✓" : "○"}
       </span>
-      <div className="min-w-0">
-        <span className={`font-medium ${neutral ? 'text-gray-500' : ok ? 'text-gray-300' : 'text-yellow-300'}`}>
-          {label}
-        </span>
-        {detail && <span className="text-gray-600 ml-1.5">{detail}</span>}
+      <div style={{ minWidth: 0 }}>
+        <span style={{ fontWeight: 500, color: labelColor }}>{label}</span>
+        {detail && <span style={{ color: "var(--ink-4)", marginLeft: 6 }}>{detail}</span>}
       </div>
     </div>
   );
 }
 
-// ─── Capability Badges ────────────────────────────────────────────────────────
+// ─── CapabilityBadges ─────────────────────────────────────────────────────────
 
 function CapabilityBadges({ route }: { route: AegisRoute }) {
   const origin = routeOrigin(route.domain);
@@ -230,47 +254,19 @@ function CapabilityBadges({ route }: { route: AegisRoute }) {
   const hasFills = hasFillSteps(route.steps);
 
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {origin === 'local' && (
-        <span className="text-xs px-2 py-0.5 rounded border text-teal-400 bg-teal-950 border-teal-900">
-          Local demo
-        </span>
-      )}
-      {origin === 'wikipedia' && (
-        <span className="text-xs px-2 py-0.5 rounded border text-blue-400 bg-blue-950 border-blue-900">
-          Wikipedia
-        </span>
-      )}
-      {origin === 'external' && (
-        <span className="text-xs px-2 py-0.5 rounded border text-gray-500 bg-gray-800 border-gray-700">
-          External site
-        </span>
-      )}
-      {visualReplay && (
-        <span className="text-xs px-2 py-0.5 rounded border text-indigo-400 bg-indigo-950 border-indigo-800">
-          Visual replay
-        </span>
-      )}
-      {parameterized && (
-        <span className="text-xs px-2 py-0.5 rounded border text-purple-400 bg-purple-950 border-purple-900">
-          Parameterized
-        </span>
-      )}
-      {sensProtected && (
-        <span className="text-xs px-2 py-0.5 rounded border text-amber-400 bg-amber-950 border-amber-900">
-          Sensitive values protected
-        </span>
-      )}
-      {!sensProtected && hasFills && (
-        <span className="text-xs px-2 py-0.5 rounded border text-gray-500 bg-gray-800 border-gray-700">
-          No sensitive fields
-        </span>
-      )}
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+      {origin === "local" && <span style={pillStyle("green")}>Local demo</span>}
+      {origin === "wikipedia" && <span style={pillStyle("blue")}>Wikipedia</span>}
+      {origin === "external" && <span style={pillStyle("graphite")}>External site</span>}
+      {visualReplay && <span style={pillStyle("blue")}>Visual replay</span>}
+      {parameterized && <span style={pillStyle("blue")}>Parameterized</span>}
+      {sensProtected && <span style={pillStyle("amber")}>Sensitive values protected</span>}
+      {!sensProtected && hasFills && <span style={pillStyle("graphite")}>No sensitive fields</span>}
     </div>
   );
 }
 
-// ─── Preview Panel ────────────────────────────────────────────────────────────
+// ─── PreviewPanel ─────────────────────────────────────────────────────────────
 
 function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport: RouteVerificationReport | null }) {
   const origin = routeOrigin(route.domain);
@@ -280,27 +276,29 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
   const hasVars = (route.variables?.length ?? 0) > 0;
   const { high: highLocators, low: lowLocators } = locatorQuality(route.steps);
 
+  const sectionHead: React.CSSProperties = {
+    fontSize: 10.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase",
+    color: "var(--ink-3)", margin: "0 0 10px",
+  };
+
   return (
-    <div className="border-t border-gray-800 bg-gray-950 px-5 py-4 space-y-5">
+    <div style={{ borderTop: "1px solid var(--hairline)", padding: "18px 20px", display: "flex", flexDirection: "column", gap: 20 }}>
+
       {/* What this skill does */}
       <div>
-        <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-          What this skill does
-        </h4>
+        <p style={sectionHead}>What this skill does</p>
         {route.workflow_description && (
-          <p className="text-sm text-gray-400 mb-3 leading-relaxed">{route.workflow_description}</p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.6, marginTop: 0 }}>{route.workflow_description}</p>
         )}
-        <ol className="space-y-1.5">
+        <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {route.steps.map((step) => (
-            <li key={step.step_id} className="flex items-start gap-2.5 text-sm text-gray-300">
-              <span className="shrink-0 w-5 h-5 flex items-center justify-center rounded bg-gray-800 text-xs text-gray-500 font-mono mt-0.5">
+            <li key={step.step_id} style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 12.5, color: "var(--ink-2)" }}>
+              <span style={{ flexShrink: 0, width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--graphite-soft)", borderRadius: "var(--r-1)", fontSize: 11, color: "var(--ink-3)", fontFamily: "monospace", marginTop: 1 }}>
                 {step.order}
               </span>
-              <span className="leading-relaxed">{stepDescription(step)}</span>
+              <span style={{ lineHeight: 1.5, flex: 1 }}>{stepDescription(step)}</span>
               {step.approval_required && (
-                <span className="shrink-0 text-xs text-amber-400 bg-amber-950 border border-amber-900 rounded px-1.5 py-0.5 mt-0.5">
-                  requires approval
-                </span>
+                <span style={{ ...pillStyle("amber"), flexShrink: 0, marginTop: 1 }}>approval required</span>
               )}
             </li>
           ))}
@@ -309,38 +307,31 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
 
       {/* What this skill will not do */}
       <div>
-        <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-          What this skill will not do
-        </h4>
+        <p style={sectionHead}>What this skill will not do</p>
         {route.forbidden_actions.length === 0 ? (
-          <p className="text-sm text-gray-600">No explicit restrictions recorded.</p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No explicit restrictions recorded.</p>
         ) : (
-          <ul className="space-y-1">
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
             {route.forbidden_actions.map((a) => (
-              <li key={a} className="flex items-center gap-2 text-sm text-red-400">
-                <span className="text-red-700">✗</span>
-                {friendlyAction(a)}
+              <li key={a} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "oklch(0.45 0.13 25)" }}>
+                <span>✗</span>{friendlyAction(a)}
               </li>
             ))}
           </ul>
         )}
       </div>
 
-      {/* Approval required before */}
+      {/* Approval gates */}
       <div>
-        <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-          Approval required before
-        </h4>
+        <p style={sectionHead}>Approval required before</p>
         {route.approval_gates.length === 0 ? (
-          <p className="text-sm text-gray-600">No approval gates on this skill.</p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No approval gates on this skill.</p>
         ) : (
-          <ul className="space-y-1.5">
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
             {route.approval_gates.map((gate) => (
-              <li key={gate.step_id} className="text-sm text-amber-300 bg-amber-950 border border-amber-900 rounded px-3 py-1.5">
-                {gate.reason}
-                <span className={`ml-2 text-xs ${RISK_COLORS[gate.risk_level] ?? "text-gray-400"}`}>
-                  ({gate.risk_level} risk)
-                </span>
+              <li key={gate.step_id} style={{ fontSize: 12.5, color: "oklch(0.45 0.12 75)", background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-2)", padding: "8px 12px", display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ flex: 1 }}>{gate.reason}</span>
+                <span style={pillStyle(riskPillColor(gate.risk_level))}>{gate.risk_level} risk</span>
               </li>
             ))}
           </ul>
@@ -350,14 +341,10 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
       {/* Required permissions */}
       {route.required_permissions.length > 0 && (
         <div>
-          <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-            Required permissions
-          </h4>
-          <div className="flex flex-wrap gap-1.5">
+          <p style={sectionHead}>Required permissions</p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
             {route.required_permissions.map((p) => (
-              <span key={p} className="text-xs px-2 py-0.5 rounded border border-indigo-800 text-indigo-300 bg-indigo-950">
-                {friendlyAction(p)}
-              </span>
+              <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
             ))}
           </div>
         </div>
@@ -365,71 +352,35 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
 
       {/* Route Health */}
       <div>
-        <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-          Route Health
-        </h4>
-        <div className="space-y-1.5">
-          <HealthRow
-            ok={true}
-            label="Private use"
-            detail="Available — only visible to you, not discoverable by other agents"
-          />
-          <HealthRow
-            ok={true}
-            label="Domain locked"
-            detail={`Restricted to ${route.domain}`}
-          />
+        <p style={sectionHead}>Route Health</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <HealthRow ok={true} label="Private use" detail="Available — only visible to you, not discoverable by other agents" />
+          <HealthRow ok={true} label="Domain locked" detail={`Restricted to ${route.domain}`} />
           <HealthRow
             ok={verified}
             label={verified ? `Verified — ${TIER_LABEL[route.trust_tier] ?? route.trust_tier}` : "Not yet verified"}
             detail={verified ? "Eligible for marketplace review submission" : "Optional for private use — required before marketplace submission"}
           />
           <HealthRow
-            ok={verified}
-            label={verified ? "Eligible for marketplace submission" : "Not submitted for marketplace"}
-            detail={verified ? "Use Submit for Review to list this skill" : "Verify your route first, then submit for review"}
-            neutral={!verified}
-          />
-          <HealthRow
             ok={visualReplay}
             label={visualReplay ? "Visual replay available" : "Visual replay not supported"}
-            detail={
-              origin === 'local' ? "Via demo bank page" :
-              origin === 'wikipedia' ? "Via Chrome extension" :
-              "Not yet supported for this domain"
-            }
+            detail={origin === "local" ? "Via demo bank page" : origin === "wikipedia" ? "Via Chrome extension" : "Not yet supported for this domain"}
           />
           <HealthRow
             ok={sensProtected}
             label={sensProtected ? "Sensitive values protected" : "No sensitive fields detected"}
-            detail={
-              sensProtected
-                ? "Redacted at record time; supplied at runtime"
-                : "All recorded values are safe literals or selectors"
-            }
+            detail={sensProtected ? "Redacted at record time; supplied at runtime" : "All recorded values are safe literals or selectors"}
           />
           <HealthRow
             ok={hasVars}
-            label={
-              hasVars
-                ? `Parameterized — ${route.variables!.length} variable${route.variables!.length !== 1 ? 's' : ''}`
-                : "No variables"
-            }
+            label={hasVars ? `Parameterized — ${route.variables!.length} variable${route.variables!.length !== 1 ? "s" : ""}` : "No variables"}
             detail={hasVars ? "Route accepts runtime inputs" : "Route uses fixed recorded values"}
             neutral={!hasVars}
           />
           <HealthRow
             ok={lowLocators === 0}
-            label={
-              lowLocators === 0
-                ? `${highLocators} semantic locator${highLocators !== 1 ? 's' : ''}`
-                : `${lowLocators} fragile locator${lowLocators !== 1 ? 's' : ''}`
-            }
-            detail={
-              lowLocators === 0
-                ? "All steps use role, label, or placeholder targeting"
-                : `${lowLocators} step${lowLocators !== 1 ? 's' : ''} use css/xpath — may break on layout changes`
-            }
+            label={lowLocators === 0 ? `${highLocators} semantic locator${highLocators !== 1 ? "s" : ""}` : `${lowLocators} fragile locator${lowLocators !== 1 ? "s" : ""}`}
+            detail={lowLocators === 0 ? "All steps use role, label, or placeholder targeting" : `${lowLocators} step${lowLocators !== 1 ? "s" : ""} use css/xpath — may break on layout changes`}
           />
         </div>
       </div>
@@ -437,26 +388,25 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
       {/* Verification summary */}
       {verifyReport && (
         <div>
-          <h4 className="text-xs font-semibold text-white uppercase tracking-wider mb-2">
-            Verification summary
-          </h4>
-          <div className={`rounded px-3 py-2 text-xs border mb-2 ${
-            verifyReport.passed
-              ? "text-cyan-300 bg-cyan-950 border-cyan-900"
-              : "text-red-300 bg-red-950 border-red-900"
-          }`}>
+          <p style={sectionHead}>Verification summary</p>
+          <div style={{
+            fontSize: 12.5, borderRadius: "var(--r-2)", padding: "8px 12px", marginBottom: 10,
+            ...(verifyReport.passed
+              ? { color: "oklch(0.42 0.09 150)", background: "var(--green-soft)", border: "1px solid var(--green-ring)" }
+              : { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }),
+          }}>
             {verifyReport.passed
               ? `Aegis verified this skill — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`
               : `Verification failed — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`}
           </div>
-          <div className="border border-gray-800 rounded divide-y divide-gray-800">
+          <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-2)", overflow: "hidden" }}>
             {verifyReport.step_results.map((result) => {
               const step = route.steps.find(s => s.step_id === result.step_id);
               if (!step) return null;
               return <VerificationStepRow key={result.step_id} step={step} result={result} />;
             })}
           </div>
-          <p className="text-xs text-gray-600 mt-1.5">
+          <p style={{ fontSize: 11.5, color: "var(--ink-4)", marginTop: 6, marginBottom: 0 }}>
             Last verified: {friendlyDate(verifyReport.completed_at)}
           </p>
         </div>
@@ -465,13 +415,9 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
   );
 }
 
-// ─── Rename Modal ─────────────────────────────────────────────────────────────
+// ─── RenameModal ──────────────────────────────────────────────────────────────
 
-function RenameModal({
-  current,
-  onSave,
-  onCancel,
-}: {
+function RenameModal({ current, onSave, onCancel }: {
   current: string;
   onSave: (name: string) => Promise<void>;
   onCancel: () => void;
@@ -481,10 +427,7 @@ function RenameModal({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
+  useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -492,43 +435,28 @@ function RenameModal({
     if (!trimmed) { setError("Name cannot be empty."); return; }
     setSaving(true);
     setError(null);
-    try {
-      await onSave(trimmed);
-    } catch (err: any) {
-      setError(err.message ?? "Save failed.");
-      setSaving(false);
-    }
+    try { await onSave(trimmed); }
+    catch (err: any) { setError(err.message ?? "Save failed."); setSaving(false); }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-sm mx-4 p-5 space-y-4">
-        <h3 className="text-sm font-semibold text-white">Rename skill</h3>
-        <form onSubmit={handleSave} className="space-y-3">
+    <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(20,22,30,0.35)", backdropFilter: "blur(4px)" }}>
+      <div className="a-card" style={{ width: "100%", maxWidth: 360, margin: "0 16px", padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+        <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: 0 }}>Rename skill</p>
+        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <input
             ref={inputRef}
             type="text"
             value={value}
-            onChange={(e) => setValue(e.target.value)}
-            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+            onChange={e => setValue(e.target.value)}
+            className="ag-input"
             placeholder="Skill name"
             disabled={saving}
           />
-          {error && <p className="text-xs text-red-400">{error}</p>}
-          <div className="flex gap-2 justify-end">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={saving}
-              className="text-xs px-4 py-2 rounded-md border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={saving || !value.trim()}
-              className="text-xs px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
-            >
+          {error && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{error}</p>}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" onClick={onCancel} disabled={saving} className="a-btn a-btn--ghost">Cancel</button>
+            <button type="submit" disabled={saving || !value.trim()} className="a-btn a-btn--primary">
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
@@ -538,14 +466,9 @@ function RenameModal({
   );
 }
 
-// ─── Skill Card ───────────────────────────────────────────────────────────────
+// ─── SkillCard ────────────────────────────────────────────────────────────────
 
-function SkillCard({
-  route,
-  onDelete,
-  onVerified,
-  onRenamed,
-}: {
+function SkillCard({ route, onDelete, onVerified, onRenamed }: {
   route: AegisRoute;
   onDelete: (id: string) => void;
   onVerified: (routeId: string) => void;
@@ -556,24 +479,18 @@ function SkillCard({
   const [showRename, setShowRename] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  const [verifyReport, setVerifyReport] = useState<RouteVerificationReport | null>(
-    route.verification_report ?? null,
-  );
+  const [verifyReport, setVerifyReport] = useState<RouteVerificationReport | null>(route.verification_report ?? null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [localTier, setLocalTier] = useState(route.trust_tier);
   const [localName, setLocalName] = useState(route.workflow_name);
-  const [localMarketplaceStatus, setLocalMarketplaceStatus] = useState(route.marketplace_status ?? 'private');
+  const [localMarketplaceStatus, setLocalMarketplaceStatus] = useState(route.marketplace_status ?? "private");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   async function handleDelete() {
     setDeleting(true);
-    try {
-      await deleteRoute(route.route_id);
-      onDelete(route.route_id);
-    } catch {
-      setDeleting(false);
-    }
+    try { await deleteRoute(route.route_id); onDelete(route.route_id); }
+    catch { setDeleting(false); }
   }
 
   async function handleVerify() {
@@ -582,9 +499,7 @@ function SkillCard({
     try {
       const report = await verifyRoute(route.route_id);
       setVerifyReport(report);
-      if (report.promoted_trust_tier) {
-        setLocalTier(report.promoted_trust_tier);
-      }
+      if (report.promoted_trust_tier) setLocalTier(report.promoted_trust_tier);
       onVerified(route.route_id);
     } catch (err: any) {
       setVerifyError(err.message ?? "Verification failed.");
@@ -598,7 +513,7 @@ function SkillCard({
     setSubmitError(null);
     try {
       const updated = await submitRouteForReview(route.route_id);
-      setLocalMarketplaceStatus(updated.marketplace_status ?? 'pending_review');
+      setLocalMarketplaceStatus(updated.marketplace_status ?? "pending_review");
     } catch (err: any) {
       setSubmitError(err.message ?? "Submission failed.");
     } finally {
@@ -616,95 +531,85 @@ function SkillCard({
   const lastVerified = verifyReport?.completed_at ?? route.last_verified_at;
   const hasVerification = !!verifyReport;
 
+  const mktVariant =
+    localMarketplaceStatus === "approved" ? "green" :
+    localMarketplaceStatus === "rejected" ? "red" :
+    localMarketplaceStatus === "pending_review" ? "amber" :
+    isRouteVerified(localTier) ? "blue" : "graphite";
+
+  const mktLabel =
+    localMarketplaceStatus === "approved" ? "Approved" :
+    localMarketplaceStatus === "rejected" ? "Rejected" :
+    localMarketplaceStatus === "pending_review" ? "Pending review" :
+    isRouteVerified(localTier) ? "Ready for review" : "Needs verification";
+
+  const ghostBtn: React.CSSProperties = {
+    fontSize: 12, fontWeight: 500, padding: "5px 12px", borderRadius: "var(--r-1)",
+    background: "rgba(255,255,255,0.7)", border: "1px solid var(--hairline)",
+    color: "var(--ink-1)", cursor: "pointer", display: "inline-flex", alignItems: "center",
+  };
+  const ghostBtnActive: React.CSSProperties = {
+    ...ghostBtn, background: "var(--blue-soft)", border: "1px solid var(--blue-ring)", color: "oklch(0.45 0.09 240)",
+  };
+
   return (
     <>
-      {showRename && (
-        <RenameModal
-          current={localName}
-          onSave={handleRename}
-          onCancel={() => setShowRename(false)}
-        />
-      )}
+      {showRename && <RenameModal current={localName} onSave={handleRename} onCancel={() => setShowRename(false)} />}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-        {/* Card header */}
-        <div className="p-4 space-y-3">
+      <div className="a-card" style={{ overflow: "hidden", padding: 0 }}>
+        {/* Header */}
+        <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+
           {/* Name row */}
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1.5 min-w-0 flex-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-white truncate">{localName}</span>
-                <StatusBadge tier={localTier} />
-                <PrivateBadge />
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <div className="ag-avatar" style={{ marginTop: 2, flexShrink: 0 }}>
+              <RouteSVG />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+                <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>{localName}</span>
+                <AStatus label={TIER_LABEL[localTier] ?? localTier} variant={TIER_VARIANT[localTier] ?? "graphite"} />
+                <AStatus label="Private" variant="graphite" />
               </div>
-              <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-500">
-                <span>
-                  <span className="font-mono text-gray-400">{route.domain}</span>
-                </span>
-                <span>
-                  {route.steps.length} step{route.steps.length !== 1 ? "s" : ""}
-                </span>
-                <span className={RISK_COLORS[route.risk_level] ?? "text-gray-400"}>
-                  {route.risk_level} risk
-                </span>
-                <span>
-                  {hasVerification
-                    ? `Verified ${friendlyDate(lastVerified)}`
-                    : "Not yet verified"}
-                </span>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 14px", fontSize: 12, color: "var(--ink-3)" }}>
+                <span style={{ fontFamily: "monospace", color: "var(--ink-2)" }}>{route.domain}</span>
+                <span>{route.steps.length} step{route.steps.length !== 1 ? "s" : ""}</span>
+                <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
+                <span>{hasVerification ? `Verified ${friendlyDate(lastVerified)}` : "Not yet verified"}</span>
               </div>
             </div>
           </div>
 
-          {/* Private / Marketplace status */}
-          <div className="flex items-center gap-x-5 gap-y-1 flex-wrap text-xs">
-            <span className="flex items-center gap-1.5">
-              <span className="font-mono text-teal-400">✓</span>
-              <span className="text-gray-500">Private use:</span>
-              <span className="text-teal-400 font-medium">Ready</span>
+          {/* Marketplace status */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", fontSize: 12 }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ color: "oklch(0.42 0.09 150)", fontFamily: "monospace", fontSize: 11 }}>✓</span>
+              <span style={{ color: "var(--ink-3)" }}>Private use:</span>
+              <span style={{ color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Ready</span>
             </span>
-            <span className="flex items-center gap-1.5">
-              <span className={`font-mono ${
-                localMarketplaceStatus === 'approved' ? "text-green-400" :
-                localMarketplaceStatus === 'rejected' ? "text-rose-400" :
-                localMarketplaceStatus === 'pending_review' ? "text-amber-400" :
-                isRouteVerified(localTier) ? "text-cyan-400" :
-                "text-gray-600"
-              }`}>
-                {localMarketplaceStatus === 'approved' ? "✓" :
-                 localMarketplaceStatus === 'rejected' ? "✗" :
-                 localMarketplaceStatus === 'pending_review' ? "⏳" :
-                 isRouteVerified(localTier) ? "✓" : "○"}
-              </span>
-              <span className="text-gray-500">Marketplace:</span>
-              <span className={
-                localMarketplaceStatus === 'approved' ? "text-green-400 font-medium" :
-                localMarketplaceStatus === 'rejected' ? "text-rose-400 font-medium" :
-                localMarketplaceStatus === 'pending_review' ? "text-amber-400 font-medium" :
-                isRouteVerified(localTier) ? "text-cyan-400 font-medium" :
-                "text-gray-500"
-              }>
-                {localMarketplaceStatus === 'approved' ? "Approved" :
-                 localMarketplaceStatus === 'rejected' ? "Rejected" :
-                 localMarketplaceStatus === 'pending_review' ? "Pending review" :
-                 isRouteVerified(localTier) ? "Ready for review" :
-                 "Needs verification before review"}
-              </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ color: "var(--ink-3)" }}>Marketplace:</span>
+              <AStatus label={mktLabel} variant={mktVariant} />
             </span>
           </div>
 
           {/* Capability badges */}
           <CapabilityBadges route={{ ...route, trust_tier: localTier }} />
 
-          {/* Action buttons */}
-          <div className="flex items-center gap-2 flex-wrap">
+          {/* Required permissions */}
+          {route.required_permissions.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {route.required_permissions.map(p => (
+                <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
+              ))}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <button
               onClick={() => { setShowPreview(v => !v); setShowAdvanced(false); }}
-              className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
-                showPreview
-                  ? "border-indigo-600 text-indigo-300 bg-indigo-950"
-                  : "border-gray-700 text-gray-400 hover:text-white hover:border-gray-500"
-              }`}
+              style={showPreview ? ghostBtnActive : ghostBtn}
             >
               {showPreview ? "Hide preview" : "Preview"}
             </button>
@@ -713,9 +618,9 @@ function SkillCard({
                 href={`http://localhost:3001/bank?previewRoute=${encodeURIComponent(route.route_id)}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs px-3 py-1.5 rounded-md border border-indigo-800 text-indigo-400 hover:bg-indigo-950 transition-colors"
+                style={ghostBtn}
               >
-                Open visual replay
+                Visual replay ↗
               </a>
             )}
             {route.domain === "en.wikipedia.org" && (
@@ -723,71 +628,48 @@ function SkillCard({
                 href={`https://en.wikipedia.org/wiki/Main_Page#aegis-preview=${encodeURIComponent(route.route_id)}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs px-3 py-1.5 rounded-md border border-indigo-800 text-indigo-400 hover:bg-indigo-950 transition-colors"
+                style={ghostBtn}
               >
-                Open external replay
+                External replay ↗
               </a>
             )}
-            <button
-              onClick={handleVerify}
-              disabled={verifying || deleting}
-              className="text-xs px-3 py-1.5 rounded-md border border-indigo-800 text-indigo-400 hover:bg-indigo-950 disabled:opacity-50 transition-colors"
-            >
+            <button onClick={handleVerify} disabled={verifying || deleting} style={{ ...ghostBtn, opacity: (verifying || deleting) ? 0.5 : 1, cursor: (verifying || deleting) ? "not-allowed" : "pointer" }}>
               {verifying ? "Verifying…" : "Verify"}
             </button>
-            <button
-              onClick={() => setShowRename(true)}
-              disabled={deleting || verifying}
-              className="text-xs px-3 py-1.5 rounded-md border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 disabled:opacity-50 transition-colors"
-            >
+            <button onClick={() => setShowRename(true)} disabled={deleting || verifying} style={{ ...ghostBtn, opacity: (deleting || verifying) ? 0.5 : 1, cursor: (deleting || verifying) ? "not-allowed" : "pointer" }}>
               Rename
             </button>
-            {localMarketplaceStatus === 'approved' ? (
-              <button
-                disabled
-                className="text-xs px-3 py-1.5 rounded-md border border-green-900 text-green-600 cursor-not-allowed"
-              >
-                Approved
-              </button>
-            ) : localMarketplaceStatus === 'rejected' ? (
-              <button
-                disabled
-                className="text-xs px-3 py-1.5 rounded-md border border-rose-900 text-rose-600 cursor-not-allowed"
-              >
-                Rejected
-              </button>
-            ) : localMarketplaceStatus === 'pending_review' ? (
-              <button
-                disabled
-                className="text-xs px-3 py-1.5 rounded-md border border-amber-900 text-amber-600 cursor-not-allowed"
-              >
-                Pending review
-              </button>
+            {localMarketplaceStatus === "approved" ? (
+              <button disabled style={{ ...ghostBtn, ...pillStyle("green"), cursor: "not-allowed" }}>Approved</button>
+            ) : localMarketplaceStatus === "rejected" ? (
+              <button disabled style={{ ...ghostBtn, ...pillStyle("red"), cursor: "not-allowed" }}>Rejected</button>
+            ) : localMarketplaceStatus === "pending_review" ? (
+              <button disabled style={{ ...ghostBtn, ...pillStyle("amber"), cursor: "not-allowed" }}>Pending review</button>
             ) : isRouteVerified(localTier) ? (
               <button
                 onClick={handleSubmitForReview}
                 disabled={submitting || deleting || verifying}
-                className="text-xs px-3 py-1.5 rounded-md border border-cyan-800 text-cyan-400 hover:bg-cyan-950 disabled:opacity-50 transition-colors"
+                style={{ ...ghostBtn, opacity: (submitting || deleting || verifying) ? 0.5 : 1, cursor: (submitting || deleting || verifying) ? "not-allowed" : "pointer" }}
               >
                 {submitting ? "Submitting…" : "Submit for Review"}
               </button>
             ) : (
-              <span
-                title="Verify this route before marketplace review."
-                className="inline-block"
-              >
-                <button
-                  disabled
-                  className="text-xs px-3 py-1.5 rounded-md border border-gray-800 text-gray-700 cursor-not-allowed"
-                >
-                  Submit for Review
-                </button>
-              </span>
+              <button disabled title="Verify this route before marketplace review." style={{ ...ghostBtn, opacity: 0.35, cursor: "not-allowed" }}>
+                Submit for Review
+              </button>
             )}
             <button
               onClick={handleDelete}
               disabled={deleting || verifying}
-              className="text-xs px-3 py-1.5 rounded-md border border-red-900 text-red-500 hover:bg-red-950 disabled:opacity-50 transition-colors ml-auto"
+              style={{
+                ...ghostBtn,
+                marginLeft: "auto",
+                background: "var(--red-soft)",
+                border: "1px solid var(--red-ring)",
+                color: "oklch(0.45 0.13 25)",
+                opacity: (deleting || verifying) ? 0.5 : 1,
+                cursor: (deleting || verifying) ? "not-allowed" : "pointer",
+              }}
             >
               {deleting ? "…" : "Delete"}
             </button>
@@ -796,122 +678,100 @@ function SkillCard({
 
         {/* Submit error strip */}
         {submitError && (
-          <div className="mx-4 mb-3 px-3 py-2 rounded text-xs border text-red-300 bg-red-950 border-red-900">
+          <div style={{ margin: "0 20px 12px", fontSize: 12, borderRadius: "var(--r-2)", padding: "8px 12px", color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }}>
             Submission error: {submitError}
           </div>
         )}
 
-        {/* Verification status strip */}
+        {/* Verification strip */}
         {(verifyReport || verifyError) && (
-          <div className={`mx-4 mb-3 px-3 py-2 rounded text-xs border ${
-            verifyError
-              ? "text-red-300 bg-red-950 border-red-900"
+          <div style={{
+            margin: "0 20px 12px", fontSize: 12, borderRadius: "var(--r-2)", padding: "8px 12px",
+            ...(verifyError
+              ? { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }
               : verifyReport!.passed
-              ? "text-cyan-300 bg-cyan-950 border-cyan-900"
-              : "text-red-300 bg-red-950 border-red-900"
-          }`}>
+              ? { color: "oklch(0.42 0.09 150)", background: "var(--green-soft)", border: "1px solid var(--green-ring)" }
+              : { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }),
+          }}>
             {verifyError ? (
-              <span>Verification error: {verifyError}</span>
+              `Verification error: ${verifyError}`
             ) : verifyReport!.passed ? (
-              <span>
-                Verification passed —{" "}
-                {verifyReport!.step_results.filter(s => s.passed).length}/{verifyReport!.step_results.length} steps
+              <>
+                Verification passed — {verifyReport!.step_results.filter(s => s.passed).length}/{verifyReport!.step_results.length} steps
                 {verifyReport!.promoted_trust_tier && (
-                  <span className="ml-2 text-cyan-400 font-medium">
+                  <span style={{ marginLeft: 8, fontWeight: 600 }}>
                     → {TIER_LABEL[verifyReport!.promoted_trust_tier] ?? verifyReport!.promoted_trust_tier}
                   </span>
                 )}
-              </span>
+              </>
             ) : (
-              <span>
-                Verification failed —{" "}
-                {verifyReport!.step_results.filter(s => s.passed).length}/{verifyReport!.step_results.length} steps passed
-                {verifyReport!.errors.length > 0 && (
-                  <span className="block mt-1 text-red-400">{verifyReport!.errors[0]}</span>
-                )}
-              </span>
+              <>
+                Verification failed — {verifyReport!.step_results.filter(s => s.passed).length}/{verifyReport!.step_results.length} steps passed
+                {verifyReport!.errors.length > 0 && <span style={{ display: "block", marginTop: 3 }}>{verifyReport!.errors[0]}</span>}
+              </>
             )}
           </div>
         )}
 
         {/* Preview panel */}
-        {showPreview && (
-          <PreviewPanel route={{ ...route, workflow_name: localName }} verifyReport={verifyReport} />
-        )}
+        {showPreview && <PreviewPanel route={{ ...route, workflow_name: localName }} verifyReport={verifyReport} />}
 
         {/* Advanced route details */}
-        <div className="border-t border-gray-800">
+        <div style={{ borderTop: "1px solid var(--hairline)" }}>
           <button
             onClick={() => { setShowAdvanced(v => !v); setShowPreview(false); }}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs text-gray-600 hover:text-gray-400 transition-colors"
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 20px", fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", cursor: "pointer" }}
           >
             <span>Advanced route details</span>
             <span>{showAdvanced ? "▲" : "▼"}</span>
           </button>
 
           {showAdvanced && (
-            <div className="px-4 pb-4 pt-1 space-y-4">
+            <div style={{ padding: "4px 20px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
               {/* Steps */}
               <div>
-                <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Steps</h3>
-                <div>
-                  {route.steps.map((step) => {
-                    const vResult = verifyReport?.step_results.find(r => r.step_id === step.step_id);
-                    return (
-                      <div key={step.step_id} className="flex items-start gap-2">
-                        <div className="flex-1 min-w-0">
-                          <StepRow step={step} />
+                <p style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-3)", margin: "0 0 8px" }}>Steps</p>
+                {route.steps.map((step) => {
+                  const vResult = verifyReport?.step_results.find(r => r.step_id === step.step_id);
+                  return (
+                    <div key={step.step_id} style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}><StepRow step={step} /></div>
+                      {vResult && (
+                        <div style={{ flexShrink: 0, paddingTop: 10 }}>
+                          <span style={{ fontSize: 11.5, fontFamily: "monospace", color: vResult.passed ? "oklch(0.42 0.09 150)" : "oklch(0.45 0.13 25)" }}>
+                            {vResult.passed ? "✓" : "✗"}
+                            {vResult.selected_locator && <span style={{ color: "var(--ink-4)", marginLeft: 4 }}>via {vResult.selected_locator.type}</span>}
+                          </span>
                         </div>
-                        {vResult && (
-                          <div className="shrink-0 pt-2.5">
-                            <span className={`text-xs font-mono ${vResult.passed ? "text-cyan-400" : "text-red-400"}`}>
-                              {vResult.passed ? "✓" : "✗"}
-                              {vResult.selected_locator && (
-                                <span className="text-gray-600 ml-1">via {vResult.selected_locator.type}</span>
-                              )}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
 
-              {/* Permissions */}
-              <div className="grid grid-cols-2 gap-4 text-xs">
+              {/* Allowed / Forbidden */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, fontSize: 12 }}>
                 <div>
-                  <p className="text-gray-500 uppercase tracking-wider mb-1 font-medium">Allowed actions</p>
-                  <div className="flex flex-wrap gap-1">
-                    {route.allowed_actions.length === 0 ? (
-                      <span className="text-gray-600">none</span>
-                    ) : (
-                      route.allowed_actions.map(a => (
-                        <span key={a} className="px-1.5 py-0.5 bg-green-950 border border-green-900 text-green-400 rounded font-mono">
-                          {a}
-                        </span>
-                      ))
-                    )}
+                  <p style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-3)", margin: "0 0 6px" }}>Allowed actions</p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {route.allowed_actions.length === 0
+                      ? <span style={{ color: "var(--ink-4)" }}>none</span>
+                      : route.allowed_actions.map(a => <span key={a} style={pillStyle("green")}>{a}</span>)
+                    }
                   </div>
                 </div>
                 <div>
-                  <p className="text-gray-500 uppercase tracking-wider mb-1 font-medium">Forbidden actions</p>
-                  <div className="flex flex-wrap gap-1">
-                    {route.forbidden_actions.length === 0 ? (
-                      <span className="text-gray-600">none</span>
-                    ) : (
-                      route.forbidden_actions.map(a => (
-                        <span key={a} className="px-1.5 py-0.5 bg-red-950 border border-red-900 text-red-400 rounded font-mono">
-                          {a}
-                        </span>
-                      ))
-                    )}
+                  <p style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-3)", margin: "0 0 6px" }}>Forbidden actions</p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {route.forbidden_actions.length === 0
+                      ? <span style={{ color: "var(--ink-4)" }}>none</span>
+                      : route.forbidden_actions.map(a => <span key={a} style={pillStyle("red")}>{a}</span>)
+                    }
                   </div>
                 </div>
               </div>
 
-              {/* Route ID */}
-              <p className="text-xs text-gray-700 font-mono">
+              <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>
                 ID: {route.route_id} · v{route.version}
               </p>
             </div>
@@ -922,28 +782,122 @@ function SkillCard({
   );
 }
 
+// ─── MarketplaceCard ──────────────────────────────────────────────────────────
+
+function MarketplaceCard({ skill, onInstallChange }: {
+  skill: SkillWithInstalled;
+  onInstallChange: (skillId: string, installed: boolean) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleInstall() {
+    setBusy(true); setError(null);
+    try { await installSkill(skill.skill_id); onInstallChange(skill.skill_id, true); }
+    catch (err: any) { setError(err.message ?? "Install failed."); }
+    finally { setBusy(false); }
+  }
+
+  async function handleUninstall() {
+    setBusy(true); setError(null);
+    try { await uninstallSkill(skill.skill_id); onInstallChange(skill.skill_id, false); }
+    catch (err: any) { setError(err.message ?? "Uninstall failed."); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="ag-row">
+      <div className="ag-avatar" style={{ marginTop: 2 }}>
+        <ShopSVG />
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
+          <span style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)" }}>{skill.name}</span>
+          <AStatus label={TIER_LABEL[skill.trust_tier] ?? skill.trust_tier} variant={TIER_VARIANT[skill.trust_tier] ?? "graphite"} />
+          {skill.installed && <AStatus label="Installed" variant="green" />}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, fontFamily: "monospace", color: "var(--ink-2)" }}>{skill.domain}</span>
+          {skill.risk_level && (
+            <span style={pillStyle(riskPillColor(skill.risk_level))}>{skill.risk_level} risk</span>
+          )}
+        </div>
+        {skill.summary && (
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 6px", lineHeight: 1.5 }}>{skill.summary}</p>
+        )}
+        {skill.required_permissions.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {skill.required_permissions.map(p => (
+              <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
+            ))}
+          </div>
+        )}
+        {error && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: "4px 0 0" }}>{error}</p>}
+      </div>
+      <div style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
+        {skill.installed ? (
+          <button
+            onClick={handleUninstall}
+            disabled={busy}
+            style={{
+              fontSize: 12, fontWeight: 500, padding: "5px 12px", borderRadius: "var(--r-1)",
+              background: "var(--red-soft)", border: "1px solid var(--red-ring)", color: "oklch(0.45 0.13 25)",
+              cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.5 : 1,
+            }}
+          >
+            {busy ? "…" : "Uninstall"}
+          </button>
+        ) : (
+          <button
+            onClick={handleInstall}
+            disabled={busy}
+            className="a-btn a-btn--primary"
+            style={{ opacity: busy ? 0.5 : 1 }}
+          >
+            {busy ? "…" : "Install"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
+
+type Tab = "rails" | "marketplace";
 
 export default function RailsPage() {
   const [routes, setRoutes] = useState<AegisRoute[]>([]);
   const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<Tab>("rails");
+
+  const [skills, setSkills] = useState<SkillWithInstalled[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsLoaded, setSkillsLoaded] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
 
   const [showAdvancedRecorder, setShowAdvancedRecorder] = useState(false);
   const [jsonInput, setJsonInput] = useState("");
   const [compiling, setCompiling] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
   const [compileResult, setCompileResult] = useState<{
-    route_id: string;
-    step_count: number;
-    trust_tier: string;
-    forbidden_action_count: number;
+    route_id: string; step_count: number; trust_tier: string; forbidden_action_count: number;
   } | null>(null);
 
   useEffect(() => {
-    listRoutes()
-      .then(setRoutes)
-      .finally(() => setLoading(false));
+    listRoutes().then(setRoutes).finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (tab === "marketplace" && !skillsLoaded) {
+      setSkillsLoading(true);
+      setSkillsError(null);
+      listSkills()
+        .then(setSkills)
+        .catch((err: any) => setSkillsError(err.message ?? "Could not load marketplace."))
+        .finally(() => { setSkillsLoading(false); setSkillsLoaded(true); });
+    }
+  }, [tab, skillsLoaded]);
 
   function handleDelete(routeId: string) {
     setRoutes(prev => prev.filter(r => r.route_id !== routeId));
@@ -957,21 +911,22 @@ export default function RailsPage() {
     setRoutes(prev => prev.map(r => r.route_id === routeId ? { ...r, workflow_name: newName } : r));
   }
 
+  function handleInstallChange(skillId: string, installed: boolean) {
+    setSkills(prev => prev.map(s => s.skill_id === skillId ? { ...s, installed } : s));
+  }
+
   async function handleCompile(e: React.FormEvent) {
     e.preventDefault();
     setCompiling(true);
     setCompileError(null);
     setCompileResult(null);
-
     let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonInput);
-    } catch {
+    try { parsed = JSON.parse(jsonInput); }
+    catch {
       setCompileError("Invalid JSON — paste the recording payload from the demo bank page.");
       setCompiling(false);
       return;
     }
-
     try {
       const result = await recordRoute(parsed as any);
       setCompileResult(result);
@@ -984,154 +939,206 @@ export default function RailsPage() {
     }
   }
 
+  const verifiedCount = routes.filter(r => isRouteVerified(r.trust_tier)).length;
+  const installedCount = skills.filter(s => s.installed).length;
+
   return (
-    <div className="max-w-3xl space-y-10">
+    <div className="page">
 
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-white">Recorded Skills</h1>
-        <p className="mt-2 text-gray-400 text-sm leading-relaxed">
-          Teach Aegis a workflow once and use it privately. Verify and submit for review when you&apos;re ready to share.
-        </p>
-        <p className="mt-1 text-gray-600 text-xs">
-          Private by default. Verified before marketplace.
-        </p>
-      </div>
-
-      {/* How it works — flow chips */}
-      <div className="grid grid-cols-2 gap-2">
-        {[
-          { step: "1", label: "Record", sub: "Demonstrate a workflow on the demo bank page" },
-          { step: "2", label: "Use privately", sub: "Replay yourself or let your own agents follow it — no verification needed" },
-          { step: "3", label: "Verify (optional)", sub: "Confirm every step resolves before submitting for marketplace" },
-          { step: "4", label: "Keep or submit", sub: "Marketplace listing requires verification and Aegis review" },
-        ].map((item) => (
-          <div key={item.step} className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-1.5 mb-1">
-              <span className="w-5 h-5 flex items-center justify-center rounded-full bg-indigo-900 text-indigo-300 text-xs font-bold shrink-0">
-                {item.step}
-              </span>
-              <span className="text-xs font-semibold text-white">{item.label}</span>
-            </div>
-            <p className="text-xs text-gray-600 leading-snug">{item.sub}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Record a new skill */}
-      <section>
-        <h2 className="text-base font-semibold text-white mb-4">Record a new skill</h2>
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
-          <div className="flex items-start gap-4">
-            <div className="flex-1 space-y-2">
-              <p className="text-sm text-gray-300 leading-relaxed">
-                Open the demo bank page, click <strong className="text-white">Start Recording</strong>, perform
-                the workflow, then click <strong className="text-white">Stop Recording</strong> and{" "}
-                <strong className="text-white">Submit to Aegis</strong>. Return here when done.
-              </p>
-              <p className="text-xs text-gray-600">
-                Aegis captures semantic telemetry — element roles, labels, and accessibility context — not raw
-                coordinates or screenshots.
-              </p>
-            </div>
-            <a
-              href="http://localhost:3001/bank.html"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="shrink-0 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-lg transition-colors font-medium"
-            >
-              Open demo bank page ↗
-            </a>
-          </div>
-
-          {/* Advanced: JSON paste */}
-          <div className="border-t border-gray-800 pt-3">
-            <button
-              onClick={() => { setShowAdvancedRecorder(v => !v); setCompileResult(null); setCompileError(null); }}
-              className="text-xs text-gray-600 hover:text-gray-400 transition-colors flex items-center gap-1"
-            >
-              <span>{showAdvancedRecorder ? "▲" : "▼"}</span>
-              <span>Advanced — paste recording JSON manually</span>
-            </button>
-
-            {showAdvancedRecorder && (
-              <form onSubmit={handleCompile} className="mt-3 space-y-3">
-                <p className="text-xs text-gray-500">
-                  If the bank page's Submit button doesn't reach Aegis automatically, copy the JSON from the
-                  recorder panel and paste it here.
-                </p>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">Recording payload JSON</label>
-                  <textarea
-                    className="w-full h-36 bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-300 font-mono focus:outline-none focus:border-indigo-500 resize-y"
-                    placeholder='{ "workflow_name": "...", "domain": "localhost", "events": [...] }'
-                    value={jsonInput}
-                    onChange={e => setJsonInput(e.target.value)}
-                  />
-                </div>
-
-                {compileError && (
-                  <p className="text-xs text-red-400 bg-red-950 border border-red-900 rounded px-3 py-2">
-                    {compileError}
-                  </p>
-                )}
-
-                {compileResult && (
-                  <div className="text-xs bg-green-950 border border-green-900 rounded px-3 py-2 space-y-0.5">
-                    <p className="text-green-300 font-medium">Skill compiled and saved</p>
-                    <p className="text-gray-400">
-                      {compileResult.step_count} steps · status: {TIER_LABEL[compileResult.trust_tier] ?? compileResult.trust_tier}
-                      {compileResult.forbidden_action_count > 0 &&
-                        ` · ${compileResult.forbidden_action_count} forbidden action${compileResult.forbidden_action_count !== 1 ? "s" : ""} identified`}
-                    </p>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={compiling || !jsonInput.trim()}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded-md transition-colors"
-                >
-                  {compiling ? "Compiling…" : "Compile skill"}
-                </button>
-              </form>
-            )}
+      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div className="a-eyebrow">Rails</div>
+          <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+            Routes,{" "}
+            <span className="cmd-hero__title-mark">verified.</span>
+          </h1>
+          <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+            Teach agents safe paths through websites. Aegis records, verifies, and replays workflows under your rules.
+          </p>
+          <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16, marginTop: 20, display: "grid", gridTemplateColumns: "auto auto auto 1fr", gap: 32 }}>
+            <HeroStat value={routes.length} label="Routes" loading={loading} />
+            <HeroStat value={verifiedCount} label="Verified" loading={loading} />
+            <HeroStat value={installedCount} label="Installed" loading={skillsLoading} />
           </div>
         </div>
-      </section>
+      </div>
 
-      {/* Saved Skills */}
-      <section>
-        <h2 className="text-base font-semibold text-white mb-4">
-          Your recorded skills
-          {routes.length > 0 && (
-            <span className="ml-2 text-sm font-normal text-gray-600">({routes.length})</span>
+      {/* ── Lifecycle strip ───────────────────────────────────────────────── */}
+      <div className="a-card" style={{ padding: "12px 20px" }}>
+        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0 }}>
+          {(["Observe", "Compile", "Verify", "Run", "Receipt"] as const).map((step, i, arr) => (
+            <span key={step} style={{ display: "flex", alignItems: "center" }}>
+              <span style={{
+                fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 999,
+                color: i === 2 ? "oklch(0.45 0.09 240)" : i === 4 ? "oklch(0.42 0.09 150)" : "var(--ink-3)",
+                background: i === 2 ? "var(--blue-soft)" : i === 4 ? "var(--green-soft)" : "transparent",
+              }}>
+                {step}
+              </span>
+              {i < arr.length - 1 && (
+                <span style={{ fontSize: 11, color: "var(--ink-4)", margin: "0 1px" }}>→</span>
+              )}
+            </span>
+          ))}
+          <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--ink-4)", paddingLeft: 16 }}>
+            Safe paths through websites, from first click to signed receipt.
+          </span>
+        </div>
+      </div>
+
+      {/* ── Tabs ─────────────────────────────────────────────────────────── */}
+      <div className="ag-tabs">
+        <button className={`ag-tab${tab === "rails" ? " ag-tab--active" : ""}`} onClick={() => setTab("rails")}>
+          My Rails{!loading && routes.length > 0 ? ` (${routes.length})` : ""}
+        </button>
+        <button className={`ag-tab${tab === "marketplace" ? " ag-tab--active" : ""}`} onClick={() => setTab("marketplace")}>
+          Marketplace
+        </button>
+      </div>
+
+      {/* ── My Rails tab ─────────────────────────────────────────────────── */}
+      {tab === "rails" && (
+        <>
+          {/* Record CTA */}
+          <div className="a-card" style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+              <div>
+                <p style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 4px" }}>Record a new route</p>
+                <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                  Open the demo bank page, click <strong style={{ color: "var(--ink-2)" }}>Start Recording</strong>, perform the workflow, then click{" "}
+                  <strong style={{ color: "var(--ink-2)" }}>Stop Recording</strong> and{" "}
+                  <strong style={{ color: "var(--ink-2)" }}>Submit to Aegis</strong>. Return here when done.
+                </p>
+                <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "4px 0 0" }}>
+                  Aegis captures semantic telemetry — element roles, labels, and accessibility context — not raw coordinates or screenshots.
+                </p>
+              </div>
+              <a
+                href="http://localhost:3001/bank.html"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="a-btn a-btn--primary"
+                style={{ flexShrink: 0 }}
+              >
+                Open demo bank ↗
+              </a>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 12 }}>
+              <button
+                onClick={() => { setShowAdvancedRecorder(v => !v); setCompileResult(null); setCompileError(null); }}
+                style={{ fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, padding: 0 }}
+              >
+                <span>{showAdvancedRecorder ? "▲" : "▼"}</span>
+                <span>Advanced — paste recording JSON manually</span>
+              </button>
+
+              {showAdvancedRecorder && (
+                <form onSubmit={handleCompile} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                    If the bank page&apos;s Submit button doesn&apos;t reach Aegis automatically, copy the JSON from the recorder panel and paste it here.
+                  </p>
+                  <div>
+                    <label className="ag-label">Recording payload JSON</label>
+                    <textarea
+                      className="ag-input"
+                      style={{ height: 120, fontFamily: "monospace", fontSize: 12, resize: "vertical", display: "block", width: "100%", boxSizing: "border-box" }}
+                      placeholder='{ "workflow_name": "...", "domain": "localhost", "events": [...] }'
+                      value={jsonInput}
+                      onChange={e => setJsonInput(e.target.value)}
+                    />
+                  </div>
+                  {compileError && (
+                    <p style={{ fontSize: 12, margin: 0, borderRadius: "var(--r-2)", padding: "8px 12px", color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }}>
+                      {compileError}
+                    </p>
+                  )}
+                  {compileResult && (
+                    <div style={{ fontSize: 12, borderRadius: "var(--r-2)", padding: "8px 12px", background: "var(--green-soft)", border: "1px solid var(--green-ring)" }}>
+                      <p style={{ color: "oklch(0.42 0.09 150)", fontWeight: 600, margin: "0 0 2px" }}>Skill compiled and saved</p>
+                      <p style={{ color: "var(--ink-3)", margin: 0 }}>
+                        {compileResult.step_count} steps · {TIER_LABEL[compileResult.trust_tier] ?? compileResult.trust_tier}
+                        {compileResult.forbidden_action_count > 0 && ` · ${compileResult.forbidden_action_count} forbidden action${compileResult.forbidden_action_count !== 1 ? "s" : ""}`}
+                      </p>
+                    </div>
+                  )}
+                  <div>
+                    <button type="submit" disabled={compiling || !jsonInput.trim()} className="a-btn a-btn--primary" style={{ opacity: (compiling || !jsonInput.trim()) ? 0.5 : 1 }}>
+                      {compiling ? "Compiling…" : "Compile skill"}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+
+          {/* Route list */}
+          {loading ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[1, 2, 3].map(i => (
+                <div key={i} style={{ height: 80, borderRadius: "var(--r-2)", background: "var(--graphite-soft)", opacity: 0.45 }} />
+              ))}
+            </div>
+          ) : routes.length === 0 ? (
+            <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
+              <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>No routes recorded yet.</p>
+              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                Open the demo bank page above, record a workflow, and it will appear here.
+              </p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {routes.map(route => (
+                <SkillCard
+                  key={route.route_id}
+                  route={route}
+                  onDelete={handleDelete}
+                  onVerified={handleVerified}
+                  onRenamed={handleRenamed}
+                />
+              ))}
+            </div>
           )}
-        </h2>
+        </>
+      )}
 
-        {loading ? (
-          <p className="text-gray-500 text-sm">Loading…</p>
-        ) : routes.length === 0 ? (
-          <div className="text-center py-14 text-gray-600 text-sm border border-dashed border-gray-800 rounded-xl space-y-1">
-            <p className="text-gray-500">No skills recorded yet.</p>
-            <p className="text-gray-700 text-xs">
-              Open the demo bank page above, record a workflow, and it will appear here.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {routes.map(route => (
-              <SkillCard
-                key={route.route_id}
-                route={route}
-                onDelete={handleDelete}
-                onVerified={handleVerified}
-                onRenamed={handleRenamed}
-              />
-            ))}
-          </div>
-        )}
-      </section>
+      {/* ── Marketplace tab ──────────────────────────────────────────────── */}
+      {tab === "marketplace" && (
+        <>
+          {skillsLoading && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[1, 2, 3].map(i => (
+                <div key={i} style={{ height: 80, borderRadius: "var(--r-2)", background: "var(--graphite-soft)", opacity: 0.45 }} />
+              ))}
+            </div>
+          )}
+          {skillsError && (
+            <div style={{ background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-3)", padding: "14px 18px" }}>
+              <div className="a-eyebrow" style={{ color: "var(--amber)", marginBottom: 4 }}>Error</div>
+              <p style={{ fontSize: 13, color: "var(--ink-1)", margin: 0 }}>{skillsError}</p>
+            </div>
+          )}
+          {!skillsLoading && !skillsError && skills.length === 0 && (
+            <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
+              <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>No routes in the marketplace yet.</p>
+              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                Verify a route and submit it for review to publish it here.
+              </p>
+            </div>
+          )}
+          {!skillsLoading && skills.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {skills.map(skill => (
+                <MarketplaceCard key={skill.skill_id} skill={skill} onInstallChange={handleInstallChange} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
     </div>
   );
 }

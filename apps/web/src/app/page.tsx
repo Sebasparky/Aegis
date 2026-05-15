@@ -325,8 +325,18 @@ export default function CommandPage() {
       if (grants.status     === "fulfilled") setActiveGrants(grants.value);
       if (uars.status       === "fulfilled") setUserApprovalReceipts(uars.value);
       if (violations.status === "fulfilled") {
-        setViolationCount(violations.value.count);
-        setCriticalViolation(violations.value.receipts.some((r) => r.severity === "critical"));
+        const rawViolationValue = violations.value;
+        const receipts = Array.isArray(rawViolationValue)
+          ? rawViolationValue
+          : Array.isArray(rawViolationValue?.receipts)
+            ? rawViolationValue.receipts
+            : [];
+        const count =
+          typeof rawViolationValue?.count === "number"
+            ? rawViolationValue.count
+            : receipts.length;
+        setViolationCount(count);
+        setCriticalViolation(receipts.some((r: { severity?: string }) => r.severity === "critical"));
       }
       if (vault.status === "fulfilled") setVaultCount(vault.value.length);
     }).finally(() => setLoading(false));

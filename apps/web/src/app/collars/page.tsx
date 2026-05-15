@@ -5,15 +5,45 @@ import Link from "next/link";
 import type { Collar } from "@aegis/types";
 import { listCollars, revokeCollar } from "@/lib/api";
 
+function ShieldSVG() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M12 3l7 3v6c0 4.5-3.2 7.5-7 9-3.8-1.5-7-4.5-7-9V6l7-3z" />
+    </svg>
+  );
+}
+
+type PillColor = "green" | "amber" | "red";
+
+function permissionPillStyle(color: PillColor): React.CSSProperties {
+  const map: Record<PillColor, React.CSSProperties> = {
+    green: { background: "var(--green-soft)", color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
+    amber: { background: "var(--amber-soft)", color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
+    red:   { background: "var(--red-soft)",   color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"   },
+  };
+  return {
+    ...map[color],
+    fontSize: 11, fontWeight: 500,
+    padding: "2px 9px", borderRadius: 999,
+    display: "inline-flex", alignItems: "center", gap: 5,
+  };
+}
+
+function statusClass(status: string): string {
+  if (status === "active")   return "green";
+  if (status === "revoked")  return "red";
+  return "graphite";
+}
+
 export default function CollarsPage() {
   const [collars, setCollars] = useState<Collar[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]   = useState<string | null>(null);
 
   async function load() {
     try {
       setCollars(await listCollars());
-    } catch (e) {
+    } catch {
       setError("Could not load collars.");
     } finally {
       setLoading(false);
@@ -33,84 +63,130 @@ export default function CollarsPage() {
   }
 
   return (
-    <div className="max-w-4xl">
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-white">Collars</h1>
-          <p className="mt-1 text-gray-400 text-sm">Define what agents can do, what requires approval, and what is never allowed.</p>
+    <div className="page">
+
+      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
+          <div>
+            <div className="a-eyebrow">Collars</div>
+            <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+              Permission shells for{" "}
+              <span className="cmd-hero__title-mark">delegated agents</span>
+            </h1>
+            <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+              Each collar defines exactly what an agent may do, what requires your approval, and what is never allowed.
+            </p>
+          </div>
+          <Link href="/collars/new" className="a-btn a-btn--primary" style={{ flexShrink: 0 }}>
+            + New Collar
+          </Link>
         </div>
-        <Link
-          href="/collars/new"
-          className="text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-4 py-2 rounded-md transition-colors"
-        >
-          New Collar
-        </Link>
       </div>
 
-      {loading && <p className="text-gray-500 text-sm">Loading...</p>}
-      {error && <p className="text-red-400 text-sm">{error}</p>}
+      {/* ── Error ────────────────────────────────────────────────────────── */}
+      {error && (
+        <div style={{
+          background: "var(--amber-soft)", border: "1px solid var(--amber-ring)",
+          borderRadius: "var(--r-3)", padding: "14px 18px",
+        }}>
+          <div className="a-eyebrow" style={{ color: "var(--amber)", marginBottom: 4 }}>Error</div>
+          <p style={{ fontSize: 13, color: "var(--ink-1)", margin: 0 }}>{error}</p>
+        </div>
+      )}
 
-      {!loading && collars.length === 0 && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-          <p className="text-sm font-medium text-gray-400">No collars yet.</p>
-          <p className="text-xs text-gray-600 mt-1">Create a collar to define an agent&apos;s permissions.</p>
-          <Link href="/collars/new" className="mt-4 inline-block text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-4 py-2 rounded-md transition-colors">
+      {/* ── Loading skeletons ─────────────────────────────────────────────── */}
+      {loading && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {[1, 2, 3].map((i) => (
+            <div key={i} style={{
+              height: 80, borderRadius: "var(--r-2)",
+              background: "var(--graphite-soft)", opacity: 0.45,
+            }} />
+          ))}
+        </div>
+      )}
+
+      {/* ── Empty state ───────────────────────────────────────────────────── */}
+      {!loading && !error && collars.length === 0 && (
+        <div className="a-card" style={{ textAlign: "center", padding: "40px 24px" }}>
+          <p style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 4px" }}>
+            No collars yet.
+          </p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+            Create a collar to define an agent&apos;s permission boundary.
+          </p>
+          <Link href="/collars/new" className="a-btn a-btn--primary" style={{ marginTop: 16 }}>
             Create Collar
           </Link>
         </div>
       )}
 
-      <div className="space-y-3">
-        {collars.map((collar) => (
-          <div key={collar.id} className="bg-gray-900 border border-gray-800 rounded-lg p-5">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-sm font-medium text-white">{collar.name}</span>
-                  <StatusBadge status={collar.status} />
+      {/* ── Collar list ───────────────────────────────────────────────────── */}
+      {!loading && collars.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {collars.map((collar) => (
+            <div key={collar.id} className="ag-row">
+
+              {/* Avatar */}
+              <div className="ag-avatar" style={{ marginTop: 2 }}>
+                <ShieldSVG />
+              </div>
+
+              {/* Main content */}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>
+                    {collar.name}
+                  </span>
+                  <span className={`a-status a-status--${statusClass(collar.status)}`}>
+                    <span className="a-status__dot" />
+                    {collar.status}
+                  </span>
                 </div>
+
                 {collar.purpose && (
-                  <p className="text-xs text-gray-500 mb-3">{collar.purpose}</p>
+                  <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "0 0 8px", lineHeight: 1.4 }}>
+                    {collar.purpose}
+                  </p>
                 )}
-                <div className="flex flex-wrap gap-4 text-xs text-gray-400">
-                  <span>{collar.allowed_actions.length} allowed</span>
-                  <span>{collar.approval_required_actions.length} require approval</span>
-                  <span>{collar.blocked_actions.length} blocked</span>
+
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: collar.purpose ? 0 : 6 }}>
+                  <span style={permissionPillStyle("green")}>
+                    {collar.allowed_actions.length} allowed
+                  </span>
+                  <span style={permissionPillStyle("amber")}>
+                    {collar.approval_required_actions.length} ask first
+                  </span>
+                  <span style={permissionPillStyle("red")}>
+                    {collar.blocked_actions.length} blocked
+                  </span>
                 </div>
               </div>
-              <div className="flex gap-2 shrink-0">
-                <Link
-                  href={`/collars/${collar.id}`}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 border border-gray-700 rounded-md transition-colors"
-                >
+
+              {/* Actions */}
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                <Link href={`/collars/${collar.id}`} className="a-btn a-btn--ghost">
                   Edit
                 </Link>
                 {collar.status === "active" && (
                   <button
+                    type="button"
                     onClick={() => handleRevoke(collar.id)}
-                    className="text-xs text-red-400 hover:text-red-300 px-3 py-1.5 border border-gray-700 rounded-md transition-colors"
+                    className="a-btn a-btn--danger"
                   >
                     Revoke
                   </button>
                 )}
               </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    active: "bg-green-900 text-green-400",
-    revoked: "bg-red-900 text-red-400",
-    archived: "bg-gray-800 text-gray-500",
-  };
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full ${colors[status] ?? "bg-gray-800 text-gray-400"}`}>
-      {status}
-    </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+    </div>
   );
 }

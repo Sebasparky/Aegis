@@ -31,91 +31,260 @@ type VerifyResult = {
 type VerifyState = { status: "idle" | "loading" | "done"; result?: VerifyResult };
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "approvals", label: "User Approvals" },
+  { id: "approvals", label: "Approvals" },
   { id: "profiles", label: "Trust Profiles" },
   { id: "violations", label: "Violations" },
   { id: "runs", label: "Route Runs" },
   { id: "actions", label: "Actions" },
 ];
 
-const SEVERITY_COLORS: Record<string, string> = {
-  low: "bg-gray-800 text-gray-400",
-  medium: "bg-yellow-900 text-yellow-400",
-  high: "bg-orange-900 text-orange-400",
-  critical: "bg-red-900 text-red-400",
+// ── Status pill variant maps ───────────────────────────────────────────────────
+
+type StatusVariant = "green" | "red" | "amber" | "blue" | "graphite";
+
+const DECISION_VARIANT: Record<string, StatusVariant> = {
+  approved: "green",
+  denied: "red",
+  allowed: "green",
+  blocked: "red",
+  warned: "amber",
+  escalated: "amber",
+  reputation_penalized: "graphite",
+  recorded_only: "graphite",
+  approved_by_user: "blue",
+  denied_by_user: "red",
+  completed_by_runner: "green",
+  failed: "red",
 };
 
-const VIOLATION_DECISION_COLORS: Record<string, string> = {
-  blocked: "bg-red-900 text-red-400",
-  warned: "bg-yellow-900 text-yellow-400",
-  escalated: "bg-orange-900 text-orange-400",
-  reputation_penalized: "bg-purple-900 text-purple-400",
-  recorded_only: "bg-gray-800 text-gray-400",
+const SEVERITY_VARIANT: Record<string, StatusVariant> = {
+  low: "graphite",
+  medium: "amber",
+  high: "red",
+  critical: "red",
 };
 
-const APPROVAL_DECISION_COLORS: Record<string, string> = {
-  approved: "bg-green-900 text-green-400",
-  denied: "bg-red-900 text-red-400",
+const TRUST_STATUS_VARIANT: Record<string, StatusVariant> = {
+  verified: "green",
+  unverified: "graphite",
+  suspended: "red",
 };
 
-const TRUST_STATUS_COLORS: Record<string, string> = {
-  verified: "bg-green-900 text-green-400",
-  unverified: "bg-gray-800 text-gray-400",
-  suspended: "bg-red-900 text-red-400",
+const PROFILE_STATUS_VARIANT: Record<string, StatusVariant> = {
+  active: "green",
+  revoked: "red",
+  superseded: "amber",
 };
 
-const PROFILE_STATUS_COLORS: Record<string, string> = {
-  active: "bg-green-900 text-green-400",
-  revoked: "bg-red-900 text-red-400",
-  superseded: "bg-yellow-900 text-yellow-400",
+const RUN_STATUS_VARIANT: Record<string, StatusVariant> = {
+  completed: "green",
+  failed: "red",
 };
 
-const DECISION_COLORS: Record<string, string> = {
-  allowed: "bg-green-900 text-green-400",
-  blocked: "bg-red-900 text-red-400",
-  approved_by_user: "bg-indigo-900 text-indigo-400",
-  denied_by_user: "bg-red-900 text-red-400",
-  completed_by_runner: "bg-green-900 text-green-400",
-  failed: "bg-red-900 text-red-400",
-};
+// ── Primitives ─────────────────────────────────────────────────────────────────
 
-const RUN_STATUS_COLORS: Record<string, string> = {
-  completed: "bg-green-900 text-green-400",
-  failed: "bg-red-900 text-red-400",
-};
+function AStatus({ label, variant = "graphite" }: { label: string; variant?: StatusVariant }) {
+  return (
+    <span className={`a-status a-status--${variant}`}>
+      <span className="a-status__dot" />
+      {label}
+    </span>
+  );
+}
 
-function Pill({ label, color }: { label: string; color: string }) {
-  return <span className={`text-xs px-2 py-0.5 rounded-full ${color}`}>{label}</span>;
+function SignedBadge({ jws_present }: { jws_present: boolean }) {
+  if (jws_present) {
+    return (
+      <span className="a-status a-status--green" style={{ fontSize: 11 }}>
+        <span className="a-status__dot" />Signed
+      </span>
+    );
+  }
+  return <span style={{ fontSize: 11, color: "var(--ink-4)" }}>Unsigned</span>;
 }
 
 function VerificationBadge({ state }: { state?: VerifyState }) {
   if (!state || state.status === "idle") {
-    return <span className="text-xs text-gray-600">Not verified</span>;
+    return <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Not verified</span>;
   }
   if (state.status === "loading") {
-    return <span className="text-xs text-gray-500 animate-pulse">Verifying…</span>;
+    return (
+      <span style={{ fontSize: 11.5, color: "var(--ink-4)" }} className="animate-pulse">
+        Verifying…
+      </span>
+    );
   }
   const r = state.result!;
-  if (r.error === "SIGNING_KEY_UNAVAILABLE") {
-    return <Pill label="Dev mode" color="bg-yellow-900 text-yellow-400" />;
-  }
-  if (r.valid) return <Pill label="Valid" color="bg-green-900 text-green-400" />;
-  if (r.hash_valid) return <Pill label="Unsigned" color="bg-yellow-900 text-yellow-400" />;
-  return <Pill label="Invalid" color="bg-red-900 text-red-400" />;
+  if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="amber" />;
+  if (r.valid) return <AStatus label="Valid" variant="green" />;
+  if (r.hash_valid) return <AStatus label="Unsigned" variant="amber" />;
+  return <AStatus label="Invalid" variant="red" />;
 }
 
 function EmptyState({ label, hint }: { label: string; hint: string }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-      <p className="text-sm font-medium text-gray-400">{label}</p>
-      <p className="text-xs text-gray-600 mt-1">{hint}</p>
+    <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
+      <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>{label}</p>
+      <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>{hint}</p>
     </div>
+  );
+}
+
+function MetaGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 24px" }}>
+      {children}
+    </div>
+  );
+}
+
+function MetaRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <>
+      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>{label}</span>
+      <span
+        style={{
+          fontSize: 12,
+          color: "var(--ink-2)",
+          fontFamily: mono ? '"JetBrains Mono", monospace' : undefined,
+          wordBreak: "break-all",
+        }}
+      >
+        {value}
+      </span>
+    </>
+  );
+}
+
+function JwsBlock({ jws }: { jws?: string }) {
+  if (!jws) {
+    return <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>Signature not available.</p>;
+  }
+  return (
+    <pre
+      style={{
+        fontSize: 11.5,
+        color: "var(--ink-3)",
+        background: "var(--graphite-soft)",
+        border: "1px solid var(--hairline)",
+        borderRadius: "var(--r-1)",
+        padding: "10px 12px",
+        overflowX: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-all",
+        fontFamily: '"JetBrains Mono", monospace',
+        margin: 0,
+      }}
+    >
+      {jws}
+    </pre>
+  );
+}
+
+function VerifyRow({
+  verifyState,
+  onVerify,
+  onToggleExpand,
+  expandLabel,
+  isExpanded,
+}: {
+  verifyState?: VerifyState;
+  onVerify: () => void;
+  onToggleExpand: () => void;
+  expandLabel: string;
+  isExpanded: boolean;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <VerificationBadge state={verifyState} />
+      <button
+        onClick={onVerify}
+        disabled={verifyState?.status === "loading"}
+        className="a-btn a-btn--ghost"
+        style={{ fontSize: 12, padding: "4px 10px" }}
+      >
+        Verify
+      </button>
+      <button
+        onClick={onToggleExpand}
+        style={{
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          fontSize: 12,
+          color: "var(--blue)",
+          padding: 0,
+        }}
+      >
+        {isExpanded ? `Hide ${expandLabel}` : `View ${expandLabel}`}
+      </button>
+    </div>
+  );
+}
+
+function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: "Newsreader, Georgia, serif",
+          fontSize: 30,
+          fontWeight: 400,
+          color: "var(--ink-1)",
+          lineHeight: 1,
+        }}
+      >
+        {loading ? "—" : value}
+      </div>
+      <div
+        style={{
+          fontSize: 9.5,
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: "var(--ink-4)",
+          marginTop: 4,
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function SigToggle({
+  id,
+  sigExpanded,
+  onToggle,
+}: {
+  id: string;
+  sigExpanded: Record<string, boolean>;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onToggle(id)}
+      style={{
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        fontSize: 12,
+        color: "var(--ink-4)",
+        padding: 0,
+        marginTop: 10,
+        display: "block",
+      }}
+    >
+      {sigExpanded[id] ? "Hide signature" : "Show signature"}
+    </button>
   );
 }
 
 function truncateHash(hash: string) {
   return hash.length > 20 ? `${hash.slice(0, 8)}…${hash.slice(-8)}` : hash;
 }
+
+// ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function ReceiptsPage() {
   const [activeTab, setActiveTab] = useState<Tab>("approvals");
@@ -146,7 +315,15 @@ export default function ReceiptsPage() {
         if (cancelled) return;
         if (arRes.status === "fulfilled") setApprovalReceipts(arRes.value);
         if (tpRes.status === "fulfilled") setTrustProfiles(tpRes.value);
-        if (vrRes.status === "fulfilled") setViolationReceipts(vrRes.value.receipts);
+        if (vrRes.status === "fulfilled") {
+          const raw = vrRes.value;
+          const normalized = Array.isArray(raw)
+            ? raw
+            : Array.isArray((raw as { receipts?: WebsiteViolationReceipt[] })?.receipts)
+            ? (raw as { receipts: WebsiteViolationReceipt[] }).receipts
+            : [];
+          setViolationReceipts(normalized);
+        }
         if (rrRes.status === "fulfilled") setRunReceipts(rrRes.value);
         if (rRes.status === "fulfilled") setReceipts(rRes.value);
       } finally {
@@ -218,577 +395,636 @@ export default function ReceiptsPage() {
   }
 
   return (
-    <div className="max-w-3xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-white">Receipts</h1>
-        <p className="mt-1 text-gray-400 text-sm">
-          Liability-grade records — user approvals, website promises, and violation evidence.
-        </p>
-      </div>
+    <div className="page">
 
-      <div className="flex gap-1 mb-6 border-b border-gray-800">
-        {TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setActiveTab(t.id)}
-            className={`px-4 py-2 text-sm rounded-t-md transition-colors ${
-              activeTab === t.id
-                ? "text-white bg-gray-900 border border-b-0 border-gray-800"
-                : "text-gray-400 hover:text-white"
-            }`}
+      {/* ── Hero ──────────────────────────────────────────────────────────── */}
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div>
+            <div className="a-eyebrow">Receipts</div>
+            <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+              Proof,{" "}
+              <span className="cmd-hero__title-mark">preserved.</span>
+            </h1>
+            <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+              Every sensitive decision and trust boundary leaves signed, verifiable proof.
+            </p>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto auto auto auto 1fr",
+              gap: 32,
+              borderTop: "1px solid var(--hairline)",
+              paddingTop: 16,
+              marginTop: 20,
+            }}
           >
-            {t.label}
-          </button>
-        ))}
+            <HeroStat value={approvalReceipts.length} label="Signed approvals" loading={loading} />
+            <HeroStat value={trustProfiles.length} label="Trust profiles" loading={loading} />
+            <HeroStat value={violationReceipts.length} label="Violations" loading={loading} />
+            <HeroStat value={runReceipts.length} label="Route runs" loading={loading} />
+          </div>
+        </div>
       </div>
 
-      {loading && <p className="text-gray-500 text-sm">Loading…</p>}
+      {/* ── Content ───────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 720 }}>
 
-      {!loading && (
-        <>
-          {/* ── User Approval Receipts ── */}
-          {activeTab === "approvals" && (
-            <>
-              {approvalReceipts.length === 0 ? (
+        {/* Tabs */}
+        <div className="ag-tabs">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`ag-tab${activeTab === t.id ? " ag-tab--active" : ""}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Loading skeletons */}
+        {loading && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[1, 2, 3].map(i => (
+              <div
+                key={i}
+                style={{
+                  height: 96,
+                  borderRadius: "var(--r-3)",
+                  background: "var(--graphite-soft)",
+                  opacity: 0.5,
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {!loading && (
+          <>
+
+            {/* ── User Approval Receipts ───────────────────────────────────── */}
+            {activeTab === "approvals" && (
+              approvalReceipts.length === 0 ? (
                 <EmptyState
                   label="No user approval receipts yet."
                   hint="Receipts are created when you approve or deny an agent action request."
                 />
               ) : (
-                <div className="space-y-3">
-                  {approvalReceipts.map(r => (
-                    <div key={r.receipt_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <Pill
-                              label={r.decision}
-                              color={APPROVAL_DECISION_COLORS[r.decision] ?? "bg-gray-800 text-gray-400"}
-                            />
-                            <Pill
-                              label={r.approval_source.replace(/_/g, " ")}
-                              color="bg-gray-800 text-gray-400"
-                            />
-                            {r.risk_level && (
-                              <Pill
-                                label={r.risk_level}
-                                color={SEVERITY_COLORS[r.risk_level] ?? "bg-gray-800 text-gray-400"}
-                              />
-                            )}
-                          </div>
-                          {r.action_type && (
-                            <p className="text-xs text-gray-400 mt-1">
-                              Action: <span className="font-mono">{r.action_type}</span>
-                            </p>
-                          )}
-                          {r.requested_action_summary && (
-                            <p className="text-xs text-gray-500 mt-0.5">{r.requested_action_summary}</p>
-                          )}
-                          {r.target_domain && (
-                            <p className="text-xs text-gray-500 mt-0.5">Domain: {r.target_domain}</p>
-                          )}
-                          {r.agent_name && (
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              Agent: {r.agent_name}
-                              {r.agent_platform ? ` · ${r.agent_platform}` : ""}
-                            </p>
-                          )}
-                          <p className="text-xs text-gray-700 mt-2 font-mono">{r.receipt_id}</p>
-                          <div className="flex items-center gap-2 mt-2">
-                            <VerificationBadge state={verifyStates[r.receipt_id]} />
-                            <button
-                              onClick={() => verifyApproval(r.receipt_id)}
-                              disabled={verifyStates[r.receipt_id]?.status === "loading"}
-                              className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                            >
-                              Verify
-                            </button>
-                            <button
-                              onClick={() => toggleExpand(r.receipt_id)}
-                              className="text-xs text-gray-500 hover:text-gray-300"
-                            >
-                              {expanded[r.receipt_id] ? "Hide details" : "View details"}
-                            </button>
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <time className="text-xs text-gray-600 block">
-                            {new Date(r.decided_at).toLocaleString()}
-                          </time>
-                          <span
-                            className={`text-xs mt-1 block ${
-                              r.verification.jws_present ? "text-green-700" : "text-gray-700"
-                            }`}
-                          >
-                            {r.verification.jws_present ? "signed" : "unsigned"}
-                          </span>
-                        </div>
-                      </div>
-
-                      {expanded[r.receipt_id] && (
-                        <div className="mt-3 pt-3 border-t border-gray-800">
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                            {r.delegation_id && (
-                              <>
-                                <span className="text-gray-500">Delegation</span>
-                                <span className="text-gray-400 font-mono truncate">{r.delegation_id}</span>
-                              </>
-                            )}
-                            {r.collar_id && (
-                              <>
-                                <span className="text-gray-500">Collar</span>
-                                <span className="text-gray-400 font-mono truncate">{r.collar_id}</span>
-                              </>
-                            )}
-                            {r.approval_id && (
-                              <>
-                                <span className="text-gray-500">Approval</span>
-                                <span className="text-gray-400 font-mono truncate">{r.approval_id}</span>
-                              </>
-                            )}
-                            {r.route_run_id && (
-                              <>
-                                <span className="text-gray-500">Run</span>
-                                <span className="text-gray-400 font-mono truncate">{r.route_run_id}</span>
-                              </>
-                            )}
-                            <span className="text-gray-500">Signing alg</span>
-                            <span className="text-gray-400">{r.verification.signing_alg}</span>
-                            {r.verification.signed_at && (
-                              <>
-                                <span className="text-gray-500">Signed at</span>
-                                <span className="text-gray-400">
-                                  {new Date(r.verification.signed_at).toLocaleString()}
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {approvalReceipts.map(r => {
+                    const decisionVariant = DECISION_VARIANT[r.decision] ?? "graphite";
+                    const cardBorder =
+                      r.decision === "approved"
+                        ? { borderColor: "var(--green-ring)" }
+                        : r.decision === "denied"
+                        ? { borderColor: "var(--red-ring)" }
+                        : {};
+                    return (
+                      <div key={r.receipt_id} className="apr-card" style={cardBorder}>
+                        <div className="apr-card__head">
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <AStatus label={r.decision} variant={decisionVariant} />
+                              <span className="a-status a-status--graphite">
+                                <span className="a-status__dot" />
+                                {r.approval_source.replace(/_/g, " ")}
+                              </span>
+                              {r.risk_level && (
+                                <AStatus
+                                  label={r.risk_level}
+                                  variant={SEVERITY_VARIANT[r.risk_level] ?? "graphite"}
+                                />
+                              )}
+                            </div>
+                            {r.action_type && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                                Action:{" "}
+                                <span style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--ink-2)" }}>
+                                  {r.action_type}
                                 </span>
-                              </>
+                              </p>
                             )}
-                            {r.verification.signing_key_id && (
-                              <>
-                                <span className="text-gray-500">Key ID</span>
-                                <span className="text-gray-400 font-mono">{r.verification.signing_key_id}</span>
-                              </>
+                            {r.requested_action_summary && (
+                              <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0 }}>
+                                {r.requested_action_summary}
+                              </p>
                             )}
-                            <span className="text-gray-500">Payload hash</span>
-                            <span className="text-gray-400 font-mono">
-                              {truncateHash(r.verification.canonical_payload_hash)}
-                            </span>
+                            {(r.target_domain || r.agent_name) && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                                {r.target_domain && <span>{r.target_domain}</span>}
+                                {r.target_domain && r.agent_name && (
+                                  <span style={{ margin: "0 6px", color: "var(--ink-4)" }}>·</span>
+                                )}
+                                {r.agent_name && (
+                                  <span>
+                                    {r.agent_name}
+                                    {r.agent_platform ? ` · ${r.agent_platform}` : ""}
+                                  </span>
+                                )}
+                              </p>
+                            )}
                           </div>
-                          <p className="text-xs text-gray-700 mt-2">
-                            raw_secrets_in_receipt: false · raw_credentials_in_receipt: false
-                          </p>
-                          <button
-                            onClick={() => showApprovalSig(r.receipt_id)}
-                            className="text-xs text-gray-600 hover:text-gray-400 mt-2"
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <time style={{ fontSize: 12, color: "var(--ink-4)", display: "block" }}>
+                              {new Date(r.decided_at).toLocaleString()}
+                            </time>
+                            <div style={{ marginTop: 6 }}>
+                              <SignedBadge jws_present={r.verification.jws_present} />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="apr-card__body" style={{ gap: 10 }}>
+                          <p
+                            style={{
+                              fontSize: 11.5,
+                              color: "var(--ink-4)",
+                              fontFamily: '"JetBrains Mono", monospace',
+                              margin: 0,
+                            }}
                           >
-                            {sigExpanded[r.receipt_id] ? "Hide signature" : "Show signature"}
-                          </button>
-                          {sigExpanded[r.receipt_id] && (
-                            <div className="mt-2">
-                              {approvalDetailCache[r.receipt_id]?.verification.jws ? (
-                                <pre className="text-xs text-gray-500 bg-gray-950 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                                  {approvalDetailCache[r.receipt_id].verification.jws}
-                                </pre>
-                              ) : (
-                                <p className="text-xs text-gray-600">Signature not available.</p>
+                            {r.receipt_id}
+                          </p>
+                          <VerifyRow
+                            verifyState={verifyStates[r.receipt_id]}
+                            onVerify={() => verifyApproval(r.receipt_id)}
+                            onToggleExpand={() => toggleExpand(r.receipt_id)}
+                            expandLabel="details"
+                            isExpanded={!!expanded[r.receipt_id]}
+                          />
+
+                          {expanded[r.receipt_id] && (
+                            <div className="apr-box">
+                              <div className="apr-box__head">Verification details</div>
+                              <MetaGrid>
+                                {r.delegation_id && <MetaRow label="Delegation" value={r.delegation_id} mono />}
+                                {r.collar_id && <MetaRow label="Collar" value={r.collar_id} mono />}
+                                {r.approval_id && <MetaRow label="Approval" value={r.approval_id} mono />}
+                                {r.route_run_id && <MetaRow label="Run" value={r.route_run_id} mono />}
+                                <MetaRow label="Signing alg" value={r.verification.signing_alg} />
+                                {r.verification.signed_at && (
+                                  <MetaRow
+                                    label="Signed at"
+                                    value={new Date(r.verification.signed_at).toLocaleString()}
+                                  />
+                                )}
+                                {r.verification.signing_key_id && (
+                                  <MetaRow label="Key ID" value={r.verification.signing_key_id} mono />
+                                )}
+                                <MetaRow
+                                  label="Payload hash"
+                                  value={truncateHash(r.verification.canonical_payload_hash)}
+                                  mono
+                                />
+                              </MetaGrid>
+                              <p
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--ink-4)",
+                                  fontFamily: '"JetBrains Mono", monospace',
+                                  margin: "10px 0 0",
+                                }}
+                              >
+                                raw_secrets_in_receipt: false · raw_credentials_in_receipt: false
+                              </p>
+                              <SigToggle id={r.receipt_id} sigExpanded={sigExpanded} onToggle={showApprovalSig} />
+                              {sigExpanded[r.receipt_id] && (
+                                <div style={{ marginTop: 8 }}>
+                                  <JwsBlock jws={approvalDetailCache[r.receipt_id]?.verification.jws} />
+                                </div>
                               )}
                             </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </>
-          )}
+              )
+            )}
 
-          {/* ── Website Trust Profiles ── */}
-          {activeTab === "profiles" && (
-            <>
-              {trustProfiles.length === 0 ? (
+            {/* ── Website Trust Profiles ───────────────────────────────────── */}
+            {activeTab === "profiles" && (
+              trustProfiles.length === 0 ? (
                 <EmptyState
                   label="No website trust profiles yet."
                   hint="Trust profiles are signed promise snapshots created when a website registers with Aegis."
                 />
               ) : (
-                <div className="space-y-3">
-                  {trustProfiles.map(p => (
-                    <div key={p.profile_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="text-sm font-medium text-white">{p.domain}</span>
-                            <Pill
-                              label={p.verification_status}
-                              color={TRUST_STATUS_COLORS[p.verification_status] ?? "bg-gray-800 text-gray-400"}
-                            />
-                            <Pill
-                              label={p.status}
-                              color={PROFILE_STATUS_COLORS[p.status] ?? "bg-gray-800 text-gray-400"}
-                            />
-                          </div>
-                          <p className="text-xs text-gray-400">{p.company_name}</p>
-                          <div className="flex items-center gap-3 mt-1 text-xs">
-                            <span className="text-gray-500">{p.safety_promises.length} promises</span>
-                            {p.violation_count > 0 && (
-                              <span className="text-red-500">{p.violation_count} violations</span>
-                            )}
-                            <span className={p.jws_present ? "text-green-700" : "text-gray-600"}>
-                              {p.jws_present ? "signed" : "unsigned"}
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-700 mt-1 font-mono">
-                            {truncateHash(p.profile_hash)}
-                          </p>
-                          <div className="flex items-center gap-2 mt-2">
-                            <VerificationBadge state={verifyStates[p.profile_id]} />
-                            <button
-                              onClick={() => verifyProfile(p.profile_id)}
-                              disabled={verifyStates[p.profile_id]?.status === "loading"}
-                              className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {trustProfiles.map(p => {
+                    const cardBorder =
+                      p.violation_count > 0
+                        ? { borderColor: "var(--amber-ring)" }
+                        : p.verification_status === "verified"
+                        ? { borderColor: "var(--green-ring)" }
+                        : {};
+                    return (
+                      <div key={p.profile_id} className="apr-card" style={cardBorder}>
+                        <div className="apr-card__head">
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>{p.domain}</span>
+                              <AStatus
+                                label={p.verification_status}
+                                variant={TRUST_STATUS_VARIANT[p.verification_status] ?? "graphite"}
+                              />
+                              <AStatus
+                                label={p.status}
+                                variant={PROFILE_STATUS_VARIANT[p.status] ?? "graphite"}
+                              />
+                            </div>
+                            <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{p.company_name}</p>
+                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                              <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                                {p.safety_promises.length} promises
+                              </span>
+                              {p.violation_count > 0 && (
+                                <span style={{ fontSize: 12, color: "oklch(0.45 0.13 25)" }}>
+                                  {p.violation_count} violations
+                                </span>
+                              )}
+                              <SignedBadge jws_present={p.jws_present} />
+                            </div>
+                            <p
+                              style={{
+                                fontSize: 11.5,
+                                color: "var(--ink-4)",
+                                fontFamily: '"JetBrains Mono", monospace',
+                                margin: 0,
+                              }}
                             >
-                              Verify
-                            </button>
-                            <button
-                              onClick={() => toggleExpand(p.profile_id)}
-                              className="text-xs text-gray-500 hover:text-gray-300"
-                            >
-                              {expanded[p.profile_id] ? "Hide promises" : "View promises"}
-                            </button>
+                              {truncateHash(p.profile_hash)}
+                            </p>
+                          </div>
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <time style={{ fontSize: 12, color: "var(--ink-4)", display: "block" }}>
+                              {new Date(p.created_at).toLocaleString()}
+                            </time>
+                            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>v{p.profile_version}</span>
                           </div>
                         </div>
-                        <div className="text-right shrink-0">
-                          <time className="text-xs text-gray-600 block">
-                            {new Date(p.created_at).toLocaleString()}
-                          </time>
-                          <span className="text-xs text-gray-700">v{p.profile_version}</span>
-                        </div>
-                      </div>
 
-                      {expanded[p.profile_id] && (
-                        <div className="mt-3 pt-3 border-t border-gray-800">
-                          <p className="text-xs text-gray-500 mb-2">Safety Promises</p>
-                          <div className="space-y-1.5">
-                            {p.safety_promises.map(sp => (
-                              <div key={sp.promise_id} className="flex items-center justify-between gap-2">
-                                <span className="text-xs text-gray-400">{sp.title}</span>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <Pill
-                                    label={sp.severity_if_violated}
-                                    color={SEVERITY_COLORS[sp.severity_if_violated] ?? "bg-gray-800 text-gray-400"}
-                                  />
-                                  {sp.committed ? (
-                                    <span className="text-xs text-green-700">committed</span>
-                                  ) : (
-                                    <span className="text-xs text-gray-600">not committed</span>
-                                  )}
-                                </div>
+                        <div className="apr-card__body" style={{ gap: 10 }}>
+                          <VerifyRow
+                            verifyState={verifyStates[p.profile_id]}
+                            onVerify={() => verifyProfile(p.profile_id)}
+                            onToggleExpand={() => toggleExpand(p.profile_id)}
+                            expandLabel="promises"
+                            isExpanded={!!expanded[p.profile_id]}
+                          />
+
+                          {expanded[p.profile_id] && (
+                            <div className="apr-box">
+                              <div className="apr-box__head">Safety Promises</div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+                                {p.safety_promises.map(sp => (
+                                  <div
+                                    key={sp.promise_id}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <span style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{sp.title}</span>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                                      <AStatus
+                                        label={sp.severity_if_violated}
+                                        variant={SEVERITY_VARIANT[sp.severity_if_violated] ?? "graphite"}
+                                      />
+                                      <span
+                                        style={{
+                                          fontSize: 12,
+                                          color: sp.committed ? "oklch(0.42 0.09 150)" : "var(--ink-4)",
+                                        }}
+                                      >
+                                        {sp.committed ? "committed" : "not committed"}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
                               </div>
-                            ))}
-                          </div>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-3">
-                            <span className="text-gray-500">Profile ID</span>
-                            <span className="text-gray-400 font-mono">{p.profile_id}</span>
-                            {p.accountability_contact && (
-                              <>
-                                <span className="text-gray-500">Contact</span>
-                                <span className="text-gray-400">{p.accountability_contact}</span>
-                              </>
-                            )}
-                            {p.policy_url && (
-                              <>
-                                <span className="text-gray-500">Policy URL</span>
-                                <span className="text-gray-400 truncate">{p.policy_url}</span>
-                              </>
-                            )}
-                            <span className="text-gray-500">Full hash</span>
-                            <span className="text-gray-400 font-mono break-all">{p.profile_hash}</span>
-                          </div>
-                          <button
-                            onClick={() => toggleSig(p.profile_id)}
-                            className="text-xs text-gray-600 hover:text-gray-400 mt-3"
-                          >
-                            {sigExpanded[p.profile_id] ? "Hide signature" : "Show signature"}
-                          </button>
-                          {sigExpanded[p.profile_id] && (
-                            <div className="mt-2">
-                              {p.profile_jws ? (
-                                <pre className="text-xs text-gray-500 bg-gray-950 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                                  {p.profile_jws}
-                                </pre>
-                              ) : (
-                                <p className="text-xs text-gray-600">No signature available.</p>
+                              <MetaGrid>
+                                <MetaRow label="Profile ID" value={p.profile_id} mono />
+                                {p.accountability_contact && (
+                                  <MetaRow label="Contact" value={p.accountability_contact} />
+                                )}
+                                {p.policy_url && <MetaRow label="Policy URL" value={p.policy_url} />}
+                                <MetaRow label="Full hash" value={p.profile_hash} mono />
+                              </MetaGrid>
+                              <SigToggle id={p.profile_id} sigExpanded={sigExpanded} onToggle={toggleSig} />
+                              {sigExpanded[p.profile_id] && (
+                                <div style={{ marginTop: 8 }}>
+                                  <JwsBlock jws={p.profile_jws} />
+                                </div>
                               )}
                             </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </>
-          )}
+              )
+            )}
 
-          {/* ── Website Violation Receipts ── */}
-          {activeTab === "violations" && (
-            <>
-              {violationReceipts.length === 0 ? (
+            {/* ── Website Violation Receipts ───────────────────────────────── */}
+            {activeTab === "violations" && (
+              violationReceipts.length === 0 ? (
                 <EmptyState
                   label="No website violation receipts yet."
                   hint="Violation receipts are created when a website commits a breach of its signed safety promises."
                 />
               ) : (
-                <div className="space-y-3">
-                  {violationReceipts.map(v => (
-                    <div key={v.receipt_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="text-sm font-medium text-white">{v.domain}</span>
-                            <Pill
-                              label={v.severity}
-                              color={SEVERITY_COLORS[v.severity] ?? "bg-gray-800 text-gray-400"}
-                            />
-                            <Pill
-                              label={v.decision.replace(/_/g, " ")}
-                              color={VIOLATION_DECISION_COLORS[v.decision] ?? "bg-gray-800 text-gray-400"}
-                            />
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {violationReceipts.map(v => {
+                    const cardBorder =
+                      v.severity === "critical" || v.severity === "high"
+                        ? { borderColor: "var(--red-ring)" }
+                        : v.severity === "medium"
+                        ? { borderColor: "var(--amber-ring)" }
+                        : {};
+                    return (
+                      <div key={v.receipt_id} className="apr-card" style={cardBorder}>
+                        <div className="apr-card__head">
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>{v.domain}</span>
+                              <AStatus label={v.severity} variant={SEVERITY_VARIANT[v.severity] ?? "graphite"} />
+                              <AStatus
+                                label={v.decision.replace(/_/g, " ")}
+                                variant={DECISION_VARIANT[v.decision] ?? "graphite"}
+                              />
+                            </div>
+                            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0 }}>
+                              {v.violated_promise_title}
+                            </p>
+                            <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                              {v.violation_type.replace(/_/g, " ")}
+                            </p>
+                            <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+                              Profile:{" "}
+                              <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>
+                                {truncateHash(v.profile_hash)}
+                              </span>
+                            </p>
+                            <p
+                              style={{
+                                fontSize: 11.5,
+                                color: "var(--ink-4)",
+                                fontFamily: '"JetBrains Mono", monospace',
+                                margin: 0,
+                              }}
+                            >
+                              {v.receipt_id}
+                            </p>
                           </div>
-                          <p className="text-xs text-gray-400">{v.violated_promise_title}</p>
-                          <p className="text-xs text-gray-600 mt-0.5">
-                            {v.violation_type.replace(/_/g, " ")}
-                          </p>
-                          <p className="text-xs text-gray-700 mt-1">
-                            Profile: <span className="font-mono">{truncateHash(v.profile_hash)}</span>
-                          </p>
-                          <p className="text-xs text-gray-700 mt-0.5 font-mono">{v.receipt_id}</p>
-                          <div className="flex items-center gap-2 mt-2">
-                            <VerificationBadge state={verifyStates[v.receipt_id]} />
-                            <button
-                              onClick={() => verifyViolation(v.receipt_id)}
-                              disabled={verifyStates[v.receipt_id]?.status === "loading"}
-                              className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                            >
-                              Verify
-                            </button>
-                            <button
-                              onClick={() => toggleExpand(v.receipt_id)}
-                              className="text-xs text-gray-500 hover:text-gray-300"
-                            >
-                              {expanded[v.receipt_id] ? "Hide evidence" : "View evidence"}
-                            </button>
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <time style={{ fontSize: 12, color: "var(--ink-4)", display: "block" }}>
+                              {new Date(v.observed_at).toLocaleString()}
+                            </time>
+                            <div style={{ marginTop: 6 }}>
+                              <SignedBadge jws_present={v.verification.jws_present} />
+                            </div>
                           </div>
                         </div>
-                        <div className="text-right shrink-0">
-                          <time className="text-xs text-gray-600 block">
-                            {new Date(v.observed_at).toLocaleString()}
-                          </time>
-                          <span
-                            className={`text-xs mt-1 block ${
-                              v.verification.jws_present ? "text-green-700" : "text-gray-700"
-                            }`}
-                          >
-                            {v.verification.jws_present ? "signed" : "unsigned"}
-                          </span>
-                        </div>
-                      </div>
 
-                      {expanded[v.receipt_id] && (
-                        <div className="mt-3 pt-3 border-t border-gray-800">
-                          <p className="text-xs text-gray-500 mb-1">Evidence summary</p>
-                          <p className="text-xs text-gray-400 mb-2">{v.redacted_evidence_summary}</p>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                            <span className="text-gray-500">Detection source</span>
-                            <span className="text-gray-400">{v.detection_source.replace(/_/g, " ")}</span>
-                            {v.target_url_or_origin && (
-                              <>
-                                <span className="text-gray-500">Origin</span>
-                                <span className="text-gray-400 truncate">{v.target_url_or_origin}</span>
-                              </>
-                            )}
-                            {v.agent_name && (
-                              <>
-                                <span className="text-gray-500">Agent</span>
-                                <span className="text-gray-400">{v.agent_name}</span>
-                              </>
-                            )}
-                            {v.delegation_id && (
-                              <>
-                                <span className="text-gray-500">Delegation</span>
-                                <span className="text-gray-400 font-mono truncate">{v.delegation_id}</span>
-                              </>
-                            )}
-                            {v.session_id && (
-                              <>
-                                <span className="text-gray-500">Session</span>
-                                <span className="text-gray-400 font-mono truncate">{v.session_id}</span>
-                              </>
-                            )}
-                            {v.detection_signals_count != null && (
-                              <>
-                                <span className="text-gray-500">Signals</span>
-                                <span className="text-gray-400">{v.detection_signals_count}</span>
-                              </>
-                            )}
-                            <span className="text-gray-500">Followup required</span>
-                            <span className={v.followup_required ? "text-yellow-400" : "text-gray-400"}>
-                              {String(v.followup_required)}
-                            </span>
-                            <span className="text-gray-500">Payload hash</span>
-                            <span className="text-gray-400 font-mono">
-                              {truncateHash(v.verification.canonical_payload_hash)}
-                            </span>
-                            {v.verification.signed_at && (
-                              <>
-                                <span className="text-gray-500">Signed at</span>
-                                <span className="text-gray-400">
-                                  {new Date(v.verification.signed_at).toLocaleString()}
-                                </span>
-                              </>
-                            )}
-                            {v.verification.signing_key_id && (
-                              <>
-                                <span className="text-gray-500">Key ID</span>
-                                <span className="text-gray-400 font-mono">{v.verification.signing_key_id}</span>
-                              </>
-                            )}
-                          </div>
-                          <p className="text-xs text-gray-700 mt-2">
-                            raw_secrets_in_receipt: false · raw_credentials_in_receipt: false · raw_page_content_in_receipt: false
-                          </p>
-                          <button
-                            onClick={() => toggleSig(v.receipt_id)}
-                            className="text-xs text-gray-600 hover:text-gray-400 mt-2"
-                          >
-                            {sigExpanded[v.receipt_id] ? "Hide signature" : "Show signature"}
-                          </button>
-                          {sigExpanded[v.receipt_id] && (
-                            <div className="mt-2">
-                              {v.verification.jws ? (
-                                <pre className="text-xs text-gray-500 bg-gray-950 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                                  {v.verification.jws}
-                                </pre>
-                              ) : (
-                                <p className="text-xs text-gray-600">No signature available.</p>
+                        <div className="apr-card__body" style={{ gap: 10 }}>
+                          <VerifyRow
+                            verifyState={verifyStates[v.receipt_id]}
+                            onVerify={() => verifyViolation(v.receipt_id)}
+                            onToggleExpand={() => toggleExpand(v.receipt_id)}
+                            expandLabel="evidence"
+                            isExpanded={!!expanded[v.receipt_id]}
+                          />
+
+                          {expanded[v.receipt_id] && (
+                            <div className="apr-box">
+                              <div className="apr-box__head">Evidence</div>
+                              <p
+                                style={{
+                                  fontSize: 12.5,
+                                  color: "var(--ink-2)",
+                                  margin: "0 0 12px",
+                                  lineHeight: 1.5,
+                                }}
+                              >
+                                {v.redacted_evidence_summary}
+                              </p>
+                              <MetaGrid>
+                                <MetaRow
+                                  label="Detection source"
+                                  value={v.detection_source.replace(/_/g, " ")}
+                                />
+                                {v.target_url_or_origin && (
+                                  <MetaRow label="Origin" value={v.target_url_or_origin} />
+                                )}
+                                {v.agent_name && <MetaRow label="Agent" value={v.agent_name} />}
+                                {v.delegation_id && (
+                                  <MetaRow label="Delegation" value={v.delegation_id} mono />
+                                )}
+                                {v.session_id && <MetaRow label="Session" value={v.session_id} mono />}
+                                {v.detection_signals_count != null && (
+                                  <MetaRow label="Signals" value={String(v.detection_signals_count)} />
+                                )}
+                                <MetaRow label="Followup required" value={String(v.followup_required)} />
+                                <MetaRow
+                                  label="Payload hash"
+                                  value={truncateHash(v.verification.canonical_payload_hash)}
+                                  mono
+                                />
+                                {v.verification.signed_at && (
+                                  <MetaRow
+                                    label="Signed at"
+                                    value={new Date(v.verification.signed_at).toLocaleString()}
+                                  />
+                                )}
+                                {v.verification.signing_key_id && (
+                                  <MetaRow label="Key ID" value={v.verification.signing_key_id} mono />
+                                )}
+                              </MetaGrid>
+                              <p
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--ink-4)",
+                                  fontFamily: '"JetBrains Mono", monospace',
+                                  margin: "10px 0 0",
+                                }}
+                              >
+                                raw_secrets_in_receipt: false · raw_credentials_in_receipt: false · raw_page_content_in_receipt: false
+                              </p>
+                              <SigToggle id={v.receipt_id} sigExpanded={sigExpanded} onToggle={toggleSig} />
+                              {sigExpanded[v.receipt_id] && (
+                                <div style={{ marginTop: 8 }}>
+                                  <JwsBlock jws={v.verification.jws} />
+                                </div>
                               )}
                             </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </>
-          )}
+              )
+            )}
 
-          {/* ── Route Run Receipts ── */}
-          {activeTab === "runs" && (
-            <>
-              {runReceipts.length === 0 ? (
+            {/* ── Route Run Receipts ───────────────────────────────────────── */}
+            {activeTab === "runs" && (
+              runReceipts.length === 0 ? (
                 <EmptyState
                   label="No route run receipts yet."
                   hint="Receipts are created when an agent-requested skill run completes or fails."
                 />
               ) : (
-                <div className="space-y-3">
-                  {runReceipts.map(r => (
-                    <div key={r.receipt_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="text-sm font-medium text-white">{r.skill_name}</span>
-                            <Pill
-                              label={r.status}
-                              color={RUN_STATUS_COLORS[r.status] ?? "bg-gray-800 text-gray-400"}
-                            />
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400">
-                              {r.route_trust_tier}
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-500 mb-1">{r.domain}</p>
-                          {r.agent_id && (
-                            <p className="text-xs text-gray-500">
-                              Agent: <span className="font-mono text-gray-400">{r.agent_id}</span>
-                            </p>
-                          )}
-                          {r.variables && Object.keys(r.variables).length > 0 && (
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              Variables:{" "}
-                              <span className="font-mono text-gray-400">
-                                {Object.entries(r.variables).map(([k, v]) => `${k}=${v}`).join(", ")}
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {runReceipts.map(r => {
+                    const statusVariant = RUN_STATUS_VARIANT[r.status] ?? "graphite";
+                    const cardBorder = r.status === "failed" ? { borderColor: "var(--red-ring)" } : {};
+                    return (
+                      <div key={r.receipt_id} className="apr-card" style={cardBorder}>
+                        <div className="apr-card__head">
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>
+                                {r.skill_name}
                               </span>
+                              <AStatus label={r.status} variant={statusVariant} />
+                              <span className="a-status a-status--graphite">
+                                <span className="a-status__dot" />
+                                {r.route_trust_tier}
+                              </span>
+                            </div>
+                            <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{r.domain}</p>
+                            {r.agent_id && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                                Agent:{" "}
+                                <span
+                                  style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--ink-2)" }}
+                                >
+                                  {r.agent_id}
+                                </span>
+                              </p>
+                            )}
+                            {r.variables && Object.keys(r.variables).length > 0 && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                                Variables:{" "}
+                                <span
+                                  style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--ink-2)" }}
+                                >
+                                  {Object.entries(r.variables)
+                                    .map(([k, v]) => `${k}=${v}`)
+                                    .join(", ")}
+                                </span>
+                              </p>
+                            )}
+                            {r.allowed_reason && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                                {r.allowed_reason}
+                              </p>
+                            )}
+                            {r.error && (
+                              <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>
+                                Error: {r.error}
+                              </p>
+                            )}
+                            <p
+                              style={{
+                                fontSize: 11.5,
+                                color: "var(--ink-4)",
+                                fontFamily: '"JetBrains Mono", monospace',
+                                margin: 0,
+                              }}
+                            >
+                              {r.receipt_id}
                             </p>
-                          )}
-                          <p className="text-xs text-gray-600 mt-2 leading-relaxed">{r.allowed_reason}</p>
-                          {r.error && (
-                            <p className="text-xs text-red-500 mt-1">Error: {r.error}</p>
-                          )}
-                          <p className="text-xs text-gray-700 mt-2 font-mono">{r.receipt_id}</p>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <time className="text-xs text-gray-600 block">
-                            {new Date(r.completed_at ?? r.created_at).toLocaleString()}
-                          </time>
-                          <span className="text-xs text-gray-700">{r.execution_surface}</span>
+                          </div>
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <time style={{ fontSize: 12, color: "var(--ink-4)", display: "block" }}>
+                              {new Date(r.completed_at ?? r.created_at).toLocaleString()}
+                            </time>
+                            {r.execution_surface && (
+                              <span style={{ fontSize: 11, color: "var(--ink-4)", display: "block", marginTop: 4 }}>
+                                {r.execution_surface}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
-              )}
-            </>
-          )}
+              )
+            )}
 
-          {/* ── Action Receipts ── */}
-          {activeTab === "actions" && (
-            <>
-              {receipts.length === 0 ? (
+            {/* ── Action Receipts ──────────────────────────────────────────── */}
+            {activeTab === "actions" && (
+              receipts.length === 0 ? (
                 <EmptyState
                   label="No action receipts yet."
                   hint="Receipts appear when Aegis handles sensitive actions."
                 />
               ) : (
-                <div className="space-y-3">
-                  {receipts.map(receipt => (
-                    <div key={receipt.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-sm font-medium text-white font-mono">
-                              {receipt.action_type}
-                            </span>
-                            <Pill
-                              label={receipt.decision.replace(/_/g, " ")}
-                              color={DECISION_COLORS[receipt.decision] ?? "bg-gray-800 text-gray-400"}
-                            />
-                          </div>
-                          {receipt.domain && (
-                            <p className="text-xs text-gray-500">{receipt.domain}</p>
-                          )}
-                          {receipt.reason && (
-                            <p className="text-xs text-gray-600 mt-0.5">{receipt.reason}</p>
-                          )}
-                          <div className="flex gap-3 mt-2 text-xs text-gray-600">
-                            <span>Outcome: {receipt.outcome}</span>
-                            {receipt.sensitive_data_shared_with_agent && (
-                              <span className="text-yellow-500">Sensitive data shared</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {receipts.map(receipt => {
+                    const decisionVariant = DECISION_VARIANT[receipt.decision] ?? "graphite";
+                    return (
+                      <div key={receipt.id} className="apr-card">
+                        <div className="apr-card__head">
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span
+                                style={{
+                                  fontSize: 13.5,
+                                  fontWeight: 600,
+                                  color: "var(--ink-1)",
+                                  fontFamily: '"JetBrains Mono", monospace',
+                                }}
+                              >
+                                {receipt.action_type}
+                              </span>
+                              <AStatus
+                                label={receipt.decision.replace(/_/g, " ")}
+                                variant={decisionVariant}
+                              />
+                            </div>
+                            {receipt.domain && (
+                              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{receipt.domain}</p>
                             )}
+                            {receipt.reason && (
+                              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                                {receipt.reason}
+                              </p>
+                            )}
+                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                              <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                                Outcome: {receipt.outcome}
+                              </span>
+                              {receipt.sensitive_data_shared_with_agent && (
+                                <AStatus label="Sensitive data shared" variant="amber" />
+                              )}
+                            </div>
                           </div>
+                          <time style={{ fontSize: 12, color: "var(--ink-4)", flexShrink: 0 }}>
+                            {new Date(receipt.created_at).toLocaleString()}
+                          </time>
                         </div>
-                        <time className="text-xs text-gray-600 shrink-0">
-                          {new Date(receipt.created_at).toLocaleString()}
-                        </time>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
-              )}
-            </>
-          )}
-        </>
-      )}
+              )
+            )}
+
+          </>
+        )}
+      </div>
     </div>
   );
 }

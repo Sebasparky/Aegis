@@ -1,9 +1,170 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { WebsiteAegisIDTrustClaims, WebsiteTrustStatus } from "@aegis/types";
-import { getWebsiteTrustClaims, listWebsiteTrustClaims } from "@/lib/api";
+import type {
+  WebsiteAegisIDTrustClaims,
+  WebsiteTrustProfile,
+  WebsiteViolationReceipt,
+  WebsiteTrustProfileVerificationResult,
+} from "@aegis/types";
+import {
+  getWebsiteTrustClaims,
+  listWebsiteTrustClaims,
+  listWebsiteTrustProfiles,
+  listWebsiteViolationReceipts,
+  verifyWebsiteTrustProfile,
+} from "@/lib/api";
 
+// ── Types ──────────────────────────────────────────────────────────────────────
+type StatusVariant = "green" | "amber" | "red" | "graphite";
+type VerifyState = { status: "idle" | "loading" | "done"; result?: WebsiteTrustProfileVerificationResult };
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function truncateHash(hash: string) {
+  return hash.length > 20 ? `${hash.slice(0, 8)}…${hash.slice(-8)}` : hash;
+}
+
+const TRUST_STATUS_LABEL: Record<string, string> = {
+  verified_demo_business: "Verified",
+  flagged: "Flagged",
+  unverified: "Unverified",
+};
+
+const TRUST_STATUS_VARIANT: Record<string, StatusVariant> = {
+  verified_demo_business: "green",
+  flagged: "red",
+  unverified: "graphite",
+};
+
+const ACTION_LABEL: Record<string, string> = {
+  allow_normal_browsing: "Allow",
+  require_extra_approval: "Approval required",
+  block_sensitive_actions: "Block",
+};
+
+const ACTION_VARIANT: Record<string, StatusVariant> = {
+  allow_normal_browsing: "green",
+  require_extra_approval: "amber",
+  block_sensitive_actions: "red",
+};
+
+const VERIFY_STATUS_VARIANT: Record<string, StatusVariant> = {
+  verified: "green",
+  unverified: "graphite",
+  suspended: "red",
+};
+
+const PROFILE_STATUS_VARIANT: Record<string, StatusVariant> = {
+  active: "green",
+  revoked: "red",
+  superseded: "amber",
+};
+
+// ── Primitives ─────────────────────────────────────────────────────────────────
+function AStatus({ label, variant = "graphite" }: { label: string; variant?: StatusVariant }) {
+  return (
+    <span className={`a-status a-status--${variant}`}>
+      <span className="a-status__dot" />
+      {label}
+    </span>
+  );
+}
+
+function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: "Newsreader, Georgia, serif",
+          fontSize: 30,
+          fontWeight: 400,
+          color: "var(--ink-1)",
+          lineHeight: 1,
+        }}
+      >
+        {loading ? "—" : value}
+      </div>
+      <div
+        style={{
+          fontSize: 9.5,
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: "var(--ink-4)",
+          marginTop: 4,
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ label, hint }: { label: string; hint: string }) {
+  return (
+    <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
+      <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>{label}</p>
+      <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>{hint}</p>
+    </div>
+  );
+}
+
+function VerificationBadge({ state }: { state?: VerifyState }) {
+  if (!state || state.status === "idle") {
+    return <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Not verified</span>;
+  }
+  if (state.status === "loading") {
+    return (
+      <span style={{ fontSize: 11.5, color: "var(--ink-4)" }} className="animate-pulse">
+        Verifying…
+      </span>
+    );
+  }
+  const r = state.result!;
+  if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="amber" />;
+  if (r.valid) return <AStatus label="Valid" variant="green" />;
+  if (r.hash_valid) return <AStatus label="Unsigned" variant="amber" />;
+  return <AStatus label="Invalid" variant="red" />;
+}
+
+function BoolDisplay({ value }: { value: boolean }) {
+  return <AStatus label={value ? "Yes" : "No"} variant={value ? "green" : "graphite"} />;
+}
+
+function CountDisplay({ n, warningAbove }: { n: number; warningAbove?: number }) {
+  const isWarning = warningAbove !== undefined && n > warningAbove;
+  return (
+    <span
+      style={{
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: isWarning ? "oklch(0.45 0.13 25)" : n > 0 ? "var(--ink-2)" : "var(--ink-4)",
+      }}
+    >
+      {n}
+    </span>
+  );
+}
+
+function ClaimRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 16,
+        padding: "10px 0",
+        borderBottom: "1px solid var(--hairline)",
+      }}
+    >
+      <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>{label}</span>
+      <div style={{ flexShrink: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────────
 export default function WebsiteAegisIDPage() {
   const [query, setQuery] = useState("localhost");
   const [inputValue, setInputValue] = useState("localhost");
@@ -12,6 +173,11 @@ export default function WebsiteAegisIDPage() {
   const [claimsError, setClaimsError] = useState<string | null>(null);
   const [list, setList] = useState<WebsiteAegisIDTrustClaims[]>([]);
   const [loadingList, setLoadingList] = useState(true);
+  const [trustProfiles, setTrustProfiles] = useState<WebsiteTrustProfile[]>([]);
+  const [violationReceipts, setViolationReceipts] = useState<WebsiteViolationReceipt[]>([]);
+  const [loadingGlobal, setLoadingGlobal] = useState(true);
+  const [profileVerifyStates, setProfileVerifyStates] = useState<Record<string, VerifyState>>({});
+  const [expandedPromises, setExpandedPromises] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setLoadingClaims(true);
@@ -23,10 +189,37 @@ export default function WebsiteAegisIDPage() {
   }, [query]);
 
   useEffect(() => {
-    listWebsiteTrustClaims()
-      .then(setList)
-      .catch(() => {})
-      .finally(() => setLoadingList(false));
+    let cancelled = false;
+    async function load() {
+      try {
+        const [listRes, profilesRes, violationsRes] = await Promise.allSettled([
+          listWebsiteTrustClaims(),
+          listWebsiteTrustProfiles(),
+          listWebsiteViolationReceipts(),
+        ]);
+        if (cancelled) return;
+        if (listRes.status === "fulfilled") setList(listRes.value);
+        if (profilesRes.status === "fulfilled") setTrustProfiles(profilesRes.value);
+        if (violationsRes.status === "fulfilled") {
+          const raw = violationsRes.value;
+          const normalized: WebsiteViolationReceipt[] = Array.isArray(raw)
+            ? raw
+            : Array.isArray((raw as { receipts?: WebsiteViolationReceipt[] })?.receipts)
+            ? (raw as { receipts: WebsiteViolationReceipt[] }).receipts
+            : [];
+          setViolationReceipts(normalized);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingList(false);
+          setLoadingGlobal(false);
+        }
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function handleSearch(e: React.FormEvent) {
@@ -34,213 +227,507 @@ export default function WebsiteAegisIDPage() {
     setQuery(inputValue.trim() || "localhost");
   }
 
+  async function verifyProfile(id: string) {
+    setProfileVerifyStates((prev) => ({ ...prev, [id]: { status: "loading" } }));
+    try {
+      const res = await verifyWebsiteTrustProfile(id);
+      setProfileVerifyStates((prev) => ({ ...prev, [id]: { status: "done", result: res } }));
+    } catch {
+      setProfileVerifyStates((prev) => ({
+        ...prev,
+        [id]: {
+          status: "done",
+          result: { profile_id: id, valid: false, hash_valid: false, signature_valid: false, error: "FETCH_FAILED" },
+        },
+      }));
+    }
+  }
+
+  function togglePromises(id: string) {
+    setExpandedPromises((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  const matchedProfile = trustProfiles.find((p) => p.domain === claims?.domain);
+  const domainViolationCount = violationReceipts.filter((r) => r.domain === claims?.domain).length;
+  const verifiedCount = trustProfiles.filter((p) => p.verification_status === "verified").length;
+
   return (
-    <div className="max-w-2xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-white">Website AegisID</h1>
-        <p className="mt-1 text-gray-400 text-sm">
-          This is the counterparty side of Aegis. It helps agents and users decide whether a
-          website or business is safe to interact with before committing sensitive actions.
-        </p>
+    <div className="page">
+
+      {/* ── Hero ──────────────────────────────────────────────────────────── */}
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div>
+            <div className="a-eyebrow">Websites</div>
+            <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+              Websites,{" "}
+              <span className="cmd-hero__title-mark">verified.</span>
+            </h1>
+            <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+              See which domains are agent-ready, which require approval, and which have broken trust promises.
+            </p>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto auto auto 1fr",
+              gap: 32,
+              borderTop: "1px solid var(--hairline)",
+              paddingTop: 16,
+              marginTop: 20,
+            }}
+          >
+            <HeroStat value={verifiedCount} label="Verified profiles" loading={loadingGlobal} />
+            <HeroStat value={violationReceipts.length} label="Violation receipts" loading={loadingGlobal} />
+            <HeroStat value={list.length} label="Known identities" loading={loadingList} />
+          </div>
+        </div>
       </div>
 
-      <div className="mb-6 px-4 py-3 rounded-lg bg-indigo-950 border border-indigo-800 text-indigo-300 text-sm">
-        Local and demo only — this is not real domain verification, real business verification,
-        or a public reputation score. Trust records are seeded locally for demo purposes.
-      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 720 }}>
 
-      <form onSubmit={handleSearch} className="mb-6 flex gap-2">
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="Enter domain (e.g. localhost, bad-store.local)"
-          className="flex-1 px-3 py-2 rounded-md bg-gray-900 border border-gray-700 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-        />
-        <button
-          type="submit"
-          className="px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+        {/* ── Domain lookup ─────────────────────────────────────────────── */}
+        <div className="a-card" style={{ padding: "20px 24px" }}>
+          <form onSubmit={handleSearch} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>
+              <label className="ag-label" htmlFor="domain-input">
+                Domain lookup
+              </label>
+              <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "2px 0 0" }}>
+                Look up a domain's trust claims, safety promises, and violation history.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                id="domain-input"
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="Search a domain… e.g. localhost, bad-store.local"
+                className="ag-input"
+                style={{ flex: 1 }}
+              />
+              <button type="submit" className="a-btn a-btn--primary">
+                Look up
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* ── Lookup result ─────────────────────────────────────────────── */}
+        {loadingClaims && (
+          <div
+            style={{
+              height: 120,
+              borderRadius: "var(--r-3)",
+              background: "var(--graphite-soft)",
+              opacity: 0.5,
+            }}
+          />
+        )}
+
+        {claimsError && !loadingClaims && (
+          <div
+            style={{
+              padding: "14px 18px",
+              borderRadius: "var(--r-2)",
+              background: "var(--amber-soft)",
+              border: "1px solid var(--amber-ring)",
+            }}
+          >
+            <p style={{ fontSize: 12.5, color: "oklch(0.45 0.12 75)", margin: 0 }}>
+              Could not load trust claims for <strong>{query}</strong>: {claimsError}
+            </p>
+          </div>
+        )}
+
+        {claims && !loadingClaims && (
+          <div className="apr-card">
+            <div className="apr-card__head">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink-1)" }}>{claims.domain}</span>
+                  <AStatus
+                    label={TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status}
+                    variant={TRUST_STATUS_VARIANT[claims.trust_status] ?? "graphite"}
+                  />
+                  <AStatus
+                    label={ACTION_LABEL[claims.recommended_agent_action] ?? claims.recommended_agent_action}
+                    variant={ACTION_VARIANT[claims.recommended_agent_action] ?? "graphite"}
+                  />
+                </div>
+                <p
+                  style={{
+                    fontSize: 11.5,
+                    color: "var(--ink-4)",
+                    fontFamily: '"JetBrains Mono", monospace',
+                    margin: 0,
+                  }}
+                >
+                  {claims.website_aegis_id}
+                </p>
+              </div>
+              <time style={{ fontSize: 12, color: "var(--ink-4)", flexShrink: 0 }}>
+                Updated{" "}
+                {new Date(claims.last_updated).toLocaleDateString(undefined, { dateStyle: "medium" })}
+              </time>
+            </div>
+
+            <div className="apr-card__body" style={{ gap: 0 }}>
+              <div className="apr-box">
+                <div className="apr-box__head">Trust Claims</div>
+                <ClaimRow label="Business Name">
+                  <span style={{ fontSize: 12.5, color: "var(--ink-2)", fontWeight: 500 }}>
+                    {claims.business_name}
+                  </span>
+                </ClaimRow>
+                <ClaimRow label="Domain Verified">
+                  <BoolDisplay value={claims.domain_verified} />
+                </ClaimRow>
+                <ClaimRow label="Agent Policy Published">
+                  <BoolDisplay value={claims.agent_policy_published} />
+                </ClaimRow>
+                <ClaimRow label="Successful Runner Transactions">
+                  <CountDisplay n={claims.successful_runner_transactions} />
+                </ClaimRow>
+                <ClaimRow label="Blocked / Disputed Actions">
+                  <CountDisplay n={claims.blocked_or_disputed_actions} warningAbove={0} />
+                </ClaimRow>
+                <ClaimRow label="Prompt Injection Reports">
+                  <CountDisplay n={claims.prompt_injection_reports} warningAbove={0} />
+                </ClaimRow>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    padding: "10px 0",
+                  }}
+                >
+                  <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
+                    Violation Receipts (this domain)
+                  </span>
+                  <CountDisplay n={domainViolationCount} warningAbove={0} />
+                </div>
+              </div>
+
+              {/* Matching trust profile for this domain */}
+              {matchedProfile && (
+                <div className="apr-box" style={{ marginTop: 12 }}>
+                  <div className="apr-box__head">Trust Profile</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <AStatus
+                        label={matchedProfile.verification_status}
+                        variant={VERIFY_STATUS_VARIANT[matchedProfile.verification_status] ?? "graphite"}
+                      />
+                      <AStatus
+                        label={matchedProfile.status}
+                        variant={PROFILE_STATUS_VARIANT[matchedProfile.status] ?? "graphite"}
+                      />
+                      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                        {matchedProfile.safety_promises.length} promises
+                      </span>
+                      {matchedProfile.violation_count > 0 && (
+                        <span style={{ fontSize: 12, color: "oklch(0.45 0.13 25)" }}>
+                          {matchedProfile.violation_count} violations
+                        </span>
+                      )}
+                    </div>
+                    <p
+                      style={{
+                        fontSize: 11.5,
+                        color: "var(--ink-4)",
+                        fontFamily: '"JetBrains Mono", monospace',
+                        margin: 0,
+                      }}
+                    >
+                      {truncateHash(matchedProfile.profile_hash)}
+                    </p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                      <VerificationBadge state={profileVerifyStates[matchedProfile.profile_id]} />
+                      <button
+                        onClick={() => verifyProfile(matchedProfile.profile_id)}
+                        disabled={profileVerifyStates[matchedProfile.profile_id]?.status === "loading"}
+                        className="a-btn a-btn--ghost"
+                        style={{ fontSize: 12, padding: "4px 10px" }}
+                      >
+                        Verify
+                      </button>
+                      <button
+                        onClick={() => togglePromises(matchedProfile.profile_id)}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          fontSize: 12,
+                          color: "var(--blue)",
+                          padding: 0,
+                        }}
+                      >
+                        {expandedPromises[matchedProfile.profile_id] ? "Hide promises" : "View promises"}
+                      </button>
+                    </div>
+                    {expandedPromises[matchedProfile.profile_id] && matchedProfile.safety_promises.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {matchedProfile.safety_promises.map((sp) => (
+                          <div
+                            key={sp.promise_id}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: 8,
+                            }}
+                          >
+                            <span style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{sp.title}</span>
+                            <AStatus
+                              label={sp.severity_if_violated}
+                              variant={
+                                sp.severity_if_violated === "critical" || sp.severity_if_violated === "high"
+                                  ? "red"
+                                  : sp.severity_if_violated === "medium"
+                                  ? "amber"
+                                  : "graphite"
+                              }
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Trust Profiles ────────────────────────────────────────────── */}
+        {!loadingGlobal && trustProfiles.length > 0 && (
+          <div>
+            <div className="a-eyebrow" style={{ marginBottom: 12 }}>Trust Profiles</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {trustProfiles.map((p) => {
+                const cardBorder =
+                  p.violation_count > 0
+                    ? { borderColor: "var(--amber-ring)" }
+                    : p.verification_status === "verified"
+                    ? { borderColor: "var(--green-ring)" }
+                    : {};
+                return (
+                  <div key={p.profile_id} className="apr-card" style={cardBorder}>
+                    <div className="apr-card__head">
+                      <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>
+                            {p.domain}
+                          </span>
+                          <AStatus
+                            label={p.verification_status}
+                            variant={VERIFY_STATUS_VARIANT[p.verification_status] ?? "graphite"}
+                          />
+                          <AStatus
+                            label={p.status}
+                            variant={PROFILE_STATUS_VARIANT[p.status] ?? "graphite"}
+                          />
+                        </div>
+                        <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{p.company_name}</p>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                            {p.safety_promises.length} promises
+                          </span>
+                          {p.violation_count > 0 && (
+                            <span style={{ fontSize: 12, color: "oklch(0.45 0.13 25)" }}>
+                              {p.violation_count} violations
+                            </span>
+                          )}
+                        </div>
+                        <p
+                          style={{
+                            fontSize: 11.5,
+                            color: "var(--ink-4)",
+                            fontFamily: '"JetBrains Mono", monospace',
+                            margin: 0,
+                          }}
+                        >
+                          {truncateHash(p.profile_hash)}
+                        </p>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <time style={{ fontSize: 12, color: "var(--ink-4)", display: "block" }}>
+                          {new Date(p.created_at).toLocaleString()}
+                        </time>
+                        <span style={{ fontSize: 11, color: "var(--ink-4)" }}>v{p.profile_version}</span>
+                      </div>
+                    </div>
+                    <div className="apr-card__body" style={{ gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <VerificationBadge state={profileVerifyStates[p.profile_id]} />
+                        <button
+                          onClick={() => verifyProfile(p.profile_id)}
+                          disabled={profileVerifyStates[p.profile_id]?.status === "loading"}
+                          className="a-btn a-btn--ghost"
+                          style={{ fontSize: 12, padding: "4px 10px" }}
+                        >
+                          Verify
+                        </button>
+                        <button
+                          onClick={() => togglePromises(p.profile_id)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            fontSize: 12,
+                            color: "var(--blue)",
+                            padding: 0,
+                          }}
+                        >
+                          {expandedPromises[p.profile_id] ? "Hide promises" : "View promises"}
+                        </button>
+                      </div>
+                      {expandedPromises[p.profile_id] && (
+                        <div className="apr-box">
+                          <div className="apr-box__head">Safety Promises</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {p.safety_promises.map((sp) => (
+                              <div
+                                key={sp.promise_id}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: 8,
+                                }}
+                              >
+                                <span style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{sp.title}</span>
+                                <AStatus
+                                  label={sp.severity_if_violated}
+                                  variant={
+                                    sp.severity_if_violated === "critical" ||
+                                    sp.severity_if_violated === "high"
+                                      ? "red"
+                                      : sp.severity_if_violated === "medium"
+                                      ? "amber"
+                                      : "graphite"
+                                  }
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Known Website Identities ───────────────────────────────────── */}
+        <div>
+          <div className="a-eyebrow" style={{ marginBottom: 12 }}>Known Identities</div>
+          {loadingList && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[1, 2].map((i) => (
+                <div
+                  key={i}
+                  style={{
+                    height: 64,
+                    borderRadius: "var(--r-2)",
+                    background: "var(--graphite-soft)",
+                    opacity: 0.5,
+                  }}
+                />
+              ))}
+            </div>
+          )}
+          {!loadingList && list.length === 0 && (
+            <EmptyState
+              label="No known website identities yet."
+              hint="Website identities are created when a domain registers with Aegis or is seeded locally."
+            />
+          )}
+          {!loadingList && list.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {list.map((item) => (
+                <button
+                  key={item.domain}
+                  onClick={() => {
+                    setInputValue(item.domain);
+                    setQuery(item.domain);
+                  }}
+                  style={{
+                    all: "unset",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    padding: "14px 16px",
+                    borderRadius: "var(--r-2)",
+                    border: "1px solid var(--hairline)",
+                    background: "var(--paper)",
+                    cursor: "pointer",
+                    transition: "border-color 120ms",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--hairline-2)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--hairline)")}
+                >
+                  <div
+                    className="ag-avatar"
+                    style={{ fontWeight: 600, fontSize: 13, color: "var(--ink-2)", flexShrink: 0 }}
+                  >
+                    {item.domain.charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <p
+                      style={{
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        color: "var(--ink-1)",
+                        margin: 0,
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {item.domain}
+                    </p>
+                    <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "2px 0 0" }}>
+                      {item.business_name}
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                      {item.successful_runner_transactions} txn
+                    </span>
+                    <AStatus
+                      label={TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status}
+                      variant={TRUST_STATUS_VARIANT[item.trust_status] ?? "graphite"}
+                    />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Demo disclaimer */}
+        <div
+          style={{
+            padding: "12px 16px",
+            borderRadius: "var(--r-2)",
+            background: "var(--blue-soft)",
+            border: "1px solid var(--blue-ring)",
+          }}
         >
-          Look up
-        </button>
-      </form>
-
-      {loadingClaims && <p className="text-gray-500 text-sm mb-6">Loading trust claims…</p>}
-      {claimsError && (
-        <p className="text-red-400 text-sm mb-6">Error: {claimsError}</p>
-      )}
-
-      {claims && !loadingClaims && (
-        <div className="mb-8">
-          <div className="flex items-center gap-3 mb-3">
-            <h2 className="text-base font-medium text-white">{claims.domain}</h2>
-            <TrustBadge status={claims.trust_status} />
-          </div>
-          <p className="text-xs text-gray-500 font-mono mb-4">{claims.website_aegis_id}</p>
-
-          <div className="space-y-2">
-            <ClaimRow
-              label="Business Name"
-              value={<span className="text-sm text-gray-200">{claims.business_name}</span>}
-            />
-            <ClaimRow
-              label="Domain Verified"
-              value={<BoolBadge value={claims.domain_verified} />}
-            />
-            <ClaimRow
-              label="Agent Policy Published"
-              value={<BoolBadge value={claims.agent_policy_published} />}
-            />
-            <ClaimRow
-              label="Prompt Injection Reports"
-              value={<CountBadge n={claims.prompt_injection_reports} warningAbove={0} />}
-            />
-            <ClaimRow
-              label="Successful Runner Transactions"
-              value={<CountBadge n={claims.successful_runner_transactions} />}
-            />
-            <ClaimRow
-              label="Blocked / Disputed Actions"
-              value={<CountBadge n={claims.blocked_or_disputed_actions} warningAbove={0} />}
-            />
-            <ClaimRow
-              label="Credential Exposure Incidents"
-              value={
-                <span className="text-xs font-semibold bg-green-900 text-green-300 px-2 py-0.5 rounded-full">
-                  {claims.credential_exposure_incidents} (incident reporting not yet built)
-                </span>
-              }
-            />
-            <ClaimRow
-              label="Recommended Agent Action"
-              value={<ActionBadge action={claims.recommended_agent_action} />}
-            />
-          </div>
-
-          <p className="mt-3 text-xs text-gray-600">
-            Last updated:{" "}
-            {new Date(claims.last_updated).toLocaleString(undefined, {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+            Local and demo only — this is not real domain verification, real business verification,
+            or a public reputation score. Trust records are seeded locally for demo purposes.
           </p>
         </div>
-      )}
 
-      <div>
-        <h2 className="text-base font-medium text-white mb-3">Known Website Identities</h2>
-        {loadingList && <p className="text-gray-500 text-sm">Loading…</p>}
-        {!loadingList && list.length === 0 && (
-          <p className="text-gray-500 text-sm">No known identities yet.</p>
-        )}
-        <div className="space-y-2">
-          {list.map((item) => (
-            <button
-              key={item.domain}
-              onClick={() => {
-                setInputValue(item.domain);
-                setQuery(item.domain);
-              }}
-              className="w-full text-left flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-gray-900 border border-gray-800 hover:border-gray-600 transition-colors"
-            >
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-white truncate">{item.domain}</p>
-                <p className="text-xs text-gray-500 truncate">{item.business_name}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="text-xs text-gray-500">{item.successful_runner_transactions} txn</span>
-                <TrustBadge status={item.trust_status} />
-              </div>
-            </button>
-          ))}
-        </div>
       </div>
-    </div>
-  );
-}
-
-function TrustBadge({ status }: { status: WebsiteTrustStatus }) {
-  if (status === "verified_demo_business") {
-    return (
-      <span className="text-xs font-semibold bg-green-900 text-green-300 px-2 py-0.5 rounded-full">
-        Verified Demo Business
-      </span>
-    );
-  }
-  if (status === "flagged") {
-    return (
-      <span className="text-xs font-semibold bg-red-900 text-red-300 px-2 py-0.5 rounded-full">
-        Flagged
-      </span>
-    );
-  }
-  return (
-    <span className="text-xs font-semibold bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
-      Unverified
-    </span>
-  );
-}
-
-function BoolBadge({ value }: { value: boolean }) {
-  return (
-    <span
-      className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-        value ? "bg-green-900 text-green-300" : "bg-gray-800 text-gray-400"
-      }`}
-    >
-      {value ? "Yes" : "No"}
-    </span>
-  );
-}
-
-function CountBadge({ n, warningAbove }: { n: number; warningAbove?: number }) {
-  const isWarning = warningAbove !== undefined && n > warningAbove;
-  return (
-    <span
-      className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-        isWarning
-          ? "bg-red-900 text-red-300"
-          : n > 0
-          ? "bg-indigo-900 text-indigo-300"
-          : "bg-gray-800 text-gray-400"
-      }`}
-    >
-      {n}
-    </span>
-  );
-}
-
-function ActionBadge({
-  action,
-}: {
-  action: "allow_normal_browsing" | "require_extra_approval" | "block_sensitive_actions";
-}) {
-  if (action === "allow_normal_browsing") {
-    return (
-      <span className="text-xs font-semibold bg-green-900 text-green-300 px-2 py-0.5 rounded-full">
-        Allow Normal Browsing
-      </span>
-    );
-  }
-  if (action === "block_sensitive_actions") {
-    return (
-      <span className="text-xs font-semibold bg-red-900 text-red-300 px-2 py-0.5 rounded-full">
-        Block Sensitive Actions
-      </span>
-    );
-  }
-  return (
-    <span className="text-xs font-semibold bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded-full">
-      Require Extra Approval
-    </span>
-  );
-}
-
-function ClaimRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-lg bg-gray-900 border border-gray-800">
-      <p className="text-sm text-gray-300">{label}</p>
-      <div className="shrink-0">{value}</div>
     </div>
   );
 }

@@ -4,10 +4,112 @@ import { useEffect, useState } from "react";
 import type { AegisIDTrustClaims } from "@aegis/types";
 import { getAegisIDTrustClaims } from "@/lib/api";
 
+// ── Primitives ─────────────────────────────────────────────────────────────────
+
+type StatusVariant = "green" | "amber" | "red" | "graphite" | "blue";
+
+function AStatus({ label, variant = "graphite" }: { label: string; variant?: StatusVariant }) {
+  return (
+    <span className={`a-status a-status--${variant}`}>
+      <span className="a-status__dot" />
+      {label}
+    </span>
+  );
+}
+
+function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: "Newsreader, Georgia, serif",
+          fontSize: 30,
+          fontWeight: 400,
+          color: "var(--ink-1)",
+          lineHeight: 1,
+        }}
+      >
+        {loading ? "—" : value}
+      </div>
+      <div
+        style={{
+          fontSize: 9.5,
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: "var(--ink-4)",
+          marginTop: 4,
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function BoolDisplay({ value }: { value: boolean }) {
+  return <AStatus label={value ? "Yes" : "No"} variant={value ? "green" : "graphite"} />;
+}
+
+function CountDisplay({ n, warningAbove }: { n: number; warningAbove?: number }) {
+  const isWarning = warningAbove !== undefined && n > warningAbove;
+  return (
+    <span
+      style={{
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: isWarning ? "oklch(0.45 0.13 25)" : n > 0 ? "var(--ink-2)" : "var(--ink-4)",
+      }}
+    >
+      {n}
+    </span>
+  );
+}
+
+function ClaimRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 16,
+        padding: "10px 0",
+        borderBottom: "1px solid var(--hairline)",
+      }}
+    >
+      <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>{label}</span>
+      <div style={{ flexShrink: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  function handleCopy() {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+  return (
+    <button
+      onClick={handleCopy}
+      className="a-btn a-btn--ghost"
+      style={{ fontSize: 11.5, padding: "3px 9px" }}
+    >
+      {copied ? "Copied" : "Copy ID"}
+    </button>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────────
+
 export default function AegisIDPage() {
   const [claims, setClaims] = useState<AegisIDTrustClaims | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [techExpanded, setTechExpanded] = useState(false);
 
   useEffect(() => {
     getAegisIDTrustClaims()
@@ -16,150 +118,230 @@ export default function AegisIDPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const sealInitial = claims?.aegis_id
+    ? claims.aegis_id.replace(/[^a-zA-Z0-9]/g, "").charAt(0).toUpperCase() || "A"
+    : "A";
+
   return (
-    <div className="max-w-2xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-white">AegisID</h1>
-        <p className="mt-1 text-gray-400 text-sm">
-          Your portable trust identity for agent-mediated actions.
-        </p>
-        {claims && (
-          <p className="mt-1 text-xs text-gray-600 font-mono">{claims.aegis_id}</p>
-        )}
+    <div className="page">
+
+      {/* ── Hero ──────────────────────────────────────────────────────────── */}
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div className="ag-hero">
+            <div className="ag-hero__left">
+              <div className="a-eyebrow">Settings</div>
+              <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+                Identity,{" "}
+                <span className="cmd-hero__title-mark">secured.</span>
+              </h1>
+              <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+                Manage your Aegis identity, trust claims, and control-plane settings for autonomous agents.
+              </p>
+            </div>
+
+            {/* Passport seal */}
+            <div className="ag-seal" style={{ width: 96, height: 96 }}>
+              <span className="ag-seal__glow" />
+              <span className="ag-seal__ring" />
+              <div className="ag-seal__disc">
+                <span className="ag-seal__initial" style={{ fontSize: 36 }}>{sealInitial}</span>
+              </div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto auto auto 1fr",
+              gap: 32,
+              borderTop: "1px solid var(--hairline)",
+              paddingTop: 16,
+              marginTop: 20,
+            }}
+          >
+            <HeroStat value={claims?.approvals_granted ?? 0} label="Approvals granted" loading={loading} />
+            <HeroStat value={claims?.blocked_risky_actions ?? 0} label="Blocked actions" loading={loading} />
+            <HeroStat value={claims?.runner_completed_purchases ?? 0} label="Runner purchases" loading={loading} />
+          </div>
+        </div>
       </div>
 
-      <div className="mb-6 px-4 py-3 rounded-lg bg-indigo-950 border border-indigo-800 text-indigo-300 text-sm">
-        These are local demo trust claims generated from receipts — not raw browsing history and
-        not a public reputation score. In production, only derived claims (not raw history) would
-        be shared with counterparties, and only with your consent.
-      </div>
+      {/* ── Loading skeletons ─────────────────────────────────────────────── */}
+      {loading && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {[1, 2].map((i) => (
+            <div
+              key={i}
+              style={{
+                height: 96,
+                borderRadius: "var(--r-3)",
+                background: "var(--graphite-soft)",
+                opacity: 0.5,
+              }}
+            />
+          ))}
+        </div>
+      )}
 
-      {loading && <p className="text-gray-500 text-sm">Loading trust claims…</p>}
-      {error && <p className="text-red-400 text-sm">Error: {error}</p>}
-
-      {claims && (
-        <div className="space-y-3">
-          <ClaimRow
-            label="Human-Backed"
-            description="This AegisID is backed by a verified human user."
-            value={
-              <span className="text-xs font-semibold bg-green-900 text-green-300 px-2 py-0.5 rounded-full">
-                Verified (demo)
-              </span>
-            }
-          />
-
-          <ClaimRow
-            label="Runner-Completed Purchases"
-            description="Purchases executed by Aegis Runner under approval constraints. Credentials never exposed to the agent."
-            value={<CountBadge n={claims.runner_completed_purchases} />}
-          />
-
-          <ClaimRow
-            label="Blocked Risky Actions"
-            description="Actions blocked by collar policy before execution."
-            value={<CountBadge n={claims.blocked_risky_actions} />}
-          />
-
-          <ClaimRow
-            label="Approvals Granted"
-            description="Sensitive actions you explicitly approved."
-            value={<CountBadge n={claims.approvals_granted} />}
-          />
-
-          <ClaimRow
-            label="Approvals Denied"
-            description="Sensitive actions you reviewed and denied."
-            value={<CountBadge n={claims.approvals_denied} />}
-          />
-
-          <ClaimRow
-            label="Credential Exposure Incidents"
-            description="Times raw credentials were exposed to an outside agent. Incident reporting is not yet implemented — this reflects the current demo system where exposure is architecturally prevented."
-            value={
-              <span className="text-xs font-semibold bg-green-900 text-green-300 px-2 py-0.5 rounded-full">
-                {claims.credential_exposure_incidents} (demo-derived)
-              </span>
-            }
-          />
-
-          <ClaimRow
-            label="Sensitive Data Shared with Agent"
-            description="Receipts where sensitive data was returned to the outside agent. Should always be 0 in a correctly operating Aegis system."
-            value={
-              <span
-                className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                  claims.sensitive_data_shared_with_agent_count === 0
-                    ? "bg-green-900 text-green-300"
-                    : "bg-red-900 text-red-300"
-                }`}
-              >
-                {claims.sensitive_data_shared_with_agent_count}
-              </span>
-            }
-          />
-
-          <ClaimRow
-            label="Purchase History"
-            description={
-              claims.purchase_history === "demo_clean"
-                ? "At least one runner-completed purchase with zero credential exposures."
-                : "No runner-completed purchases yet. Run the demo to build history."
-            }
-            value={
-              <span
-                className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                  claims.purchase_history === "demo_clean"
-                    ? "bg-green-900 text-green-300"
-                    : "bg-gray-800 text-gray-400"
-                }`}
-              >
-                {claims.purchase_history}
-              </span>
-            }
-          />
-
-          <p className="pt-4 text-xs text-gray-600">
-            Last updated:{" "}
-            {new Date(claims.last_updated).toLocaleString(undefined, {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}
+      {/* ── Error ─────────────────────────────────────────────────────────── */}
+      {error && !loading && (
+        <div
+          style={{
+            padding: "14px 18px",
+            borderRadius: "var(--r-2)",
+            background: "var(--amber-soft)",
+            border: "1px solid var(--amber-ring)",
+          }}
+        >
+          <p style={{ fontSize: 12.5, color: "oklch(0.45 0.12 75)", margin: 0 }}>
+            Could not load identity: {error}
           </p>
         </div>
       )}
-    </div>
-  );
-}
 
-function ClaimRow({
-  label,
-  description,
-  value,
-}: {
-  label: string;
-  description: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4 px-4 py-3 rounded-lg bg-gray-900 border border-gray-800">
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-white">{label}</p>
-        <p className="text-xs text-gray-500 mt-0.5">{description}</p>
-      </div>
-      <div className="shrink-0 mt-0.5">{value}</div>
-    </div>
-  );
-}
+      {/* ── Identity card ─────────────────────────────────────────────────── */}
+      {claims && !loading && (
+        <>
+          <div
+            className="apr-card"
+            style={{ borderColor: claims.verified_human_backed ? "var(--green-ring)" : undefined }}
+          >
+            <div className="apr-card__head">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <AStatus
+                    label={claims.verified_human_backed ? "Human-backed" : "Unverified"}
+                    variant={claims.verified_human_backed ? "green" : "graphite"}
+                  />
+                  <AStatus
+                    label={claims.purchase_history === "demo_clean" ? "Clean history" : "No history"}
+                    variant={claims.purchase_history === "demo_clean" ? "green" : "graphite"}
+                  />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      color: "var(--ink-2)",
+                      fontFamily: '"JetBrains Mono", monospace',
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {claims.aegis_id}
+                  </span>
+                  <CopyButton text={claims.aegis_id} />
+                </div>
+              </div>
+              <time style={{ fontSize: 12, color: "var(--ink-4)", flexShrink: 0 }}>
+                Updated{" "}
+                {new Date(claims.last_updated).toLocaleDateString(undefined, { dateStyle: "medium" })}
+              </time>
+            </div>
 
-function CountBadge({ n }: { n: number }) {
-  return (
-    <span
-      className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-        n > 0 ? "bg-indigo-900 text-indigo-300" : "bg-gray-800 text-gray-400"
-      }`}
-    >
-      {n}
-    </span>
+            <div className="apr-card__body" style={{ gap: 0 }}>
+              <div className="apr-box">
+                <div className="apr-box__head">Trust Claims</div>
+
+                <ClaimRow label="Human-Backed">
+                  <BoolDisplay value={claims.verified_human_backed} />
+                </ClaimRow>
+                <ClaimRow label="Runner-Completed Purchases">
+                  <CountDisplay n={claims.runner_completed_purchases} />
+                </ClaimRow>
+                <ClaimRow label="Blocked Risky Actions">
+                  <CountDisplay n={claims.blocked_risky_actions} />
+                </ClaimRow>
+                <ClaimRow label="Approvals Granted">
+                  <CountDisplay n={claims.approvals_granted} />
+                </ClaimRow>
+                <ClaimRow label="Approvals Denied">
+                  <CountDisplay n={claims.approvals_denied} />
+                </ClaimRow>
+                <ClaimRow label="Credential Exposure Incidents">
+                  <CountDisplay n={claims.credential_exposure_incidents} warningAbove={0} />
+                </ClaimRow>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    padding: "10px 0",
+                  }}
+                >
+                  <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
+                    Sensitive Data Shared with Agent
+                  </span>
+                  <CountDisplay n={claims.sensitive_data_shared_with_agent_count} warningAbove={0} />
+                </div>
+              </div>
+
+              {/* Technical details toggle */}
+              <div style={{ marginTop: 12 }}>
+                <button
+                  onClick={() => setTechExpanded((v) => !v)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    color: "var(--blue)",
+                    padding: 0,
+                  }}
+                >
+                  {techExpanded ? "Hide technical details" : "View technical details"}
+                </button>
+
+                {techExpanded && (
+                  <div className="apr-box" style={{ marginTop: 10 }}>
+                    <div className="apr-box__head">Technical Details</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 24px" }}>
+                      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>Last updated</span>
+                      <span style={{ fontSize: 12, color: "var(--ink-2)" }}>
+                        {new Date(claims.last_updated).toLocaleString(undefined, {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })}
+                      </span>
+                      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>Purchase history</span>
+                      <span style={{ fontSize: 12, color: "var(--ink-2)" }}>{claims.purchase_history}</span>
+                    </div>
+                    <p
+                      style={{
+                        fontSize: 11,
+                        color: "var(--ink-4)",
+                        fontFamily: '"JetBrains Mono", monospace',
+                        margin: "10px 0 0",
+                      }}
+                    >
+                      not_a_guarantee: true · based_only_on_aegis_observed_events: true
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Demo disclaimer */}
+          <div
+            style={{
+              padding: "12px 16px",
+              borderRadius: "var(--r-2)",
+              background: "var(--blue-soft)",
+              border: "1px solid var(--blue-ring)",
+            }}
+          >
+            <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+              Local demo only — trust claims are derived from receipts in this session, not a public
+              reputation score. Only derived claims (not raw history) would be shared with counterparties
+              in production, and only with your consent.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
   );
 }

@@ -11,6 +11,15 @@ import {
 
 type Tab = "connected" | "connect" | "passports";
 
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
+    </div>
+  );
+}
+
 function statusClass(status: AgentDelegation["status"]) {
   if (status === "revoked") return "a-status a-status--outline-red";
   return "a-status a-status--graphite";
@@ -208,50 +217,13 @@ export default function DelegationsPage() {
         </div>
 
         {/* Stats strip */}
-        <div
-          className="cmd-pulse"
-          style={{
-            borderTop: "1px solid var(--hairline)",
-            marginTop: 24,
-            paddingTop: 18,
-            paddingBottom: 20,
-            justifyContent: "flex-start",
-          }}
-        >
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
-            <span
-              style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
-            >
-              {loading ? "—" : delegations.length}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.08em" }}>
-              Passports issued
-            </span>
-          </div>
-          <div className="cmd-pulse__div" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
-            <span
-              style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
-            >
-              {loading ? "—" : activeDelegations.length}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.08em" }}>
-              Active
-            </span>
-          </div>
-          <div className="cmd-pulse__div" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
-            <span
-              style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
-            >
-              {loading
-                ? "—"
-                : delegations.filter((d) => d.status === "revoked" || d.status === "expired").length}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.08em" }}>
-              Revoked
-            </span>
-          </div>
+        <div className="header-stats">
+          <HeaderStat value={loading ? "—" : delegations.length} label="Passports issued" />
+          <HeaderStat value={loading ? "—" : activeDelegations.length} label="Active" />
+          <HeaderStat
+            value={loading ? "—" : delegations.filter((d) => d.status === "revoked" || d.status === "expired").length}
+            label="Revoked"
+          />
         </div>
       </div>
 

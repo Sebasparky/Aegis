@@ -70,32 +70,11 @@ function AStatus({ label, variant = "graphite" }: { label: string; variant?: Sta
   );
 }
 
-function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
   return (
-    <div>
-      <div
-        style={{
-          fontFamily: "Newsreader, Georgia, serif",
-          fontSize: 30,
-          fontWeight: 400,
-          color: "var(--ink-1)",
-          lineHeight: 1,
-        }}
-      >
-        {loading ? "—" : value}
-      </div>
-      <div
-        style={{
-          fontSize: 9.5,
-          fontWeight: 600,
-          letterSpacing: "0.1em",
-          textTransform: "uppercase",
-          color: "var(--ink-4)",
-          marginTop: 4,
-        }}
-      >
-        {label}
-      </div>
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
     </div>
   );
 }
@@ -269,19 +248,10 @@ export default function WebsiteAegisIDPage() {
               See which domains are agent-ready, which require approval, and which have broken trust promises.
             </p>
           </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto auto auto 1fr",
-              gap: 32,
-              borderTop: "1px solid var(--hairline)",
-              paddingTop: 16,
-              marginTop: 20,
-            }}
-          >
-            <HeroStat value={verifiedCount} label="Verified profiles" loading={loadingGlobal} />
-            <HeroStat value={violationReceipts.length} label="Violation receipts" loading={loadingGlobal} />
-            <HeroStat value={list.length} label="Known identities" loading={loadingList} />
+          <div className="header-stats">
+            <HeaderStat value={loadingGlobal ? "—" : verifiedCount} label="Verified profiles" />
+            <HeaderStat value={loadingGlobal ? "—" : violationReceipts.length} label="Violation receipts" />
+            <HeaderStat value={loadingList ? "—" : list.length} label="Known identities" />
           </div>
         </div>
       </div>

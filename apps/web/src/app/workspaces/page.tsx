@@ -4,6 +4,15 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { listWorkspaces, type WorkspaceWithCounts } from "@/lib/api";
 
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
+    </div>
+  );
+}
+
 function GridIcon() {
   return (
     <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -57,31 +66,12 @@ export default function WorkspacesPage() {
         </div>
 
         {!loading && workspaces.length > 0 && (
-          <div className="cmd-pulse" style={{ marginTop: 24, paddingBottom: 24, borderTop: "1px solid var(--hairline)", justifyContent: "flex-start" }}>
-            <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-              <span className="cmd-pulse__num">{workspaces.length}</span>
-              <span className="cmd-pulse__lab">Workspaces</span>
-            </div>
-            <div className="cmd-pulse__div" />
-            <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-              <span className="cmd-pulse__num">{totalOpen}</span>
-              <span className="cmd-pulse__lab">Open Tasks</span>
-            </div>
-            <div className="cmd-pulse__div" />
-            <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-              <span className="cmd-pulse__num">{totalProgress}</span>
-              <span className="cmd-pulse__lab">In Progress</span>
-            </div>
-            <div className="cmd-pulse__div" />
-            <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-              <span className="cmd-pulse__num">{totalCompleted}</span>
-              <span className="cmd-pulse__lab">Completed</span>
-            </div>
-            <div className="cmd-pulse__div" />
-            <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-              <span className="cmd-pulse__num">{totalArtifacts}</span>
-              <span className="cmd-pulse__lab">Artifacts</span>
-            </div>
+          <div className="header-stats" style={{ paddingBottom: 24 }}>
+            <HeaderStat value={workspaces.length} label="Workspaces" />
+            <HeaderStat value={totalOpen} label="Open tasks" />
+            <HeaderStat value={totalProgress} label="In progress" />
+            <HeaderStat value={totalCompleted} label="Completed" />
+            <HeaderStat value={totalArtifacts} label="Artifacts" />
           </div>
         )}
         {(loading || workspaces.length === 0) && <div style={{ paddingBottom: 28 }} />}

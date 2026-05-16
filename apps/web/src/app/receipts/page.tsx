@@ -40,21 +40,21 @@ const TABS: { id: Tab; label: string }[] = [
 
 // ── Status pill variant maps ───────────────────────────────────────────────────
 
-type StatusVariant = "green" | "red" | "amber" | "blue" | "graphite";
+type StatusVariant = "green" | "red" | "amber" | "blue" | "graphite" | "quiet" | "outline-red" | "outline-amber";
 
 const DECISION_VARIANT: Record<string, StatusVariant> = {
-  approved: "green",
-  denied: "red",
-  allowed: "green",
-  blocked: "red",
-  warned: "amber",
-  escalated: "amber",
+  approved: "quiet",
+  denied: "outline-red",
+  allowed: "quiet",
+  blocked: "outline-red",
+  warned: "outline-amber",
+  escalated: "outline-amber",
   reputation_penalized: "graphite",
   recorded_only: "graphite",
-  approved_by_user: "blue",
-  denied_by_user: "red",
-  completed_by_runner: "green",
-  failed: "red",
+  approved_by_user: "quiet",
+  denied_by_user: "outline-red",
+  completed_by_runner: "quiet",
+  failed: "outline-red",
 };
 
 const SEVERITY_VARIANT: Record<string, StatusVariant> = {
@@ -65,20 +65,20 @@ const SEVERITY_VARIANT: Record<string, StatusVariant> = {
 };
 
 const TRUST_STATUS_VARIANT: Record<string, StatusVariant> = {
-  verified: "green",
-  unverified: "graphite",
-  suspended: "red",
+  verified: "quiet",
+  unverified: "quiet",
+  suspended: "outline-red",
 };
 
 const PROFILE_STATUS_VARIANT: Record<string, StatusVariant> = {
-  active: "green",
-  revoked: "red",
-  superseded: "amber",
+  active: "quiet",
+  revoked: "outline-red",
+  superseded: "outline-amber",
 };
 
 const RUN_STATUS_VARIANT: Record<string, StatusVariant> = {
-  completed: "green",
-  failed: "red",
+  completed: "quiet",
+  failed: "outline-red",
 };
 
 // ── Primitives ─────────────────────────────────────────────────────────────────
@@ -95,8 +95,8 @@ function AStatus({ label, variant = "graphite" }: { label: string; variant?: Sta
 function SignedBadge({ jws_present }: { jws_present: boolean }) {
   if (jws_present) {
     return (
-      <span className="a-status a-status--green" style={{ fontSize: 11 }}>
-        <span className="a-status__dot" />Signed
+      <span className="a-status a-status--quiet" style={{ fontSize: 11 }}>
+        Signed
       </span>
     );
   }
@@ -115,8 +115,8 @@ function VerificationBadge({ state }: { state?: VerifyState }) {
     );
   }
   const r = state.result!;
-  if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="amber" />;
-  if (r.valid) return <AStatus label="Valid" variant="green" />;
+  if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="outline-amber" />;
+  if (r.valid) return <AStatus label="Valid" variant="quiet" />;
   if (r.hash_valid) return <AStatus label="Unsigned" variant="amber" />;
   return <AStatus label="Invalid" variant="red" />;
 }
@@ -222,32 +222,11 @@ function VerifyRow({
   );
 }
 
-function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
   return (
-    <div>
-      <div
-        style={{
-          fontFamily: "Newsreader, Georgia, serif",
-          fontSize: 30,
-          fontWeight: 400,
-          color: "var(--ink-1)",
-          lineHeight: 1,
-        }}
-      >
-        {loading ? "—" : value}
-      </div>
-      <div
-        style={{
-          fontSize: 9.5,
-          fontWeight: 600,
-          letterSpacing: "0.1em",
-          textTransform: "uppercase",
-          color: "var(--ink-4)",
-          marginTop: 4,
-        }}
-      >
-        {label}
-      </div>
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
     </div>
   );
 }
@@ -412,20 +391,11 @@ export default function ReceiptsPage() {
               Every sensitive decision and trust boundary leaves signed, verifiable proof.
             </p>
           </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto auto auto auto 1fr",
-              gap: 32,
-              borderTop: "1px solid var(--hairline)",
-              paddingTop: 16,
-              marginTop: 20,
-            }}
-          >
-            <HeroStat value={approvalReceipts.length} label="Signed approvals" loading={loading} />
-            <HeroStat value={trustProfiles.length} label="Trust profiles" loading={loading} />
-            <HeroStat value={violationReceipts.length} label="Violations" loading={loading} />
-            <HeroStat value={runReceipts.length} label="Route runs" loading={loading} />
+          <div className="header-stats">
+            <HeaderStat value={loading ? "—" : approvalReceipts.length} label="Signed approvals" />
+            <HeaderStat value={loading ? "—" : trustProfiles.length} label="Trust profiles" />
+            <HeaderStat value={loading ? "—" : violationReceipts.length} label="Violations" />
+            <HeaderStat value={loading ? "—" : runReceipts.length} label="Route runs" />
           </div>
         </div>
       </div>
@@ -489,8 +459,7 @@ export default function ReceiptsPage() {
                           <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                               <AStatus label={r.decision} variant={decisionVariant} />
-                              <span className="a-status a-status--graphite">
-                                <span className="a-status__dot" />
+                              <span className="a-status a-status--quiet">
                                 {r.approval_source.replace(/_/g, " ")}
                               </span>
                               {r.risk_level && (
@@ -896,8 +865,7 @@ export default function ReceiptsPage() {
                                 {r.skill_name}
                               </span>
                               <AStatus label={r.status} variant={statusVariant} />
-                              <span className="a-status a-status--graphite">
-                                <span className="a-status__dot" />
+                              <span className="a-status a-status--quiet">
                                 {r.route_trust_tier}
                               </span>
                             </div>

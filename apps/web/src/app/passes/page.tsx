@@ -30,6 +30,15 @@ function statusClass(status: string): string {
 
 type Tab = "vault" | "seal" | "assignments";
 
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
+    </div>
+  );
+}
+
 export default function PassesPage() {
   const [passes, setPasses]   = useState<AegisPass[]>([]);
   const [collars, setCollars] = useState<Collar[]>([]);
@@ -220,37 +229,10 @@ export default function PassesPage() {
           </div>
 
           {/* Stat counters */}
-          <div style={{
-            display: "grid", gridTemplateColumns: "1fr 1px 1fr 1px 1fr",
-            gap: 18, alignItems: "center",
-            borderTop: "1px solid var(--hairline)", marginTop: 20, paddingTop: 18,
-          }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={{ fontSize: 9, letterSpacing: "0.18em", fontWeight: 600, color: "var(--ink-3)", textTransform: "uppercase" }}>
-                Credentials · Sealed
-              </span>
-              <span style={{ fontFamily: '"Newsreader", Georgia, serif', fontWeight: 500, fontSize: 30, color: "var(--ink-1)", letterSpacing: "-0.02em" }}>
-                {loading ? "—" : vaultPasses.length}
-              </span>
-            </div>
-            <div style={{ width: 1, height: 40, background: "var(--hairline)", justifySelf: "center" }} />
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={{ fontSize: 9, letterSpacing: "0.18em", fontWeight: 600, color: "var(--ink-3)", textTransform: "uppercase" }}>
-                Agent Passes · Active
-              </span>
-              <span style={{ fontFamily: '"Newsreader", Georgia, serif', fontWeight: 500, fontSize: 30, color: "var(--ink-1)", letterSpacing: "-0.02em" }}>
-                {loading ? "—" : activePasses.length}
-              </span>
-            </div>
-            <div style={{ width: 1, height: 40, background: "var(--hairline)", justifySelf: "center" }} />
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={{ fontSize: 9, letterSpacing: "0.18em", fontWeight: 600, color: "var(--ink-3)", textTransform: "uppercase" }}>
-                Raw Secrets · Exposed
-              </span>
-              <span style={{ fontFamily: '"Newsreader", Georgia, serif', fontWeight: 500, fontSize: 30, color: "var(--ink-1)", letterSpacing: "-0.02em" }}>
-                0
-              </span>
-            </div>
+          <div className="header-stats">
+            <HeaderStat value={loading ? "—" : vaultPasses.length} label="Credentials sealed" />
+            <HeaderStat value={loading ? "—" : activePasses.length} label="Agent passes active" />
+            <HeaderStat value={0} label="Raw secrets exposed" />
           </div>
         </div>
       </div>

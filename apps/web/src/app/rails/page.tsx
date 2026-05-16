@@ -131,15 +131,11 @@ function riskPillColor(level: string): PillColor {
   return "red";
 }
 
-function HeroStat({ value, label, loading }: { value: number; label: string; loading: boolean }) {
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
   return (
-    <div>
-      <div style={{ fontFamily: '"Newsreader", Georgia, serif', fontSize: 30, fontWeight: 400, color: "var(--ink-1)", lineHeight: 1 }}>
-        {loading ? "—" : value}
-      </div>
-      <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-4)", marginTop: 4 }}>
-        {label}
-      </div>
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
     </div>
   );
 }
@@ -986,10 +982,10 @@ export default function RailsPage() {
           <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
             Teach agents safe paths through websites. Antigen records, verifies, and replays workflows under your rules.
           </p>
-          <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16, marginTop: 20, display: "grid", gridTemplateColumns: "auto auto auto 1fr", gap: 32 }}>
-            <HeroStat value={routes.length} label="Routes" loading={loading} />
-            <HeroStat value={verifiedCount} label="Verified" loading={loading} />
-            <HeroStat value={installedCount} label="Installed" loading={skillsLoading} />
+          <div className="header-stats">
+            <HeaderStat value={loading ? "—" : routes.length} label="Routes" />
+            <HeaderStat value={loading ? "—" : verifiedCount} label="Verified" />
+            <HeaderStat value={skillsLoading ? "—" : installedCount} label="Installed" />
           </div>
         </div>
       </div>

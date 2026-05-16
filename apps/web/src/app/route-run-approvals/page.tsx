@@ -44,6 +44,15 @@ import type { SensitiveGrant } from "@aegis/types";
 
 // ── Tone / risk helpers ────────────────────────────────────────────────────────
 
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
+    </div>
+  );
+}
+
 function toneStyle(tone?: ApprovalManifestLineItem["tone"]): React.CSSProperties {
   switch (tone) {
     case "money":   return { color: "oklch(0.42 0.09 150)", fontWeight: 600 };
@@ -318,7 +327,7 @@ function PendingRunCard({
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <span className="a-status a-status--amber"><span className="a-status__dot" />Waiting</span>
+          <span className="a-status a-status--amber">Waiting</span>
           <span className={riskPillClass(riskTier)}><span className="a-status__dot" />{riskLabel(riskTier)}</span>
         </div>
       </div>
@@ -449,7 +458,7 @@ function PendingAuthSessionCard({
           <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>Antigen Login Request</p>
           <p style={{ fontSize: 11.5, color: "var(--blue)", fontFamily: "monospace", margin: 0 }}>{session.domain}</p>
         </div>
-        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}><span className="a-status__dot" />Waiting</span>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>Waiting</span>
       </div>
       <div className="apr-card__body">
         <SectionCard label="Task">
@@ -528,7 +537,7 @@ function PendingInjectionCard({
           <span style={{ ...fieldKindStyle, fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, fontFamily: "monospace" }}>
             {injection.field_kind}
           </span>
-          <span className="a-status a-status--amber"><span className="a-status__dot" />Waiting</span>
+          <span className="a-status a-status--amber">Waiting</span>
         </div>
       </div>
 
@@ -612,7 +621,7 @@ function PendingCredAuthCard({
           </div>
           <p style={{ fontSize: 11.5, color: "oklch(0.42 0.12 245)", fontFamily: "monospace", margin: 0 }}>{auth.domain}</p>
         </div>
-        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}><span className="a-status__dot" />Waiting</span>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>Waiting</span>
       </div>
 
       <div className="apr-card__body">
@@ -859,7 +868,7 @@ function PendingChallengeCard({
             </p>
             <p style={{ fontSize: 11.5, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{challenge.domain}</p>
           </div>
-          <span className="a-status a-status--graphite" style={{ flexShrink: 0 }}><span className="a-status__dot" />Expired</span>
+          <span className="a-status a-status--quiet" style={{ flexShrink: 0 }}>Expired</span>
         </div>
         <div className="apr-card__body">
           <div className="apr-box">
@@ -972,7 +981,7 @@ function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)" }}>Active Sensitive Grants</span>
           {grants.length > 0 && (
-            <span className="a-status a-status--green"><span className="a-status__dot" />{grants.length}</span>
+            <span className="a-status a-status--quiet">{grants.length}</span>
           )}
         </div>
         <a href="/sensitive-grants" style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none" }}>View all →</a>
@@ -1233,19 +1242,9 @@ export default function RouteRunApprovalsPage() {
               </span>
             )}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "auto auto 1fr", gap: 32, borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
-            <div>
-              <div style={{ fontFamily: "Newsreader, Georgia, serif", fontSize: 30, fontWeight: 400, color: "var(--ink-1)", lineHeight: 1 }}>
-                {loading ? "—" : pendingCount}
-              </div>
-              <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-4)", marginTop: 4 }}>Pending</div>
-            </div>
-            <div>
-              <div style={{ fontFamily: "Newsreader, Georgia, serif", fontSize: 30, fontWeight: 400, color: "var(--ink-1)", lineHeight: 1 }}>
-                {loading ? "—" : activeGrants.length}
-              </div>
-              <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-4)", marginTop: 4 }}>Active Grants</div>
-            </div>
+          <div className="header-stats">
+            <HeaderStat value={loading ? "—" : pendingCount} label="Pending" />
+            <HeaderStat value={loading ? "—" : activeGrants.length} label="Active grants" />
           </div>
         </div>
       </div>

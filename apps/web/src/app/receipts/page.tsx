@@ -612,7 +612,7 @@ export default function ReceiptsPage() {
               trustProfiles.length === 0 ? (
                 <EmptyState
                   label="No website trust profiles yet."
-                  hint="Trust profiles are signed promise snapshots created when a website registers with Aegis."
+                  hint="Trust profiles are signed promise snapshots created when a website registers with Antigen."
                 />
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -968,7 +968,7 @@ export default function ReceiptsPage() {
               receipts.length === 0 ? (
                 <EmptyState
                   label="No action receipts yet."
-                  hint="Receipts appear when Aegis handles sensitive actions."
+                  hint="Receipts appear when Antigen handles sensitive actions."
                 />
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

@@ -116,7 +116,7 @@ function TrustCore({ delegations, loading }: { delegations: AgentDelegation[]; l
         <div className="trust__core-inner">
           <span className="trust__core-bezel" aria-hidden="true" />
           <div className="trust__core-glyph"><ShieldSVG size={32} /></div>
-          <div className="trust__core-label">AEGIS CORE</div>
+          <div className="trust__core-label">ANTIGEN CORE</div>
         </div>
       </div>
 
@@ -377,7 +377,7 @@ export default function CommandPage() {
             <span className="cmd-hero__title-mark">{heroVerb()}</span>
           </h1>
           <p className="cmd-hero__sub">
-            Aegis verifies who acts, what they may touch, and what proof they leave.
+            Antigen verifies who acts, what they may touch, and what proof they leave.
           </p>
         </div>
 

@@ -26,7 +26,7 @@ export const STANDARD_SAFETY_PROMISES: Omit<WebsiteSafetyPromise, "committed">[]
     promise_id: "site_will_not_request_secrets_outside_approved_flows",
     title: "Secrets Only in Approved Flows",
     description:
-      "This website will not request credentials, tokens, or secrets outside of Aegis-approved secure injection flows.",
+      "This website will not request credentials, tokens, or secrets outside of Antigen-approved secure injection flows.",
     severity_if_violated: "critical",
   },
   {
@@ -38,16 +38,16 @@ export const STANDARD_SAFETY_PROMISES: Omit<WebsiteSafetyPromise, "committed">[]
   },
   {
     promise_id: "site_will_respect_aegis_approval_boundaries",
-    title: "Respect Aegis Approval Boundaries",
+    title: "Respect Antigen Approval Boundaries",
     description:
-      "This website will not attempt to bypass, circumvent, or accelerate through Aegis-required approval gates.",
+      "This website will not attempt to bypass, circumvent, or accelerate through Antigen-required approval gates.",
     severity_if_violated: "high",
   },
   {
     promise_id: "site_will_expose_clear_sensitive_action_metadata",
     title: "Clear Sensitive Action Metadata",
     description:
-      "This website will expose machine-readable metadata (ARIA, data attributes, or structured headers) identifying sensitive actions so Aegis can detect and govern them.",
+      "This website will expose machine-readable metadata (ARIA, data attributes, or structured headers) identifying sensitive actions so Antigen can detect and govern them.",
     severity_if_violated: "medium",
   },
   {

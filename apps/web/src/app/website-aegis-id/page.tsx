@@ -648,7 +648,7 @@ export default function WebsiteAegisIDPage() {
           {!loadingList && list.length === 0 && (
             <EmptyState
               label="No known website identities yet."
-              hint="Website identities are created when a domain registers with Aegis or is seeded locally."
+              hint="Website identities are created when a domain registers with Antigen or is seeded locally."
             />
           )}
           {!loadingList && list.length > 0 && (

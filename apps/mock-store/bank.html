@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AegisDemo Bank</title>
+  <title>AntigenDemo Bank</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f2f5; color: #111; min-height: 100vh; }
@@ -58,7 +58,7 @@
     }
     .btn-danger:hover { background: #fef2f2; }
     .btn-danger::after {
-      content: "⛔ Aegis Guard — blocked action";
+      content: "⛔ Antigen Guard — blocked action";
       position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
       background: #1a1a1a; color: #f9fafb; font-size: 0.7rem;
       padding: 4px 8px; border-radius: 4px; white-space: nowrap;
@@ -79,7 +79,7 @@
     .view { display: none; }
     .view.active { display: block; }
 
-    /* ── Aegis Recorder Panel ── */
+    /* ── Antigen Recorder Panel ── */
     #recorder-panel {
       position: fixed; bottom: 20px; right: 20px;
       width: 340px; background: #111827; color: #f9fafb;
@@ -158,7 +158,7 @@
     #submit-result.success { background: #064e3b; color: #6ee7b7; }
     #submit-result.error { background: #450a0a; color: #fca5a5; }
 
-    /* ── Aegis Preview Panel ── */
+    /* ── Antigen Preview Panel ── */
     #preview-panel {
       position: fixed; bottom: 20px; left: 20px;
       width: 340px; background: #111827; color: #f9fafb;
@@ -225,7 +225,7 @@
 
 <!-- Bank Shell -->
 <header class="bank-header" role="banner">
-  <h1>AegisDemo Bank</h1>
+  <h1>AntigenDemo Bank</h1>
   <span class="user">Demo User · **** 4821</span>
 </header>
 
@@ -352,8 +352,8 @@
 
 </main>
 
-<!-- Aegis Skill Preview Panel (shown only when ?previewRoute= is set) -->
-<div id="preview-panel" role="complementary" aria-label="Aegis Skill Preview" hidden>
+<!-- Antigen Skill Preview Panel (shown only when ?previewRoute= is set) -->
+<div id="preview-panel" role="complementary" aria-label="Antigen Skill Preview" hidden>
   <div id="preview-header">
     <h3>▶ Skill Preview</h3>
     <span id="preview-badge">Preview mode</span>
@@ -366,14 +366,14 @@
   </div>
 </div>
 
-<!-- Aegis Recorder Panel -->
-<div id="recorder-panel" role="complementary" aria-label="Aegis Recorder">
+<!-- Antigen Recorder Panel -->
+<div id="recorder-panel" role="complementary" aria-label="Antigen Recorder">
   <div id="recorder-header">
-    <h3>⬤ Aegis Recorder</h3>
+    <h3>⬤ Antigen Recorder</h3>
     <span id="recorder-status" class="idle">idle</span>
   </div>
   <div id="recorder-body">
-    <p>Record a safe banking workflow and compile it into a verified Aegis Rails route.</p>
+    <p>Record a safe banking workflow and compile it into a verified Antigen Rails route.</p>
     <div id="recorder-controls">
       <button id="btn-start">Start Recording</button>
       <button id="btn-stop">⏹ Stop Recording</button>
@@ -381,11 +381,11 @@
     <div id="recording-warning">Recording browser actions. Click Stop Recording when finished.</div>
     <div id="event-count"></div>
     <div id="result-area">
-      <label>Generated AegisRoute JSON</label>
+      <label>Generated AntigenRoute JSON</label>
       <pre id="route-json"></pre>
       <div id="result-actions">
         <button id="btn-copy">Copy JSON</button>
-        <button id="btn-submit">Submit to Aegis API</button>
+        <button id="btn-submit">Submit to Antigen API</button>
       </div>
       <div id="submit-result"></div>
       <button id="btn-reset">↺ New Recording</button>
@@ -427,7 +427,7 @@ document.querySelectorAll('[data-dangerous]').forEach(btn => {
   btn.addEventListener('click', e => { e.preventDefault(); });
 });
 
-// ─── Aegis Recorder ───────────────────────────────────────────────────────────
+// ─── Antigen Recorder ───────────────────────────────────────────────────────────
 let recording = false;
 let recordedEvents = [];
 let workflowName = 'Demo Banking Workflow';
@@ -694,7 +694,7 @@ btnCopy.addEventListener('click', () => {
     .then(() => { btnCopy.textContent = 'Copied!'; setTimeout(() => { btnCopy.textContent = 'Copy JSON'; }, 2000); });
 });
 
-// ─── Aegis Skill Preview ──────────────────────────────────────────────────────
+// ─── Antigen Skill Preview ──────────────────────────────────────────────────────
 (function () {
   if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
 
@@ -1019,12 +1019,12 @@ btnSubmit.addEventListener('click', async () => {
     }
   } catch (err) {
     submitRes.className = 'error';
-    submitRes.textContent = '✗ Could not reach Aegis API (is it running on port 4000?)';
+    submitRes.textContent = '✗ Could not reach Antigen API (is it running on port 4000?)';
   }
 
   submitRes.style.display = 'block';
   btnSubmit.disabled = false;
-  btnSubmit.textContent = 'Submit to Aegis API';
+  btnSubmit.textContent = 'Submit to Antigen API';
 });
 </script>
 </body>

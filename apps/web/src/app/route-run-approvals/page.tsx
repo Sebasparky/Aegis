@@ -155,14 +155,14 @@ function ManifestPanel({ ctx }: { ctx: RunApprovalContext }) {
         </SectionCard>
       )}
 
-      <SectionCard label="What Aegis protects">
+      <SectionCard label="What Antigen protects">
         <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {m.capabilities_to_release.map((cap, i) => (
             <li key={i} className="apr-check">
               <span className="apr-check__tick apr-check__tick--blue">⬡</span>
               <span>
                 <span style={{ color: "var(--blue)", fontFamily: "monospace", fontSize: 11.5 }}>{cap}</span>
-                {" "}capability will be released by Aegis
+                {" "}capability will be released by Antigen
               </span>
             </li>
           ))}
@@ -289,7 +289,7 @@ function PendingRunCard({
     return (
       <div className="apr-card apr-card--green" style={{ padding: "20px" }}>
         <p style={{ fontSize: 13.5, fontWeight: 600, color: "oklch(0.42 0.09 150)", margin: "0 0 4px" }}>
-          Decision recorded — Aegis is executing this safely.
+          Decision recorded — Antigen is executing this safely.
         </p>
         <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "0 0 12px" }}>
           {run.skill_summary?.name ?? run.skill_id} · {run.domain}
@@ -314,7 +314,7 @@ function PendingRunCard({
             <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {agentId ?? "External agent"}
             </p>
-            <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>via Aegis Delegation · {run.domain}</p>
+            <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>via Antigen Delegation · {run.domain}</p>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -393,7 +393,7 @@ function PendingRunCard({
         <SectionCard label="Approving this will">
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.6 }}>
             · Create a signed execution receipt linked to your decision<br />
-            · Execute the route within your collar boundaries — sensitive steps are Aegis-verified
+            · Execute the route within your collar boundaries — sensitive steps are Antigen-verified
           </p>
         </SectionCard>
 
@@ -446,7 +446,7 @@ function PendingAuthSessionCard({
     <div className="apr-card apr-card--blue">
       <div className="apr-card__head">
         <div>
-          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>Aegis Login Request</p>
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>Antigen Login Request</p>
           <p style={{ fontSize: 11.5, color: "var(--blue)", fontFamily: "monospace", margin: 0 }}>{session.domain}</p>
         </div>
         <span className="a-status a-status--amber" style={{ flexShrink: 0 }}><span className="a-status__dot" />Waiting</span>
@@ -458,17 +458,17 @@ function PendingAuthSessionCard({
 
         <SectionCard label="Credential & session custody">
           <CheckList items={[
-            "Aegis uses your stored credential to log in — you are not sharing your password with Claude.",
+            "Antigen uses your stored credential to log in — you are not sharing your password with Claude.",
             "Claude does not see the password at any point.",
             "Claude does not receive cookies, session tokens, or browser storage.",
-            "Aegis returns only an authenticated_session_id handle to Claude.",
+            "Antigen returns only an authenticated_session_id handle to Claude.",
           ]} />
         </SectionCard>
 
         <SectionCard label="Approving this will">
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.6 }}>
             · Create a signed approval receipt recording your decision<br />
-            · Aegis performs the login using your vault credential — the agent receives only a session handle
+            · Antigen performs the login using your vault credential — the agent receives only a session handle
             {session.expires_at && <><br />· Session handle expires {formatExpiry(session.expires_at)}</>}
           </p>
         </SectionCard>
@@ -544,8 +544,8 @@ function PendingInjectionCard({
 
         <SectionCard label="Credential custody">
           <CheckList items={[
-            "Aegis resolves the credential server-side via KMS — the agent never sees the value.",
-            "The value flows directly from the Aegis API into the browser field via CDP.",
+            "Antigen resolves the credential server-side via KMS — the agent never sees the value.",
+            "The value flows directly from the Antigen API into the browser field via CDP.",
             "The agent receives only injection metadata (id, status, field_kind). No raw value.",
             "raw_value_revealed_to_agent: false — enforced as a TypeScript literal type on every response.",
           ]} />
@@ -554,7 +554,7 @@ function PendingInjectionCard({
         <SectionCard label="Approving this will">
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.6 }}>
             · Create a signed UserApprovalReceipt recording your decision<br />
-            · Create a temporary SensitiveGrant — Aegis injects the secret directly, the raw value is never revealed to the agent
+            · Create a temporary SensitiveGrant — Antigen injects the secret directly, the raw value is never revealed to the agent
             {injection.expires_at && <><br />· Grant expires {formatExpiry(injection.expires_at)}</>}
             <br />· Revoke active grants from{" "}
             <a href="/sensitive-grants" style={{ color: "var(--blue)" }}>Sensitive Grants</a>
@@ -643,18 +643,18 @@ function PendingCredAuthCard({
 
         <SectionCard label="Credential custody">
           <CheckList blue items={[
-            "Aegis resolves credentials server-side via KMS — the agent never sees username or password.",
+            "Antigen resolves credentials server-side via KMS — the agent never sees username or password.",
             "Values are injected directly into browser fields via CDP. No raw credential in any API response.",
             "The agent receives only injection metadata (id, status, field_kind). raw_values_revealed_to_agent: false.",
-            "The agent owns all navigation and form submission. Aegis only fills the protected fields.",
-            "Default Aegis agent browsers disable password/card saving. This approval does not authorize 'remember me', 'keep me signed in', 'trust this device', or saving credentials to the browser or website.",
+            "The agent owns all navigation and form submission. Antigen only fills the protected fields.",
+            "Default Antigen agent browsers disable password/card saving. This approval does not authorize 'remember me', 'keep me signed in', 'trust this device', or saving credentials to the browser or website.",
           ]} />
         </SectionCard>
 
         <SectionCard label="Approving this will">
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.6 }}>
             · Create a signed UserApprovalReceipt recording your decision<br />
-            · Create a temporary SensitiveGrant — Aegis injects credentials directly, the raw values are never revealed to the agent
+            · Create a temporary SensitiveGrant — Antigen injects credentials directly, the raw values are never revealed to the agent
             {auth.expires_at && <><br />· Grant expires {formatExpiry(auth.expires_at)}</>}
             <br />· Revoke active grants from{" "}
             <a href="/sensitive-grants" style={{ color: "var(--blue)" }}>Sensitive Grants</a>
@@ -784,7 +784,7 @@ function PendingChallengeCard({
               {emailSearching ? "Searching Gmail…" : "Find code in connected Gmail"}
             </button>
             <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
-              Aegis only searches for this live verification request after you approve. The code is never shown to the agent.
+              Antigen only searches for this live verification request after you approve. The code is never shown to the agent.
             </p>
             {emailError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{emailError}</p>}
           </div>
@@ -802,7 +802,7 @@ function PendingChallengeCard({
         <div style={{ background: "var(--green-soft)", border: "1px solid var(--green-ring)", borderRadius: "var(--r-2)", padding: "12px 16px" }}>
           <p style={{ fontSize: 13, fontWeight: 600, color: "oklch(0.42 0.09 150)", margin: "0 0 2px" }}>Code found</p>
           <p style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", margin: "0 0 2px" }}>
-            From {sender_domain ?? "github.com"}{seconds !== null ? `, received ${seconds}s ago` : ""}.
+            From {sender_domain ?? "unknown domain"}{seconds !== null ? `, received ${seconds}s ago` : ""}.
           </p>
           <p style={{ fontSize: 11.5, color: "oklch(0.42 0.09 150)", opacity: 0.75, margin: 0 }}>
             The agent will inject it when it calls inject_challenge_email_code.
@@ -897,10 +897,10 @@ function PendingChallengeCard({
           )}
         </SectionCard>
 
-        <SectionCard label="Aegis guarantees">
+        <SectionCard label="Antigen guarantees">
           <CheckList items={[
             "Enter the code here — do not paste it into the agent chat.",
-            "Aegis injects the code directly into the browser field once.",
+            "Antigen injects the code directly into the browser field once.",
             "The agent never sees the code.",
             "Code expires immediately after injection.",
             "Submitting creates a signed approval receipt. The raw code is not stored in the receipt or grant.",
@@ -929,12 +929,12 @@ function PendingChallengeCard({
               </button>
             </div>
             <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
-              The agent will click Verify/Continue after Aegis fills the field.
+              The agent will click Verify/Continue after Antigen fills the field.
             </p>
           </div>
         ) : (
           <p style={{ fontSize: 12.5, color: "oklch(0.42 0.09 150)", margin: 0 }}>
-            Code submitted. Aegis will inject it into the browser field when the agent calls inject_security_challenge_code.
+            Code submitted. Antigen will inject it into the browser field when the agent calls inject_security_challenge_code.
           </p>
         )}
 
@@ -1114,7 +1114,7 @@ export default function RouteRunApprovalsPage() {
     try {
       await approveAuthenticatedSession(sessionId);
       setAuthSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
-      setLastDecision({ action: "approved", note: "Login session approved. Aegis is logging in." });
+      setLastDecision({ action: "approved", note: "Login session approved. Antigen is logging in." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to approve login session.");
     }
@@ -1224,7 +1224,7 @@ export default function RouteRunApprovalsPage() {
                 Approve, with{" "}<span className="cmd-hero__title-mark">proof.</span>
               </h1>
               <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
-                Review what your agents are asking Aegis to do before any sensitive capability is released.
+                Review what your agents are asking Antigen to do before any sensitive capability is released.
               </p>
             </div>
             {!loading && pendingCount > 0 && (
@@ -1325,7 +1325,7 @@ export default function RouteRunApprovalsPage() {
             <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
               <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Credential sessions</div>
               <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting access to use one of your stored credentials. Approving lets Aegis fill credentials on the specified domain. Secrets are never returned to the agent.
+                An agent is requesting access to use one of your stored credentials. Approving lets Antigen fill credentials on the specified domain. Secrets are never returned to the agent.
               </p>
             </div>
             {loading ? null : credSessions.length === 0 ? (
@@ -1371,7 +1371,7 @@ export default function RouteRunApprovalsPage() {
                       ))}
                     </div>
                     <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
-                      Session expires 10 minutes after approval. Credentials are filled by Aegis only — never returned to the agent.
+                      Session expires 10 minutes after approval. Credentials are filled by Antigen only — never returned to the agent.
                     </p>
                     <button onClick={() => handleApproveCredSession(session.session_id)} className="a-btn a-btn--primary">
                       Approve session
@@ -1390,7 +1390,7 @@ export default function RouteRunApprovalsPage() {
             <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
               <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Login sessions</div>
               <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting Aegis to log in on its behalf. The agent receives only a session handle, never cookies, storage, or your password.
+                An agent is requesting Antigen to log in on its behalf. The agent receives only a session handle, never cookies, storage, or your password.
               </p>
             </div>
             {loading ? null : authSessions.length === 0 ? (
@@ -1414,7 +1414,7 @@ export default function RouteRunApprovalsPage() {
             <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
               <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Login credentials</div>
               <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting permission to use one of your stored credentials to log in. One approval covers both fields for this attempt. Aegis resolves and injects — the agent never receives them.
+                An agent is requesting permission to use one of your stored credentials to log in. One approval covers both fields for this attempt. Antigen resolves and injects — the agent never receives them.
               </p>
             </div>
             {loading ? null : credAuths.length === 0 ? (
@@ -1438,7 +1438,7 @@ export default function RouteRunApprovalsPage() {
             <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
               <div className="a-eyebrow" style={{ color: "oklch(0.42 0.09 150)", marginBottom: 4 }}>Secret field injections</div>
               <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting Aegis to fill a credential field directly in its active browser via CDP. The agent never receives the raw credential.
+                An agent is requesting Antigen to fill a credential field directly in its active browser via CDP. The agent never receives the raw credential.
               </p>
             </div>
             {loading ? null : injections.length === 0 ? (
@@ -1462,7 +1462,7 @@ export default function RouteRunApprovalsPage() {
             <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
               <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Security challenges</div>
               <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent encountered a security challenge (device verification, email code, etc.) and paused. Enter the code here — Aegis injects it once. The agent never sees the code.
+                An agent encountered a security challenge (device verification, email code, etc.) and paused. Enter the code here — Antigen injects it once. The agent never sees the code.
               </p>
             </div>
             {loading ? null : challenges.length === 0 ? (

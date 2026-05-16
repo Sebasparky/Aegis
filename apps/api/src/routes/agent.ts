@@ -122,7 +122,7 @@ export async function agentRoutes(server: FastifyInstance) {
           block:
             "Collar policy blocked the action. Agent must stop. Do not attempt to bypass.",
           completed_by_runner:
-            "Aegis Runner executed the sensitive step internally. Receipt is the record. Agent may continue.",
+            "Antigen Runner executed the sensitive step internally. Receipt is the record. Agent may continue.",
           sensitive_data_shared_with_agent:
             "Always false. Vault values (card numbers, CVV, passwords, addresses) are never returned to the outside agent.",
         },
@@ -130,7 +130,7 @@ export async function agentRoutes(server: FastifyInstance) {
           {
             name: "create_session",
             description:
-              "Open a protected Playwright browser session under an Aegis Pass. Each session gets an isolated Chromium context enforced by the collar attached to the pass.",
+              "Open a protected Playwright browser session under an Antigen Pass. Each session gets an isolated Chromium context enforced by the collar attached to the pass.",
             endpoint: "POST /api/agent/create-session",
             method: "POST",
             required_inputs: ["agent_pass_token"],
@@ -194,7 +194,7 @@ export async function agentRoutes(server: FastifyInstance) {
           {
             name: "click",
             description:
-              "Click a browser element. Aegis inspects the element, detects if the action is sensitive, evaluates the collar, and either executes the click, pauses for approval, or blocks.",
+              "Click a browser element. Antigen inspects the element, detects if the action is sensitive, evaluates the collar, and either executes the click, pauses for approval, or blocks.",
             endpoint: "POST /api/agent/session/:sessionId/click",
             method: "POST",
             required_inputs: ["agent_pass_token", "target"],
@@ -227,7 +227,7 @@ export async function agentRoutes(server: FastifyInstance) {
           {
             name: "type",
             description:
-              "Type a value into a browser input. Aegis inspects the field before allowing. Typed values are never stored in receipts.",
+              "Type a value into a browser input. Antigen inspects the field before allowing. Typed values are never stored in receipts.",
             endpoint: "POST /api/agent/session/:sessionId/type",
             method: "POST",
             required_inputs: ["agent_pass_token", "target", "value"],
@@ -246,7 +246,7 @@ export async function agentRoutes(server: FastifyInstance) {
               { decision: "block", description: "Field blocked by collar policy." },
             ],
             safety_notes: [
-              "Never pass card numbers, CVV, passwords, or identity data as the value. Aegis Runner handles sensitive field fills from the vault.",
+              "Never pass card numbers, CVV, passwords, or identity data as the value. Antigen Runner handles sensitive field fills from the vault.",
               "Typed values are not stored in receipts.",
             ],
           },
@@ -272,7 +272,7 @@ export async function agentRoutes(server: FastifyInstance) {
           {
             name: "request_capability",
             description:
-              "Explicitly ask Aegis whether a named action is permitted before attempting it. Use this to check collar policy without triggering a real browser action.",
+              "Explicitly ask Antigen whether a named action is permitted before attempting it. Use this to check collar policy without triggering a real browser action.",
             endpoint: "POST /api/agent/session/:sessionId/request-capability",
             method: "POST",
             required_inputs: ["agent_pass_token", "action_type"],
@@ -301,7 +301,7 @@ export async function agentRoutes(server: FastifyInstance) {
             ],
             safety_notes: [
               "When approval_required is returned, the session enters waiting_for_approval and cannot accept further capability requests until the user approves or denies.",
-              "After approval, Aegis Runner executes the sensitive step. The agent receives a receipt, not raw secrets.",
+              "After approval, Antigen Runner executes the sensitive step. The agent receives a receipt, not raw secrets.",
             ],
           },
           {
@@ -331,7 +331,7 @@ export async function agentRoutes(server: FastifyInstance) {
   /**
    * POST /api/agent/create-session
    *
-   * Outside agents use this to request a protected browser session under an Aegis Pass.
+   * Outside agents use this to request a protected browser session under an Antigen Pass.
    * Launches an isolated Playwright/Chromium context immediately after creating the session record.
    */
   server.post<{ Body: CreateSessionBody }>("/api/agent/create-session", async (req, reply) => {
@@ -586,7 +586,7 @@ export async function agentRoutes(server: FastifyInstance) {
    * POST /api/agent/session/:sessionId/request-capability
    *
    * The agent requests permission to perform a sensitive action.
-   * Aegis evaluates it against the active collar and responds with:
+   * Antigen evaluates it against the active collar and responds with:
    *   - allow     → receipt created, proceed
    *   - approval_required → approval_request created, session paused
    *   - block     → receipt created, action denied

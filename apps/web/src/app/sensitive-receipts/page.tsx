@@ -120,7 +120,7 @@ export default function SensitiveReceiptsPage() {
     listSensitiveReceiptTimeline({ since, event_group: eventGroup })
       .then((r) => { if (active) setItems(r.items); })
       .catch(() => {
-        if (active) setError("Could not load the timeline. Make sure the Aegis API is running.");
+        if (active) setError("Could not load the timeline. Make sure the Antigen API is running.");
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -131,7 +131,7 @@ export default function SensitiveReceiptsPage() {
     setError(null);
     listSensitiveReceiptTimeline({ since, event_group: eventGroup })
       .then((r) => setItems(r.items))
-      .catch(() => setError("Could not load the timeline. Make sure the Aegis API is running."))
+      .catch(() => setError("Could not load the timeline. Make sure the Antigen API is running."))
       .finally(() => setLoading(false));
   }
 
@@ -143,7 +143,7 @@ export default function SensitiveReceiptsPage() {
       <div className="mb-5">
         <h1 className="text-2xl font-semibold text-white">Sensitive Action Timeline</h1>
         <p className="mt-1 text-sm text-gray-400 max-w-xl">
-          A record of what Aegis did on your behalf. No passwords, codes, cookies, or email
+          A record of what Antigen did on your behalf. No passwords, codes, cookies, or email
           contents are stored or shown here.
         </p>
       </div>
@@ -218,8 +218,8 @@ export default function SensitiveReceiptsPage() {
           </p>
           <p className="text-xs text-gray-600 mt-1">
             {since !== "all"
-              ? 'Try changing the time range to "All time", or run an Aegis login flow to generate events.'
-              : "Run an Aegis login or challenge flow to see events here."}
+              ? 'Try changing the time range to "All time", or run an Antigen login flow to generate events.'
+              : "Run an Antigen login or challenge flow to see events here."}
           </p>
         </div>
       )}

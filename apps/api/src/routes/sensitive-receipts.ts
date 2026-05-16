@@ -241,9 +241,9 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
               event_type: "challenge_code_submitted_manual",
               timestamp: ch.submitted_at,
               domain: ch.domain,
-              description: "Verification code was submitted in the Aegis UI",
+              description: "Verification code was submitted in the Antigen UI",
               metadata: { challenge_type: ch.challenge_type, domain: ch.domain },
-              privacy_guarantees: ["Code entered in Aegis UI — not pasted into chat"],
+              privacy_guarantees: ["Code entered in Antigen UI — not pasted into chat"],
               challenge_id: ch.challenge_id,
               ...(ch.browser_session_id ? { browser_session_id: ch.browser_session_id } : {}),
             });
@@ -258,7 +258,7 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
             domain: ch.domain,
             description: "Verification code was injected and deleted from memory",
             metadata: { challenge_type: ch.challenge_type, domain: ch.domain },
-            privacy_guarantees: ["Code injected via CDP and deleted from Aegis memory immediately"],
+            privacy_guarantees: ["Code injected via CDP and deleted from Antigen memory immediately"],
             challenge_id: ch.challenge_id,
             ...(ch.browser_session_id ? { browser_session_id: ch.browser_session_id } : {}),
           });
@@ -297,13 +297,13 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
             event_type: "challenge_email_code_found",
             timestamp: res.found_at,
             domain: res.domain,
-            description: "A verification code was found in email and held in Aegis memory",
+            description: "A verification code was found in email and held in Antigen memory",
             metadata: {
               domain: res.domain,
               ...(res.sender_domain ? { sender_domain: res.sender_domain } : {}),
               ...(res.received_at ? { received_at: res.received_at } : {}),
             },
-            privacy_guarantees: ["Code held in Aegis memory only — not returned to agent"],
+            privacy_guarantees: ["Code held in Antigen memory only — not returned to agent"],
             challenge_id: res.challenge_id,
             resolution_id: res.resolution_id,
           });

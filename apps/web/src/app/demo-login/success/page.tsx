@@ -13,8 +13,8 @@ export default function DemoLoginSuccessPage() {
           </div>
 
           <p className="text-sm text-gray-400">
-            The Aegis-controlled login workflow completed. Username and password
-            were filled by Aegis under the active collar and delegation policy.
+            The Antigen-controlled login workflow completed. Username and password
+            were filled by Antigen under the active collar and delegation policy.
             The agent never received the credentials directly.
           </p>
 

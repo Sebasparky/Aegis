@@ -55,7 +55,7 @@ export async function executeRunnerTask(runnerTaskId: string): Promise<RunnerTas
         const vaultData = getMockCheckoutData();
         const fillResult = await controller.fillCheckoutFromVault(vaultData);
         result =
-          "Aegis Runner filled fake checkout details from the mock vault. No real payment was made. No credentials were exposed to the outside agent.";
+          "Antigen Runner filled fake checkout details from the mock vault. No real payment was made. No credentials were exposed to the outside agent.";
         extraConstraints = {
           mock_vault_used: true,
           fields_filled_count: fillResult.fields_filled.length,
@@ -64,7 +64,7 @@ export async function executeRunnerTask(runnerTaskId: string): Promise<RunnerTas
       } catch (err) {
         console.error("[RunnerService] fillCheckoutFromVault failed:", err);
         result =
-          "Aegis Runner attempted form fill but encountered an error. Simulated completion. No real payment was made and no credentials were exposed.";
+          "Antigen Runner attempted form fill but encountered an error. Simulated completion. No real payment was made and no credentials were exposed.";
         extraConstraints = { mock_vault_used: false, sensitive_data_shared_with_agent: false };
       }
     } else {

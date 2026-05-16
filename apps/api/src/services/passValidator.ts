@@ -39,13 +39,13 @@ export function validatePassToken(token: string | undefined): PassValidationResu
   }
 
   if (pass.status === "revoked") {
-    return { ok: false, code: "PASS_REVOKED", message: "This Aegis Pass has been revoked." };
+    return { ok: false, code: "PASS_REVOKED", message: "This Antigen Pass has been revoked." };
   }
 
   if (pass.status === "expired" || new Date(pass.expires_at) < new Date()) {
     passes.set(pass.id, { ...pass, status: "expired" });
     schedulePersist();
-    return { ok: false, code: "PASS_EXPIRED", message: "This Aegis Pass has expired." };
+    return { ok: false, code: "PASS_EXPIRED", message: "This Antigen Pass has expired." };
   }
 
   const collar = collars.get(pass.default_collar_id);

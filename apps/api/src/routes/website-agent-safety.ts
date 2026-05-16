@@ -57,7 +57,7 @@ const PERMISSION_TO_CATEGORY: Partial<Record<ActionType, DelegationTrustTaskCate
   comment: "message_send",
 };
 
-// The Aegis capability type required to safely execute a task category.
+// The Antigen capability type required to safely execute a task category.
 const CATEGORY_CAPABILITY: Partial<Record<DelegationTrustTaskCategory, RuntimeCapabilityType>> = {
   login: "login_credential",
   credential_fill: "login_credential",
@@ -323,7 +323,7 @@ export async function computeWebsiteAgentSafetyProfile(
   if (supportsCapabilityReleaseGate) machineReadableReasons.push("capability_release_gate_active");
   if (hasSensitiveWorkflowSupport) machineReadableReasons.push("has_sensitive_workflow_support");
   if (hasValidWellKnownPolicy) {
-    machineReadableReasons.push("well-known Aegis policy found for domain");
+    machineReadableReasons.push("well-known Antigen policy found for domain");
     const matchingPolicyWorkflows = wellKnownPolicy!.supported_workflows.filter(
       (w) => w.task_category === taskCategory
     );

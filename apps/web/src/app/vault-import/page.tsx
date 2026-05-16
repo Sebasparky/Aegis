@@ -115,8 +115,8 @@ export default function VaultImportPage() {
       );
       setImportResult(result);
       setFlow("complete");
-    } catch (err: any) {
-      setImportError(err.message ?? "Import failed. Please try again.");
+    } catch (err: unknown) {
+      setImportError(err instanceof Error ? err.message : "Import failed. Please try again.");
       setFlow("preview");
     }
   }
@@ -132,12 +132,17 @@ export default function VaultImportPage() {
   }
 
   return (
-    <div className="max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-white">Import Credentials</h1>
-        <p className="mt-1 text-sm text-gray-400">
-          Upload a CSV export from Chrome, Google Password Manager, or Apple Passwords. Passwords are
-          encrypted into the Aegis vault immediately — the raw CSV is never stored on the server.
+    <div className="page">
+
+      {/* ── Header ── */}
+      <div style={{ marginBottom: 24 }}>
+        <span className="a-eyebrow">Secrets · Import</span>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--ink-1)", margin: "4px 0 6px" }}>
+          Import credentials
+        </h1>
+        <p style={{ fontSize: 13.5, color: "var(--ink-3)", maxWidth: 520, margin: 0, lineHeight: 1.5 }}>
+          Upload a CSV export from Chrome, Google Password Manager, or Apple Passwords. Passwords
+          are encrypted into the Antigen vault immediately — the raw CSV is never stored on the server.
         </p>
       </div>
 
@@ -166,16 +171,21 @@ export default function VaultImportPage() {
       )}
 
       {flow === "importing" && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center space-y-3">
-          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="text-sm text-gray-300">Encrypting and storing credentials…</p>
-          <p className="text-xs text-gray-500">This may take a moment for large imports.</p>
+        <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", padding: "48px 32px", textAlign: "center" }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: "50%",
+            border: "2px solid var(--hairline)", borderTopColor: "var(--ink-1)",
+            animation: "spin 0.8s linear infinite", margin: "0 auto 16px",
+          }} />
+          <p style={{ fontSize: 14, color: "var(--ink-2)", margin: "0 0 4px" }}>Encrypting and storing credentials…</p>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>This may take a moment for large imports.</p>
         </div>
       )}
 
       {flow === "complete" && importResult && (
         <CompleteStep result={importResult} onImportMore={reset} />
       )}
+
     </div>
   );
 }
@@ -194,53 +204,66 @@ function UploadStep({
   const [dragging, setDragging] = useState(false);
 
   return (
-    <div className="space-y-4">
-      <div className="bg-amber-950 border border-amber-700 rounded-lg px-4 py-3">
-        <p className="text-xs text-amber-300 font-medium">CSV files contain plaintext passwords</p>
-        <p className="text-xs text-amber-500 mt-0.5">
-          We recommend deleting the CSV file from your computer after import. Aegis encrypts
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Warning banner */}
+      <div style={{ background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-3)", padding: "12px 16px" }}>
+        <p style={{ fontSize: 12.5, fontWeight: 600, color: "var(--amber)", margin: "0 0 2px" }}>
+          CSV files contain plaintext passwords
+        </p>
+        <p style={{ fontSize: 12, color: "oklch(0.55 0.08 70)", margin: 0, lineHeight: 1.45 }}>
+          We recommend deleting the CSV file from your computer after import. Antigen encrypts
           passwords immediately and never stores the raw file.
         </p>
       </div>
 
+      {/* Drop zone */}
       <div
-        className={`border-2 border-dashed rounded-lg p-10 text-center cursor-pointer transition-colors ${
-          dragging ? "border-indigo-400 bg-indigo-950/30" : "border-gray-700 hover:border-gray-500"
-        }`}
+        style={{
+          border: `2px dashed ${dragging ? "var(--ink-2)" : "var(--hairline)"}`,
+          borderRadius: "var(--r-3)",
+          padding: "48px 32px",
+          textAlign: "center",
+          cursor: "pointer",
+          background: dragging ? "var(--graphite-soft)" : "transparent",
+          transition: "border-color 0.15s, background 0.15s",
+        }}
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => { setDragging(false); onDrop(e); }}
         onClick={() => fileInputRef.current?.click()}
       >
-        <p className="text-sm text-gray-300 font-medium">Drop your CSV here or click to choose a file</p>
-        <p className="text-xs text-gray-500 mt-1">Accepts .csv files only</p>
+        <p style={{ fontSize: 14, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 4px" }}>
+          Drop your CSV here or click to choose a file
+        </p>
+        <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>Accepts .csv files only</p>
         <input
           ref={fileInputRef}
           type="file"
           accept=".csv,text/csv"
-          className="hidden"
+          style={{ display: "none" }}
           onChange={onFileInput}
         />
       </div>
 
       {parseError && (
-        <p className="text-sm text-red-400">{parseError}</p>
+        <p style={{ fontSize: 13, color: "var(--red)", margin: 0 }}>{parseError}</p>
       )}
 
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
-        <p className="text-xs text-gray-400 font-medium">Supported formats</p>
-        <div className="space-y-1 text-xs text-gray-500">
-          <p>
-            <span className="text-gray-300">Chrome / Google Password Manager</span> —
-            {" "}name, url, username, password, note
+      {/* Supported formats */}
+      <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", padding: "14px 18px" }}>
+        <p style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-2)", margin: "0 0 8px" }}>Supported formats</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "var(--ink-4)", lineHeight: 1.45 }}>
+          <p style={{ margin: 0 }}>
+            <span style={{ color: "var(--ink-2)" }}>Chrome / Google Password Manager</span>
+            {" "}— name, url, username, password, note
           </p>
-          <p>
-            <span className="text-gray-300">Apple Passwords</span> —
-            {" "}Title, URL, Username, Password, Notes, OTPAuth
+          <p style={{ margin: 0 }}>
+            <span style={{ color: "var(--ink-2)" }}>Apple Passwords</span>
+            {" "}— Title, URL, Username, Password, Notes, OTPAuth
           </p>
-          <p>
-            <span className="text-gray-300">Generic</span> — any CSV with url/website, username/login,
-            and password columns (case-insensitive headers)
+          <p style={{ margin: 0 }}>
+            <span style={{ color: "var(--ink-2)" }}>Generic</span>
+            {" "}— any CSV with url/website, username/login, and password columns (case-insensitive headers)
           </p>
         </div>
       </div>
@@ -274,17 +297,17 @@ function PreviewStep({
   const allSelected = rows.length > 0 && rows.every((r) => r.selected);
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="space-y-0.5">
-          <p className="text-sm text-gray-300">
-            <span className="font-medium text-white">{rows.length}</span> credential
-            {rows.length !== 1 ? "s" : ""} found
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Summary row */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+        <div>
+          <p style={{ fontSize: 13.5, color: "var(--ink-1)", margin: "0 0 2px" }}>
+            <strong>{rows.length}</strong> credential{rows.length !== 1 ? "s" : ""} found
             {importFormat !== "unknown" && (
-              <span className="text-gray-500"> · {FORMAT_LABELS[importFormat] ?? importFormat}</span>
+              <span style={{ color: "var(--ink-4)" }}> · {FORMAT_LABELS[importFormat] ?? importFormat}</span>
             )}
           </p>
-          <p className="text-xs text-gray-500">
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
             {selectedRows.length} selected
             {duplicateCount > 0 && ` · ${duplicateCount} possible duplicate${duplicateCount !== 1 ? "s" : ""} (unchecked by default)`}
             {skippedRows > 0 && ` · ${skippedRows} row${skippedRows !== 1 ? "s" : ""} skipped (missing domain, username, or password)`}
@@ -292,28 +315,28 @@ function PreviewStep({
         </div>
         <button
           onClick={onReset}
-          className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          style={{ fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", padding: 0, cursor: "pointer" }}
         >
           Start over
         </button>
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-        <table className="w-full text-sm">
+      {/* Table */}
+      <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", overflow: "hidden" }}>
+        <table style={{ width: "100%", fontSize: 12.5, borderCollapse: "collapse" }}>
           <thead>
-            <tr className="border-b border-gray-800">
-              <th className="px-4 py-2 text-left w-10">
+            <tr style={{ borderBottom: "1px solid var(--hairline)" }}>
+              <th style={{ padding: "10px 14px", textAlign: "left", width: 40 }}>
                 <input
                   type="checkbox"
                   checked={allSelected}
                   onChange={(e) => onToggleAll(e.target.checked)}
-                  className="accent-indigo-500"
                 />
               </th>
-              <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">Credential</th>
-              <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">Username</th>
-              <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">Password</th>
-              <th className="px-4 py-2 text-left text-xs text-gray-500 font-medium">Status</th>
+              <th style={{ padding: "10px 14px", textAlign: "left", fontSize: 11.5, color: "var(--ink-4)", fontWeight: 500 }}>Credential</th>
+              <th style={{ padding: "10px 14px", textAlign: "left", fontSize: 11.5, color: "var(--ink-4)", fontWeight: 500 }}>Username</th>
+              <th style={{ padding: "10px 14px", textAlign: "left", fontSize: 11.5, color: "var(--ink-4)", fontWeight: 500 }}>Password</th>
+              <th style={{ padding: "10px 14px", textAlign: "left", fontSize: 11.5, color: "var(--ink-4)", fontWeight: 500 }}>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -323,29 +346,37 @@ function PreviewStep({
               return (
                 <tr
                   key={i}
-                  className={`border-b border-gray-800 last:border-0 ${row.isDuplicate ? "opacity-60" : ""}`}
+                  style={{
+                    borderBottom: i < rows.length - 1 ? "1px solid var(--hairline)" : undefined,
+                    opacity: row.isDuplicate ? 0.6 : 1,
+                  }}
                 >
-                  <td className="px-4 py-2.5">
+                  <td style={{ padding: "10px 14px" }}>
                     <input
                       type="checkbox"
                       checked={row.selected}
                       onChange={() => onToggleRow(i)}
-                      className="accent-indigo-500"
                     />
                   </td>
-                  <td className="px-4 py-2.5">
-                    <p className="text-white text-xs font-medium">{row.label}</p>
-                    <p className="text-gray-500 text-xs">{providerLabel} · {row.normalizedDomain}</p>
+                  <td style={{ padding: "10px 14px" }}>
+                    <p style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink-1)", margin: "0 0 1px" }}>{row.label}</p>
+                    <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>{providerLabel} · {row.normalizedDomain}</p>
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-gray-300">{row.username}</td>
-                  <td className="px-4 py-2.5 text-xs text-gray-500 tracking-widest">••••••••</td>
-                  <td className="px-4 py-2.5">
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--ink-2)" }}>{row.username}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--ink-4)", letterSpacing: "0.12em" }}>••••••••</td>
+                  <td style={{ padding: "10px 14px" }}>
                     {row.isDuplicate ? (
-                      <span className="text-xs bg-amber-900 text-amber-300 px-1.5 py-0.5 rounded">
+                      <span style={{
+                        fontSize: 10.5, padding: "1px 7px", borderRadius: 999,
+                        background: "var(--amber-soft)", color: "var(--amber)", border: "1px solid var(--amber-ring)",
+                      }}>
                         Possible duplicate
                       </span>
                     ) : (
-                      <span className="text-xs bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">
+                      <span style={{
+                        fontSize: 10.5, padding: "1px 7px", borderRadius: 999,
+                        background: "var(--graphite-soft)", color: "var(--ink-3)", border: "1px solid var(--hairline)",
+                      }}>
                         Ready
                       </span>
                     )}
@@ -358,18 +389,18 @@ function PreviewStep({
       </div>
 
       {importError && (
-        <p className="text-sm text-red-400">{importError}</p>
+        <p style={{ fontSize: 13, color: "var(--red)", margin: 0 }}>{importError}</p>
       )}
 
-      <div className="flex items-center gap-3">
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <button
           onClick={onImport}
           disabled={selectedRows.length === 0}
-          className="bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-md transition-colors"
+          className="a-btn a-btn--primary"
         >
           Import {selectedRows.length > 0 ? `${selectedRows.length} ` : ""}selected
         </button>
-        <p className="text-xs text-gray-500">
+        <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
           Passwords are encrypted immediately. The CSV is not sent to the server.
         </p>
       </div>
@@ -390,41 +421,47 @@ function CompleteStep({
   onImportMore: () => void;
 }) {
   return (
-    <div className="space-y-4">
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 space-y-4">
-        <div className="flex items-start gap-3">
-          <div className="w-8 h-8 rounded-full bg-green-900 flex items-center justify-center shrink-0">
-            <svg className="w-4 h-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Success card */}
+      <div style={{ border: "1px solid var(--green-ring)", borderRadius: "var(--r-3)", padding: "20px 24px", background: "var(--green-soft)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 16 }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: "50%",
+            background: "var(--green)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          }}>
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
           </div>
           <div>
-            <p className="text-sm font-medium text-white">
+            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
               Imported {result.total_imported} credential{result.total_imported !== 1 ? "s" : ""}
             </p>
             {result.failed.length > 0 && (
-              <p className="text-xs text-amber-400 mt-0.5">
+              <p style={{ fontSize: 12, color: "var(--amber)", margin: 0 }}>
                 {result.failed.length} entr{result.failed.length !== 1 ? "ies" : "y"} could not be imported.
               </p>
             )}
           </div>
         </div>
 
-        <div className="border border-gray-800 rounded-md px-4 py-3 space-y-1 text-xs text-gray-400">
-          <p>Raw CSV was not stored on the server.</p>
-          <p>Passwords were encrypted into the Aegis vault. Agents cannot read them.</p>
+        <div style={{ border: "1px solid var(--green-ring)", borderRadius: "var(--r-2)", padding: "10px 14px", fontSize: 12, color: "oklch(0.42 0.09 150)", lineHeight: 1.55 }}>
+          <p style={{ margin: "0 0 2px" }}>Raw CSV was not stored on the server.</p>
+          <p style={{ margin: 0 }}>Passwords were encrypted into the Antigen vault. Agents cannot read them.</p>
         </div>
 
         {result.imported.length > 0 && (
-          <div className="space-y-1">
-            <p className="text-xs text-gray-500 font-medium">Imported credentials</p>
-            <div className="space-y-1">
+          <div style={{ marginTop: 14 }}>
+            <p style={{ fontSize: 11.5, fontWeight: 500, color: "oklch(0.42 0.09 150)", margin: "0 0 6px" }}>Imported credentials</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {result.imported.map((vp) => {
                 const provider = findCredentialProviderByDomain(vp.domain);
-                const label = provider ? `${provider.display_name} · ${vp.username ?? vp.domain}` : `${vp.domain} · ${vp.username ?? ""}`;
+                const label = provider
+                  ? `${provider.display_name} · ${vp.username ?? vp.domain}`
+                  : `${vp.domain} · ${vp.username ?? ""}`;
                 return (
-                  <div key={vp.pass_id} className="flex items-center gap-2 text-xs text-gray-300">
-                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+                  <div key={vp.pass_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-2)" }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
                     <span>{label}</span>
                   </div>
                 );
@@ -434,24 +471,22 @@ function CompleteStep({
         )}
       </div>
 
-      <div className="bg-amber-950 border border-amber-700 rounded-lg px-4 py-3">
-        <p className="text-xs text-amber-300 font-medium">Delete your CSV file</p>
-        <p className="text-xs text-amber-500 mt-0.5">
+      {/* Delete CSV reminder */}
+      <div style={{ background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-3)", padding: "12px 16px" }}>
+        <p style={{ fontSize: 12.5, fontWeight: 600, color: "var(--amber)", margin: "0 0 2px" }}>Delete your CSV file</p>
+        <p style={{ fontSize: 12, color: "oklch(0.55 0.08 70)", margin: 0, lineHeight: 1.45 }}>
           Your export CSV contains plaintext passwords. Now that import is complete, we recommend
           deleting it from your computer.
         </p>
       </div>
 
-      <div className="flex items-center gap-3">
-        <a
-          href="/passes"
-          className="bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors"
-        >
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <a href="/passes" className="a-btn a-btn--primary">
           View your credentials
         </a>
         <button
           onClick={onImportMore}
-          className="text-sm text-gray-400 hover:text-white transition-colors"
+          className="a-btn a-btn--ghost"
         >
           Import more
         </button>

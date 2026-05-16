@@ -155,13 +155,13 @@ export default function CollarsPage() {
 
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: collar.purpose ? 0 : 6 }}>
                   <span style={permissionPillStyle("green")}>
-                    {collar.allowed_actions.length} allowed
+                    {(collar.allowed_actions ?? []).length} allowed
                   </span>
                   <span style={permissionPillStyle("amber")}>
-                    {collar.approval_required_actions.length} ask first
+                    {(collar.approval_required_actions ?? []).length} ask first
                   </span>
                   <span style={permissionPillStyle("red")}>
-                    {collar.blocked_actions.length} blocked
+                    {(collar.blocked_actions ?? []).length} blocked
                   </span>
                 </div>
               </div>

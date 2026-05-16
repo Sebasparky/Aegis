@@ -179,7 +179,7 @@ export async function websiteViolationReceiptRoutes(app: FastifyInstance) {
         ? { detection_signals_count: body.detection_signals_count }
         : {}),
 
-      // Aegis response
+      // Antigen response
       decision: body.decision,
       ...(body.blocked_action_type !== undefined
         ? { blocked_action_type: body.blocked_action_type }

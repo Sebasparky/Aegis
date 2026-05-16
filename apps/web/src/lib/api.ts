@@ -130,7 +130,7 @@ export const verifyWebsiteViolationReceipt = (id: string) =>
 // Reputation
 export const getReputationSummary = () => request<ReputationSummary>("/api/reputation/summary");
 
-// AegisID
+// Antigen ID
 export const getAegisIDTrustClaims = () =>
   request<AegisIDTrustClaims>("/api/aegis-id/me/trust-claims");
 
@@ -166,7 +166,7 @@ export const getRunner = (id: string) => request<RunnerTask>(`/api/runners/${id}
 export const executeRunner = (id: string) =>
   request<{ id: string; status: string; result?: string }>(`/api/runners/${id}/execute`, { method: "POST" });
 
-// Website AegisID
+// Website Antigen ID
 export const getWebsiteTrustClaims = (domain: string) =>
   request<WebsiteAegisIDTrustClaims>(`/api/website-aegis-id/${encodeURIComponent(domain)}/trust-claims`);
 export const listWebsiteTrustClaims = () =>
@@ -227,7 +227,7 @@ export const revokeDelegation = (delegationId: string) =>
     body: JSON.stringify({}),
   });
 
-// Aegis Rails
+// Antigen Rails
 export const listRoutes = (params?: { domain?: string; trust_tier?: string }) => {
   const qs = params
     ? "?" + new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v))).toString()

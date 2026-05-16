@@ -22,8 +22,8 @@ export function buildReceipt(
   const now = new Date().toISOString();
 
   const surfaceLabel = executionSurface === "aegis_playwright"
-    ? "the Aegis Playwright runtime"
-    : "the Aegis browser extension";
+    ? "the Antigen Playwright runtime"
+    : "the Antigen browser extension";
 
   const allowed_reason = status === "completed"
     ? `Skill "${skillName}" was installed for user_001. Route domain matched ${run.domain}. Execution was completed through ${surfaceLabel}.`
@@ -191,7 +191,7 @@ function buildRunApprovalContext(runId: string): RunApprovalContext | null {
       capabilities_to_release: ["payment_method"],
       custody_guarantees: [
         "Raw card data will not be shown to the agent",
-        "Payment is processed in the Aegis-controlled runtime only",
+        "Payment is processed in the Antigen-controlled runtime only",
       ],
       spending_limit: {
         ...(collarMax !== undefined ? { max_amount_usd: collarMax } : {}),
@@ -199,7 +199,7 @@ function buildRunApprovalContext(runId: string): RunApprovalContext | null {
         payment_instrument_label: payLabel,
       },
       runtime_guarantees: [
-        "Aegis executes this in an isolated Playwright browser session",
+        "Antigen executes this in an isolated Playwright browser session",
         "Coverage violation detection blocks unexpected sensitive actions",
         "A signed execution receipt is created and linked to this approval",
       ],
@@ -216,23 +216,23 @@ function buildRunApprovalContext(runId: string): RunApprovalContext | null {
   } else if (taskCategory === "login") {
     const lineItems: ApprovalManifestLineItem[] = [
       { label: "Website", value: run.domain },
-      { label: "Login type", value: "Username + password (Aegis-managed)" },
+      { label: "Login type", value: "Username + password (Antigen-managed)" },
     ];
 
     manifest = {
       title: `Log in to ${run.domain}`,
-      subtitle: "Aegis fills credentials without showing them to the agent",
+      subtitle: "Antigen fills credentials without showing them to the agent",
       task_category: taskCategory,
       primary_action_label: "Allow login",
       risk_tier: route?.risk_level ?? "high",
       line_items: lineItems,
       capabilities_to_release: ["login_credential"],
       custody_guarantees: [
-        "Password is filled by Aegis — never shown to the agent",
-        "Credentials come from your Aegis vault, not from the agent",
+        "Password is filled by Antigen — never shown to the agent",
+        "Credentials come from your Antigen vault, not from the agent",
       ],
       runtime_guarantees: [
-        "Aegis executes this in an isolated Playwright browser session",
+        "Antigen executes this in an isolated Playwright browser session",
         "A signed execution receipt is created and linked to this approval",
       ],
       website_context: {
@@ -256,10 +256,10 @@ function buildRunApprovalContext(runId: string): RunApprovalContext | null {
       line_items: lineItems,
       capabilities_to_release: permissions,
       custody_guarantees: [
-        "Sensitive operations are executed by Aegis, not exposed directly to the agent",
+        "Sensitive operations are executed by Antigen, not exposed directly to the agent",
       ],
       runtime_guarantees: [
-        "Aegis executes this in an isolated Playwright browser session",
+        "Antigen executes this in an isolated Playwright browser session",
         "A signed execution receipt is created and linked to this approval",
       ],
       website_context: {
@@ -663,7 +663,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
             approved_at: approvedAt,
             approval_ui_version: "route-run-approvals-v1",
             approval_text_shown: action_type === "travel_booking"
-              ? `Book demo flight on ${run.domain} (max $${spendingLimitStepUps.get(run.run_id)?.approved_limit_usd ?? collar?.spending_limits?.max_with_approval ?? 500} USD, Aegis Demo Card ending 4242)`
+              ? `Book demo flight on ${run.domain} (max $${spendingLimitStepUps.get(run.run_id)?.approved_limit_usd ?? collar?.spending_limits?.max_with_approval ?? 500} USD, Antigen Demo Card ending 4242)`
               : action_type === "payment"
               ? `Approve payment on ${run.domain} (max $${spendingLimitStepUps.get(run.run_id)?.approved_limit_usd ?? collar?.spending_limits?.max_with_approval ?? 500} USD, demo card only)`
               : `Approve ${action_type} on ${run.domain}?`,
@@ -888,7 +888,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
    * POST /api/route-runs/:runId/resolve-value
    *
    * Extension-only: resolve a pass_field or secret_ref value during an approved running RouteRun.
-   * Secret values are never returned to agents — only the Aegis extension calls this endpoint.
+   * Secret values are never returned to agents — only the Antigen extension calls this endpoint.
    */
   server.post<{
     Params: { runId: string };

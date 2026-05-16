@@ -2078,7 +2078,7 @@ describe("Section 14: Seed data validation", () => {
     expect(t002.recommended_action).toBe("wait");
     const blockers = t002.blocker_reasons as Record<string, unknown>;
     expect(blockers.incomplete_dependency_task_ids).toContain("task_coord_001");
-    expect(blockers.missing_artifact_names).toContain("aegis-pillars-summary.md");
+    expect(blockers.missing_artifact_names).toContain("antigen-pillars-summary.md");
   });
 
   it("fresh manifest shows task_coord_001 as ready/high priority and task_coord_003 as ready/low priority, with 001 first", async () => {
@@ -2112,7 +2112,7 @@ describe("Section 14: Seed data validation", () => {
     expect(res.json().error.code).toBe("TASK_NOT_READY");
   });
 
-  it("task_coord_002 becomes ready after completing task_coord_001 and creating aegis-pillars-summary.md", async () => {
+  it("task_coord_002 becomes ready after completing task_coord_001 and creating antigen-pillars-summary.md", async () => {
     // Complete the dependency
     const t001 = workspaceTasks.get("task_coord_001")!;
     t001.status = "in_progress";
@@ -2126,9 +2126,9 @@ describe("Section 14: Seed data validation", () => {
     workspaceArtifacts.set("art_seed_summary", {
       artifact_id: "art_seed_summary",
       workspace_id: "ws_coord_trial_001",
-      name: "aegis-pillars-summary.md",
+      name: "antigen-pillars-summary.md",
       kind: "markdown",
-      content: "# Aegis Pillars",
+      content: "# Antigen Pillars",
       task_id: "task_coord_001",
       created_by_delegation_id: IDS.DELEGATION_ALL,
       created_at: new Date().toISOString(),

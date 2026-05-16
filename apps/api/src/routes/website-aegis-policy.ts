@@ -174,7 +174,7 @@ export async function websiteAegisPolicyRoutes(server: FastifyInstance) {
       return reply.status(404).send({
         ok: false,
         error: "POLICY_NOT_FOUND",
-        message: "Could not fetch or parse an Aegis policy for this domain.",
+        message: "Could not fetch or parse an Antigen policy for this domain.",
       });
     }
 

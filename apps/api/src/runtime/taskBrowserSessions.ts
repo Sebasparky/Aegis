@@ -256,14 +256,14 @@ export async function createTaskBrowserSession(
 
   if (!portBusy) {
     const session = await launchChrome(opts, DEFAULT_CDP_PORT);
-    return { session, user_message: "Started a fresh Aegis task browser session." };
+    return { session, user_message: "Started a fresh Antigen task browser session." };
   }
 
   const existing = findSessionByPort(DEFAULT_CDP_PORT);
 
   // Case A: known ready session with live CDP — reuse without spawning Chrome
   if (existing && existing.status === "ready" && await isCdpAlive(DEFAULT_CDP_PORT)) {
-    return { session: existing, reused_existing: true, user_message: "Reusing the active Aegis task browser session." };
+    return { session: existing, reused_existing: true, user_message: "Reusing the active Antigen task browser session." };
   }
 
   // Case B: known stale session (expired or failed) — recycle and try same port
@@ -280,7 +280,7 @@ export async function createTaskBrowserSession(
     const freed = await waitForPortFree(DEFAULT_CDP_PORT);
     if (freed) {
       const session = await launchChrome(opts, DEFAULT_CDP_PORT);
-      return { session, user_message: "Started a fresh Aegis task browser session." };
+      return { session, user_message: "Started a fresh Antigen task browser session." };
     }
     // Port still busy after recycle — fall through to alternate ports below
   }
@@ -294,13 +294,13 @@ export async function createTaskBrowserSession(
   const altPort = await findAvailablePort(ALTERNATE_CDP_PORTS);
   if (altPort !== null) {
     const session = await launchChrome(opts, altPort);
-    return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Aegis task browser session." };
+    return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session." };
   }
 
   // Case D: no ports available in 9222–9230 range
   console.error("[TaskBrowser] All ports 9222–9230 occupied — cannot start task browser session");
   throw Object.assign(
-    new Error("Aegis could not start a secure browser session. Please try again."),
+    new Error("Antigen could not start a secure browser session. Please try again."),
     { code: "NO_PORTS_AVAILABLE" },
   );
 }

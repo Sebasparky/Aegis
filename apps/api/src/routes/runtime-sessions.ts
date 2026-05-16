@@ -11,7 +11,7 @@ export async function runtimeSessionRoutes(server: FastifyInstance) {
   /**
    * POST /api/runtime/route-runs/:runId/playwright/start
    *
-   * Start an approved pending RouteRun in the Aegis Playwright controlled runtime.
+   * Start an approved pending RouteRun in the Antigen Playwright controlled runtime.
    * Refuses runs that are pending_approval — user must approve first.
    * Synchronous for v1: awaits completion before responding.
    */
@@ -38,7 +38,7 @@ export async function runtimeSessionRoutes(server: FastifyInstance) {
         );
         if (existing) return reply.send({ ok: true, data: existing });
         if (run.status === "running") {
-          return sendError(reply, 409, "RUN_ALREADY_RUNNING", "Run is already executing in the Aegis Playwright runtime.");
+          return sendError(reply, 409, "RUN_ALREADY_RUNNING", "Run is already executing in the Antigen Playwright runtime.");
         }
         // Claimed but Playwright hasn't started yet — allow fallback
       }

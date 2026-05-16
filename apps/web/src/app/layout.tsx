@@ -3,8 +3,8 @@ import "./globals.css";
 import { AppShell } from "@/components/shell";
 
 export const metadata: Metadata = {
-  title: "Aegis",
-  description: "The trust and control layer for autonomous AI agents.",
+  title: "Antigen",
+  description: "The trust and liability layer for autonomous AI agents.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

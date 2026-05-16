@@ -63,7 +63,7 @@ function getPageLabel(pathname: string): string {
   for (const [route, label] of Object.entries(PAGE_LABELS)) {
     if (route !== "/" && pathname.startsWith(route)) return label;
   }
-  return "Aegis";
+  return "Antigen";
 }
 
 function isActive(pathname: string, href: string): boolean {
@@ -107,7 +107,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="sb__brand-glyph-inner">{Icons.shield(14)}</span>
           </div>
           <div>
-            <div className="sb__brand-name">Aegis</div>
+            <div className="sb__brand-name">Antigen</div>
             <div className="sb__brand-tag">TRUST LAYER · v0.4</div>
           </div>
         </div>
@@ -155,7 +155,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Topbar */}
         <header className="tb">
           <div className="tb__crumb">
-            <span className="tb__crumb-org">My Aegis</span>
+            <span className="tb__crumb-org">My Antigen</span>
             <span className="tb__crumb-sep">/</span>
             <span className="tb__crumb-page">{pageLabel}</span>
           </div>

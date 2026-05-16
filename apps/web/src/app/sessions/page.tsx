@@ -29,7 +29,7 @@ export default function SessionsPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold text-white">Sessions</h1>
         <p className="mt-1 text-gray-400 text-sm">
-          Protected browser sessions start when an agent requests web access through Aegis.
+          Protected browser sessions start when an agent requests web access through Antigen.
         </p>
       </div>
 
@@ -39,7 +39,7 @@ export default function SessionsPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
           <p className="text-sm font-medium text-gray-400">No active sessions.</p>
           <p className="text-xs text-gray-600 mt-1">
-            Agents can request protected sessions using an Aegis Pass.
+            Agents can request protected sessions using an Antigen Pass.
           </p>
         </div>
       )}

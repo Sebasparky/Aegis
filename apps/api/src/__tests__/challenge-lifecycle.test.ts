@@ -273,7 +273,7 @@ describe("Email resolution — agent-initiated path (email-resolution-request �
 
     const resolutionId: string = reqBody.data.resolution_id;
 
-    // Step 2: User approves in Aegis UI — search runs.
+    // Step 2: User approves in Antigen UI — search runs.
     vi.mocked(searchGmailForChallengeCode).mockResolvedValueOnce(MOCK_SEARCH_RESULT_SNIPPET);
     vi.mocked(executeChallengeInjectionViaCDP).mockResolvedValueOnce({ success: true });
 

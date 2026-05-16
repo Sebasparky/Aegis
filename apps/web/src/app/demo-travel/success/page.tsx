@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export default function DemoTravelSuccessPage() {
-  const bookingId = `AEGIS-DEMO-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+  const bookingId = `ANTIGEN-DEMO-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
 
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center px-4">
@@ -15,7 +15,7 @@ export default function DemoTravelSuccessPage() {
           </div>
 
           <p className="text-sm text-gray-400">
-            The Aegis-controlled flight booking completed. The demo payment method
+            The Antigen-controlled flight booking completed. The demo payment method
             was used under the active collar and delegation policy.
             No raw card data was handled by the agent.
           </p>
@@ -33,7 +33,7 @@ export default function DemoTravelSuccessPage() {
 
           <div className="bg-gray-800 border border-gray-700 rounded-md px-3 py-2 space-y-1">
             <p className="text-xs text-gray-500">Payment</p>
-            <p className="text-xs text-cyan-400 font-mono">Aegis Demo Card ending 4242</p>
+            <p className="text-xs text-cyan-400 font-mono">Antigen Demo Card ending 4242</p>
             <p className="text-xs text-gray-600">Tokenized · No raw card data stored or exposed</p>
           </div>
 

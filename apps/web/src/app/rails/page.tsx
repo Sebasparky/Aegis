@@ -396,7 +396,7 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
               : { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }),
           }}>
             {verifyReport.passed
-              ? `Aegis verified this skill — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`
+              ? `Antigen verified this skill — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`
               : `Verification failed — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`}
           </div>
           <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-2)", overflow: "hidden" }}>
@@ -956,7 +956,7 @@ export default function RailsPage() {
             <span className="cmd-hero__title-mark">verified.</span>
           </h1>
           <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
-            Teach agents safe paths through websites. Aegis records, verifies, and replays workflows under your rules.
+            Teach agents safe paths through websites. Antigen records, verifies, and replays workflows under your rules.
           </p>
           <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16, marginTop: 20, display: "grid", gridTemplateColumns: "auto auto auto 1fr", gap: 32 }}>
             <HeroStat value={routes.length} label="Routes" loading={loading} />
@@ -1010,10 +1010,10 @@ export default function RailsPage() {
                 <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
                   Open the demo bank page, click <strong style={{ color: "var(--ink-2)" }}>Start Recording</strong>, perform the workflow, then click{" "}
                   <strong style={{ color: "var(--ink-2)" }}>Stop Recording</strong> and{" "}
-                  <strong style={{ color: "var(--ink-2)" }}>Submit to Aegis</strong>. Return here when done.
+                  <strong style={{ color: "var(--ink-2)" }}>Submit to Antigen</strong>. Return here when done.
                 </p>
                 <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "4px 0 0" }}>
-                  Aegis captures semantic telemetry — element roles, labels, and accessibility context — not raw coordinates or screenshots.
+                  Antigen captures semantic telemetry — element roles, labels, and accessibility context — not raw coordinates or screenshots.
                 </p>
               </div>
               <a
@@ -1039,7 +1039,7 @@ export default function RailsPage() {
               {showAdvancedRecorder && (
                 <form onSubmit={handleCompile} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
                   <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
-                    If the bank page&apos;s Submit button doesn&apos;t reach Aegis automatically, copy the JSON from the recorder panel and paste it here.
+                    If the bank page&apos;s Submit button doesn&apos;t reach Antigen automatically, copy the JSON from the recorder panel and paste it here.
                   </p>
                   <div>
                     <label className="ag-label">Recording payload JSON</label>

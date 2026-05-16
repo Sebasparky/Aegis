@@ -258,14 +258,14 @@ export async function buildAgentSafeObservationSnapshot(
     if (raw.kind === 'field') {
       if (raw.sensitive) {
         allowedActions = ['read', 'request_fill'];
-        reason = `Sensitive field (${raw.sensitivity ?? 'unknown'}) — value protected by Aegis capability release.`;
+        reason = `Sensitive field (${raw.sensitivity ?? 'unknown'}) — value protected by Antigen capability release.`;
       } else {
         allowedActions = ['read', 'fill'];
       }
     } else if (raw.kind === 'button') {
       if (raw.sensitive) {
         allowedActions = ['read', 'request_click'];
-        reason = `Sensitive action button (${raw.sensitivity ?? 'unknown'}) — must go through Aegis route step.`;
+        reason = `Sensitive action button (${raw.sensitivity ?? 'unknown'}) — must go through Antigen route step.`;
       } else {
         allowedActions = ['read', 'click'];
       }

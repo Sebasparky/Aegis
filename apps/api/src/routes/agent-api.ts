@@ -375,7 +375,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                 run: buildRunSummary(run, []),
                 approval_required: true,
                 next_action: "wait_for_user_approval",
-                message: `Approval required for: ${needsApproval.join(", ")}. Approve at /route-run-approvals in the Aegis UI.`,
+                message: `Approval required for: ${needsApproval.join(", ")}. Approve at /route-run-approvals in the Antigen UI.`,
               },
             });
           }
@@ -502,7 +502,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
   /**
    * GET /api/agent/v1/websites/:domain/policy
-   * Returns the well-known Aegis policy for the domain (localhost-only in v1).
+   * Returns the well-known Antigen policy for the domain (localhost-only in v1).
    */
   server.get<{ Params: { domain: string } }>(
     "/api/agent/v1/websites/:domain/policy",
@@ -551,7 +551,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           data: {
             domain,
             profile_found: false,
-            warning: `No active WebsiteTrustProfile registered with Aegis for domain '${domain}'. This domain has not declared its agent commitments. Require user approval for any sensitive actions.`,
+            warning: `No active WebsiteTrustProfile registered with Antigen for domain '${domain}'. This domain has not declared its agent commitments. Require user approval for any sensitive actions.`,
           },
         });
       }
@@ -559,7 +559,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const warnings: string[] = [];
       if (profile.verification_status !== "verified") {
         warnings.push(
-          `Trust profile is '${profile.verification_status}' — declarations have not been verified by Aegis.`
+          `Trust profile is '${profile.verification_status}' — declarations have not been verified by Antigen.`
         );
       }
       if (profile.status !== "active") {
@@ -628,7 +628,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
   // ─── Authenticated Session Boundary v1 ─────────────────────────────────────
 
-  // Request Aegis to perform a login on the agent's behalf.
+  // Request Antigen to perform a login on the agent's behalf.
   // Agent never receives cookies, storage, password, or session secrets.
   // Returns a session handle with status pending_approval.
   // Login runs after user approval; stops on 2FA/CAPTCHA/passkey/security challenge.
@@ -745,8 +745,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     switch (status) {
       case "pending_approval":
         return authCovered
-          ? "Tell the user to approve in the Aegis UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id from this response — it will return automatically when approved. Do NOT ask the user to type 'done'."
-          : "Tell the user to approve in the Aegis UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id. Do NOT ask the user to type 'done'.";
+          ? "Tell the user to approve in the Antigen UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id from this response — it will return automatically when approved. Do NOT ask the user to type 'done'."
+          : "Tell the user to approve in the Antigen UI at /route-run-approvals under 'Login credential requests'. Then call wait_for_credential_authorization with the authorization_id. Do NOT ask the user to type 'done'.";
       case "approved":
         return "Injection is approved. Call execute_secret_field_injection with this injection_request_id.";
       case "executing":
@@ -806,7 +806,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (pageHostname !== body.domain && !pageHostname.endsWith(`.${body.domain}`)) {
         return sendError(
           reply, 400, "DOMAIN_MISMATCH",
-          `Aegis will not inject ${body.domain} credentials into ${pageHostname}. ` +
+          `Antigen will not inject ${body.domain} credentials into ${pageHostname}. ` +
           `Navigate to the ${body.domain} login page (using username/password, not OAuth) before requesting injection.`,
         );
       }
@@ -1182,7 +1182,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           domain: injection.domain,
           filled_at: injection.filled_at,
           raw_value_revealed_to_agent: false,
-          note: "Aegis injected the field value directly via CDP. The raw credential was never returned to the agent.",
+          note: "Antigen injected the field value directly via CDP. The raw credential was never returned to the agent.",
         },
       });
     },
@@ -1250,7 +1250,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   function challengeNextAction(status: SecurityChallengeStatus): string {
     switch (status) {
       case "pending_user":
-        return 'Tell the user: "A verification code is needed. Please enter it in the Aegis UI at /route-run-approvals under \'Security challenges\'." Do NOT ask the user to paste the code into chat. Call wait_for_security_challenge again.';
+        return 'Tell the user: "A verification code is needed. Please enter it in the Antigen UI at /route-run-approvals under \'Security challenges\'." Do NOT ask the user to paste the code into chat. Call wait_for_security_challenge again.';
       case "code_submitted":
         return "User has submitted the code. Call inject_security_challenge_code now.";
       case "code_injected":
@@ -1262,7 +1262,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       case "expired":
         return "Challenge expired. Navigate back to the challenge page and call report_security_challenge again.";
       case "failed":
-        return "Challenge injection failed. Check the error field. The user may submit the code again via the Aegis UI.";
+        return "Challenge injection failed. Check the error field. The user may submit the code again via the Antigen UI.";
     }
   }
 
@@ -1321,7 +1321,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         element_hint: (body.element_hint && typeof body.element_hint === "object") ? body.element_hint as SecurityChallenge["element_hint"] : undefined,
         instructions: (typeof body.instructions === "string" && body.instructions.trim())
           ? body.instructions.trim()
-          : `${body.domain} requires a security verification code. Enter the code in the Aegis UI.`,
+          : `${body.domain} requires a security verification code. Enter the code in the Antigen UI.`,
         raw_code_revealed_to_agent: false,
         created_at: now.toISOString(),
         expires_at: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
@@ -1340,7 +1340,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           masked_destination: challenge.masked_destination,
           expires_at: challenge.expires_at,
           raw_code_revealed_to_agent: false as const,
-          next_action: `Tell the user: "A security challenge was detected on ${challenge.domain}. Please enter the verification code in the Aegis UI at /route-run-approvals under 'Security challenges'." Do NOT ask the user to paste the code into chat. Then call wait_for_security_challenge with challenge_id="${challenge.challenge_id}".`,
+          next_action: `Tell the user: "A security challenge was detected on ${challenge.domain}. Please enter the verification code in the Antigen UI at /route-run-approvals under 'Security challenges'." Do NOT ask the user to paste the code into chat. Then call wait_for_security_challenge with challenge_id="${challenge.challenge_id}".`,
         },
       });
     },
@@ -1395,17 +1395,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   function resolutionNextAction(status: ChallengeEmailResolutionStatus): string {
     switch (status) {
       case "pending_approval":
-        return "Wait for the user to approve the Gmail search in the Aegis UI at /route-run-approvals under 'Security challenges'. Then call wait_for_challenge_email_resolution again.";
+        return "Wait for the user to approve the Gmail search in the Antigen UI at /route-run-approvals under 'Security challenges'. Then call wait_for_challenge_email_resolution again.";
       case "code_found":
         return "Call inject_challenge_email_code to inject the code into the browser field. The agent never sees the code.";
       case "injected":
-        return "Code was injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you.";
+        return "Code was injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Antigen does not click for you.";
       case "not_found":
-        return "No code found in recent verification emails. Tell the user: 'Aegis could not find the verification code in Gmail. Please enter it manually in the Aegis UI at /route-run-approvals under Security challenges.'";
+        return "No code found in recent verification emails. Tell the user: 'Antigen could not find the verification code in Gmail. Please enter it manually in the Antigen UI at /route-run-approvals under Security challenges.'";
       case "failed":
-        return "Email resolution failed. Tell the user to enter the verification code manually in the Aegis UI.";
+        return "Email resolution failed. Tell the user to enter the verification code manually in the Antigen UI.";
       case "cancelled":
-        return "Resolution was cancelled. The user can enter the code manually in the Aegis UI.";
+        return "Resolution was cancelled. The user can enter the code manually in the Antigen UI.";
       case "expired":
         return "Resolution expired. Request a new resolution if the challenge is still active.";
       case "searching":
@@ -1646,7 +1646,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (challenge.status !== "code_submitted") {
         return sendError(
           reply, 400, "INVALID_STATUS",
-          `Cannot inject code for challenge with status '${challenge.status}'. The user must submit the code in the Aegis UI first.`,
+          `Cannot inject code for challenge with status '${challenge.status}'. The user must submit the code in the Antigen UI first.`,
         );
       }
 
@@ -1654,7 +1654,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (!entry) {
         return sendError(
           reply, 400, "CODE_NOT_AVAILABLE",
-          "No code found for this challenge. It may have been cleared after submission. Ask the user to submit again in the Aegis UI.",
+          "No code found for this challenge. It may have been cleared after submission. Ask the user to submit again in the Antigen UI.",
         );
       }
       if (new Date(entry.expires_at) < new Date()) {
@@ -1690,8 +1690,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_code_revealed_to_agent: false as const,
           ...(challenge.error ? { error: challenge.error } : {}),
           next_action: challenge.status === "code_injected"
-            ? "Code injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Aegis does not click for you."
-            : `Injection failed: ${challenge.error ?? "unknown error"}. Ensure the browser is still open on the challenge page. Ask the user to submit the code again in the Aegis UI.`,
+            ? "Code injected into the browser field. Click 'Verify', 'Continue', or 'Submit' in your Playwright browser to complete the challenge. Antigen does not click for you."
+            : `Injection failed: ${challenge.error ?? "unknown error"}. Ensure the browser is still open on the challenge page. Ask the user to submit the code again in the Antigen UI.`,
         },
       });
     },

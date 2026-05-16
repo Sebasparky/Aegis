@@ -22,7 +22,7 @@ const VALID_TASK_CATEGORIES = new Set<DelegationTrustTaskCategory>([
   "destructive_action", "message_send",
 ]);
 
-// Categories that require an Aegis-held login credential.
+// Categories that require an Antigen-held login credential.
 const LOGIN_CATEGORIES = new Set<DelegationTrustTaskCategory>(["login", "credential_fill"]);
 
 // Categories that require a payment method capability.

@@ -132,7 +132,7 @@ export default function WorkspaceDetailPage() {
 
   const { open, in_progress, completed } = workspace.task_counts;
   const participantDelegations = delegations.filter((d) =>
-    workspace.participant_delegation_ids.includes(d.id),
+    workspace.participant_delegation_ids?.includes(d.id) ?? false,
   );
 
   const byReadiness = (label: Readiness) => tasks.filter((t) => t.readiness === label);
@@ -786,7 +786,7 @@ function CreateTaskForm({
 
       <div>
         <label className="ag-label">Required artifact names (comma-separated)</label>
-        <input className="ag-input" value={requiredArtifacts} onChange={(e) => setRequiredArtifacts(e.target.value)} placeholder="aegis-pillars-summary.md, analysis-report.json" />
+        <input className="ag-input" value={requiredArtifacts} onChange={(e) => setRequiredArtifacts(e.target.value)} placeholder="antigen-pillars-summary.md, analysis-report.json" />
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -846,7 +846,7 @@ function CreateArtifactForm({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div>
           <label className="ag-label">Name *</label>
-          <input className="ag-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="aegis-pillars-summary.md" required />
+          <input className="ag-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="antigen-pillars-summary.md" required />
         </div>
         <div>
           <label className="ag-label">Kind</label>

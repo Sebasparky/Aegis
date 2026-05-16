@@ -195,7 +195,7 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
 
   /**
    * POST /api/credential-sessions/:sessionId/fill
-   * Agent requests Aegis to fill a specific credential field on the active matching tab.
+   * Agent requests Antigen to fill a specific credential field on the active matching tab.
    * Creates a pending CredentialFillRequest; the extension picks it up and executes the fill.
    * Secrets are never returned to the agent — only the extension resolves and fills values.
    */
@@ -243,7 +243,7 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
         session_id: fillReq.session_id,
         field: fillReq.field,
         status: fillReq.status,
-        message: `Fill request created for "${field}". The Aegis extension will fill the field on the active ${session.domain} tab.`,
+        message: `Fill request created for "${field}". The Antigen extension will fill the field on the active ${session.domain} tab.`,
       },
     });
   });
@@ -282,7 +282,7 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
    *
    * DEV PROTOTYPE ONLY — NOT PRODUCTION-AUTHENTICATED.
    * This endpoint returns secret material (password) from encryptedSecretVault via KMS decryption.
-   * It is intended exclusively for the Aegis Chrome extension running locally.
+   * It is intended exclusively for the Antigen Chrome extension running locally.
    * Production must authenticate the extension caller (e.g., short-lived nonce,
    * mutual TLS, or extension signing) before returning any secret material.
    * This endpoint MUST NOT be exposed to agents, MCP tools, logs, or any public surface.

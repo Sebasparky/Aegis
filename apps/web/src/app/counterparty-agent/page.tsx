@@ -5,7 +5,7 @@ import type { AgentTrustPassport } from "@aegis/types";
 import { getAgentTrustPassport } from "@/lib/api";
 
 export default function CounterpartyAgentPage() {
-  const [aegisId, setAegisId] = useState("aid_user_001");
+  const [aegisId, __setAntigenId__] = useState("aid_user_001");
   const [inputValue, setInputValue] = useState("aid_user_001");
   const [passport, setPassport] = useState<AgentTrustPassport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,7 +23,7 @@ export default function CounterpartyAgentPage() {
 
   function handleLookup(e: React.FormEvent) {
     e.preventDefault();
-    setAegisId(inputValue.trim());
+    __setAntigenId__(inputValue.trim());
   }
 
   const actionColors: Record<string, string> = {
@@ -33,7 +33,7 @@ export default function CounterpartyAgentPage() {
   };
 
   const actionLabels: Record<string, string> = {
-    allow_with_aegis_controls: "Allow with Aegis Controls",
+    allow_with_aegis_controls: "Allow with Antigen Controls",
     require_extra_verification: "Require Extra Verification",
     block_sensitive_interaction: "Block Sensitive Interaction",
   };
@@ -49,14 +49,14 @@ export default function CounterpartyAgentPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold text-white">Agent Verification</h1>
         <p className="mt-1 text-gray-400 text-sm">
-          Website view: verify whether an incoming agent-backed AegisID is accountable,
+          Website view: verify whether an incoming agent-backed AntigenID is accountable,
           policy-bound, and safe to interact with.
         </p>
       </div>
 
       <div className="mb-6 px-4 py-3 rounded-lg bg-indigo-950 border border-indigo-800 text-indigo-300 text-sm">
         This is the counterparty view — what a website or business sees when it receives an
-        agent-backed AegisID. Only trust claims are shown. No raw browsing history, purchase
+        agent-backed AntigenID. Only trust claims are shown. No raw browsing history, purchase
         details, vault data, or secrets are disclosed.
       </div>
 
@@ -65,7 +65,7 @@ export default function CounterpartyAgentPage() {
           type="text"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          placeholder="AegisID (e.g. aid_user_001)"
+          placeholder="AntigenID (e.g. aid_user_001)"
           className="flex-1 px-3 py-2 rounded-md bg-gray-900 border border-gray-700 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
         />
         <button
@@ -129,7 +129,7 @@ export default function CounterpartyAgentPage() {
               />
               <ClaimRow
                 label="Runner-Completed Purchases"
-                description="Purchases executed by Aegis Runner under approval — credentials never exposed"
+                description="Purchases executed by Antigen Runner under approval — credentials never exposed"
                 value={<CountBadge n={passport.runner_completed_purchases} />}
               />
               <ClaimRow

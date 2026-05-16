@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-// Demo credentials — fake, hardcoded for local Aegis-controlled execution demo only.
+// Demo credentials — fake, hardcoded for local Antigen-controlled execution demo only.
 const DEMO_USERNAME = "demo_user";
 const DEMO_PASSWORD = "demo_pass";
 
@@ -31,7 +31,7 @@ export default function DemoLoginPage() {
           </div>
           <h1 className="text-xl font-semibold text-white">Demo Login</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Local test page for Aegis-controlled credential workflow execution.
+            Local test page for Antigen-controlled credential workflow execution.
           </p>
         </div>
 
@@ -106,7 +106,7 @@ export default function DemoLoginPage() {
             password: <span className="text-cyan-400">demo_pass</span>
           </p>
           <p className="text-xs text-gray-600 mt-2">
-            Agents must request a RouteRun through Aegis — this page is not accessible via{" "}
+            Agents must request a RouteRun through Antigen — this page is not accessible via{" "}
             <code className="text-gray-500">get_agent_runnable_workflow</code>.
           </p>
         </div>

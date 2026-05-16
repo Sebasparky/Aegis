@@ -116,7 +116,7 @@ export async function approvalRoutes(server: FastifyInstance) {
         action_type: approval.action_type,
         decision: "completed_by_runner",
         domain: approval.domain,
-        reason: `User approved request.${userNote} Aegis Runner simulated completion. No real payment was made and no credentials were exposed.`,
+        reason: `User approved request.${userNote} Antigen Runner simulated completion. No real payment was made and no credentials were exposed.`,
         outcome: "completed",
         sensitive_data_shared_with_agent: false,
         runner_task_id: completedRunner.id,

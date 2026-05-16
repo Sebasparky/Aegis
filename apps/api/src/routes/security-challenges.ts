@@ -116,7 +116,7 @@ export async function securityChallengeRoutes(server: FastifyInstance): Promise<
     return reply.send({ ok: true, data: items.map(safeChallenge) });
   });
 
-  // User submits code into Aegis UI — code is stored memory-only, not persisted
+  // User submits code into Antigen UI — code is stored memory-only, not persisted
   server.post<{ Params: { challengeId: string }; Body: { code?: unknown } }>(
     "/api/internal/security-challenges/:challengeId/submit-code",
     async (req, reply) => {

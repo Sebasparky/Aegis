@@ -202,7 +202,7 @@ export default function PassesPage() {
                 <span className="cmd-hero__title-mark">sealed.</span>
               </h1>
               <p className="cmd-hero__sub" style={{ textAlign: "left", fontSize: 13.5, margin: 0 }}>
-                Store credentials once. Aegis releases scoped capability — never raw secrets — to agents operating under approved collars.
+                Store credentials once. Antigen releases scoped capability — never raw secrets — to agents operating under approved collars.
               </p>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end", flexShrink: 0 }}>
@@ -521,7 +521,7 @@ export default function PassesPage() {
             <div>
               <div className="a-eyebrow" style={{ marginBottom: 4 }}>Seal a credential</div>
               <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                Store a login credential for Aegis-controlled injection.
+                Store a login credential for Antigen-controlled injection.
                 The password is encrypted on entry and never returned.
               </p>
             </div>
@@ -592,7 +592,7 @@ export default function PassesPage() {
 
             <p style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.5 }}>
               Password is stored encrypted in the dev vault and never returned after creation.
-              Agents resolve it only during approved Aegis-controlled execution.
+              Agents resolve it only during approved Antigen-controlled execution.
             </p>
           </div>
 
@@ -680,7 +680,7 @@ export default function PassesPage() {
             </form>
 
             <p style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.5 }}>
-              This pass does not contain passwords, cards, or identity. It only lets the agent request controlled capabilities from Aegis.
+              This pass does not contain passwords, cards, or identity. It only lets the agent request controlled capabilities from Antigen.
             </p>
           </div>
         </div>
@@ -691,7 +691,7 @@ export default function PassesPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div className="a-eyebrow" style={{ marginBottom: 2 }}>Credential assignments</div>
           <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 12px", lineHeight: 1.5 }}>
-            Choose which stored credential each Aegis-controlled skill uses at execution time.
+            Choose which stored credential each Antigen-controlled skill uses at execution time.
             The agent never sees the password.
           </p>
 

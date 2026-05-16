@@ -164,7 +164,7 @@ function makeProfile(overrides: Partial<WebsiteTrustProfile> = {}): WebsiteTrust
       allowed_agent_actions: ["browse"],
       prohibited_agent_actions: [],
       sensitive_actions_require_aegis_approval: true,
-      credential_handling_policy: "Via Aegis only.",
+      credential_handling_policy: "Via Antigen only.",
       payment_action_policy: "Approval required.",
       data_usage_policy: "Session only.",
       prompt_injection_commitment: "None embedded.",

@@ -180,7 +180,7 @@ export function evaluateActionRequest(
   if (!matched) {
     return decide(
       "pause",
-      "Requested locator does not match any locator in the route step target. Aegis pauses — verify the target before proceeding.",
+      "Requested locator does not match any locator in the route step target. Antigen pauses — verify the target before proceeding.",
       null,
       riskCategory
     );

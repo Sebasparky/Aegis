@@ -330,7 +330,7 @@ function convertPageEvents(
         : undefined;
       if (matchedRelease) {
         coverage_status = "covered_by_aegis";
-        reason = `Capability release ${matchedRelease.capability_release_id} (${requiredCapability}) granted by Aegis for this run.`;
+        reason = `Capability release ${matchedRelease.capability_release_id} (${requiredCapability}) granted by Antigen for this run.`;
       } else {
         coverage_status = "not_covered_by_aegis";
         reason = `Sensitive event (${sensitivity}) requires ${requiredCapability} capability release — none found for this run.`;
@@ -354,7 +354,7 @@ function convertPageEvents(
           reason = matched.reason;
         } else if (severity === "high" || severity === "critical") {
           coverage_status = "not_covered_by_aegis";
-          reason = `Sensitive event (${sensitivity}) detected outside an Aegis-controlled action window.`;
+          reason = `Sensitive event (${sensitivity}) detected outside an Antigen-controlled action window.`;
         } else {
           coverage_status = "unknown";
           reason = `Sensitive event detected; coverage could not be determined.`;
@@ -509,7 +509,7 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
             ["sensitive_field_focus", "sensitive_field_input"],
             credBrowserNow,
             COVERAGE_DURATION_MS,
-            `Aegis Playwright runtime filling ${vp.type === "secret_ref" ? "secret credential" : "pass field"} via KMS vault — secret resolved server-side, never exposed to agent.`
+            `Antigen Playwright runtime filling ${vp.type === "secret_ref" ? "secret credential" : "pass field"} via KMS vault — secret resolved server-side, never exposed to agent.`
           );
 
           const resolved = await resolveRouteStepValue(run, step);
@@ -608,9 +608,9 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
         const clickBrowserNow = await page.evaluate(() => Date.now());
 
         // Open coverage windows for every sensitivity a button click or form submit could produce.
-        // Windows are time-bounded from the browser's clock and only opened when Aegis
+        // Windows are time-bounded from the browser's clock and only opened when Antigen
         // explicitly executes a click step — not weakening global coverage.
-        const clickReason = "Button click / form submit executed by Aegis Playwright runtime under route control.";
+        const clickReason = "Button click / form submit executed by Antigen Playwright runtime under route control.";
         const buttonSensitivities: RuntimeEventSensitivity[] = [
           "payment", "financial", "credential", "destructive", "account_change",
         ];
@@ -651,7 +651,7 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
     session.runtime_events = events;
 
     // ── Violation check ───────────────────────────────────────────────────────
-    // If any high/critical-severity sensitive events occurred outside an Aegis
+    // If any high/critical-severity sensitive events occurred outside an Antigen
     // coverage window, block the run and record an intervention receipt.
     // Authorization stays "active" — the action did not safely complete.
     const uncoveredSensitiveEvents = events.filter(
@@ -674,7 +674,7 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
           element_hint: e.element_hint,
           reason: e.capability_type_required
             ? `Sensitive event (${e.sensitivity}) requires ${e.capability_type_required} capability release — none found for this run — run blocked.`
-            : `Uncovered sensitive ${e.event_type} (${e.sensitivity}) outside Aegis-controlled window — run blocked.`,
+            : `Uncovered sensitive ${e.event_type} (${e.sensitivity}) outside Antigen-controlled window — run blocked.`,
           created_at: new Date().toISOString(),
           capability_type_required: e.capability_type_required,
           capability_release_present: e.capability_release_present,
@@ -685,7 +685,7 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
       session.coverage_summary = getCoverageSummary(session.runtime_session_id);
 
       const violationMsg =
-        `VIOLATION_BLOCKED: ${interventions.length} uncovered sensitive event(s) detected outside Aegis-controlled windows.`;
+        `VIOLATION_BLOCKED: ${interventions.length} uncovered sensitive event(s) detected outside Antigen-controlled windows.`;
       const violationNow = new Date().toISOString();
 
       run.status = "failed";

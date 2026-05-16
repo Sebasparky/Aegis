@@ -94,7 +94,7 @@ export function getInjectionSafetyCopy(opts: {
 }): string {
   const { requesting_site, provider_display_name, injection_domain } = opts;
   if (requesting_site && requesting_site !== injection_domain) {
-    return `${requesting_site} is asking you to sign in with ${provider_display_name}. Aegis will only inject this credential on ${injection_domain}.`;
+    return `${requesting_site} is asking you to sign in with ${provider_display_name}. Antigen will only inject this credential on ${injection_domain}.`;
   }
-  return `Aegis will only inject this credential on ${injection_domain}.`;
+  return `Antigen will only inject this credential on ${injection_domain}.`;
 }

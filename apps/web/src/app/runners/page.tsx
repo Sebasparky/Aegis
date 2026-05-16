@@ -31,7 +31,7 @@ export default function RunnersPage() {
   return (
     <div className="max-w-3xl">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-white">Aegis Runners</h1>
+        <h1 className="text-2xl font-semibold text-white">Antigen Runners</h1>
         <p className="mt-1 text-gray-400 text-sm">
           Runners complete approved sensitive steps so your agent never holds raw secrets.
         </p>

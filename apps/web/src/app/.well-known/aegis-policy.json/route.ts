@@ -19,7 +19,7 @@ const DEMO_POLICY: WebsiteAegisPolicy = {
       prohibited_actions: ["identity_disclosure", "account_deletion"],
       support_path: "/support",
       notes:
-        "Demo login workflow. Aegis must fill credentials through controlled runtime custody.",
+        "Demo login workflow. Antigen must fill credentials through controlled runtime custody.",
     },
     {
       workflow_id: "demo_travel_booking",

@@ -79,7 +79,7 @@ async function main() {
   });
 
   server.get("/", async () => {
-    return { ok: true, data: { name: "Aegis API", version: "0.1.0" } };
+    return { ok: true, data: { name: "Antigen API", version: "0.1.0" } };
   });
 
   await server.register(userRoutes);
@@ -130,7 +130,7 @@ async function main() {
   }
 
   await server.listen({ port: 4000, host: "0.0.0.0" });
-  console.log("Aegis API running on http://localhost:4000");
+  console.log("Antigen API running on http://localhost:4000");
 }
 
 main().catch((err) => {

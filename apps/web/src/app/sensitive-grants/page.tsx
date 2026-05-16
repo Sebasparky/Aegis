@@ -20,23 +20,11 @@ const STATUS_LABELS: Record<string, string> = {
   revoked: "Revoked",
 };
 
-const STATUS_BORDER: Record<string, string> = {
-  active: "border-amber-800 bg-gray-900",
-  consumed: "border-gray-800 bg-gray-900",
-  expired: "border-gray-800 bg-gray-900",
-  revoked: "border-gray-800 bg-gray-900",
-};
-
-const STATUS_PILL: Record<string, string> = {
-  active: "bg-amber-950 text-amber-300 border border-amber-800",
-  consumed: "bg-gray-800 text-gray-400",
-  expired: "bg-gray-800 text-gray-500",
-  revoked: "bg-red-950 text-red-400",
-};
-
-const TYPE_PILL: Record<string, string> = {
-  credential_injection: "bg-indigo-950 text-indigo-300 border border-indigo-800",
-  challenge_resolution: "bg-purple-950 text-purple-300 border border-purple-800",
+const STATUS_CSS: Record<string, string> = {
+  active: "a-status--amber",
+  consumed: "a-status--graphite",
+  expired: "a-status--graphite",
+  revoked: "a-status--red",
 };
 
 const GRANT_TYPE_LABELS: Record<string, string> = {
@@ -69,29 +57,6 @@ function truncateId(id: string): string {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function Pill({ label, className }: { label: string; className: string }) {
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full ${className}`}>{label}</span>
-  );
-}
-
-function PrivacyBadge({ label }: { label: string }) {
-  return (
-    <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-900">
-      {label}
-    </span>
-  );
-}
-
-function EmptyState({ label, hint }: { label: string; hint: string }) {
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-      <p className="text-sm font-medium text-gray-400">{label}</p>
-      <p className="text-xs text-gray-600 mt-1">{hint}</p>
-    </div>
-  );
-}
-
 function VerifyResultPanel({
   result,
   verifiedAt,
@@ -100,33 +65,27 @@ function VerifyResultPanel({
   verifiedAt: string;
 }) {
   return (
-    <div className="mt-3 p-3 bg-gray-950 border border-gray-800 rounded-lg space-y-2">
-      <div className="flex flex-wrap gap-2">
-        <Pill
-          label={result.uar_valid ? "UAR valid" : "UAR invalid"}
-          className={
-            result.uar_valid ? "bg-emerald-950 text-emerald-400 border border-emerald-900" : "bg-red-950 text-red-400 border border-red-900"
-          }
-        />
-        <Pill
-          label={result.scope_consistent ? "Scope consistent" : "Scope mismatch"}
-          className={
-            result.scope_consistent
-              ? "bg-emerald-950 text-emerald-400 border border-emerald-900"
-              : "bg-amber-950 text-amber-400 border border-amber-900"
-          }
-        />
-        <Pill
-          label={STATUS_LABELS[result.grant_status] ?? result.grant_status}
-          className={STATUS_PILL[result.grant_status] ?? "bg-gray-800 text-gray-400"}
-        />
+    <div style={{ marginTop: 12, padding: "12px 16px", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-2)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        <span className={`a-status ${result.uar_valid ? "a-status--green" : "a-status--red"}`}>
+          <span className="a-status__dot" />
+          {result.uar_valid ? "UAR valid" : "UAR invalid"}
+        </span>
+        <span className={`a-status ${result.scope_consistent ? "a-status--green" : "a-status--amber"}`}>
+          <span className="a-status__dot" />
+          {result.scope_consistent ? "Scope consistent" : "Scope mismatch"}
+        </span>
+        <span className={`a-status ${STATUS_CSS[result.grant_status] ?? "a-status--graphite"}`}>
+          <span className="a-status__dot" />
+          {STATUS_LABELS[result.grant_status] ?? result.grant_status}
+        </span>
       </div>
       {result.uar_error && (
-        <p className="text-xs text-amber-400">
-          UAR issue: <span className="font-mono">{result.uar_error}</span>
+        <p style={{ fontSize: 11.5, color: "var(--amber)", margin: "0 0 4px", fontFamily: "monospace" }}>
+          UAR issue: {result.uar_error}
         </p>
       )}
-      <p className="text-xs text-gray-600">
+      <p style={{ fontSize: 11, color: "var(--ink-4)", margin: 0 }}>
         Verified at {new Date(verifiedAt).toLocaleTimeString()}
       </p>
     </div>
@@ -161,8 +120,8 @@ function RevokePanel({
   }
 
   return (
-    <div className="mt-3 p-3 bg-red-950/20 border border-red-900 rounded-lg space-y-3">
-      <p className="text-sm text-red-200">
+    <div style={{ marginTop: 12, padding: "12px 16px", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-2)" }}>
+      <p style={{ fontSize: 13, color: "var(--red)", margin: "0 0 10px" }}>
         Are you sure? This will revoke this sensitive grant immediately.
       </p>
       <textarea
@@ -170,21 +129,28 @@ function RevokePanel({
         onChange={(e) => setReason(e.target.value.slice(0, 200))}
         placeholder="Optional reason…"
         rows={2}
-        className="w-full text-xs bg-gray-950 border border-gray-800 rounded-md px-2 py-1.5 text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-red-800 resize-none"
+        style={{
+          width: "100%", fontSize: 12, fontFamily: "inherit",
+          background: "white", border: "1px solid var(--red-ring)", borderRadius: "var(--r-2)",
+          padding: "6px 10px", color: "var(--ink-1)", resize: "none",
+          outline: "none", boxSizing: "border-box", marginBottom: 8,
+        }}
       />
-      {err && <p className="text-xs text-red-400">{err}</p>}
-      <div className="flex items-center gap-2">
+      {err && <p style={{ fontSize: 12, color: "var(--red)", margin: "0 0 8px" }}>{err}</p>}
+      <div style={{ display: "flex", gap: 8 }}>
         <button
           onClick={handleConfirm}
           disabled={working}
-          className="px-3 py-1.5 text-xs rounded-lg bg-red-700 hover:bg-red-600 text-white font-medium transition-colors disabled:opacity-50"
+          className="a-btn a-btn--danger"
+          style={{ fontSize: 12 }}
         >
           {working ? "Revoking…" : "Confirm Revoke"}
         </button>
         <button
           onClick={onCancel}
           disabled={working}
-          className="px-3 py-1.5 text-xs rounded-lg border border-gray-700 text-gray-400 hover:bg-gray-800 transition-colors disabled:opacity-50"
+          className="a-btn a-btn--ghost"
+          style={{ fontSize: 12 }}
         >
           Cancel
         </button>
@@ -208,6 +174,9 @@ function GrantCard({
   const [verifyState, setVerifyState] = useState<VerifyState>({ status: "idle" });
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [techOpen, setTechOpen] = useState(false);
+
+  const isActive = grant.status === "active";
+  const cardBorderColor = isActive ? "var(--amber-ring)" : "var(--hairline)";
 
   async function handleVerify() {
     setVerifyState({ status: "loading" });
@@ -239,43 +208,54 @@ function GrantCard({
   return (
     <div
       id={`grant-${grant.grant_id}`}
-      className={`border rounded-lg p-4 ${STATUS_BORDER[grant.status] ?? "border-gray-800 bg-gray-900"}`}
+      style={{
+        border: `1px solid ${cardBorderColor}`,
+        borderRadius: "var(--r-3)",
+        background: "white",
+        padding: "16px 20px",
+      }}
     >
       {/* Header: type + status pills + truncated grant_id */}
-      <div className="flex items-center gap-2 flex-wrap mb-2">
-        <Pill
-          label={GRANT_TYPE_LABELS[grant.grant_type] ?? grant.grant_type}
-          className={TYPE_PILL[grant.grant_type] ?? "bg-gray-800 text-gray-400"}
-        />
-        <Pill
-          label={STATUS_LABELS[grant.status] ?? grant.status}
-          className={STATUS_PILL[grant.status] ?? "bg-gray-800 text-gray-400"}
-        />
-        <span className="text-xs font-mono text-gray-600 ml-auto">{truncateId(grant.grant_id)}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{
+          fontSize: 10.5, fontWeight: 500, padding: "1px 8px", borderRadius: 999,
+          background: "var(--blue-soft)", color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)",
+        }}>
+          {GRANT_TYPE_LABELS[grant.grant_type] ?? grant.grant_type}
+        </span>
+        <span className={`a-status ${STATUS_CSS[grant.status] ?? "a-status--graphite"}`}>
+          <span className="a-status__dot" />
+          {STATUS_LABELS[grant.status] ?? grant.status}
+        </span>
+        <span style={{ fontSize: 10.5, color: "var(--ink-4)", fontFamily: "monospace", marginLeft: "auto" }}>
+          {truncateId(grant.grant_id)}
+        </span>
       </div>
 
       {/* Domain + delegation + timing */}
-      <div className="mb-2">
-        <p className="text-sm font-medium text-white">{grant.scope.domain}</p>
-        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5">
-          <span className="text-xs text-gray-500">
+      <div style={{ marginBottom: 8 }}>
+        <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 3px" }}>
+          {grant.scope.domain}
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 16px" }}>
+          <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
             Delegation:{" "}
-            <span className="font-mono text-gray-400">{truncateId(grant.scope.delegation_id)}</span>
+            <span style={{ fontFamily: "monospace", color: "var(--ink-3)" }}>{truncateId(grant.scope.delegation_id)}</span>
           </span>
-          <span className="text-xs text-gray-500">
+          <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
             Expires:{" "}
-            <span className="text-gray-400">{formatRelativeTime(grant.expires_at)}</span>
+            <span style={{ color: "var(--ink-3)" }}>{formatRelativeTime(grant.expires_at)}</span>
           </span>
           {grant.status === "consumed" && grant.consumed_at && (
-            <span className="text-xs text-gray-500">
+            <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
               Consumed:{" "}
-              <span className="text-gray-400">{formatRelativeTime(grant.consumed_at)}</span>
+              <span style={{ color: "var(--ink-3)" }}>{formatRelativeTime(grant.consumed_at)}</span>
             </span>
           )}
           {grant.status === "revoked" && grant.revoked_at && (
-            <span className="text-xs text-gray-500">
+            <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
               Revoked:{" "}
-              <span className="text-gray-400">{formatRelativeTime(grant.revoked_at)}</span>
+              <span style={{ color: "var(--ink-3)" }}>{formatRelativeTime(grant.revoked_at)}</span>
             </span>
           )}
         </div>
@@ -283,36 +263,47 @@ function GrantCard({
 
       {/* Optional context: task / workspace / route run */}
       {(grant.scope.task_id || grant.scope.workspace_id || grant.scope.route_run_id) && (
-        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mb-2">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 16px", marginBottom: 8 }}>
           {grant.scope.task_id && (
-            <span className="text-xs text-gray-600">
-              Task: <span className="font-mono">{truncateId(grant.scope.task_id)}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+              Task: <span style={{ fontFamily: "monospace" }}>{truncateId(grant.scope.task_id)}</span>
             </span>
           )}
           {grant.scope.workspace_id && (
-            <span className="text-xs text-gray-600">
-              Workspace: <span className="font-mono">{truncateId(grant.scope.workspace_id)}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+              Workspace: <span style={{ fontFamily: "monospace" }}>{truncateId(grant.scope.workspace_id)}</span>
             </span>
           )}
           {grant.scope.route_run_id && (
-            <span className="text-xs text-gray-600">
-              Run: <span className="font-mono">{truncateId(grant.scope.route_run_id)}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>
+              Run: <span style={{ fontFamily: "monospace" }}>{truncateId(grant.scope.route_run_id)}</span>
             </span>
           )}
         </div>
       )}
 
-      {/* Privacy guarantees — always visible */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        <PrivacyBadge label="Secret exposed to agent: No" />
-        <PrivacyBadge label="Raw credentials in grant: No" />
+      {/* Privacy guarantees */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+        <span style={{
+          fontSize: 10.5, fontWeight: 500, padding: "1px 8px", borderRadius: 999,
+          background: "var(--green-soft)", color: "var(--green)", border: "1px solid var(--green-ring)",
+        }}>
+          Secret exposed to agent: No
+        </span>
+        <span style={{
+          fontSize: 10.5, fontWeight: 500, padding: "1px 8px", borderRadius: 999,
+          background: "var(--green-soft)", color: "var(--green)", border: "1px solid var(--green-ring)",
+        }}>
+          Raw credentials in grant: No
+        </span>
       </div>
 
       {/* Actions */}
-      <div className="flex flex-wrap items-center gap-4">
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 16 }}>
         <a
           href="/receipts"
-          className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+          className="a-link"
+          style={{ fontSize: 12 }}
           title={`Linked UAR: ${grant.linked_uar_id}`}
         >
           View receipt →
@@ -320,21 +311,21 @@ function GrantCard({
         <button
           onClick={handleVerify}
           disabled={verifyState.status === "loading"}
-          className="text-xs text-gray-400 hover:text-white disabled:opacity-50 transition-colors"
+          style={{ fontSize: 12, color: "var(--ink-3)", background: "none", border: "none", padding: 0, cursor: "pointer", opacity: verifyState.status === "loading" ? 0.5 : 1 }}
         >
           {verifyState.status === "loading" ? "Verifying…" : "Verify grant"}
         </button>
-        {grant.status === "active" && !revokeOpen && (
+        {isActive && !revokeOpen && (
           <button
             onClick={() => setRevokeOpen(true)}
-            className="text-xs text-red-500 hover:text-red-400 transition-colors"
+            style={{ fontSize: 12, color: "var(--red)", background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
             Revoke
           </button>
         )}
         <button
           onClick={() => setTechOpen((v) => !v)}
-          className="text-xs text-gray-600 hover:text-gray-400 transition-colors ml-auto"
+          style={{ fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", padding: 0, cursor: "pointer", marginLeft: "auto" }}
         >
           {techOpen ? "Hide details" : "Details"}
         </button>
@@ -355,22 +346,22 @@ function GrantCard({
 
       {/* Technical details */}
       {techOpen && (
-        <div className="mt-3 pt-3 border-t border-gray-800">
-          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-            <span className="text-gray-600">Grant ID</span>
-            <span className="font-mono text-gray-500 break-all">{grant.grant_id}</span>
-            <span className="text-gray-600">Schema</span>
-            <span className="text-gray-500">v{grant.schema_version} · {grant.issuer}</span>
-            <span className="text-gray-600">Linked UAR</span>
-            <span className="font-mono text-gray-500 break-all">{grant.linked_uar_id}</span>
-            <span className="text-gray-600">Created</span>
-            <span className="text-gray-500">{new Date(grant.created_at).toLocaleString()}</span>
-            <span className="text-gray-600">Expires</span>
-            <span className="text-gray-500">{new Date(grant.expires_at).toLocaleString()}</span>
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--hairline)" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 16px", fontSize: 11.5 }}>
+            <span style={{ color: "var(--ink-4)" }}>Grant ID</span>
+            <span style={{ fontFamily: "monospace", color: "var(--ink-3)", wordBreak: "break-all" }}>{grant.grant_id}</span>
+            <span style={{ color: "var(--ink-4)" }}>Schema</span>
+            <span style={{ color: "var(--ink-3)" }}>v{grant.schema_version} · {grant.issuer}</span>
+            <span style={{ color: "var(--ink-4)" }}>Linked UAR</span>
+            <span style={{ fontFamily: "monospace", color: "var(--ink-3)", wordBreak: "break-all" }}>{grant.linked_uar_id}</span>
+            <span style={{ color: "var(--ink-4)" }}>Created</span>
+            <span style={{ color: "var(--ink-3)" }}>{new Date(grant.created_at).toLocaleString()}</span>
+            <span style={{ color: "var(--ink-4)" }}>Expires</span>
+            <span style={{ color: "var(--ink-3)" }}>{new Date(grant.expires_at).toLocaleString()}</span>
             {grant.revoke_reason && (
               <>
-                <span className="text-gray-600">Revoke reason</span>
-                <span className="text-gray-500">{grant.revoke_reason}</span>
+                <span style={{ color: "var(--ink-4)" }}>Revoke reason</span>
+                <span style={{ color: "var(--ink-3)" }}>{grant.revoke_reason}</span>
               </>
             )}
           </div>
@@ -393,9 +384,9 @@ function StatusGroup({
 
   if (grants.length === 0) {
     return (
-      <div className="flex items-center gap-2 py-0.5">
-        <span className="text-xs text-gray-700 font-medium">{STATUS_LABELS[status]}</span>
-        <span className="text-xs text-gray-800">— 0 grants</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
+        <span style={{ fontSize: 12, color: "var(--ink-4)", fontWeight: 500 }}>{STATUS_LABELS[status]}</span>
+        <span style={{ fontSize: 12, color: "var(--ink-4)" }}>— 0 grants</span>
       </div>
     );
   }
@@ -404,14 +395,19 @@ function StatusGroup({
     <div>
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex items-center gap-2 text-sm font-medium text-gray-300 hover:text-white transition-colors mb-2 w-full text-left"
+        style={{
+          display: "flex", alignItems: "center", gap: 8,
+          fontSize: 13, fontWeight: 600, color: "var(--ink-1)",
+          background: "none", border: "none", padding: "0 0 8px", cursor: "pointer",
+          width: "100%", textAlign: "left",
+        }}
       >
-        <span className="text-gray-600">{collapsed ? "▸" : "▾"}</span>
+        <span style={{ color: "var(--ink-4)", fontSize: 10 }}>{collapsed ? "▸" : "▾"}</span>
         <span>{STATUS_LABELS[status]}</span>
-        <span className="text-xs text-gray-600 font-normal">({grants.length})</span>
+        <span style={{ fontSize: 12, color: "var(--ink-4)", fontWeight: 400 }}>({grants.length})</span>
       </button>
       {!collapsed && (
-        <div className="space-y-3">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {grants.map((g) => (
             <GrantCard key={g.grant_id} grant={g} onRevoked={onGrantRevoked} />
           ))}
@@ -439,9 +435,7 @@ export default function SensitiveGrantsPage() {
     };
     listSensitiveGrants(Object.keys(filters).length ? filters : undefined)
       .then(setGrants)
-      .catch(() =>
-        setError("Could not load sensitive grants. Make sure the Aegis API is running.")
-      )
+      .catch(() => setError("Could not load sensitive grants. Make sure the Antigen API is running."))
       .finally(() => setLoading(false));
   }
 
@@ -456,7 +450,7 @@ export default function SensitiveGrantsPage() {
     listSensitiveGrants(Object.keys(filters).length ? filters : undefined)
       .then((data) => { if (active) setGrants(data); })
       .catch(() => {
-        if (active) setError("Could not load sensitive grants. Make sure the Aegis API is running.");
+        if (active) setError("Could not load sensitive grants. Make sure the Antigen API is running.");
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -479,41 +473,40 @@ export default function SensitiveGrantsPage() {
 
   const isFiltered = !!filterType || !!filterStatus;
 
-  const selectClass =
-    "text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-gray-600 cursor-pointer";
+  const selectStyle: React.CSSProperties = {
+    fontSize: 12, background: "white", border: "1px solid var(--hairline)",
+    color: "var(--ink-2)", borderRadius: "var(--r-2)", padding: "4px 10px",
+    outline: "none", cursor: "pointer",
+  };
 
   return (
-    <div className="max-w-3xl">
-      {/* Header */}
-      <div className="mb-5">
-        <h1 className="text-2xl font-semibold text-white">Sensitive Grants</h1>
-        <p className="mt-1 text-sm text-gray-400 max-w-xl">
-          Authority tokens issued when you approved a sensitive operation. Revoke any active grant
-          to cancel the delegated authority immediately. No passwords or raw secrets are stored here.
+    <div className="page">
+
+      {/* ── Header ── */}
+      <div style={{ marginBottom: 24 }}>
+        <span className="a-eyebrow">Sensitive Grants</span>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--ink-1)", margin: "4px 0 6px" }}>
+          Authority tokens
+        </h1>
+        <p style={{ fontSize: 13.5, color: "var(--ink-3)", maxWidth: 520, margin: 0, lineHeight: 1.5 }}>
+          Issued when you approved a sensitive operation. Revoke any active grant to cancel delegated
+          authority immediately. No passwords or raw secrets are stored here.
         </p>
       </div>
 
-      {/* Filter bar */}
-      <div className="mb-5 flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-gray-500">Type</span>
-          <select
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-            className={selectClass}
-          >
+      {/* ── Filter bar ── */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Type</span>
+          <select value={filterType} onChange={(e) => setFilterType(e.target.value)} style={selectStyle}>
             <option value="">All types</option>
             <option value="credential_injection">Credential Injection</option>
             <option value="challenge_resolution">Challenge Resolution</option>
           </select>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-gray-500">Status</span>
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className={selectClass}
-          >
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>Status</span>
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={selectStyle}>
             <option value="">All statuses</option>
             <option value="active">Active</option>
             <option value="consumed">Consumed</option>
@@ -524,7 +517,7 @@ export default function SensitiveGrantsPage() {
         {isFiltered && (
           <button
             onClick={() => { setFilterType(""); setFilterStatus(""); }}
-            className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
+            style={{ fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
             Reset
           </button>
@@ -532,45 +525,50 @@ export default function SensitiveGrantsPage() {
         <button
           onClick={() => loadGrants(filterType, filterStatus)}
           disabled={loading}
-          className="ml-auto text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1 rounded-md transition-colors disabled:opacity-50"
+          className="a-btn a-btn--ghost"
+          style={{ marginLeft: "auto", fontSize: 12 }}
         >
           {loading ? "Loading…" : "Refresh"}
         </button>
       </div>
 
-      {/* Error */}
+      {/* ── Error ── */}
       {error && (
-        <div className="bg-red-950 border border-red-800 rounded-lg p-4 mb-4 text-sm text-red-400">
-          {error}{" "}
+        <div style={{ background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-3)", padding: "14px 18px", marginBottom: 16 }}>
+          <p style={{ fontSize: 13, color: "var(--red)", margin: "0 0 6px" }}>{error}</p>
           <button
             onClick={() => loadGrants(filterType, filterStatus)}
-            className="underline hover:no-underline"
+            className="a-link"
+            style={{ fontSize: 12, background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
             Retry
           </button>
         </div>
       )}
 
-      {/* Loading skeleton */}
+      {/* ── Loading skeleton ── */}
       {loading && (
-        <div className="space-y-3 animate-pulse">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {[1, 2, 3].map((i) => (
-            <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg h-24" />
+            <div key={i} style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", height: 96, background: "var(--graphite-soft)", opacity: 0.5 }} />
           ))}
         </div>
       )}
 
-      {/* Empty state */}
+      {/* ── Empty state ── */}
       {!loading && !error && grants.length === 0 && (
-        <EmptyState
-          label="No sensitive grants found."
-          hint="Grants are created when you approve a credential injection or challenge resolution. Run an Aegis login flow to create one."
-        />
+        <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", padding: "40px 32px", textAlign: "center" }}>
+          <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-2)", margin: "0 0 6px" }}>No sensitive grants found</p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0, maxWidth: 380, marginInline: "auto" }}>
+            Grants are created when you approve a credential injection or challenge resolution. Run an
+            Antigen login flow to create one.
+          </p>
+        </div>
       )}
 
-      {/* Status groups */}
+      {/* ── Status groups ── */}
       {!loading && !error && grants.length > 0 && (
-        <div className="space-y-5">
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           {STATUS_ORDER.map((status) => (
             <StatusGroup
               key={status}
@@ -581,6 +579,7 @@ export default function SensitiveGrantsPage() {
           ))}
         </div>
       )}
+
     </div>
   );
 }

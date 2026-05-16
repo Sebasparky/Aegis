@@ -2,17 +2,17 @@
 
 import { useEffect, useState } from "react";
 
-const OUTSIDE_AGENT_PROMPT = `You are acting through Aegis, a trust and control layer for browser automation.
+const OUTSIDE_AGENT_PROMPT = `You are acting through Antigen, a trust and control layer for browser automation.
 
 Rules:
-- Use only Aegis browser endpoints: create-session, navigate, read-page, click, type, screenshot, request-capability, close.
+- Use only Antigen browser endpoints: create-session, navigate, read-page, click, type, screenshot, request-capability, close.
 - Do not access the browser directly.
 - Normal browsing (search, compare, read) is allowed without interruption.
-- Sensitive actions (purchase, login, form submit, identity disclosure) go through Aegis enforcement.
-- Never ask the user for passwords, card numbers, CVV, addresses, or identity documents. Aegis handles these.
-- If Aegis returns { "decision": "approval_required" }: stop immediately, tell the user what action is pending, and wait. Do not retry the action.
-- If Aegis returns { "decision": "block" }: stop. Do not attempt to bypass the block.
-- After the user approves, Aegis Runner will execute the sensitive step. You will receive a receipt confirming the outcome.
+- Sensitive actions (purchase, login, form submit, identity disclosure) go through Antigen enforcement.
+- Never ask the user for passwords, card numbers, CVV, addresses, or identity documents. Antigen handles these.
+- If Antigen returns { "decision": "approval_required" }: stop immediately, tell the user what action is pending, and wait. Do not retry the action.
+- If Antigen returns { "decision": "block" }: stop. Do not attempt to bypass the block.
+- After the user approves, Antigen Runner will execute the sensitive step. You will receive a receipt confirming the outcome.
 - Treat receipts as the source of truth for sensitive actions.
 - The agent_pass_token was provided to you at session start. Include it in every request body.`;
 
@@ -74,9 +74,9 @@ const EXAMPLE_FLOW = [
 
 // → Stop. Tell the user. Wait.
 // → Do NOT retry the click.
-// → After user approves, Aegis Runner executes the step.
+// → After user approves, Antigen Runner executes the step.
 // → You receive a receipt — not raw secrets.`,
-    note: "Agent must stop and wait for user approval. Aegis Runner handles the sensitive step.",
+    note: "Agent must stop and wait for user approval. Antigen Runner handles the sensitive step.",
     color: "amber",
   },
   {
@@ -156,7 +156,7 @@ export default function AgentBridgePage() {
         if (json.ok) setManifest(json.data);
         else setError("API returned an error.");
       })
-      .catch(() => setError("Could not reach the Aegis API. Is it running?"))
+      .catch(() => setError("Could not reach the Antigen API. Is it running?"))
       .finally(() => setLoading(false));
   }, []);
 
@@ -166,18 +166,18 @@ export default function AgentBridgePage() {
       <div>
         <h1 className="text-2xl font-semibold text-white">Agent Bridge</h1>
         <p className="mt-2 text-gray-400 text-sm leading-relaxed">
-          Aegis is not the agent. Outside agents decide what to do — browse, compare, click. Aegis
+          Antigen is not the agent. Outside agents decide what to do — browse, compare, click. Antigen
           owns the protected browser runtime, enforces collars at sensitive boundaries, and hands
-          approved sensitive steps to Aegis Runner. The agent never holds secrets.
+          approved sensitive steps to Antigen Runner. The agent never holds secrets.
         </p>
         <div className="mt-3 flex gap-3 text-xs text-gray-500">
           <span className="text-green-400">Agents can browse.</span>
           <span className="text-gray-600">·</span>
-          <span className="text-amber-400">Aegis decides when they can commit.</span>
+          <span className="text-amber-400">Antigen decides when they can commit.</span>
         </div>
       </div>
 
-      {/* Two Ways to Use Aegis */}
+      {/* Two Ways to Use Antigen */}
       <section>
         <h2 className="text-base font-semibold text-white mb-3">Two Ways to Connect an Agent</h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -195,8 +195,8 @@ export default function AgentBridgePage() {
             <p className="text-xs text-gray-400 leading-relaxed">
               User creates a named delegation for an outside agent (e.g. OpenClaw) once. The agent
               stores a reusable <code className="font-mono text-amber-300">AEGIS_PASS_TOKEN</code>{" "}
-              and starts new Aegis sessions for each natural-language command. User keeps texting the
-              agent normally through Slack or another channel — Aegis is the protected browser
+              and starts new Antigen sessions for each natural-language command. User keeps texting the
+              agent normally through Slack or another channel — Antigen is the protected browser
               runtime underneath.
             </p>
             <p className="mt-2 text-xs text-indigo-400">→ /delegations</p>
@@ -322,7 +322,7 @@ export default function AgentBridgePage() {
           Outside-Agent System Prompt
         </h2>
         <p className="text-sm text-gray-500 mb-3">
-          Paste this into the system prompt of Claude, ChatGPT, or any agent that will use Aegis.
+          Paste this into the system prompt of Claude, ChatGPT, or any agent that will use Antigen.
         </p>
         <CopyBlock code={OUTSIDE_AGENT_PROMPT} />
       </section>

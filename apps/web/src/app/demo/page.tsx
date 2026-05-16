@@ -88,7 +88,7 @@ export default function DemoPage() {
 
       const pass = await createPass({
         agent_name: "Demo Agent",
-        purpose: "Aegis Demo — shopping checkout",
+        purpose: "Antigen Demo — shopping checkout",
         default_collar_id: collarId,
         expires_in_minutes: 30,
       });
@@ -96,7 +96,7 @@ export default function DemoPage() {
       if (!pass.token) throw new Error("Pass created but no token returned.");
       passTokenRef.current = pass.token;
 
-      const session = await createAgentSession(pass.token, "Aegis Demo");
+      const session = await createAgentSession(pass.token, "Antigen Demo");
       setSessionId(session.session_id);
 
       await agentNavigate(pass.token, session.session_id, "http://localhost:3001/checkout.html");
@@ -149,8 +149,8 @@ export default function DemoPage() {
           </span>
         </div>
         <p className="text-sm text-gray-400 mt-1">
-          Aegis lets outside agents browse freely, but pauses sensitive actions and lets
-          Aegis Runner execute approved steps without exposing secrets.
+          Antigen lets outside agents browse freely, but pauses sensitive actions and lets
+          Antigen Runner execute approved steps without exposing secrets.
         </p>
       </div>
 
@@ -230,7 +230,7 @@ export default function DemoPage() {
               onClick={handleApproveAndRun}
               className="text-sm bg-green-700 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-5 py-2 rounded-md transition-colors font-medium"
             >
-              {phase === "approving" ? "Running Aegis Runner…" : "Approve and Run Aegis Runner"}
+              {phase === "approving" ? "Running Antigen Runner…" : "Approve and Run Antigen Runner"}
             </button>
           </div>
         )}
@@ -254,7 +254,7 @@ export default function DemoPage() {
             </div>
             <div className="bg-green-950 border border-green-800 rounded-md px-4 py-3">
               <p className="text-xs text-green-300 font-medium mb-0.5">
-                Aegis Runner filled fake checkout details from the mock vault.
+                Antigen Runner filled fake checkout details from the mock vault.
               </p>
               <p className="text-xs text-green-500">
                 The outside agent never received the card number, CVV, or address.
@@ -288,9 +288,9 @@ export default function DemoPage() {
         <ul className="space-y-2">
           {[
             "Outside agent chose the browser action.",
-            "Aegis intercepted the sensitive click before execution.",
+            "Antigen intercepted the sensitive click before execution.",
             "User approval was required.",
-            "Aegis Runner filled fake checkout data from the mock vault.",
+            "Antigen Runner filled fake checkout data from the mock vault.",
             "The outside agent never received the card number, CVV, or address.",
             "A receipt was created.",
           ].map((point) => (

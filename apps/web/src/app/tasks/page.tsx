@@ -271,7 +271,7 @@ export default function TasksPage() {
             </div>
             {createResult.task.website_aegis_id && (
               <div>
-                <span className="text-gray-500">Website AegisID</span>
+                <span className="text-gray-500">Website AntigenID</span>
                 <p className="text-gray-200 font-mono">{createResult.task.website_aegis_id}</p>
               </div>
             )}
@@ -352,7 +352,7 @@ export default function TasksPage() {
                 </div>
                 {task.website_aegis_id && (
                   <div>
-                    <span className="text-gray-500">Website AegisID</span>
+                    <span className="text-gray-500">Website AntigenID</span>
                     <p className="text-gray-300 font-mono">{task.website_aegis_id}</p>
                   </div>
                 )}

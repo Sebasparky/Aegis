@@ -21,7 +21,7 @@ export function getMockCheckoutData(): CheckoutData {
   return {
     email: "demo@aegis.local",
     phone: "555-0100",
-    streetAddress: "123 Aegis Test Ave",
+    streetAddress: "123 Antigen Test Ave",
     city: "Ann Arbor",
     zip: "48109",
     countryValue: "US",

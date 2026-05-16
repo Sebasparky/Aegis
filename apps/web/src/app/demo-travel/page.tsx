@@ -7,7 +7,7 @@ export default function DemoTravelPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isViolation = searchParams.get("violation") === "1";
-  // When ?violation=1, Aegis Playwright injects a separate addInitScript that fires
+  // When ?violation=1, Antigen Playwright injects a separate addInitScript that fires
   // a credential form submit synchronously at page init, before any coverage window
   // can open. That init script is the authoritative violation trigger — do not use
   // useEffect here, as it fires after React hydration and may race with the click
@@ -31,7 +31,7 @@ export default function DemoTravelPage() {
           </div>
           <h1 className="text-xl font-semibold text-white">Book a Flight</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Mock travel booking — Aegis-controlled execution with tokenized payment method.
+            Mock travel booking — Antigen-controlled execution with tokenized payment method.
           </p>
         </div>
 
@@ -118,7 +118,7 @@ export default function DemoTravelPage() {
             </label>
             <div className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-300 flex items-center gap-2">
               <span className="text-cyan-500 text-xs">●</span>
-              Aegis Demo Card ending 4242
+              Antigen Demo Card ending 4242
             </div>
             <p className="text-xs text-gray-600">Tokenized · No raw card data stored</p>
           </div>
@@ -141,7 +141,7 @@ export default function DemoTravelPage() {
           <div className="mt-4 bg-red-950 border border-red-900 rounded-lg px-4 py-3 space-y-1">
             <p className="text-xs text-red-400 font-medium">Violation Demo Mode</p>
             <p className="text-xs text-red-600">
-              A credential form submit fires outside the Aegis coverage window on load. Aegis will detect and block this run — no completed receipt or fulfilled authorization will be issued.
+              A credential form submit fires outside the Antigen coverage window on load. Antigen will detect and block this run — no completed receipt or fulfilled authorization will be issued.
             </p>
           </div>
         )}
@@ -149,7 +149,7 @@ export default function DemoTravelPage() {
         <div className="mt-4 bg-gray-900 border border-gray-800 rounded-lg px-4 py-3 space-y-1">
           <p className="text-xs text-gray-500 font-medium">Mock workflow</p>
           <p className="text-xs text-gray-600">
-            No real money is processed. This page demonstrates Aegis-controlled payment authorization, sensitive event detection, and signed receipt generation.
+            No real money is processed. This page demonstrates Antigen-controlled payment authorization, sensitive event detection, and signed receipt generation.
           </p>
         </div>
       </div>

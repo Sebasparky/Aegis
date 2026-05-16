@@ -138,7 +138,7 @@ export default function AegisIDPage() {
                 <span className="cmd-hero__title-mark">secured.</span>
               </h1>
               <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
-                Manage your Aegis identity, trust claims, and control-plane settings for autonomous agents.
+                Manage your Antigen identity, trust claims, and control-plane settings for autonomous agents.
               </p>
             </div>
 

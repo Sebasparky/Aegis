@@ -16,7 +16,7 @@ export async function counterpartyRoutes(server: FastifyInstance) {
       if (!user) {
         return reply.status(404).send({
           ok: false,
-          error: { code: "NOT_FOUND", message: "AegisID not found" },
+          error: { code: "NOT_FOUND", message: "AntigenID not found" },
         });
       }
 

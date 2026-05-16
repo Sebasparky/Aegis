@@ -208,7 +208,7 @@ export default function DelegationsPage() {
               }}
             >
               Add helpers, give them passports, and keep them inside your rules. Every agent earns
-              an Aegis passport before it touches your accounts.
+              an Antigen passport before it touches your accounts.
             </p>
             <button
               className="a-btn a-btn--ghost"
@@ -326,7 +326,7 @@ export default function DelegationsPage() {
               before every task.
             </p>
             <p style={{ margin: 0 }}>
-              Configure the agent to use the Aegis MCP server. See{" "}
+              Configure the agent to use the Antigen MCP server. See{" "}
               <span style={{ color: "var(--blue)" }}>/agent-bridge</span> for the system prompt and
               tool list.
             </p>
@@ -586,7 +586,7 @@ export default function DelegationsPage() {
               Connect an agent
             </div>
             <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 4 }}>
-              The agent receives a reusable signed token backed by an Aegis collar.
+              The agent receives a reusable signed token backed by an Antigen collar.
             </div>
           </div>
           <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -680,7 +680,7 @@ export default function DelegationsPage() {
       {activeTab === "passports" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: 12, color: "var(--ink-4)", marginBottom: 4 }}>
-            Passport ledger — all Aegis passports issued to agents on this account
+            Passport ledger — all Antigen passports issued to agents on this account
           </div>
           {loading ? (
             <div style={{ color: "var(--ink-3)", fontSize: 13, padding: "24px 0" }}>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type {
@@ -19,14 +19,6 @@ import {
 } from "@/lib/api";
 
 // ── Tiny SVG helpers ───────────────────────────────────────────────────────
-function ShieldSVG({ size = 32 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <path d="M12 3l7 3v6c0 4.5-3.2 7.5-7 9-3.8-1.5-7-4.5-7-9V6l7-3z" />
-      <path d="M9 12l2 2 4-4" />
-    </svg>
-  );
-}
 function ArrowSVG({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -66,36 +58,74 @@ function RouteLine({ steps, active = 0 }: { steps: string[]; active?: number }) 
   );
 }
 
-// ── TrustCore ──────────────────────────────────────────────────────────────
-type NodeStatus = "verified" | "limited" | "approval" | "blocked";
-type OrbNode = { id: string; name: string; status: NodeStatus; angle: number; r: number };
+// ── AntigenCoreMap ─────────────────────────────────────────────────────────
+const ANGLES   = [-10, 70, 145, 215, 290, 340];
+const RADII    = [200, 230, 195, 235, 208, 220];
+const MAX_NODES = 6;
 
-const ANGLES = [-10, 70, 145, 215, 290];
-const RADII  = [200, 230, 195, 235, 208];
+/**
+ * AntigenCoreGlyph — abstract authority-A recognition mark.
+ * Named so it can be swapped for the final Antigen logo SVG later.
+ */
+function AntigenCoreGlyph() {
+  return (
+    <svg width={22} height={22} viewBox="0 0 22 22" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="9" stroke="currentColor" strokeWidth="0.8" opacity="0.45" />
+      <path
+        d="M8.5 16 L11 7 L13.5 16"
+        stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+      />
+      <line x1="9.3" y1="13" x2="12.7" y2="13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
 
-function TrustCore({ delegations, loading }: { delegations: AgentDelegation[]; loading: boolean }) {
-  const [hover, setHover] = useState<string | null>(null);
+type NodeStatus = "verified" | "limited" | "blocked";
+type OrbNode = {
+  id: string; name: string; status: NodeStatus;
+  channel: string; platform: string;
+  angle: number; r: number; overflow: false;
+};
+type OverflowNode = { id: "__overflow__"; overflow: true; angle: number; r: number; count: number };
+type MapNode = OrbNode | OverflowNode;
 
-  const nodes: OrbNode[] = delegations.slice(0, 5).map((d, i) => ({
-    id:     d.id,
-    name:   d.agent_name,
-    status: d.status === "active"  ? "verified"
-          : d.status === "revoked" ? "blocked"
-          : "limited",
-    angle: ANGLES[i],
-    r:     RADII[i],
+function AntigenCoreMap({ delegations, loading }: { delegations: AgentDelegation[]; loading: boolean }) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  const visible  = delegations.slice(0, MAX_NODES);
+  const overflow = delegations.length - MAX_NODES;
+
+  const nodes: MapNode[] = visible.map((d, i) => ({
+    id:       d.id,
+    name:     d.agent_name,
+    status:   d.status === "active"  ? "verified"
+            : d.status === "revoked" ? "blocked"
+            : "limited",
+    channel:  d.channel,
+    platform: d.agent_platform ?? "",
+    angle:    ANGLES[i],
+    r:        RADII[i],
+    overflow: false as const,
   }));
 
-  return (
-    <div className="trust">
-      <div className="trust__rings">
-        <div className="trust__ring trust__ring--1" />
-        <div className="trust__ring trust__ring--2" />
-        <div className="trust__ring trust__ring--3" />
-        <div className="trust__ring trust__ring--4" />
-      </div>
+  if (overflow > 0) {
+    nodes.push({
+      id: "__overflow__", overflow: true,
+      angle: ANGLES[MAX_NODES] ?? 340,
+      r:     RADII[MAX_NODES]  ?? 220,
+      count: overflow,
+    });
+  }
 
-      <svg className="trust__lines" viewBox="-300 -300 600 600" aria-hidden="true">
+  return (
+    <div style={{ position: "relative", width: 540, height: 540, margin: "0 auto" }}>
+
+      {/* Animated SVG line — draws only for the hovered node */}
+      <svg
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 1 }}
+        viewBox="-300 -300 600 600"
+        aria-hidden="true"
+      >
         {nodes.map((n) => {
           const rad = (n.angle * Math.PI) / 180;
           return (
@@ -104,44 +134,103 @@ function TrustCore({ delegations, loading }: { delegations: AgentDelegation[]; l
               x1="0" y1="0"
               x2={Math.cos(rad) * n.r}
               y2={Math.sin(rad) * n.r}
-              className={`trust__line trust__line--${n.status}${hover === n.id ? " trust__line--hover" : ""}`}
+              className={`antigen-line${hoveredId === n.id ? " antigen-line--visible" : ""}`}
+              strokeLinecap="round"
             />
           );
         })}
       </svg>
 
-      <div className="trust__core">
-        <span className="trust__core-pulse" aria-hidden="true" />
-        <span className="trust__core-pulse trust__core-pulse--2" aria-hidden="true" />
-        <div className="trust__core-inner">
-          <span className="trust__core-bezel" aria-hidden="true" />
-          <div className="trust__core-glyph"><ShieldSVG size={32} /></div>
-          <div className="trust__core-label">ANTIGEN CORE</div>
-        </div>
+      {/* Antigen core recognition mark */}
+      <div className="antigen-core" style={{ color: "var(--blue)" }}>
+        <AntigenCoreGlyph />
       </div>
 
+      {/* Agent nodes */}
       {nodes.map((n) => {
         const rad = (n.angle * Math.PI) / 180;
         const x   = Math.cos(rad) * n.r;
         const y   = Math.sin(rad) * n.r;
-        return (
-          <div
-            key={n.id}
-            className={`trust__node trust__node--${n.status}${hover === n.id ? " trust__node--hover" : ""}`}
-            style={{ transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))` }}
-            onMouseEnter={() => setHover(n.id)}
-            onMouseLeave={() => setHover(null)}
-          >
-            <span className="trust__node-orb" />
-            <div className="trust__node-card">
-              <div className="trust__node-card__name">{n.name}</div>
+
+        if (n.overflow) {
+          return (
+            <div
+              key={n.id}
+              className="antigen-node antigen-node--overflow"
+              style={{
+                position: "absolute", top: "50%", left: "50%",
+                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`,
+                width: 22, height: 22, fontSize: 9,
+              }}
+              aria-label={`${n.count} more agents`}
+            >
+              +{n.count}
             </div>
-          </div>
+          );
+        }
+
+        const isHovered = hoveredId === n.id;
+        const statusMod = n.status === "verified" ? "verified" : n.status === "blocked" ? "blocked" : "limited";
+        const statusColor = n.status === "verified" ? "green" : n.status === "blocked" ? "red" : "amber";
+        const cardX = x + (x >= 0 ? 28 : -28);
+        const cardY = y + (y >= 0 ? 22 : -22);
+
+        return (
+          <Fragment key={n.id}>
+            <button
+              type="button"
+              className={`antigen-node antigen-node--${statusMod}`}
+              style={{
+                position: "absolute", top: "50%", left: "50%",
+                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`,
+                zIndex: 3,
+              }}
+              onMouseEnter={() => setHoveredId(n.id)}
+              onMouseLeave={() => setHoveredId(null)}
+              onFocus={() => setHoveredId(n.id)}
+              onBlur={() => setHoveredId(null)}
+              aria-label={n.name}
+            />
+
+            {isHovered && (
+              <div
+                style={{
+                  position: "absolute", top: "50%", left: "50%",
+                  transform: `translate(calc(-50% + ${cardX}px), calc(-50% + ${cardY}px))`,
+                  zIndex: 10, pointerEvents: "none",
+                }}
+              >
+                <div className="antigen-card">
+                  <div style={{ fontWeight: 600, fontSize: 12.5, color: "var(--ink-1)", marginBottom: 2 }}>
+                    {n.name}
+                  </div>
+                  {(n.platform || n.channel) && (
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginBottom: 6 }}>
+                      {[n.platform, n.channel].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
+                  <span className={`a-status a-status--${statusColor}`} style={{ fontSize: 11 }}>
+                    <span className="a-status__dot" />
+                    {n.status}
+                  </span>
+                  <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 7, fontFamily: '"JetBrains Mono", monospace', letterSpacing: "0.02em" }}>
+                    Protected by Antigen
+                  </div>
+                </div>
+              </div>
+            )}
+          </Fragment>
         );
       })}
 
       {!loading && delegations.length === 0 && (
-        <p className="trust__caption">No agents connected · Add one to begin</p>
+        <p style={{
+          position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
+          color: "var(--ink-3)", fontSize: 12.5, fontFamily: '"Newsreader", "Georgia", serif',
+          fontStyle: "italic", whiteSpace: "nowrap",
+        }}>
+          No agents connected
+        </p>
       )}
     </div>
   );
@@ -381,7 +470,7 @@ export default function CommandPage() {
           </p>
         </div>
 
-        <TrustCore delegations={delegations} loading={loading} />
+        <AntigenCoreMap delegations={delegations} loading={loading} />
 
         <div className="cmd-pulse cmd-pulse--instr">
           <button className="cmd-pulse__item" type="button" onClick={() => router.push("/delegations")}>

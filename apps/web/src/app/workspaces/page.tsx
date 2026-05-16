@@ -65,7 +65,7 @@ export default function WorkspacesPage() {
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
           <div className="a-eyebrow" style={{ marginBottom: 8 }}>Workspaces</div>
-          <h1 className="cmd-hero__title" style={{ fontSize: 32, margin: "0 0 10px" }}>
+          <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "0 0 10px" }}>
             Agents,{" "}
             <span className="cmd-hero__title-mark">coordinated.</span>
           </h1>

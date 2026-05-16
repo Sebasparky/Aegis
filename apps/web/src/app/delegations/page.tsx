@@ -183,50 +183,29 @@ export default function DelegationsPage() {
   return (
     <div className="page">
       {/* ── Hero ── */}
-      <div className="cmd-hero cmd-hero--ceramic">
-        <div className="cmd-hero__aura" />
-        <div className="cmd-hero__grain" />
+      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
 
-        {/* Split: left text + right seal */}
-        <div className="ag-hero">
-          <div className="ag-hero__left">
-            <div className="a-eyebrow" style={{ marginBottom: 10 }}>Agents</div>
-            <h1
-              className="cmd-hero__title"
-              style={{ textAlign: "left", margin: "0 0 14px", fontSize: 38 }}
-            >
+        <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
+          <div>
+            <div className="a-eyebrow" style={{ marginBottom: 8 }}>Agents</div>
+            <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "0 0 10px" }}>
               Agents,{" "}
               <span className="cmd-hero__title-mark">introduced.</span>
             </h1>
-            <p
-              style={{
-                fontSize: 15,
-                color: "var(--ink-2)",
-                margin: "0 0 22px",
-                lineHeight: 1.55,
-                maxWidth: 440,
-              }}
-            >
+            <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0, maxWidth: 480 }}>
               Add helpers, give them passports, and keep them inside your rules. Every agent earns
               an Antigen passport before it touches your accounts.
             </p>
-            <button
-              className="a-btn a-btn--ghost"
-              onClick={() => setActiveTab("connect")}
-              style={{ fontSize: 13 }}
-            >
-              Connect agent
-            </button>
           </div>
-
-          {/* Passport seal — CSS-only, decorative */}
-          <div className="ag-seal" aria-hidden="true">
-            <div className="ag-seal__glow" />
-            <div className="ag-seal__ring" />
-            <div className="ag-seal__disc">
-              <span className="ag-seal__initial">A</span>
-            </div>
-          </div>
+          <button
+            className="a-btn a-btn--ghost"
+            onClick={() => setActiveTab("connect")}
+            style={{ fontSize: 13, flexShrink: 0 }}
+          >
+            Connect agent
+          </button>
         </div>
 
         {/* Stats strip */}
@@ -234,7 +213,7 @@ export default function DelegationsPage() {
           className="cmd-pulse"
           style={{
             borderTop: "1px solid var(--hairline)",
-            marginTop: 28,
+            marginTop: 24,
             paddingTop: 18,
             paddingBottom: 20,
           }}

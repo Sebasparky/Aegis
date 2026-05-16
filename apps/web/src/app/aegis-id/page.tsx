@@ -118,10 +118,6 @@ export default function AegisIDPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const sealInitial = claims?.aegis_id
-    ? claims.aegis_id.replace(/[^a-zA-Z0-9]/g, "").charAt(0).toUpperCase() || "A"
-    : "A";
-
   return (
     <div className="page">
 
@@ -130,27 +126,14 @@ export default function AegisIDPage() {
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
-          <div className="ag-hero">
-            <div className="ag-hero__left">
-              <div className="a-eyebrow">Settings</div>
-              <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
-                Identity,{" "}
-                <span className="cmd-hero__title-mark">secured.</span>
-              </h1>
-              <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
-                Manage your Antigen identity, trust claims, and control-plane settings for autonomous agents.
-              </p>
-            </div>
-
-            {/* Passport seal */}
-            <div className="ag-seal" style={{ width: 96, height: 96 }}>
-              <span className="ag-seal__glow" />
-              <span className="ag-seal__ring" />
-              <div className="ag-seal__disc">
-                <span className="ag-seal__initial" style={{ fontSize: 36 }}>{sealInitial}</span>
-              </div>
-            </div>
-          </div>
+          <div className="a-eyebrow" style={{ marginBottom: 8 }}>Settings</div>
+          <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "0 0 10px" }}>
+            Identity,{" "}
+            <span className="cmd-hero__title-mark">secured.</span>
+          </h1>
+          <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: "0 0 20px" }}>
+            Manage your Antigen identity, trust claims, and control-plane settings for autonomous agents.
+          </p>
 
           <div
             style={{
@@ -159,7 +142,6 @@ export default function AegisIDPage() {
               gap: 32,
               borderTop: "1px solid var(--hairline)",
               paddingTop: 16,
-              marginTop: 20,
             }}
           >
             <HeroStat value={claims?.approvals_granted ?? 0} label="Approvals granted" loading={loading} />

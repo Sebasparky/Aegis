@@ -15,24 +15,6 @@ function GridIcon() {
   );
 }
 
-function CountChip({ value, label, color }: { value: number; label: string; color: "green" | "blue" | "amber" | "graphite" }) {
-  const styles: Record<string, React.CSSProperties> = {
-    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    graphite: { background: "var(--graphite-soft)", color: "var(--ink-2)",         border: "1px solid var(--hairline)" },
-  };
-  return (
-    <span style={{
-      ...styles[color],
-      fontSize: 11, fontWeight: 500,
-      padding: "2px 9px", borderRadius: 999,
-      display: "inline-flex", alignItems: "center", gap: 4,
-    }}>
-      <span style={{ fontWeight: 600 }}>{value}</span>{" "}{label}
-    </span>
-  );
-}
 
 export default function WorkspacesPage() {
   const [workspaces, setWorkspaces] = useState<WorkspaceWithCounts[]>([]);
@@ -160,10 +142,11 @@ export default function WorkspacesPage() {
                   <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>
                     {w.name}
                   </span>
-                  <span className={`a-status a-status--${w.status === "active" ? "green" : "graphite"}`}>
-                    <span className="a-status__dot" />
-                    {w.status}
-                  </span>
+                  {w.status === "active" ? (
+                    <span className="metadata-state metadata-state--good">{w.status}</span>
+                  ) : (
+                    <span className="a-status a-status--graphite">{w.status}</span>
+                  )}
                 </div>
 
                 {w.description && (
@@ -172,11 +155,14 @@ export default function WorkspacesPage() {
                   </p>
                 )}
 
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: w.description ? 0 : 6 }}>
-                  <CountChip value={w.task_counts.open + w.task_counts.in_progress} label="active" color="blue" />
-                  <CountChip value={w.task_counts.completed} label="done" color="green" />
-                  <CountChip value={w.artifact_count} label="artifacts" color="amber" />
-                  <CountChip value={w.participant_delegation_ids.length} label="participants" color="graphite" />
+                <div className="a-meta-line" style={{ marginTop: w.description ? 0 : 6 }}>
+                  <span>{w.task_counts.open + w.task_counts.in_progress} active</span>
+                  <span className="a-meta-line__sep">·</span>
+                  <span>{w.task_counts.completed} done</span>
+                  <span className="a-meta-line__sep">·</span>
+                  <span>{w.artifact_count} artifacts</span>
+                  <span className="a-meta-line__sep">·</span>
+                  <span>{w.participant_delegation_ids.length} participants</span>
                 </div>
 
                 <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace" }}>

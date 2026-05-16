@@ -48,7 +48,7 @@ function HeroStat({ value, label, loading }: { value: number; label: string; loa
 }
 
 function BoolDisplay({ value }: { value: boolean }) {
-  return <AStatus label={value ? "Yes" : "No"} variant={value ? "green" : "graphite"} />;
+  return <span style={{ fontSize: 12.5, color: "var(--ink-2)", fontWeight: 500 }}>{value ? "Yes" : "No"}</span>;
 }
 
 function CountDisplay({ n, warningAbove }: { n: number; warningAbove?: number }) {
@@ -193,15 +193,14 @@ export default function AegisIDPage() {
           >
             <div className="apr-card__head">
               <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <AStatus
-                    label={claims.verified_human_backed ? "Human-backed" : "Unverified"}
-                    variant={claims.verified_human_backed ? "green" : "graphite"}
-                  />
-                  <AStatus
-                    label={claims.purchase_history === "demo_clean" ? "Clean history" : "No history"}
-                    variant={claims.purchase_history === "demo_clean" ? "green" : "graphite"}
-                  />
+                <div className="metadata-row">
+                  <span style={{ color: "var(--ink-2)", fontWeight: 500 }}>
+                    {claims.verified_human_backed ? "Human-backed" : "Unverified"}
+                  </span>
+                  <span className="metadata-sep">·</span>
+                  <span style={{ color: "var(--ink-3)" }}>
+                    {claims.purchase_history === "demo_clean" ? "Clean history" : "No purchase history"}
+                  </span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span

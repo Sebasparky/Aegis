@@ -288,9 +288,11 @@ function ConnectedAgents({ delegations, loading }: { delegations: AgentDelegatio
                 <div style={{ fontWeight: 500, fontSize: 13.5, color: "var(--ink-1)" }}>{d.agent_name}</div>
                 <div style={{ fontSize: 12, color: "var(--ink-3)" }}>{d.channel}</div>
               </div>
-              <span className={`a-status a-status--${d.status === "active" ? "green" : "graphite"}`}>
-                <span className="a-status__dot" />{d.status}
-              </span>
+              {d.status === "active" ? (
+                <span className="metadata-state metadata-state--good">{d.status}</span>
+              ) : (
+                <span className="a-status a-status--graphite">{d.status}</span>
+              )}
             </div>
           ))}
           {delegations.length > 5 && (

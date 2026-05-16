@@ -16,7 +16,7 @@ import {
 } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-type StatusVariant = "green" | "amber" | "red" | "graphite";
+type StatusVariant = "green" | "amber" | "red" | "graphite" | "quiet" | "outline-red" | "outline-amber";
 type VerifyState = { status: "idle" | "loading" | "done"; result?: WebsiteTrustProfileVerificationResult };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -31,9 +31,9 @@ const TRUST_STATUS_LABEL: Record<string, string> = {
 };
 
 const TRUST_STATUS_VARIANT: Record<string, StatusVariant> = {
-  verified_demo_business: "green",
+  verified_demo_business: "quiet",
   flagged: "red",
-  unverified: "graphite",
+  unverified: "quiet",
 };
 
 const ACTION_LABEL: Record<string, string> = {
@@ -49,15 +49,15 @@ const ACTION_VARIANT: Record<string, StatusVariant> = {
 };
 
 const VERIFY_STATUS_VARIANT: Record<string, StatusVariant> = {
-  verified: "green",
-  unverified: "graphite",
+  verified: "quiet",
+  unverified: "quiet",
   suspended: "red",
 };
 
 const PROFILE_STATUS_VARIANT: Record<string, StatusVariant> = {
-  active: "green",
-  revoked: "red",
-  superseded: "amber",
+  active: "quiet",
+  revoked: "outline-red",
+  superseded: "outline-amber",
 };
 
 // ── Primitives ─────────────────────────────────────────────────────────────────
@@ -122,13 +122,13 @@ function VerificationBadge({ state }: { state?: VerifyState }) {
   }
   const r = state.result!;
   if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="amber" />;
-  if (r.valid) return <AStatus label="Valid" variant="green" />;
+  if (r.valid) return <span style={{ fontSize: 11.5, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Valid</span>;
   if (r.hash_valid) return <AStatus label="Unsigned" variant="amber" />;
   return <AStatus label="Invalid" variant="red" />;
 }
 
 function BoolDisplay({ value }: { value: boolean }) {
-  return <AStatus label={value ? "Yes" : "No"} variant={value ? "green" : "graphite"} />;
+  return <span style={{ fontSize: 12.5, color: "var(--ink-2)", fontWeight: 500 }}>{value ? "Yes" : "No"}</span>;
 }
 
 function CountDisplay({ n, warningAbove }: { n: number; warningAbove?: number }) {
@@ -349,14 +349,19 @@ export default function WebsiteAegisIDPage() {
               <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink-1)" }}>{claims.domain}</span>
-                  <AStatus
-                    label={TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status}
-                    variant={TRUST_STATUS_VARIANT[claims.trust_status] ?? "graphite"}
-                  />
-                  <AStatus
-                    label={ACTION_LABEL[claims.recommended_agent_action] ?? claims.recommended_agent_action}
-                    variant={ACTION_VARIANT[claims.recommended_agent_action] ?? "graphite"}
-                  />
+                  {claims.trust_status === "flagged" ? (
+                    <AStatus label={TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status} variant="red" />
+                  ) : (
+                    <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status}</span>
+                  )}
+                  {claims.recommended_agent_action === "allow_normal_browsing" ? (
+                    <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)" }}>normal browsing allowed</span>
+                  ) : (
+                    <AStatus
+                      label={ACTION_LABEL[claims.recommended_agent_action] ?? claims.recommended_agent_action}
+                      variant={ACTION_VARIANT[claims.recommended_agent_action] ?? "graphite"}
+                    />
+                  )}
                 </div>
                 <p
                   style={{
@@ -420,14 +425,16 @@ export default function WebsiteAegisIDPage() {
                   <div className="apr-box__head">Trust Profile</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      <AStatus
-                        label={matchedProfile.verification_status}
-                        variant={VERIFY_STATUS_VARIANT[matchedProfile.verification_status] ?? "graphite"}
-                      />
-                      <AStatus
-                        label={matchedProfile.status}
-                        variant={PROFILE_STATUS_VARIANT[matchedProfile.status] ?? "graphite"}
-                      />
+                      {matchedProfile.verification_status === "suspended" ? (
+                        <AStatus label={matchedProfile.verification_status} variant="red" />
+                      ) : (
+                        <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{matchedProfile.verification_status}</span>
+                      )}
+                      {matchedProfile.status === "active" ? (
+                        <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{matchedProfile.status}</span>
+                      ) : (
+                        <AStatus label={matchedProfile.status} variant={PROFILE_STATUS_VARIANT[matchedProfile.status] ?? "graphite"} />
+                      )}
                       <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
                         {matchedProfile.safety_promises.length} promises
                       </span>
@@ -525,14 +532,16 @@ export default function WebsiteAegisIDPage() {
                           <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>
                             {p.domain}
                           </span>
-                          <AStatus
-                            label={p.verification_status}
-                            variant={VERIFY_STATUS_VARIANT[p.verification_status] ?? "graphite"}
-                          />
-                          <AStatus
-                            label={p.status}
-                            variant={PROFILE_STATUS_VARIANT[p.status] ?? "graphite"}
-                          />
+                          {p.verification_status === "suspended" ? (
+                            <AStatus label={p.verification_status} variant="red" />
+                          ) : (
+                            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.verification_status}</span>
+                          )}
+                          {p.status === "active" ? (
+                            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.status}</span>
+                          ) : (
+                            <AStatus label={p.status} variant={PROFILE_STATUS_VARIANT[p.status] ?? "graphite"} />
+                          )}
                         </div>
                         <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{p.company_name}</p>
                         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -701,10 +710,11 @@ export default function WebsiteAegisIDPage() {
                     <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
                       {item.successful_runner_transactions} txn
                     </span>
-                    <AStatus
-                      label={TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status}
-                      variant={TRUST_STATUS_VARIANT[item.trust_status] ?? "graphite"}
-                    />
+                    {item.trust_status === "flagged" ? (
+                      <AStatus label={TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status} variant="red" />
+                    ) : (
+                      <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status}</span>
+                    )}
                   </div>
                 </button>
               ))}

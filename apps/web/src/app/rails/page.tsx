@@ -253,15 +253,21 @@ function CapabilityBadges({ route }: { route: AegisRoute }) {
   const sensProtected = hasSensitiveValues(route.steps);
   const hasFills = hasFillSteps(route.steps);
 
+  const tags: Array<{ text: string; amber?: boolean }> = [];
+  if (origin === "local") tags.push({ text: "Local demo" });
+  else if (origin === "wikipedia") tags.push({ text: "Wikipedia" });
+  else tags.push({ text: "External site" });
+  if (visualReplay) tags.push({ text: "Visual replay" });
+  if (parameterized) tags.push({ text: "Parameterized" });
+  if (sensProtected) tags.push({ text: "Sensitive values protected", amber: true });
+  else if (hasFills) tags.push({ text: "No sensitive fields" });
+
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-      {origin === "local" && <span style={pillStyle("green")}>Local demo</span>}
-      {origin === "wikipedia" && <span style={pillStyle("blue")}>Wikipedia</span>}
-      {origin === "external" && <span style={pillStyle("graphite")}>External site</span>}
-      {visualReplay && <span style={pillStyle("blue")}>Visual replay</span>}
-      {parameterized && <span style={pillStyle("blue")}>Parameterized</span>}
-      {sensProtected && <span style={pillStyle("amber")}>Sensitive values protected</span>}
-      {!sensProtected && hasFills && <span style={pillStyle("graphite")}>No sensitive fields</span>}
+    <div className="metadata-row">
+      {tags.flatMap((t, i) => [
+        ...(i > 0 ? [<span key={`s${i}`} className="metadata-sep">·</span>] : []),
+        <span key={t.text} style={t.amber ? { color: "var(--amber)" } : undefined}>{t.text}</span>,
+      ])}
     </div>
   );
 }
@@ -342,10 +348,11 @@ function PreviewPanel({ route, verifyReport }: { route: AegisRoute; verifyReport
       {route.required_permissions.length > 0 && (
         <div>
           <p style={sectionHead}>Required permissions</p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-            {route.required_permissions.map((p) => (
-              <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
-            ))}
+          <div className="metadata-row">
+            {route.required_permissions.flatMap((p, i) => [
+              ...(i > 0 ? [<span key={`s${i}`} className="metadata-sep">·</span>] : []),
+              <span key={p}>{friendlyAction(p)}</span>,
+            ])}
           </div>
         </div>
       )}
@@ -566,15 +573,19 @@ function SkillCard({ route, onDelete, onVerified, onRenamed }: {
               <RouteSVG />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
                 <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>{localName}</span>
-                <AStatus label={TIER_LABEL[localTier] ?? localTier} variant={TIER_VARIANT[localTier] ?? "graphite"} />
-                <AStatus label="Private" variant="graphite" />
+                <span className="metadata-state">{TIER_LABEL[localTier] ?? localTier}</span>
+                <span className="metadata-sep">·</span>
+                <span className="metadata-state">Private</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 14px", fontSize: 12, color: "var(--ink-3)" }}>
                 <span style={{ fontFamily: "monospace", color: "var(--ink-2)" }}>{route.domain}</span>
                 <span>{route.steps.length} step{route.steps.length !== 1 ? "s" : ""}</span>
-                <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
+                {route.risk_level === "low"
+                  ? <span>{route.risk_level} risk</span>
+                  : <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
+                }
                 <span>{hasVerification ? `Verified ${friendlyDate(lastVerified)}` : "Not yet verified"}</span>
               </div>
             </div>
@@ -589,7 +600,17 @@ function SkillCard({ route, onDelete, onVerified, onRenamed }: {
             </span>
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <span style={{ color: "var(--ink-3)" }}>Marketplace:</span>
-              <AStatus label={mktLabel} variant={mktVariant} />
+              {localMarketplaceStatus === "approved" ? (
+                <span className="metadata-state--good">marketplace approved</span>
+              ) : localMarketplaceStatus === "rejected" ? (
+                <span className="metadata-state--red">Rejected</span>
+              ) : localMarketplaceStatus === "pending_review" ? (
+                <span className="a-status a-status--amber">Pending review</span>
+              ) : isRouteVerified(localTier) ? (
+                <span className="metadata-state">Ready for review</span>
+              ) : (
+                <span className="metadata-state">Needs verification</span>
+              )}
             </span>
           </div>
 
@@ -598,10 +619,11 @@ function SkillCard({ route, onDelete, onVerified, onRenamed }: {
 
           {/* Required permissions */}
           {route.required_permissions.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-              {route.required_permissions.map(p => (
-                <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
-              ))}
+            <div className="metadata-row">
+              {route.required_permissions.flatMap((p, i) => [
+                ...(i > 0 ? [<span key={`sp${i}`} className="metadata-sep">·</span>] : []),
+                <span key={p}>{friendlyAction(p)}</span>,
+              ])}
             </div>
           )}
 
@@ -640,7 +662,7 @@ function SkillCard({ route, onDelete, onVerified, onRenamed }: {
               Rename
             </button>
             {localMarketplaceStatus === "approved" ? (
-              <button disabled style={{ ...ghostBtn, ...pillStyle("green"), cursor: "not-allowed" }}>Approved</button>
+              <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>marketplace approved</span>
             ) : localMarketplaceStatus === "rejected" ? (
               <button disabled style={{ ...ghostBtn, ...pillStyle("red"), cursor: "not-allowed" }}>Rejected</button>
             ) : localMarketplaceStatus === "pending_review" ? (
@@ -756,7 +778,10 @@ function SkillCard({ route, onDelete, onVerified, onRenamed }: {
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {route.allowed_actions.length === 0
                       ? <span style={{ color: "var(--ink-4)" }}>none</span>
-                      : route.allowed_actions.map(a => <span key={a} style={pillStyle("green")}>{a}</span>)
+                      : route.allowed_actions.flatMap((a, i) => [
+                          ...(i > 0 ? [<span key={`sa${i}`} className="metadata-sep">·</span>] : []),
+                          <span key={a} style={{ fontSize: 12, color: "var(--ink-3)" }}>{a}</span>,
+                        ])
                     }
                   </div>
                 </div>
@@ -811,25 +836,28 @@ function MarketplaceCard({ skill, onInstallChange }: {
         <ShopSVG />
       </div>
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
           <span style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)" }}>{skill.name}</span>
-          <AStatus label={TIER_LABEL[skill.trust_tier] ?? skill.trust_tier} variant={TIER_VARIANT[skill.trust_tier] ?? "graphite"} />
-          {skill.installed && <AStatus label="Installed" variant="green" />}
+          <span className="metadata-state">{TIER_LABEL[skill.trust_tier] ?? skill.trust_tier}</span>
+          {skill.installed && <><span className="metadata-sep">·</span><span className="metadata-state--good">installed</span></>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5, flexWrap: "wrap" }}>
           <span style={{ fontSize: 12, fontFamily: "monospace", color: "var(--ink-2)" }}>{skill.domain}</span>
           {skill.risk_level && (
-            <span style={pillStyle(riskPillColor(skill.risk_level))}>{skill.risk_level} risk</span>
+            skill.risk_level === "low"
+              ? <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{skill.risk_level} risk</span>
+              : <span style={pillStyle(riskPillColor(skill.risk_level))}>{skill.risk_level} risk</span>
           )}
         </div>
         {skill.summary && (
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 6px", lineHeight: 1.5 }}>{skill.summary}</p>
         )}
         {skill.required_permissions.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {skill.required_permissions.map(p => (
-              <span key={p} style={pillStyle("blue")}>{friendlyAction(p)}</span>
-            ))}
+          <div className="metadata-row">
+            {skill.required_permissions.flatMap((p, i) => [
+              ...(i > 0 ? [<span key={`sm${i}`} className="metadata-sep">·</span>] : []),
+              <span key={p}>{friendlyAction(p)}</span>,
+            ])}
           </div>
         )}
         {error && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: "4px 0 0" }}>{error}</p>}

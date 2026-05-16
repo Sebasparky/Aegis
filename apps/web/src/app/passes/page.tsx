@@ -23,8 +23,8 @@ function LockSVG() {
 }
 
 function statusClass(status: string): string {
-  if (status === "active")  return "green";
-  if (status === "revoked") return "red";
+  if (status === "active")  return "quiet";
+  if (status === "revoked") return "outline-red";
   return "graphite";
 }
 
@@ -247,7 +247,7 @@ export default function PassesPage() {
               <span style={{ fontSize: 9, letterSpacing: "0.18em", fontWeight: 600, color: "var(--ink-3)", textTransform: "uppercase" }}>
                 Raw Secrets · Exposed
               </span>
-              <span style={{ fontFamily: '"Newsreader", Georgia, serif', fontWeight: 500, fontSize: 30, color: "oklch(0.42 0.09 150)", letterSpacing: "-0.02em" }}>
+              <span style={{ fontFamily: '"Newsreader", Georgia, serif', fontWeight: 500, fontSize: 30, color: "var(--ink-1)", letterSpacing: "-0.02em" }}>
                 0
               </span>
             </div>
@@ -381,26 +381,12 @@ export default function PassesPage() {
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
                       <span style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)" }}>{vp.label}</span>
                       {vpProvider && (
-                        <span style={{
-                          fontSize: 10.5, fontWeight: 500, padding: "1px 7px", borderRadius: 999,
-                          background: "var(--blue-soft)", color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)",
-                        }}>
-                          {vpProvider.display_name}
-                        </span>
+                        <><span className="metadata-sep">·</span><span style={{ fontSize: 10.5, fontWeight: 500, color: "var(--ink-3)" }}>{vpProvider.display_name}</span></>
                       )}
-                      <span style={{
-                        fontSize: 10.5, fontWeight: 500, padding: "1px 7px", borderRadius: 999,
-                        background: "var(--graphite-soft)", color: "var(--ink-3)", border: "1px solid var(--hairline)",
-                      }}>
-                        {vp.kind}
-                      </span>
+                      <span className="metadata-sep">·</span>
+                      <span style={{ fontSize: 10.5, fontWeight: 500, color: "var(--ink-3)" }}>{vp.kind}</span>
                       {vp.pass_id === "pass_vault_demo_login_001" && (
-                        <span style={{
-                          fontSize: 10.5, fontWeight: 500, padding: "1px 7px", borderRadius: 999,
-                          background: "var(--blue-soft)", color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)",
-                        }}>
-                          seeded demo
-                        </span>
+                        <><span className="metadata-sep">·</span><span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>seeded demo</span></>
                       )}
                     </div>
                     <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: '"JetBrains Mono", monospace', marginBottom: 6 }}>
@@ -480,9 +466,11 @@ export default function PassesPage() {
                     <span style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)" }}>
                       {pass.agent_name}
                     </span>
-                    <span className={`a-status a-status--${statusClass(pass.status)}`}>
-                      <span className="a-status__dot" />{pass.status}
-                    </span>
+                    {pass.status === "active" ? (
+                      <span className="metadata-state metadata-state--good">{pass.status}</span>
+                    ) : (
+                      <span className={`a-status a-status--${statusClass(pass.status)}`}>{pass.status}</span>
+                    )}
                   </div>
                   {pass.purpose && (
                     <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "0 0 4px", lineHeight: 1.4 }}>

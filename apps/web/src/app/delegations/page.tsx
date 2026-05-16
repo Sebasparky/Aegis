@@ -12,8 +12,7 @@ import {
 type Tab = "connected" | "connect" | "passports";
 
 function statusClass(status: AgentDelegation["status"]) {
-  if (status === "active") return "a-status a-status--green";
-  if (status === "revoked") return "a-status a-status--red";
+  if (status === "revoked") return "a-status a-status--outline-red";
   return "a-status a-status--graphite";
 }
 
@@ -216,9 +215,10 @@ export default function DelegationsPage() {
             marginTop: 24,
             paddingTop: 18,
             paddingBottom: 20,
+            justifyContent: "flex-start",
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
             <span
               style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
             >
@@ -229,7 +229,7 @@ export default function DelegationsPage() {
             </span>
           </div>
           <div className="cmd-pulse__div" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
             <span
               style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
             >
@@ -240,7 +240,7 @@ export default function DelegationsPage() {
             </span>
           </div>
           <div className="cmd-pulse__div" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
             <span
               style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--ink-1)" }}
             >
@@ -451,10 +451,11 @@ export default function DelegationsPage() {
                         gap: 8,
                       }}
                     >
-                      <span className={statusClass(d.status)}>
-                        <span className="a-status__dot" />
-                        {d.status}
-                      </span>
+                      {d.status === "active" ? (
+                        <span className="metadata-state metadata-state--good">{d.status}</span>
+                      ) : (
+                        <span className={statusClass(d.status)}>{d.status}</span>
+                      )}
                       <div style={{ display: "flex", gap: 4 }}>
                         {!isEditing && (
                           <button
@@ -753,10 +754,11 @@ export default function DelegationsPage() {
 
                   {/* Status + subtle arrow — no operational controls */}
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span className={statusClass(d.status)}>
-                      <span className="a-status__dot" />
-                      {d.status}
-                    </span>
+                    {d.status === "active" ? (
+                      <span className="metadata-state metadata-state--good">{d.status}</span>
+                    ) : (
+                      <span className={statusClass(d.status)}>{d.status}</span>
+                    )}
                     <span
                       style={{
                         color: "var(--ink-4)",

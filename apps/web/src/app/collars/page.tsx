@@ -13,25 +13,9 @@ function ShieldSVG() {
   );
 }
 
-type PillColor = "green" | "amber" | "red";
-
-function permissionPillStyle(color: PillColor): React.CSSProperties {
-  const map: Record<PillColor, React.CSSProperties> = {
-    green: { background: "var(--green-soft)", color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    amber: { background: "var(--amber-soft)", color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    red:   { background: "var(--red-soft)",   color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"   },
-  };
-  return {
-    ...map[color],
-    fontSize: 11, fontWeight: 500,
-    padding: "2px 9px", borderRadius: 999,
-    display: "inline-flex", alignItems: "center", gap: 5,
-  };
-}
-
 function statusClass(status: string): string {
-  if (status === "active")   return "green";
-  if (status === "revoked")  return "red";
+  if (status === "active")   return "quiet";
+  if (status === "revoked")  return "outline-red";
   return "graphite";
 }
 
@@ -141,10 +125,11 @@ export default function CollarsPage() {
                   <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>
                     {collar.name}
                   </span>
-                  <span className={`a-status a-status--${statusClass(collar.status)}`}>
-                    <span className="a-status__dot" />
-                    {collar.status}
-                  </span>
+                  {collar.status === "active" ? (
+                    <span className="metadata-state metadata-state--good">{collar.status}</span>
+                  ) : (
+                    <span className={`a-status a-status--${statusClass(collar.status)}`}>{collar.status}</span>
+                  )}
                 </div>
 
                 {collar.purpose && (
@@ -153,16 +138,24 @@ export default function CollarsPage() {
                   </p>
                 )}
 
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: collar.purpose ? 0 : 6 }}>
-                  <span style={permissionPillStyle("green")}>
-                    {(collar.allowed_actions ?? []).length} allowed
-                  </span>
-                  <span style={permissionPillStyle("amber")}>
-                    {(collar.approval_required_actions ?? []).length} ask first
-                  </span>
-                  <span style={permissionPillStyle("red")}>
-                    {(collar.blocked_actions ?? []).length} blocked
-                  </span>
+                <div className="a-meta-line" style={{ marginTop: collar.purpose ? 0 : 6 }}>
+                  <span>{(collar.allowed_actions ?? []).length} allowed</span>
+                  {(collar.approval_required_actions ?? []).length > 0 && (
+                    <>
+                      <span className="a-meta-line__sep">·</span>
+                      <span style={{ color: "var(--amber)" }}>
+                        {(collar.approval_required_actions ?? []).length} ask first
+                      </span>
+                    </>
+                  )}
+                  {(collar.blocked_actions ?? []).length > 0 && (
+                    <>
+                      <span className="a-meta-line__sep">·</span>
+                      <span style={{ color: "var(--red)" }}>
+                        {(collar.blocked_actions ?? []).length} blocked
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 

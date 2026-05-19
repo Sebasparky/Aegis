@@ -406,6 +406,11 @@ export async function routeRunRoutes(server: FastifyInstance) {
       return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
     }
 
+    // No-collar agents may not start execution
+    if (!collar_id) {
+      return sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
+    }
+
     if (collar_id) {
       const collar = collars.get(collar_id);
       if (collar && collar.status === "active") {

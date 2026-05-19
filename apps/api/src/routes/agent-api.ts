@@ -2,6 +2,7 @@ import { existsSync, createReadStream } from "fs";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type {
   AgentDelegation,
+  Collar,
   DelegationTrustTaskCategory,
   ExternalAgentIdentity,
   ExternalAgentSkillSummary,
@@ -117,6 +118,28 @@ async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Prom
   }
 
   return delegation;
+}
+
+/** Returns the active collar for a delegation, or writes a 403 and returns null. */
+function requireActiveCollar(
+  delegation: AgentDelegation,
+  reply: FastifyReply
+): { collar: Collar } | null {
+  const collar_id = delegation.default_collar_id;
+  if (!collar_id) {
+    sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
+    return null;
+  }
+  const collar = collars.get(collar_id);
+  if (!collar) {
+    sendError(reply, 403, "COLLAR_REQUIRED", "The collar attached to this delegation was not found.");
+    return null;
+  }
+  if (collar.status !== "active") {
+    sendError(reply, 403, "COLLAR_REVOKED", "The collar attached to this delegation is not active.");
+    return null;
+  }
+  return { collar };
 }
 
 function filterBySkillAccessPolicy(skillIds: string[], delegation: AgentDelegation): string[] {
@@ -337,6 +360,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const agent_id = delegation.agent_name;
       const delegation_id = delegation.id;
       const collar_id = delegation.default_collar_id;
+
+      // No-collar agents may not start execution
+      if (!collar_id) {
+        return sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
+      }
 
       // Collar enforcement
       if (collar_id) {
@@ -786,6 +814,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const delegation = await requireAgentToken(req, reply);
       if (!delegation) return;
 
+      if (!requireActiveCollar(delegation, reply)) return;
+
       const body = req.body as {
         domain?: string;
         pass_id?: string;
@@ -1018,6 +1048,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const delegation = await requireAgentToken(req, reply);
       if (!delegation) return;
+
+      if (!requireActiveCollar(delegation, reply)) return;
 
       const injection = secretFieldInjections.get(req.params.injectionId);
       if (!injection) return sendError(reply, 404, "INJECTION_NOT_FOUND", "Injection not found.");

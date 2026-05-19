@@ -346,19 +346,170 @@ describe("Collar policy — POST /api/skills/:skillId/runs", () => {
     expect(body.error.details).toContain("identity_disclosure");
   });
 
-  it("no collar_id on delegation skips enforcement and creates pending run", async () => {
-    const delegation = agentDelegations.get(IDS.DELEGATION_ALL)!;
-    const origCollar = delegation.default_collar_id;
-    (delegation as unknown as Record<string, unknown>).default_collar_id = undefined;
+  it("no collar_id on delegation is blocked with 403 COLLAR_REQUIRED", async () => {
+    installSkill(IDS.SKILL_BLOCKED);
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/skills/${IDS.SKILL_BLOCKED}/runs`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+  });
+});
+
+// ─── 5. No-collar agent behavior ─────────────────────────────────────────────
+
+describe("No-collar agent — connected but no rule set", () => {
+  beforeEach(() => {
+    installSkill(IDS.SKILL_WIKI);
+    installSkill(IDS.SKILL_PURCHASE);
+    installSkill(IDS.SKILL_BLOCKED);
+  });
+
+  it("GET /api/agent/v1/me returns 200 with no collar_id", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/agent/v1/me",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.agent_id).toBe("agent_demo_no_collar");
+    expect(body.data.default_collar_id).toBeUndefined();
+  });
+
+  it("GET /api/agent/v1/skills returns 200", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/agent/v1/skills",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+  });
+
+  it("POST /api/skills/:skillId/runs returns 403 COLLAR_REQUIRED", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/skills/${IDS.SKILL_WIKI}/runs`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+    expect(body.error.message).toContain("no rule set");
+  });
+
+  it("POST /api/agent/v1/runs returns 403 COLLAR_REQUIRED", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runs",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: { skill_id: IDS.SKILL_WIKI },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+    expect(body.error.message).toContain("no rule set");
+  });
+
+  it("POST /api/agent/v1/injections returns 403 COLLAR_REQUIRED", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/injections",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {
+        domain: "github.com",
+        field_kind: "username",
+        page_url: "https://github.com/login",
+        reason: "Login to GitHub",
+      },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+  });
+
+  it("POST /api/agent/v1/injections/:id/execute returns 403 COLLAR_REQUIRED", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/injections/inj_nonexistent/execute",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+  });
+});
+
+// ─── 6. Active-collar agent regression ───────────────────────────────────────
+
+describe("Active-collar agent regression — behavior unchanged", () => {
+  beforeEach(() => {
+    installSkill(IDS.SKILL_WIKI);
+    installSkill(IDS.SKILL_PURCHASE);
+    installSkill(IDS.SKILL_BLOCKED);
+  });
+
+  it("POST /api/skills/:skillId/runs with allowed permission → pending", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/skills/${IDS.SKILL_WIKI}/runs`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe("pending");
+  });
+
+  it("POST /api/skills/:skillId/runs with approval_required permission → pending_approval", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/skills/${IDS.SKILL_PURCHASE}/runs`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.approval_required).toBe(true);
+    expect(body.data.run.status).toBe("pending_approval");
+  });
+
+  it("POST /api/skills/:skillId/runs with blocked permission → 403 COLLAR_BLOCKED", async () => {
     const res = await server.inject({
       method: "POST",
       url: `/api/skills/${IDS.SKILL_BLOCKED}/runs`,
       headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
       payload: {},
     });
-    delegation.default_collar_id = origCollar;
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("COLLAR_BLOCKED");
+  });
+
+  it("POST /api/agent/v1/runs with active collar and allowed skill → pending run", async () => {
+    // SKILL_WIKI requires "browse" which is in allowed_actions; skill must be installed
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runs",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: { skill_id: IDS.SKILL_WIKI },
+    });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.status).toBe("pending");
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.run.status).toBe("pending");
+    expect(body.data.approval_required).toBe(false);
   });
 });
 

@@ -36,8 +36,10 @@ export const IDS = {
   COLLAR: "collar_demo_starter",
   DELEGATION_ALL: "delg_demo_001",
   DELEGATION_RESTRICTED: "delg_demo_restricted",
+  DELEGATION_NO_COLLAR: "delg_demo_no_collar",
   TOKEN_ALL: "pass_demo_001",
   TOKEN_RESTRICTED: "pass_demo_002",
+  TOKEN_NO_COLLAR: "token_demo_no_collar",
   SKILL_WIKI: "skill_demo_wikipedia_001",
   SKILL_PURCHASE: "skill_demo_purchase_001",
   SKILL_BLOCKED: "skill_demo_blocked_001",
@@ -152,6 +154,23 @@ export function seedTestData(): void {
     updated_at: NOW,
   };
   agentDelegations.set(delegationRestricted.id, delegationRestricted);
+
+  const delegationNoCollar: AgentDelegation = {
+    id: IDS.DELEGATION_NO_COLLAR,
+    user_id: IDS.USER,
+    user_aegis_id: "aid_user_001",
+    agent_name: "agent_demo_no_collar",
+    agent_platform: "api",
+    channel: "api",
+    // no default_collar_id — agent connected without a rule set
+    status: "active",
+    token_id: IDS.TOKEN_NO_COLLAR,
+    skill_access_mode: "all",
+    skill_access_skill_ids: [],
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  agentDelegations.set(delegationNoCollar.id, delegationNoCollar);
 
   const routeWiki: AegisRoute = {
     route_id: IDS.ROUTE_WIKI,
@@ -310,6 +329,7 @@ export async function buildTestServer(): Promise<FastifyInstance> {
   await server.register(skillRoutes);
   await server.register(routeRunRoutes);
   await server.register(receiptRoutes);
+  await server.register(agentApiRoutes);
   await server.ready();
   return server;
 }

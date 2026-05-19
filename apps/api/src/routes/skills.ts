@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { AgentDelegation, InstalledSkill } from "@aegis/types";
-import { skills, installedSkills, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, installedSkills, passes, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
@@ -23,25 +23,42 @@ export async function skillRoutes(server: FastifyInstance) {
 
       // Resolve optional bearer token for agent-scoped skill discovery.
       // No token → existing web UI behavior, no auth required.
+      // Auth path: Bearer token is pass.token → find pass → find delegation via pass.id.
       const rawAuth = (req.headers["authorization"] as string | undefined) ?? "";
       const bearerMatch = rawAuth.match(/^Bearer (.+)$/i);
       const token = bearerMatch?.[1]?.trim();
 
       let delegation: AgentDelegation | undefined;
       if (token) {
+        const pass = Array.from(passes.values()).find(
+          (p) => p.user_id === MOCK_USER_ID && p.token === token
+        );
+        if (!pass) {
+          return reply.status(401).send({
+            ok: false, error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." },
+          });
+        }
+        if (pass.status === "revoked") {
+          return reply.status(401).send({
+            ok: false, error: { code: "DELEGATION_REVOKED", message: "This delegation has been revoked." },
+          });
+        }
+        if (pass.status === "expired" || new Date(pass.expires_at) < new Date()) {
+          return reply.status(401).send({
+            ok: false, error: { code: "DELEGATION_EXPIRED", message: "This delegation has expired. Request a new delegation." },
+          });
+        }
         const found = Array.from(agentDelegations.values()).find(
-          (d) => d.user_id === MOCK_USER_ID && d.token_id === token
+          (d) => d.user_id === MOCK_USER_ID && d.token_id === pass.id
         );
         if (!found) {
           return reply.status(401).send({
-            ok: false,
-            error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." },
+            ok: false, error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." },
           });
         }
         if (found.status === "revoked") {
           return reply.status(401).send({
-            ok: false,
-            error: { code: "DELEGATION_REVOKED", message: "This delegation has been revoked." },
+            ok: false, error: { code: "DELEGATION_REVOKED", message: "This delegation has been revoked." },
           });
         }
         if (found.status === "expired" || (found.expires_at && new Date(found.expires_at) < new Date())) {
@@ -50,8 +67,7 @@ export async function skillRoutes(server: FastifyInstance) {
           agentDelegations.set(found.id, found);
           schedulePersist();
           return reply.status(401).send({
-            ok: false,
-            error: { code: "DELEGATION_EXPIRED", message: "This delegation has expired. Request a new delegation." },
+            ok: false, error: { code: "DELEGATION_EXPIRED", message: "This delegation has expired. Request a new delegation." },
           });
         }
         delegation = found;

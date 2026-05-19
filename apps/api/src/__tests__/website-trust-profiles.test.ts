@@ -89,6 +89,8 @@ import type { WebsiteTrustProfile } from "@aegis/types";
 import { websiteTrustProfiles, agentDelegations, collars } from "../store/index.js";
 import { websiteTrustProfileRoutes } from "../routes/website-trust-profiles.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
+import { passes } from "../store/index.js";
+import type { PassWithToken } from "../store/index.js";
 
 // ─── Test server ──────────────────────────────────────────────────────────────
 
@@ -111,6 +113,7 @@ beforeEach(() => {
   websiteTrustProfiles.clear();
   agentDelegations.clear();
   collars.clear();
+  passes.clear();
 
   // Seed a collar and delegation so agent endpoints can authenticate
   collars.set("collar_demo_starter", {
@@ -145,6 +148,14 @@ beforeEach(() => {
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
   });
+
+  // Seed the pass so the auth lookup (pass.token → delegation) resolves.
+  passes.set(AGENT_TOKEN, {
+    id: AGENT_TOKEN, token: AGENT_TOKEN, user_id: "user_001",
+    agent_name: "TestAgent", default_collar_id: "collar_demo_starter",
+    status: "active", expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    created_at: "2026-01-01T00:00:00.000Z",
+  } as PassWithToken);
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

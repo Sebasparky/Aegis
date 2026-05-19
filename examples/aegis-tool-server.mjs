@@ -15,7 +15,9 @@
  *
  * Environment variables:
  *   AEGIS_API_BASE      API base URL            (default: http://localhost:4000)
- *   AEGIS_AGENT_TOKEN   Bearer delegation token  (default: pass_demo_001)
+ *   AEGIS_AGENT_TOKEN   Bearer delegation token — the delegation_token returned by
+ *                       POST /api/delegations (i.e. pass.token, not the pass ID).
+ *                       Demo default: pass_demo_001 (id === token for demo passes).
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -59,7 +61,7 @@ async function request(method, path, body) {
 async function discoverInstalledSkills({ domain }) {
   const res = await request(
     "GET",
-    `/api/skills?domain=${encodeURIComponent(domain)}&installed=true`
+    `/api/agent/v1/skills?domain=${encodeURIComponent(domain)}`
   );
   if (!res.ok) {
     return {
@@ -98,8 +100,8 @@ async function discoverInstalledSkills({ domain }) {
 }
 
 async function getAgentRunnableWorkflow({ skill_id }) {
-  // Resolve skill via installed skills (respects delegation policy)
-  const skillsRes = await request("GET", `/api/skills?installed=true`);
+  // Resolve skill via agent-scoped skills endpoint (respects delegation policy)
+  const skillsRes = await request("GET", `/api/agent/v1/skills`);
   if (!skillsRes.ok) {
     return {
       error: skillsRes.error?.code ?? "UNKNOWN_ERROR",

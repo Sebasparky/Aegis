@@ -67,12 +67,14 @@ import {
 import {
   aegisWorkspaces,
   collars,
+  passes,
   agentDelegations,
   workspaceTasks,
   workspaceArtifacts,
   workspaceAuditEvents,
   MOCK_USER_ID,
 } from "../store/index.js";
+import type { PassWithToken } from "../store/index.js";
 
 const AUTH_A = `Bearer ${IDS.TOKEN_ALL}`;
 const AUTH_B = `Bearer ${IDS.TOKEN_B}`;
@@ -606,6 +608,15 @@ function seedPermCollar(id: string, opts: {
 }
 
 function seedPermDelegation(delegationId: string, tokenId: string, collarId: string): void {
+  // Seed the pass alongside the delegation so the auth lookup (pass.token → pass.id → delegation) resolves.
+  // For test tokens tokenId serves as both pass.id and pass.token (demo shorthand).
+  const passExpiry = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  passes.set(tokenId, {
+    id: tokenId, token: tokenId, user_id: MOCK_USER_ID,
+    agent_name: `agent_perm_${delegationId}`, default_collar_id: collarId,
+    status: "active", expires_at: passExpiry, created_at: NOW_PERM,
+  } as PassWithToken);
+
   agentDelegations.set(delegationId, {
     id: delegationId,
     user_id: MOCK_USER_ID,

@@ -99,12 +99,14 @@ import {
   agentDelegations,
   aegisVaultPasses,
   collars,
+  passes,
   encryptedSecretVault,
   credentialUseAuthorizations,
   secretFieldInjections,
   sensitiveGrants,
   MOCK_USER_ID,
 } from "../store/index.js";
+import type { PassWithToken } from "../store/index.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 
 // ─── Test server ──────────────────────────────────────────────────────────────
@@ -125,6 +127,7 @@ beforeEach(() => {
   agentDelegations.clear();
   aegisVaultPasses.clear();
   collars.clear();
+  passes.clear();
   encryptedSecretVault.clear();
   credentialUseAuthorizations.clear();
   secretFieldInjections.clear();
@@ -159,6 +162,15 @@ function seedDelegation() {
     updated_at: new Date().toISOString(),
   } as any);
 
+  // Seed a pass so the auth lookup (pass.token → pass.id → delegation) resolves.
+  // BEARER_TOKEN serves as both pass.id and pass.token for test convenience.
+  passes.set(BEARER_TOKEN, {
+    id: BEARER_TOKEN, token: BEARER_TOKEN, user_id: MOCK_USER_ID,
+    agent_name: "TestAgent", default_collar_id: "col_test",
+    status: "active", expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    created_at: new Date().toISOString(),
+  } as PassWithToken);
+
   const delegation: AgentDelegation = {
     id: DELEGATION_ID,
     agent_name: "TestAgent",
@@ -169,7 +181,7 @@ function seedDelegation() {
     expires_at: new Date(Date.now() + 3600_000).toISOString(),
     status: "active",
   } as AgentDelegation;
-  agentDelegations.set(BEARER_TOKEN, delegation);
+  agentDelegations.set(DELEGATION_ID, delegation);
   return delegation;
 }
 

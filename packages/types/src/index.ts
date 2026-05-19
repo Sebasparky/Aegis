@@ -1109,6 +1109,16 @@ export interface ExternalAgentIdentity {
   user_aegis_id: string;
   default_collar_id?: string;
   delegation_status: AgentDelegationStatus;
+  expires_at?: string;
+  /** false when the delegation has no collar or the collar is not active. */
+  collar_active: boolean;
+  /** true when collar_active is false — explicit signal that execution tools are unavailable. */
+  execution_blocked: boolean;
+  /** Present when collar_active is true. */
+  collar_spending_limits?: {
+    max_without_approval: number;
+    max_with_approval: number;
+  };
   token_scope: {
     skill_access_mode: SkillAccessMode;
     allowed_skill_ids?: string[];
@@ -1126,6 +1136,8 @@ export interface ExternalAgentSkillSummary {
   trust_tier?: string;
   execution_mode?: ExecutionMode;
   sensitivity_level?: SensitivityLevel;
+  /** true when the calling delegation's active collar permits this skill's required_permissions. */
+  execution_available?: boolean;
 }
 
 export interface ExternalAgentRunSummary {

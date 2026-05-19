@@ -32,6 +32,7 @@ import {
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import {
   agentDelegations,
+  passes,
   skills,
   installedSkills,
   routes,
@@ -82,7 +83,12 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
   return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
 }
 
-/** Validates Bearer token and returns the matched AgentDelegation, or writes a 401 and returns null. */
+/** Validates Bearer token and returns the matched AgentDelegation, or writes an error and returns null.
+ *
+ * Auth path: Bearer token is pass.token → find pass by token → find delegation via pass.id.
+ * Collar validation is intentionally omitted here — it is handled downstream by requireActiveCollar()
+ * or workspace-domain logic, which can return appropriate workspace-specific error codes.
+ */
 export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<AgentDelegation | null> {
   const authHeader = (req.headers["authorization"] as string | undefined) ?? "";
   const bearerMatch = authHeader.match(/^Bearer (.+)$/i);
@@ -93,9 +99,29 @@ export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply
     return null;
   }
 
-  // Find by token_id without status filter — check status explicitly to return specific error codes
+  // Step 1: resolve the pass by its raw token value.
+  const pass = Array.from(passes.values()).find(
+    (p) => p.user_id === MOCK_USER_ID && p.token === token
+  );
+
+  if (!pass) {
+    sendError(reply, 401, "INVALID_TOKEN", "Token does not match any delegation.");
+    return null;
+  }
+
+  if (pass.status === "revoked") {
+    sendError(reply, 401, "DELEGATION_REVOKED", "This delegation has been revoked.");
+    return null;
+  }
+
+  if (pass.status === "expired" || new Date(pass.expires_at) < new Date()) {
+    sendError(reply, 401, "DELEGATION_EXPIRED", "This delegation has expired. Request a new delegation.");
+    return null;
+  }
+
+  // Step 2: resolve the delegation via the pass ID.
   const delegation = Array.from(agentDelegations.values()).find(
-    (d) => d.user_id === MOCK_USER_ID && d.token_id === token
+    (d) => d.user_id === MOCK_USER_ID && d.token_id === pass.id
   );
 
   if (!delegation) {
@@ -116,6 +142,9 @@ export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply
     sendError(reply, 401, "DELEGATION_EXPIRED", "This delegation has expired. Request a new delegation.");
     return null;
   }
+
+  // Update last_used_at after both pass and delegation are confirmed valid.
+  passes.set(pass.id, { ...pass, last_used_at: new Date().toISOString() });
 
   return delegation;
 }
@@ -235,6 +264,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const mode = delegation.skill_access_mode ?? "all";
     const ids = delegation.skill_access_skill_ids ?? [];
 
+    const collar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
+    const collar_active = collar !== undefined && collar.status === "active";
+
     const identity: ExternalAgentIdentity = {
       agent_id: delegation.agent_name,
       agent_name: delegation.agent_name,
@@ -243,6 +275,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       user_aegis_id: delegation.user_aegis_id,
       ...(delegation.default_collar_id ? { default_collar_id: delegation.default_collar_id } : {}),
       delegation_status: delegation.status,
+      ...(delegation.expires_at ? { expires_at: delegation.expires_at } : {}),
+      collar_active,
+      execution_blocked: !collar_active,
+      ...(collar_active && collar ? {
+        collar_spending_limits: {
+          max_without_approval: collar.spending_limits.max_without_approval,
+          max_with_approval: collar.spending_limits.max_with_approval,
+        },
+      } : {}),
       token_scope: {
         skill_access_mode: mode,
         ...(mode === "only" ? { allowed_skill_ids: ids } : {}),
@@ -256,10 +297,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   /**
    * GET /api/agent/v1/skills
    * Lists installed skills visible to this delegation's skill access policy.
+   * Optional ?domain= filter by exact domain match.
    */
-  server.get("/api/agent/v1/skills", async (req, reply) => {
+  server.get<{ Querystring: { domain?: string } }>("/api/agent/v1/skills", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
+
+    const { domain } = req.query;
+
+    const collar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
+    const collar_active = collar !== undefined && collar.status === "active";
 
     const userInstalled = Array.from(installedSkills.values()).filter(
       (i) => i.user_id === MOCK_USER_ID && i.enabled
@@ -273,17 +320,29 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const result: ExternalAgentSkillSummary[] = visibleSkillIds
       .map((skillId) => skills.get(skillId))
       .filter((s): s is NonNullable<typeof s> => s !== undefined)
-      .map((s) => ({
-        skill_id: s.skill_id,
-        name: s.name,
-        summary: s.summary,
-        domain: s.domain,
-        required_permissions: s.required_permissions,
-        ...(s.risk_level ? { risk_level: s.risk_level } : {}),
-        ...(s.trust_tier ? { trust_tier: s.trust_tier } : {}),
-        ...(s.execution_mode ? { execution_mode: s.execution_mode } : {}),
-        ...(s.sensitivity_level ? { sensitivity_level: s.sensitivity_level } : {}),
-      }));
+      .filter((s) => !domain || s.domain === domain)
+      .map((s) => {
+        const execution_available = collar_active && collar !== undefined
+          ? s.required_permissions.every(
+              (perm) =>
+                !collar.blocked_actions.includes(perm as any) &&
+                (collar.allowed_actions.includes(perm as any) ||
+                  collar.approval_required_actions.includes(perm as any))
+            )
+          : false;
+        return {
+          skill_id: s.skill_id,
+          name: s.name,
+          summary: s.summary,
+          domain: s.domain,
+          required_permissions: s.required_permissions,
+          ...(s.risk_level ? { risk_level: s.risk_level } : {}),
+          ...(s.trust_tier ? { trust_tier: s.trust_tier } : {}),
+          ...(s.execution_mode ? { execution_mode: s.execution_mode } : {}),
+          ...(s.sensitivity_level ? { sensitivity_level: s.sensitivity_level } : {}),
+          execution_available,
+        };
+      });
 
     return reply.send({ ok: true, data: result });
   });

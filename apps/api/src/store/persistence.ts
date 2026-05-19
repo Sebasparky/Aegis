@@ -179,6 +179,24 @@ export async function seedDefaultData(): Promise<void> {
     });
   }
 
+  // Seed passes for demo delegations so validatePassToken can resolve bearer tokens.
+  // For demo tokens, id === token (demo shorthand; production uses distinct values).
+  const DEMO_PASS_EXPIRY = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  if (!passes.has("pass_demo_001")) {
+    passes.set("pass_demo_001", {
+      id: "pass_demo_001", token: "pass_demo_001", user_id: "user_001",
+      agent_name: "agent_demo_001", default_collar_id: "collar_research_001",
+      status: "active", expires_at: DEMO_PASS_EXPIRY, created_at: "2026-04-30T12:00:00.000Z",
+    });
+  }
+  if (!passes.has("pass_demo_002")) {
+    passes.set("pass_demo_002", {
+      id: "pass_demo_002", token: "pass_demo_002", user_id: "user_001",
+      agent_name: "agent_demo_restricted", default_collar_id: "collar_review_001",
+      status: "active", expires_at: DEMO_PASS_EXPIRY, created_at: "2026-04-30T12:00:01.000Z",
+    });
+  }
+
   if (!agentDelegations.has("delg_demo_001")) {
     agentDelegations.set("delg_demo_001", {
       id: "delg_demo_001", user_id: "user_001", user_aegis_id: "aid_user_001",
@@ -195,6 +213,45 @@ export async function seedDefaultData(): Promise<void> {
       default_collar_id: "collar_review_001", status: "active",
       token_id: "pass_demo_002", skill_access_mode: "only", skill_access_skill_ids: [],
       created_at: "2026-04-30T12:00:01.000Z", updated_at: "2026-04-30T12:00:01.000Z",
+    });
+  }
+
+  // Shopping Collar — generic third-party agent delegation for ecommerce tasks.
+  if (!collars.has("collar_shopping_001")) {
+    collars.set("collar_shopping_001", {
+      id: "collar_shopping_001",
+      user_id: "user_001",
+      name: "Shopping Agent Collar",
+      description: "Scoped collar for agents that browse and purchase on behalf of users.",
+      purpose: "Allow agents to search, compare, and request purchase approvals.",
+      status: "active",
+      allowed_actions: ["browse", "search", "read", "compare", "add_to_cart"] as any,
+      approval_required_actions: ["purchase", "payment", "login", "submit_form"] as any,
+      blocked_actions: [
+        "identity_disclosure", "subscription", "delete_account",
+        "financial_data_disclosure", "government_id_upload",
+      ] as any,
+      spending_limits: { max_without_approval: 0, max_with_approval: 250, subscriptions_allowed: false },
+      counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: true },
+      session_limits: { max_duration_minutes: 120, max_active_sessions: 2 },
+      created_at: "2026-05-19T00:00:00.000Z",
+      updated_at: "2026-05-19T00:00:00.000Z",
+    });
+  }
+  if (!passes.has("pass_demo_shopping_001")) {
+    passes.set("pass_demo_shopping_001", {
+      id: "pass_demo_shopping_001", token: "tok_demo_shopping_001", user_id: "user_001",
+      agent_name: "demo_shopping_agent", default_collar_id: "collar_shopping_001",
+      status: "active", expires_at: DEMO_PASS_EXPIRY, created_at: "2026-05-19T00:00:00.000Z",
+    });
+  }
+  if (!agentDelegations.has("delg_demo_shopping_001")) {
+    agentDelegations.set("delg_demo_shopping_001", {
+      id: "delg_demo_shopping_001", user_id: "user_001", user_aegis_id: "aid_user_001",
+      agent_name: "demo_shopping_agent", agent_platform: "api", channel: "api",
+      default_collar_id: "collar_shopping_001", status: "active",
+      token_id: "pass_demo_shopping_001", skill_access_mode: "all", skill_access_skill_ids: [],
+      created_at: "2026-05-19T00:00:00.000Z", updated_at: "2026-05-19T00:00:00.000Z",
     });
   }
 

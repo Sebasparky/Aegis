@@ -8,6 +8,7 @@ import { taskBrowserSessionRoutes } from "../routes/task-browser-sessions.js";
 import {
   users,
   collars,
+  passes,
   skills,
   routes,
   installedSkills,
@@ -20,6 +21,7 @@ import {
   workspaceAuditEvents,
   MOCK_USER_ID,
 } from "../store/index.js";
+import type { PassWithToken } from "../store/index.js";
 import type {
   AgentDelegation,
   Collar,
@@ -58,6 +60,7 @@ export const IDS = {
 export function resetStore(): void {
   users.clear();
   collars.clear();
+  passes.clear();
   agentDelegations.clear();
   skills.clear();
   installedSkills.clear();
@@ -121,6 +124,19 @@ export function seedTestData(): void {
     created_at: NOW,
     updated_at: NOW,
   });
+
+  // Seed PassWithToken entries alongside each delegation.
+  // For test tokens the id equals the token string (demo shorthand — production uses distinct values).
+  const PASS_EXPIRY = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const testPasses: PassWithToken[] = [
+    { id: IDS.TOKEN_ALL, token: IDS.TOKEN_ALL, user_id: IDS.USER, agent_name: "agent_demo_001",
+      default_collar_id: IDS.COLLAR, status: "active", expires_at: PASS_EXPIRY, created_at: NOW },
+    { id: IDS.TOKEN_RESTRICTED, token: IDS.TOKEN_RESTRICTED, user_id: IDS.USER, agent_name: "agent_demo_restricted",
+      default_collar_id: IDS.COLLAR, status: "active", expires_at: PASS_EXPIRY, created_at: NOW },
+    { id: IDS.TOKEN_NO_COLLAR, token: IDS.TOKEN_NO_COLLAR, user_id: IDS.USER, agent_name: "agent_demo_no_collar",
+      status: "active", expires_at: PASS_EXPIRY, created_at: NOW },
+  ];
+  for (const p of testPasses) passes.set(p.id, p);
 
   const delegationAll: AgentDelegation = {
     id: IDS.DELEGATION_ALL,
@@ -348,6 +364,15 @@ export async function buildWorkspaceTestServer(): Promise<FastifyInstance> {
 /** Seeds the two extra delegations needed for workspace coordination tests. */
 export function seedWorkspaceDelegations(): void {
   const NOW = "2026-05-01T00:00:00.000Z";
+  const PASS_EXPIRY = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+
+  // Seed passes alongside delegations so validatePassToken can resolve them.
+  passes.set(IDS.TOKEN_B, { id: IDS.TOKEN_B, token: IDS.TOKEN_B, user_id: MOCK_USER_ID,
+    agent_name: "agent_test_b", default_collar_id: IDS.COLLAR, status: "active",
+    expires_at: PASS_EXPIRY, created_at: NOW });
+  passes.set(IDS.TOKEN_OUTSIDER, { id: IDS.TOKEN_OUTSIDER, token: IDS.TOKEN_OUTSIDER, user_id: MOCK_USER_ID,
+    agent_name: "agent_test_outsider", default_collar_id: IDS.COLLAR, status: "active",
+    expires_at: PASS_EXPIRY, created_at: NOW });
 
   const delegationB: AgentDelegation = {
     id: IDS.DELEGATION_B,
@@ -554,6 +579,14 @@ export function seedCollarRoutingTrial(): void {
     updated_at: NOW,
   };
   collars.set("col_routing_review", reviewCollar);
+
+  const ROUTING_EXPIRY = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  passes.set("tok_routing_research", { id: "tok_routing_research", token: "tok_routing_research",
+    user_id: MOCK_USER_ID, agent_name: "agent_routing_research", default_collar_id: "col_routing_research",
+    status: "active", expires_at: ROUTING_EXPIRY, created_at: NOW });
+  passes.set("tok_routing_review", { id: "tok_routing_review", token: "tok_routing_review",
+    user_id: MOCK_USER_ID, agent_name: "agent_routing_review", default_collar_id: "col_routing_review",
+    status: "active", expires_at: ROUTING_EXPIRY, created_at: NOW });
 
   agentDelegations.set("delg_routing_research", {
     id: "delg_routing_research",

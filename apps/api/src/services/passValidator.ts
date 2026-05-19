@@ -1,4 +1,4 @@
-import type { Collar } from "@aegis/types";
+import type { Collar, AgentDelegation } from "@aegis/types";
 import { passes, collars, agentDelegations } from "../store/index.js";
 import type { PassWithToken } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
@@ -12,6 +12,7 @@ export interface PassValidationError {
 export interface PassValidationSuccess {
   ok: true;
   pass: PassWithToken;
+  delegation: AgentDelegation;
   collar: Collar | undefined;
 }
 
@@ -79,5 +80,5 @@ export function validatePassToken(token: string | undefined): PassValidationResu
   // Update last_used_at only after both pass and delegation are confirmed valid
   passes.set(pass.id, { ...pass, last_used_at: new Date().toISOString() } as PassWithToken & { last_used_at: string });
 
-  return { ok: true, pass, collar };
+  return { ok: true, pass, delegation, collar };
 }

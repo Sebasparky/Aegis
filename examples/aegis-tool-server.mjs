@@ -58,6 +58,60 @@ async function request(method, path, body) {
 
 // ─── Tool handlers ───────────────────────────────────────────────────────────
 
+async function getAgentIdentity() {
+  let res;
+  try {
+    res = await request("GET", "/api/agent/v1/me");
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get agent identity." };
+  }
+  const d = res.data;
+  return {
+    agent_name: d.agent_name,
+    delegation_id: d.delegation_id,
+    platform: d.agent_platform ?? null,
+    policy_mode: d.policy_mode ?? null,
+    collar_active: d.collar_active,
+    baseline_policy_active: d.baseline_policy_active ?? false,
+    execution_blocked: d.execution_blocked,
+    delegation_status: d.delegation_status,
+    token_scope: d.token_scope ?? null,
+  };
+}
+
+async function listAvailableSkills({ domain } = {}) {
+  const path = domain
+    ? `/api/agent/v1/skills?domain=${encodeURIComponent(domain)}`
+    : "/api/agent/v1/skills";
+  let res;
+  try {
+    res = await request("GET", path);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to fetch skills." };
+  }
+  return {
+    skills: res.data.map((s) => ({
+      skill_id: s.skill_id,
+      name: s.name,
+      summary: s.summary ?? null,
+      domain: s.domain,
+      risk_level: s.risk_level ?? null,
+      execution_mode: s.execution_mode ?? null,
+      sensitivity_level: s.sensitivity_level ?? null,
+    })),
+  };
+}
+
+async function startControlledBrowserSession(args = {}) {
+  return startTaskBrowserSession(args);
+}
+
 async function discoverInstalledSkills({ domain }) {
   const res = await request(
     "GET",
@@ -1825,6 +1879,60 @@ async function createWorkspaceArtifact({ workspace_id, name, kind, content, task
 
 const TOOLS = [
   {
+    name: "get_agent_identity",
+    description:
+      "Start here. Returns the identity of the connected agent delegation — agent name, delegation ID, platform, policy mode (collar or baseline), collar status, and whether execution is blocked. " +
+      "Call this first to confirm your Aegis connection is active and to discover your delegation_id, collar, and effective permissions. " +
+      "No parameters required — uses the configured agent token automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "list_available_skills",
+    description:
+      "List all skills (verified workflow routes) installed and visible to this delegation. " +
+      "Returns skill IDs, names, domains, risk levels, and execution modes. " +
+      "Call this to discover which Aegis-governed workflows are available before starting a task. " +
+      "Optionally filter by domain. " +
+      "execution_mode='agent_runnable' means the agent can fetch and execute the recipe itself via get_agent_runnable_workflow. " +
+      "execution_mode='aegis_controlled' means the workflow is sensitive and must be delegated to Aegis via request_skill_run.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "Optional. Filter to skills for a specific domain, e.g. 'github.com'.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "start_controlled_browser_session",
+    description:
+      "Start an Aegis-managed ephemeral Chrome browser session for agent-controlled navigation. " +
+      "Aegis launches Chrome with a no-save profile (password saving, autofill, card saving, and sync disabled). " +
+      "The agent uses its own Playwright tools (via @playwright/mcp) for ALL navigation, clicking, and reading — " +
+      "Aegis does NOT navigate or click on the agent's behalf. " +
+      "Aegis uses the session ONLY to inject protected credential fields via CDP when request_secret_field_injection is called. " +
+      "Starting this session does NOT itself authorize any sensitive actions — user approval is required separately for credential injection. " +
+      "If a session is already active it will be reused (reused_existing=true). " +
+      "Call close_task_browser_session only after the full task is complete.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delegation_id: {
+          type: "string",
+          description: "Optional. Delegation ID to associate with this browser session. Use the delegation_id from get_agent_identity.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "discover_installed_skills",
     description:
       "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. execution_mode='agent_runnable' means Aegis has a verified route recipe the agent can fetch with get_agent_runnable_workflow and execute in its own browser session — no extension handoff, no RouteRun. execution_mode='aegis_controlled' means the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and execution must be delegated to Aegis via request_skill_run. Use this first to understand which Aegis-governed paths exist and how to invoke them.",
@@ -2012,7 +2120,7 @@ const TOOLS = [
       properties: {
         delegation_id: {
           type: "string",
-          description: "The delegation_id to issue a passport for (e.g. 'delg_demo_001').",
+          description: "The delegation_id to issue a passport for. Use the delegation_id returned by get_agent_identity.",
         },
         expires_in_minutes: {
           type: "number",
@@ -2103,7 +2211,7 @@ const TOOLS = [
       properties: {
         delegation_id: {
           type: "string",
-          description: "The delegation ID to evaluate (e.g. 'delg_demo_001').",
+          description: "The delegation ID to evaluate. Use the delegation_id returned by get_agent_identity.",
         },
         task_category: {
           type: "string",
@@ -2127,7 +2235,7 @@ const TOOLS = [
       properties: {
         delegation_id: {
           type: "string",
-          description: "The delegation ID to issue the assertion for (e.g. 'delg_demo_001').",
+          description: "The delegation ID to issue the assertion for. Use the delegation_id returned by get_agent_identity.",
         },
         task_category: {
           type: "string",
@@ -2926,7 +3034,7 @@ const TOOLS = [
       properties: {
         workspace_id: {
           type: "string",
-          description: "The workspace ID, e.g. 'ws_coord_trial_001'.",
+          description: "The workspace ID provided by the workspace owner.",
         },
       },
       required: ["workspace_id"],
@@ -3080,6 +3188,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   let result;
 
   switch (name) {
+    case "get_agent_identity":
+      result = await getAgentIdentity();
+      break;
+    case "list_available_skills":
+      result = await listAvailableSkills(a);
+      break;
+    case "start_controlled_browser_session":
+      result = await startControlledBrowserSession(a);
+      break;
     case "discover_installed_skills":
       result = await discoverInstalledSkills(a);
       break;

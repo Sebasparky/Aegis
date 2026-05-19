@@ -7,7 +7,7 @@ import {
   closeTaskBrowserSession,
   type CreateTaskBrowserResult,
 } from "../runtime/taskBrowserSessions.js";
-import { requireAgentToken, requireActiveCollar } from "./agent-api.js";
+import { requireAgentToken } from "./agent-api.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -36,12 +36,12 @@ function safeSessionView(session: ReturnType<typeof getTaskBrowserSession>) {
 
 export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise<void> {
   // POST /api/task-browser-sessions — create an ephemeral task browser session.
-  // Requires a valid Bearer token and an active collar. delegation_id is derived
-  // from the token; any delegation_id in the request body is ignored.
+  // Requires a valid Bearer token. delegation_id is derived from the token;
+  // any delegation_id in the request body is ignored. No collar required —
+  // sensitive actions within the session are gated by the collar/baseline at run time.
   server.post("/api/task-browser-sessions", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
-    if (!requireActiveCollar(delegation, reply)) return;
 
     try {
       const result: CreateTaskBrowserResult = await createTaskBrowserSession({

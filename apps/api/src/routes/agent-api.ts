@@ -63,6 +63,7 @@ import { computeWebsiteAgentSafetyProfile } from "./website-agent-safety.js";
 import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
 import { checkSensitiveGrant } from "../lib/sensitiveGrants.js";
 import { runObservationDryRun } from "../runtime/observationDryRun.js";
+import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -86,7 +87,7 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
 /** Validates Bearer token and returns the matched AgentDelegation, or writes an error and returns null.
  *
  * Auth path: Bearer token is pass.token → find pass by token → find delegation via pass.id.
- * Collar validation is intentionally omitted here — it is handled downstream by requireActiveCollar()
+ * Collar validation is intentionally omitted here — it is handled downstream by resolveEffectiveCollar()
  * or workspace-domain logic, which can return appropriate workspace-specific error codes.
  */
 export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<AgentDelegation | null> {
@@ -149,27 +150,6 @@ export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply
   return delegation;
 }
 
-/** Returns the active collar for a delegation, or writes a 403 and returns null. */
-export function requireActiveCollar(
-  delegation: AgentDelegation,
-  reply: FastifyReply
-): { collar: Collar } | null {
-  const collar_id = delegation.default_collar_id;
-  if (!collar_id) {
-    sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
-    return null;
-  }
-  const collar = collars.get(collar_id);
-  if (!collar) {
-    sendError(reply, 403, "COLLAR_REQUIRED", "The collar attached to this delegation was not found.");
-    return null;
-  }
-  if (collar.status !== "active") {
-    sendError(reply, 403, "COLLAR_REVOKED", "The collar attached to this delegation is not active.");
-    return null;
-  }
-  return { collar };
-}
 
 function filterBySkillAccessPolicy(skillIds: string[], delegation: AgentDelegation): string[] {
   const mode = delegation.skill_access_mode ?? "all";
@@ -264,8 +244,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const mode = delegation.skill_access_mode ?? "all";
     const ids = delegation.skill_access_skill_ids ?? [];
 
-    const collar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
-    const collar_active = collar !== undefined && collar.status === "active";
+    const collarResult = resolveEffectiveCollar(delegation, collars);
+    const collar_active = collarResult.ok && collarResult.policy_mode === "collar";
+    const execution_blocked = !collarResult.ok;
+    const baseline_policy_active = collarResult.ok && collarResult.policy_mode === "baseline";
 
     const identity: ExternalAgentIdentity = {
       agent_id: delegation.agent_name,
@@ -277,11 +259,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       delegation_status: delegation.status,
       ...(delegation.expires_at ? { expires_at: delegation.expires_at } : {}),
       collar_active,
-      execution_blocked: !collar_active,
-      ...(collar_active && collar ? {
+      execution_blocked,
+      ...(baseline_policy_active ? { baseline_policy_active: true } : {}),
+      ...(collarResult.ok ? { policy_mode: collarResult.policy_mode } : {}),
+      ...(collar_active && collarResult.ok ? {
         collar_spending_limits: {
-          max_without_approval: collar.spending_limits.max_without_approval,
-          max_with_approval: collar.spending_limits.max_with_approval,
+          max_without_approval: collarResult.collar.spending_limits.max_without_approval,
+          max_with_approval: collarResult.collar.spending_limits.max_with_approval,
         },
       } : {}),
       token_scope: {
@@ -305,8 +289,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     const { domain } = req.query;
 
-    const collar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
-    const collar_active = collar !== undefined && collar.status === "active";
+    const collarResult = resolveEffectiveCollar(delegation, collars);
 
     const userInstalled = Array.from(installedSkills.values()).filter(
       (i) => i.user_id === MOCK_USER_ID && i.enabled
@@ -322,12 +305,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       .filter((s): s is NonNullable<typeof s> => s !== undefined)
       .filter((s) => !domain || s.domain === domain)
       .map((s) => {
-        const execution_available = collar_active && collar !== undefined
+        const execution_available = collarResult.ok
           ? s.required_permissions.every(
               (perm) =>
-                !collar.blocked_actions.includes(perm as any) &&
-                (collar.allowed_actions.includes(perm as any) ||
-                  collar.approval_required_actions.includes(perm as any))
+                !collarResult.collar.blocked_actions.includes(perm as any) &&
+                (collarResult.collar.allowed_actions.includes(perm as any) ||
+                  collarResult.collar.approval_required_actions.includes(perm as any))
             )
           : false;
         return {
@@ -418,72 +401,68 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       const agent_id = delegation.agent_name;
       const delegation_id = delegation.id;
-      const collar_id = delegation.default_collar_id;
 
-      // No-collar agents may not start execution
-      if (!collar_id) {
-        return sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
+      const collarResult = resolveEffectiveCollar(delegation, collars);
+      if (!collarResult.ok) {
+        return sendError(reply, collarResult.status, collarResult.code, collarResult.message);
+      }
+      const { collar, policy_mode } = collarResult;
+      const effectiveCollarId = policy_mode === "collar" ? collar.id : undefined;
+
+      // Permission enforcement — works identically for real collar and baseline policy.
+      const needsApproval: string[] = [];
+      const hardBlocked: string[] = [];
+
+      for (const perm of route.required_permissions) {
+        if (collar.blocked_actions.includes(perm as any)) {
+          hardBlocked.push(perm);
+        } else if (
+          !collar.allowed_actions.includes(perm as any) &&
+          !collar.approval_required_actions.includes(perm as any)
+        ) {
+          hardBlocked.push(perm);
+        } else if (collar.approval_required_actions.includes(perm as any)) {
+          needsApproval.push(perm);
+        }
       }
 
-      // Collar enforcement
-      if (collar_id) {
-        const collar = collars.get(collar_id);
-        if (collar && collar.status === "active") {
-          const needsApproval: string[] = [];
-          const hardBlocked: string[] = [];
+      if (hardBlocked.length > 0) {
+        return sendError(
+          reply,
+          403,
+          "COLLAR_BLOCKED",
+          "This delegation's collar does not allow this route.",
+          `Blocked permission(s): ${hardBlocked.join(", ")}.`
+        );
+      }
 
-          for (const perm of route.required_permissions) {
-            if (collar.blocked_actions.includes(perm as any)) {
-              hardBlocked.push(perm);
-            } else if (
-              !collar.allowed_actions.includes(perm as any) &&
-              !collar.approval_required_actions.includes(perm as any)
-            ) {
-              hardBlocked.push(perm);
-            } else if (collar.approval_required_actions.includes(perm as any)) {
-              needsApproval.push(perm);
-            }
-          }
-
-          if (hardBlocked.length > 0) {
-            return sendError(
-              reply,
-              403,
-              "COLLAR_BLOCKED",
-              "This delegation's collar does not allow this route.",
-              `Blocked permission(s): ${hardBlocked.join(", ")}.`
-            );
-          }
-
-          if (needsApproval.length > 0) {
-            const run: RouteRun = {
-              run_id: newId("run"),
-              skill_id: skill.skill_id,
-              route_id: route.route_id,
-              installed_skill_id: installedSkill.installed_skill_id,
-              user_id: MOCK_USER_ID,
-              domain: skill.domain,
-              status: "pending_approval",
-              approval_required_permissions: needsApproval,
-              created_at: new Date().toISOString(),
-              ...(agent_id ? { agent_id } : {}),
-              ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
-              ...(delegation_id ? { delegation_id } : {}),
-              ...(collar_id ? { collar_id } : {}),
-            };
-            routeRuns.set(run.run_id, run);
-            schedulePersist();
-            return reply.send({
-              ok: true,
-              data: {
-                run: buildRunSummary(run, []),
-                approval_required: true,
-                next_action: "wait_for_user_approval",
-                message: `Approval required for: ${needsApproval.join(", ")}. Approve at /route-run-approvals in the Antigen UI.`,
-              },
-            });
-          }
-        }
+      if (needsApproval.length > 0) {
+        const run: RouteRun = {
+          run_id: newId("run"),
+          skill_id: skill.skill_id,
+          route_id: route.route_id,
+          installed_skill_id: installedSkill.installed_skill_id,
+          user_id: MOCK_USER_ID,
+          domain: skill.domain,
+          status: "pending_approval",
+          approval_required_permissions: needsApproval,
+          created_at: new Date().toISOString(),
+          ...(agent_id ? { agent_id } : {}),
+          ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+          ...(delegation_id ? { delegation_id } : {}),
+          ...(effectiveCollarId ? { collar_id: effectiveCollarId } : {}),
+        };
+        routeRuns.set(run.run_id, run);
+        schedulePersist();
+        return reply.send({
+          ok: true,
+          data: {
+            run: buildRunSummary(run, []),
+            approval_required: true,
+            next_action: "wait_for_user_approval",
+            message: `Approval required for: ${needsApproval.join(", ")}. Approve at /route-run-approvals in the Antigen UI.`,
+          },
+        });
       }
 
       const run: RouteRun = {
@@ -498,7 +477,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(agent_id ? { agent_id } : {}),
         ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
         ...(delegation_id ? { delegation_id } : {}),
-        ...(collar_id ? { collar_id } : {}),
+        ...(effectiveCollarId ? { collar_id: effectiveCollarId } : {}),
       };
 
       routeRuns.set(run.run_id, run);
@@ -873,7 +852,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const delegation = await requireAgentToken(req, reply);
       if (!delegation) return;
 
-      if (!requireActiveCollar(delegation, reply)) return;
+      const injCollarResult = resolveEffectiveCollar(delegation, collars);
+      if (!injCollarResult.ok) {
+        return sendError(reply, injCollarResult.status, injCollarResult.code, injCollarResult.message);
+      }
 
       const body = req.body as {
         domain?: string;
@@ -1108,7 +1090,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const delegation = await requireAgentToken(req, reply);
       if (!delegation) return;
 
-      if (!requireActiveCollar(delegation, reply)) return;
+      const execCollarResult = resolveEffectiveCollar(delegation, collars);
+      if (!execCollarResult.ok) {
+        return sendError(reply, execCollarResult.status, execCollarResult.code, execCollarResult.message);
+      }
 
       const injection = secretFieldInjections.get(req.params.injectionId);
       if (!injection) return sendError(reply, 404, "INJECTION_NOT_FOUND", "Injection not found.");

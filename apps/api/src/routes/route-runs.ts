@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier, ApprovalManifest, ApprovalManifestLineItem, RunApprovalContext } from "@aegis/types";
 import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, userApprovalReceipts, MOCK_USER_ID, newId } from "../store/index.js";
+import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
 import { schedulePersist } from "../store/persistence.js";
@@ -322,7 +323,6 @@ export async function routeRunRoutes(server: FastifyInstance) {
 
     const agent_id = delegation.agent_name;
     const delegation_id = delegation.id;
-    const collar_id = delegation.default_collar_id;
 
     const skill = skills.get(skillId);
     if (!skill) return sendError(reply, 404, "SKILL_NOT_FOUND", "Skill not found.");
@@ -406,71 +406,69 @@ export async function routeRunRoutes(server: FastifyInstance) {
       return sendError(reply, 403, "SKILL_ACCESS_DENIED", "This agent is not allowed to use this installed skill.");
     }
 
-    // No-collar agents may not start execution
-    if (!collar_id) {
-      return sendError(reply, 403, "COLLAR_REQUIRED", "This agent has no rule set. Add one before starting execution.");
+    const collarResult = resolveEffectiveCollar(delegation, collars);
+    if (!collarResult.ok) {
+      return sendError(reply, collarResult.status, collarResult.code, collarResult.message);
+    }
+    const { collar, policy_mode } = collarResult;
+    const effectiveCollarId = policy_mode === "collar" ? collar.id : undefined;
+
+    // Permission enforcement — works identically for real collar and baseline policy.
+    const needsApproval: string[] = [];
+    const hardBlocked: string[] = [];
+
+    for (const perm of route.required_permissions) {
+      if (collar.blocked_actions.includes(perm as any)) {
+        hardBlocked.push(perm);
+      } else if (
+        !collar.allowed_actions.includes(perm as any) &&
+        !collar.approval_required_actions.includes(perm as any)
+      ) {
+        hardBlocked.push(perm);
+      } else if (collar.approval_required_actions.includes(perm as any)) {
+        needsApproval.push(perm);
+      }
+      // else: in allowed_actions — fine
     }
 
-    if (collar_id) {
-      const collar = collars.get(collar_id);
-      if (collar && collar.status === "active") {
-        const needsApproval: string[] = [];
-        const hardBlocked: string[] = [];
+    if (hardBlocked.length > 0) {
+      return sendError(
+        reply,
+        403,
+        "COLLAR_BLOCKED",
+        "This agent's collar does not allow this route.",
+        `Permission(s) blocked or unknown: ${hardBlocked.join(", ")}.`
+      );
+    }
 
-        for (const perm of route.required_permissions) {
-          if (collar.blocked_actions.includes(perm as any)) {
-            hardBlocked.push(perm);
-          } else if (
-            !collar.allowed_actions.includes(perm as any) &&
-            !collar.approval_required_actions.includes(perm as any)
-          ) {
-            hardBlocked.push(perm);
-          } else if (collar.approval_required_actions.includes(perm as any)) {
-            needsApproval.push(perm);
-          }
-          // else: in allowed_actions — fine
-        }
-
-        if (hardBlocked.length > 0) {
-          return sendError(
-            reply,
-            403,
-            "COLLAR_BLOCKED",
-            "This agent's collar does not allow this route.",
-            `Permission(s) blocked or unknown: ${hardBlocked.join(", ")}.`
-          );
-        }
-
-        if (needsApproval.length > 0) {
-          const run: RouteRun = {
-            run_id: newId("run"),
-            skill_id: skill.skill_id,
-            route_id: route.route_id,
-            installed_skill_id: installedSkill.installed_skill_id,
-            user_id: MOCK_USER_ID,
-            domain: skill.domain,
-            status: "pending_approval",
-            approval_required_permissions: needsApproval,
-            created_at: new Date().toISOString(),
-            ...(agent_id ? { agent_id } : {}),
-            ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
-            ...(validatedPassOverrides && Object.keys(validatedPassOverrides).length > 0 ? { pass_overrides: validatedPassOverrides } : {}),
-            ...(delegation_id ? { delegation_id } : {}),
-            ...(collar_id ? { collar_id } : {}),
-          };
-          routeRuns.set(run.run_id, run);
-          schedulePersist();
-          return {
-            ok: true,
-            data: {
-              run,
-              approval_required: true,
-              approval_required_permissions: needsApproval,
-              message: `This run requires approval for: ${needsApproval.join(", ")}.`,
-            },
-          };
-        }
-      }
+    if (needsApproval.length > 0) {
+      const run: RouteRun = {
+        run_id: newId("run"),
+        skill_id: skill.skill_id,
+        route_id: route.route_id,
+        installed_skill_id: installedSkill.installed_skill_id,
+        user_id: MOCK_USER_ID,
+        domain: skill.domain,
+        status: "pending_approval",
+        approval_required_permissions: needsApproval,
+        created_at: new Date().toISOString(),
+        ...(agent_id ? { agent_id } : {}),
+        ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+        ...(validatedPassOverrides && Object.keys(validatedPassOverrides).length > 0 ? { pass_overrides: validatedPassOverrides } : {}),
+        ...(delegation_id ? { delegation_id } : {}),
+        ...(effectiveCollarId ? { collar_id: effectiveCollarId } : {}),
+      };
+      routeRuns.set(run.run_id, run);
+      schedulePersist();
+      return {
+        ok: true,
+        data: {
+          run,
+          approval_required: true,
+          approval_required_permissions: needsApproval,
+          message: `This run requires approval for: ${needsApproval.join(", ")}.`,
+        },
+      };
     }
 
     const run: RouteRun = {
@@ -486,7 +484,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
       ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
       ...(validatedPassOverrides && Object.keys(validatedPassOverrides).length > 0 ? { pass_overrides: validatedPassOverrides } : {}),
       ...(delegation_id ? { delegation_id } : {}),
-      ...(collar_id ? { collar_id } : {}),
+      ...(effectiveCollarId ? { collar_id: effectiveCollarId } : {}),
     };
 
     routeRuns.set(run.run_id, run);

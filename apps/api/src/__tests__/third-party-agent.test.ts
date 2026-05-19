@@ -114,7 +114,7 @@ describe("GET /api/agent/v1/me identity contract", () => {
     expect(data.delegation_id).toBeTruthy();
   });
 
-  it("returns collar_active: false and execution_blocked: true when no collar", async () => {
+  it("returns collar_active: false, execution_blocked: false, baseline_policy_active: true when no collar", async () => {
     const created = await createDelegation({ agent_name: "no_collar_agent" });
     const token: string = created.json().data.delegation_token;
 
@@ -125,11 +125,13 @@ describe("GET /api/agent/v1/me identity contract", () => {
     });
     const { data } = me.json();
     expect(data.collar_active).toBe(false);
-    expect(data.execution_blocked).toBe(true);
+    expect(data.execution_blocked).toBe(false);
+    expect(data.baseline_policy_active).toBe(true);
+    expect(data.policy_mode).toBe("baseline");
     expect(data.collar_spending_limits).toBeUndefined();
   });
 
-  it("returns collar_active: true, execution_blocked: false, and spending_limits when collar active", async () => {
+  it("returns collar_active: true, execution_blocked: false, policy_mode: collar, and spending_limits when collar active", async () => {
     const me = await server.inject({
       method: "GET",
       url: "/api/agent/v1/me",
@@ -139,6 +141,8 @@ describe("GET /api/agent/v1/me identity contract", () => {
     const { data } = me.json();
     expect(data.collar_active).toBe(true);
     expect(data.execution_blocked).toBe(false);
+    expect(data.baseline_policy_active).toBeUndefined();
+    expect(data.policy_mode).toBe("collar");
     expect(data.collar_spending_limits).toBeDefined();
     expect(typeof data.collar_spending_limits.max_without_approval).toBe("number");
     expect(typeof data.collar_spending_limits.max_with_approval).toBe("number");
@@ -286,7 +290,7 @@ describe("GET /api/agent/v1/skills — execution_available and domain filter", (
     installSkill(IDS.SKILL_BLOCKED);
   });
 
-  it("returns execution_available: false for all skills when no collar", async () => {
+  it("returns execution_available based on baseline policy when no collar", async () => {
     const res = await server.inject({
       method: "GET",
       url: "/api/agent/v1/skills",
@@ -295,9 +299,12 @@ describe("GET /api/agent/v1/skills — execution_available and domain filter", (
     expect(res.statusCode).toBe(200);
     const skills: any[] = res.json().data;
     expect(skills.length).toBeGreaterThan(0);
-    for (const s of skills) {
-      expect(s.execution_available).toBe(false);
-    }
+    const wiki = skills.find((s: any) => s.skill_id === IDS.SKILL_WIKI);
+    const blocked = skills.find((s: any) => s.skill_id === IDS.SKILL_BLOCKED);
+    // browse is in baseline allowed_actions
+    if (wiki) expect(wiki.execution_available).toBe(true);
+    // identity_disclosure is in baseline blocked_actions
+    if (blocked) expect(blocked.execution_available).toBe(false);
   });
 
   it("returns execution_available: true for allowed skills when collar active", async () => {
@@ -341,10 +348,10 @@ describe("GET /api/agent/v1/skills — execution_available and domain filter", (
   });
 });
 
-// ─── 6. No-collar execution is still blocked (regression guard) ───────────────
+// ─── 6. No-collar agent — baseline safety policy (regression guard updated) ───
 
-describe("No-collar agent execution block — regression guard", () => {
-  it("POST /api/skills/:skillId/runs still returns 403 COLLAR_REQUIRED", async () => {
+describe("No-collar agent — baseline policy replaces COLLAR_REQUIRED", () => {
+  it("POST /api/skills/:skillId/runs with browse skill → pending run (baseline allows)", async () => {
     installSkill(IDS.SKILL_WIKI);
     const res = await server.inject({
       method: "POST",
@@ -352,11 +359,11 @@ describe("No-collar agent execution block — regression guard", () => {
       headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
       payload: {},
     });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe("COLLAR_REQUIRED");
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe("pending");
   });
 
-  it("POST /api/agent/v1/runs still returns 403 COLLAR_REQUIRED", async () => {
+  it("POST /api/agent/v1/runs with browse skill → pending run (baseline allows)", async () => {
     installSkill(IDS.SKILL_WIKI);
     const res = await server.inject({
       method: "POST",
@@ -364,7 +371,19 @@ describe("No-collar agent execution block — regression guard", () => {
       headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
       payload: { skill_id: IDS.SKILL_WIKI },
     });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.run.status).toBe("pending");
+  });
+
+  it("POST /api/skills/:skillId/runs with identity_disclosure skill → 403 COLLAR_BLOCKED (baseline blocks)", async () => {
+    installSkill(IDS.SKILL_BLOCKED);
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/skills/${IDS.SKILL_BLOCKED}/runs`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {},
+    });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe("COLLAR_REQUIRED");
+    expect(res.json().error.code).toBe("COLLAR_BLOCKED");
   });
 });

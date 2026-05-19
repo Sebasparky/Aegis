@@ -1110,10 +1110,14 @@ export interface ExternalAgentIdentity {
   default_collar_id?: string;
   delegation_status: AgentDelegationStatus;
   expires_at?: string;
-  /** false when the delegation has no collar or the collar is not active. */
+  /** true when the delegation has an explicitly assigned active collar. false for no-collar (baseline) and broken-collar agents. */
   collar_active: boolean;
-  /** true when collar_active is false — explicit signal that execution tools are unavailable. */
+  /** true only when the delegation has a collar assigned but it is broken or revoked. false for no-collar (baseline) and active-collar agents. */
   execution_blocked: boolean;
+  /** true when no collar is assigned and the Aegis baseline safety policy is in effect. */
+  baseline_policy_active?: boolean;
+  /** "baseline" when running under the Aegis baseline safety policy; "collar" when an active custom collar is in use. Absent when execution is blocked. */
+  policy_mode?: "collar" | "baseline";
   /** Present when collar_active is true. */
   collar_spending_limits?: {
     max_without_approval: number;

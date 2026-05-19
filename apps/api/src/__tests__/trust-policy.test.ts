@@ -65,7 +65,7 @@ describe("Token auth — POST /api/skills/:skillId/runs", () => {
     expect(res.json().error.code).toBe("INVALID_TOKEN");
   });
 
-  it("returns 401 INVALID_TOKEN when the delegation is revoked", async () => {
+  it("returns 401 DELEGATION_REVOKED when the delegation is revoked", async () => {
     const delegation = agentDelegations.get(IDS.DELEGATION_ALL)!;
     delegation.status = "revoked";
     const res = await server.inject({
@@ -76,7 +76,7 @@ describe("Token auth — POST /api/skills/:skillId/runs", () => {
     });
     delegation.status = "active";
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("INVALID_TOKEN");
+    expect(res.json().error.code).toBe("DELEGATION_REVOKED");
   });
 
   it("returns 403 SKILL_NOT_INSTALLED when skill exists but is not installed", async () => {

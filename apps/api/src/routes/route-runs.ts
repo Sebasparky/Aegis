@@ -301,11 +301,23 @@ export async function routeRunRoutes(server: FastifyInstance) {
     }
 
     const delegation = Array.from(agentDelegations.values()).find(
-      (d) => d.user_id === MOCK_USER_ID && d.status === "active" && d.token_id === token
+      (d) => d.user_id === MOCK_USER_ID && d.token_id === token
     );
 
     if (!delegation) {
-      return sendError(reply, 401, "INVALID_TOKEN", "Token does not match an active delegation.");
+      return sendError(reply, 401, "INVALID_TOKEN", "Token does not match any delegation.");
+    }
+
+    if (delegation.status === "revoked") {
+      return sendError(reply, 401, "DELEGATION_REVOKED", "This delegation has been revoked.");
+    }
+
+    if (delegation.status === "expired" || (delegation.expires_at && new Date(delegation.expires_at) < new Date())) {
+      delegation.status = "expired";
+      delegation.updated_at = new Date().toISOString();
+      agentDelegations.set(delegation.id, delegation);
+      schedulePersist();
+      return sendError(reply, 401, "DELEGATION_EXPIRED", "This delegation has expired. Request a new delegation.");
     }
 
     const agent_id = delegation.agent_name;

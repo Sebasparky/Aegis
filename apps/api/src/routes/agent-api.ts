@@ -92,12 +92,27 @@ async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Prom
     return null;
   }
 
+  // Find by token_id without status filter — check status explicitly to return specific error codes
   const delegation = Array.from(agentDelegations.values()).find(
-    (d) => d.user_id === MOCK_USER_ID && d.status === "active" && d.token_id === token
+    (d) => d.user_id === MOCK_USER_ID && d.token_id === token
   );
 
   if (!delegation) {
-    sendError(reply, 401, "INVALID_TOKEN", "Token does not match an active delegation.");
+    sendError(reply, 401, "INVALID_TOKEN", "Token does not match any delegation.");
+    return null;
+  }
+
+  if (delegation.status === "revoked") {
+    sendError(reply, 401, "DELEGATION_REVOKED", "This delegation has been revoked.");
+    return null;
+  }
+
+  if (delegation.status === "expired" || (delegation.expires_at && new Date(delegation.expires_at) < new Date())) {
+    delegation.status = "expired";
+    delegation.updated_at = new Date().toISOString();
+    agentDelegations.set(delegation.id, delegation);
+    schedulePersist();
+    sendError(reply, 401, "DELEGATION_EXPIRED", "This delegation has expired. Request a new delegation.");
     return null;
   }
 

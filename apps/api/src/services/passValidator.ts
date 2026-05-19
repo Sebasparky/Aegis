@@ -1,5 +1,5 @@
 import type { Collar } from "@aegis/types";
-import { passes, collars } from "../store/index.js";
+import { passes, collars, agentDelegations } from "../store/index.js";
 import type { PassWithToken } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
@@ -60,7 +60,23 @@ export function validatePassToken(token: string | undefined): PassValidationResu
     }
   }
 
-  // Update last_used_at on every successful validation
+  // Resolve and validate linked delegation — fail closed if missing or invalid
+  const delegation = Array.from(agentDelegations.values()).find((d) => d.token_id === pass.id);
+  if (!delegation) {
+    return { ok: false, code: "DELEGATION_NOT_FOUND", message: "No active delegation is linked to this pass." };
+  }
+  if (delegation.status === "revoked") {
+    return { ok: false, code: "DELEGATION_REVOKED", message: "The delegation linked to this pass has been revoked." };
+  }
+  if (delegation.status === "expired" || (delegation.expires_at && new Date(delegation.expires_at) < new Date())) {
+    delegation.status = "expired";
+    delegation.updated_at = new Date().toISOString();
+    agentDelegations.set(delegation.id, delegation);
+    schedulePersist();
+    return { ok: false, code: "DELEGATION_EXPIRED", message: "The delegation linked to this pass has expired." };
+  }
+
+  // Update last_used_at only after both pass and delegation are confirmed valid
   passes.set(pass.id, { ...pass, last_used_at: new Date().toISOString() } as PassWithToken & { last_used_at: string });
 
   return { ok: true, pass, collar };

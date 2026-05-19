@@ -29,15 +29,32 @@ export async function skillRoutes(server: FastifyInstance) {
 
       let delegation: AgentDelegation | undefined;
       if (token) {
-        delegation = Array.from(agentDelegations.values()).find(
-          (d) => d.user_id === MOCK_USER_ID && d.status === "active" && d.token_id === token
+        const found = Array.from(agentDelegations.values()).find(
+          (d) => d.user_id === MOCK_USER_ID && d.token_id === token
         );
-        if (!delegation) {
+        if (!found) {
           return reply.status(401).send({
             ok: false,
-            error: { code: "INVALID_TOKEN", message: "Token does not match an active delegation." },
+            error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." },
           });
         }
+        if (found.status === "revoked") {
+          return reply.status(401).send({
+            ok: false,
+            error: { code: "DELEGATION_REVOKED", message: "This delegation has been revoked." },
+          });
+        }
+        if (found.status === "expired" || (found.expires_at && new Date(found.expires_at) < new Date())) {
+          found.status = "expired";
+          found.updated_at = new Date().toISOString();
+          agentDelegations.set(found.id, found);
+          schedulePersist();
+          return reply.status(401).send({
+            ok: false,
+            error: { code: "DELEGATION_EXPIRED", message: "This delegation has expired. Request a new delegation." },
+          });
+        }
+        delegation = found;
       }
 
       let list = Array.from(skills.values());

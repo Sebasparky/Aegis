@@ -133,6 +133,7 @@ async function findAvailablePort(ports: number[]): Promise<number | null> {
 export interface CreateTaskBrowserOptions {
   user_id?: string;
   delegation_id?: string;
+  debug_visible?: boolean;
 }
 
 export interface CreateTaskBrowserResult {
@@ -141,6 +142,7 @@ export interface CreateTaskBrowserResult {
   port_auto_selected?: true;
   requires_browser_reconnect?: true;
   user_message: string;
+  mode: "headless" | "visible";
 }
 
 // Extracted Chrome launch logic — creates a session on any given port.
@@ -156,6 +158,8 @@ async function launchChrome(
     );
   }
 
+  const debug_visible = opts.debug_visible === true;
+  const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
   const userId = opts.user_id ?? MOCK_USER_ID;
   const browser_session_id = newId("tbsess");
   const user_data_dir = join(tmpdir(), `aegis-agent-browser-${browser_session_id}`);
@@ -171,6 +175,8 @@ async function launchChrome(
     cdp_port: cdpPort,
     user_data_dir,
     ephemeral: true,
+    mode,
+    debug_visible,
     created_at: now.toISOString(),
     expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
   };
@@ -206,6 +212,7 @@ async function launchChrome(
       "--no-first-run",
       "--disable-default-apps",
       "--no-default-browser-check",
+      ...(debug_visible ? [] : ["--headless=new"]),
     ];
 
     const chrome = spawn(chromeBin, chromeArgs, { stdio: "ignore", detached: false });
@@ -252,18 +259,20 @@ const ALTERNATE_CDP_PORTS = [9223, 9224, 9225, 9226, 9227, 9228, 9229, 9230];
 export async function createTaskBrowserSession(
   opts: CreateTaskBrowserOptions = {},
 ): Promise<CreateTaskBrowserResult> {
+  const debug_visible = opts.debug_visible === true;
+  const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
   const portBusy = await isPortInUse(DEFAULT_CDP_PORT);
 
   if (!portBusy) {
     const session = await launchChrome(opts, DEFAULT_CDP_PORT);
-    return { session, user_message: "Started a fresh Antigen task browser session." };
+    return { session, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
   const existing = findSessionByPort(DEFAULT_CDP_PORT);
 
   // Case A: known ready session with live CDP — reuse without spawning Chrome
   if (existing && existing.status === "ready" && await isCdpAlive(DEFAULT_CDP_PORT)) {
-    return { session: existing, reused_existing: true, user_message: "Reusing the active Antigen task browser session." };
+    return { session: existing, reused_existing: true, user_message: "Reusing the active Antigen task browser session.", mode: existing.mode };
   }
 
   // Case B: known stale session (expired or failed) — recycle and try same port
@@ -280,7 +289,7 @@ export async function createTaskBrowserSession(
     const freed = await waitForPortFree(DEFAULT_CDP_PORT);
     if (freed) {
       const session = await launchChrome(opts, DEFAULT_CDP_PORT);
-      return { session, user_message: "Started a fresh Antigen task browser session." };
+      return { session, user_message: "Started a fresh Antigen task browser session.", mode };
     }
     // Port still busy after recycle — fall through to alternate ports below
   }
@@ -294,7 +303,7 @@ export async function createTaskBrowserSession(
   const altPort = await findAvailablePort(ALTERNATE_CDP_PORTS);
   if (altPort !== null) {
     const session = await launchChrome(opts, altPort);
-    return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session." };
+    return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
   // Case D: no ports available in 9222–9230 range

@@ -8,6 +8,14 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
+vi.mock("../runtime/taskBrowserSessions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../runtime/taskBrowserSessions.js")>();
+  return {
+    ...actual,
+    createTaskBrowserSession: vi.fn(),
+  };
+});
+
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
@@ -26,6 +34,7 @@ import {
 } from "../store/index.js";
 import type { PassWithToken } from "../store/index.js";
 import type { AgentDelegation, Collar } from "@aegis/types";
+import { createTaskBrowserSession } from "../runtime/taskBrowserSessions.js";
 
 let server: FastifyInstance;
 
@@ -385,5 +394,116 @@ describe("No-collar agent — baseline policy replaces COLLAR_REQUIRED", () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe("COLLAR_BLOCKED");
+  });
+});
+
+// ─── 7. Task browser session headless mode ────────────────────────────────────
+
+describe("POST /api/task-browser-sessions — headless mode", () => {
+  const mockSession = (debug_visible: boolean) => ({
+    browser_session_id: "tbsess_test_001",
+    user_id: MOCK_USER_ID,
+    delegation_id: IDS.DELEGATION_ALL,
+    status: "ready" as const,
+    cdp_url: "http://localhost:9222",
+    cdp_port: 9222,
+    user_data_dir: "/tmp/aegis-agent-browser-tbsess_test_001",
+    ephemeral: true as true,
+    mode: debug_visible ? ("visible" as const) : ("headless" as const),
+    debug_visible,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+  });
+
+  beforeEach(() => {
+    vi.mocked(createTaskBrowserSession).mockReset();
+  });
+
+  it("returns mode: 'headless' when no body is sent", async () => {
+    vi.mocked(createTaskBrowserSession).mockResolvedValueOnce({
+      session: mockSession(false),
+      user_message: "Started a fresh Antigen task browser session.",
+      mode: "headless",
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(201);
+    const { data } = res.json();
+    expect(data.mode).toBe("headless");
+    expect(data.debug_visible).toBe(false);
+    expect(vi.mocked(createTaskBrowserSession).mock.calls[0][0]).toMatchObject({ debug_visible: false });
+  });
+
+  it("returns mode: 'headless' when debug_visible is absent from body", async () => {
+    vi.mocked(createTaskBrowserSession).mockResolvedValueOnce({
+      session: mockSession(false),
+      user_message: "Started a fresh Antigen task browser session.",
+      mode: "headless",
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: { delegation_id: "some_id" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.mode).toBe("headless");
+    expect(vi.mocked(createTaskBrowserSession).mock.calls[0][0]).toMatchObject({ debug_visible: false });
+  });
+
+  it("returns mode: 'visible' and passes debug_visible: true to runtime when requested", async () => {
+    vi.mocked(createTaskBrowserSession).mockResolvedValueOnce({
+      session: mockSession(true),
+      user_message: "Started a fresh Antigen task browser session.",
+      mode: "visible",
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: { debug_visible: true },
+    });
+    expect(res.statusCode).toBe(201);
+    const { data } = res.json();
+    expect(data.mode).toBe("visible");
+    expect(data.debug_visible).toBe(true);
+    expect(vi.mocked(createTaskBrowserSession).mock.calls[0][0]).toMatchObject({ debug_visible: true });
+  });
+
+  it("auth is still required — 401 without a valid token", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(vi.mocked(createTaskBrowserSession)).not.toHaveBeenCalled();
+  });
+
+  it("mode field appears in response alongside browser_session_id and status", async () => {
+    vi.mocked(createTaskBrowserSession).mockResolvedValueOnce({
+      session: mockSession(false),
+      user_message: "Started a fresh Antigen task browser session.",
+      mode: "headless",
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    const { data } = res.json();
+    expect(data.browser_session_id).toBeTruthy();
+    expect(data.status).toBe("ready");
+    expect(data.mode).toBe("headless");
   });
 });

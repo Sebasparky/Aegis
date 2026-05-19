@@ -26,6 +26,8 @@ function safeSessionView(session: ReturnType<typeof getTaskBrowserSession>) {
     cdp_port: session.cdp_port,
     user_data_dir: session.user_data_dir,
     ephemeral: session.ephemeral,
+    mode: session.mode,
+    debug_visible: session.debug_visible,
     created_at: session.created_at,
     expires_at: session.expires_at,
     closed_at: session.closed_at,
@@ -44,12 +46,16 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
     if (!delegation) return;
 
     try {
+      const body = (req.body ?? {}) as { debug_visible?: boolean };
+      const debug_visible = body.debug_visible === true;
+
       const result: CreateTaskBrowserResult = await createTaskBrowserSession({
         user_id: MOCK_USER_ID,
         delegation_id: delegation.id,
+        debug_visible,
       });
-      const { session, reused_existing, port_auto_selected, requires_browser_reconnect, user_message } = result;
-      const meta: Record<string, unknown> = { user_message };
+      const { session, reused_existing, port_auto_selected, requires_browser_reconnect, user_message, mode } = result;
+      const meta: Record<string, unknown> = { user_message, mode };
       if (reused_existing) meta.reused_existing = true;
       if (port_auto_selected) meta.port_auto_selected = true;
       if (requires_browser_reconnect) meta.requires_browser_reconnect = true;

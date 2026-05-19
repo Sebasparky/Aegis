@@ -2115,6 +2115,8 @@ export interface TaskBrowserSession {
   cdp_port: number;
   user_data_dir: string;    // /tmp/aegis-agent-browser-<id> — local path, not a secret
   ephemeral: true;
+  mode: "headless" | "visible";
+  debug_visible: boolean;
   created_at: string;
   expires_at: string;
   closed_at?: string;

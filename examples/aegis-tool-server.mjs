@@ -108,8 +108,8 @@ async function listAvailableSkills({ domain } = {}) {
   };
 }
 
-async function startControlledBrowserSession(args = {}) {
-  return startTaskBrowserSession(args);
+async function startControlledBrowserSession({ delegation_id, debug_visible = false } = {}) {
+  return startTaskBrowserSession({ delegation_id, debug_visible });
 }
 
 async function discoverInstalledSkills({ domain }) {
@@ -1397,9 +1397,10 @@ async function injectChallengeEmailCode({ resolution_id } = {}) {
 
 // ─── Task Browser Lifecycle handlers ─────────────────────────────────────────
 
-async function startTaskBrowserSession({ delegation_id } = {}) {
+async function startTaskBrowserSession({ delegation_id, debug_visible = false } = {}) {
   const body = {};
   if (delegation_id) body.delegation_id = delegation_id;
+  body.debug_visible = debug_visible === true;
   let res;
   try {
     res = await request("POST", "/api/task-browser-sessions", body);
@@ -1443,6 +1444,8 @@ async function startTaskBrowserSession({ delegation_id } = {}) {
     status: s.status,
     cdp_url: s.cdp_url,
     ephemeral: s.ephemeral,
+    mode: res.data?.mode ?? s.mode ?? "headless",
+    debug_visible: s.debug_visible ?? false,
     expires_at: s.expires_at,
     cleanup_complete: s.cleanup_complete ?? false,
     reused_existing: reused,
@@ -1914,19 +1917,24 @@ const TOOLS = [
     name: "start_controlled_browser_session",
     description:
       "Start an Aegis-managed ephemeral Chrome browser session for agent-controlled navigation. " +
-      "Aegis launches Chrome with a no-save profile (password saving, autofill, card saving, and sync disabled). " +
+      "Sessions are headless by default — Chrome runs in the background with no visible window. " +
       "The agent uses its own Playwright tools (via @playwright/mcp) for ALL navigation, clicking, and reading — " +
       "Aegis does NOT navigate or click on the agent's behalf. " +
       "Aegis uses the session ONLY to inject protected credential fields via CDP when request_secret_field_injection is called. " +
       "Starting this session does NOT itself authorize any sensitive actions — user approval is required separately for credential injection. " +
       "If a session is already active it will be reused (reused_existing=true). " +
-      "Call close_task_browser_session only after the full task is complete.",
+      "Call close_task_browser_session only after the full task is complete. " +
+      "Do NOT pass debug_visible: true unless the user has explicitly asked to see the browser window for debugging.",
     inputSchema: {
       type: "object",
       properties: {
         delegation_id: {
           type: "string",
           description: "Optional. Delegation ID to associate with this browser session. Use the delegation_id from get_agent_identity.",
+        },
+        debug_visible: {
+          type: "boolean",
+          description: "Optional. Default false. Set to true ONLY when the user explicitly requests a visible browser window for local debugging. Do not set this for normal task execution — sessions should always be headless.",
         },
       },
       required: [],
@@ -2554,7 +2562,7 @@ const TOOLS = [
   {
     name: "start_task_browser_session",
     description:
-      "Create an ephemeral Chrome browser session for agent-controlled navigation.\n\n" +
+      "Create an ephemeral Chrome browser session for agent-controlled navigation. Sessions are headless by default — no visible Chrome window.\n\n" +
       "Aegis launches Chrome with --remote-debugging-port=9222 and a fresh /tmp profile " +
       "that has password saving, autofill, card saving, and sync disabled. " +
       "The agent uses Playwright browser tools (via @playwright/mcp --cdp-endpoint=http://localhost:9222) for all navigation, clicking, and reading. " +
@@ -2576,6 +2584,10 @@ const TOOLS = [
         delegation_id: {
           type: "string",
           description: "Optional delegation ID to associate with the browser session.",
+        },
+        debug_visible: {
+          type: "boolean",
+          description: "Optional. Default false. Set to true ONLY when the user explicitly requests a visible Chrome window for local debugging. Normal task execution must always be headless.",
         },
       },
       required: [],

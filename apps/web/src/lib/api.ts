@@ -823,5 +823,5 @@ export const getAgentConnectorStatus = (id: string) =>
 export const revokeAgentConnector = (id: string) =>
   request<{ connector_id: string; status: "revoked"; delegation_revoked: boolean }>(
     `/api/agent-connectors/${id}/revoke`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify({}) },
   );

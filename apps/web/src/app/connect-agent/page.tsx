@@ -182,6 +182,8 @@ export default function ConnectAgentPage() {
   const [connectors, setConnectors] = useState<AgentConnector[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [collars, setCollars] = useState<Collar[]>([]);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
   const { copied, copy } = useCopy();
 
@@ -242,6 +244,9 @@ export default function ConnectAgentPage() {
   }
 
   async function handleRevoke(id: string) {
+    if (!window.confirm("Revoke this connector? The agent will lose access immediately.")) return;
+    setRevokingId(id);
+    setRevokeError(null);
     try {
       await revokeAgentConnector(id);
       setConnectors((prev) =>
@@ -249,7 +254,14 @@ export default function ConnectAgentPage() {
           c.connector_id === id ? { ...c, status: "revoked" } : c
         )
       );
-    } catch {}
+      if (created?.connector.connector_id === id) {
+        setSetupStatus("revoked");
+      }
+    } catch (e: unknown) {
+      setRevokeError(e instanceof Error ? e.message : "Failed to revoke connector.");
+    } finally {
+      setRevokingId(null);
+    }
   }
 
   const mcpSetup  = created?.setup?.connector_type === "mcp_local"  ? (created.setup as SetupMcp)  : null;
@@ -587,6 +599,22 @@ export default function ConnectAgentPage() {
       <div>
         <div className="a-eyebrow" style={{ marginBottom: 12 }}>Connected Agents</div>
 
+        {revokeError && (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: "10px 14px",
+              borderRadius: "var(--r-1)",
+              background: "var(--red-soft)",
+              border: "1px solid var(--red-ring)",
+              color: "oklch(0.45 0.13 25)",
+              fontSize: 13,
+            }}
+          >
+            {revokeError}
+          </div>
+        )}
+
         {listLoading ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {[0, 1, 2].map((i) => (
@@ -657,10 +685,12 @@ export default function ConnectAgentPage() {
                         padding: "4px 10px",
                         color: "var(--red)",
                         borderColor: "var(--red-ring)",
+                        opacity: revokingId === c.connector_id ? 0.5 : 1,
                       }}
+                      disabled={revokingId === c.connector_id}
                       onClick={() => handleRevoke(c.connector_id)}
                     >
-                      Revoke
+                      {revokingId === c.connector_id ? "Revoking…" : "Revoke"}
                     </button>
                   )}
                 </div>

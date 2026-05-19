@@ -23,7 +23,7 @@ export interface AgentDelegation {
   agent_name: string;
   agent_platform?: string;
   channel: AgentDelegationChannel;
-  default_collar_id: string;
+  default_collar_id?: string;
   status: AgentDelegationStatus;
   token_id: string;
   created_at: string;
@@ -190,7 +190,7 @@ export interface AegisPass {
   user_id: string;
   agent_name: string;
   purpose?: string;
-  default_collar_id: string;
+  default_collar_id?: string;
   status: PassStatus;
   expires_at: string;
   created_at: string;

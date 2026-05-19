@@ -114,7 +114,7 @@ export function checkWorkspacePermission(
 ): { ok: true } | WorkspaceAccessDenied {
   const wsDecision = evaluateCollarForAction(workspaceCollar, action);
 
-  const delegationCollar = collars.get(delegation.default_collar_id);
+  const delegationCollar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
   if (!delegationCollar || delegationCollar.status !== "active") {
     return {
       ok: false,

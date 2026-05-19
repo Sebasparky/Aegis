@@ -355,6 +355,11 @@ export async function agentRoutes(server: FastifyInstance) {
       collar = requested;
     }
 
+    // No-collar agents can connect but cannot start sessions until a rule set is added.
+    if (!collar) {
+      return sendError(reply, 400, "NO_COLLAR", "This agent has no rule set. Add one in the Antigen console before starting a session.");
+    }
+
     // Session expiry: earlier of collar max duration or pass expiry
     const collarMaxMs = collar.session_limits.max_duration_minutes * 60 * 1000;
     const collarExpiry = new Date(Date.now() + collarMaxMs);
@@ -627,6 +632,11 @@ export async function agentRoutes(server: FastifyInstance) {
       }
       if (session.status !== "active") {
         return sendError(reply, 400, `SESSION_${session.status.toUpperCase()}`, `Session is ${session.status}.`);
+      }
+
+      // Sessions are only created for collar-bearing passes; this guard is a safety net.
+      if (!collar) {
+        return sendError(reply, 400, "NO_COLLAR", "This agent has no rule set. Add one in the Antigen console before starting a session.");
       }
 
       // Look up domain trust

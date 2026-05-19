@@ -227,6 +227,10 @@ export async function taskRoutes(server: FastifyInstance) {
         );
       }
 
+      if (!collar) {
+        return sendError(reply, 400, "NO_COLLAR", "This agent has no rule set. Add one in the Antigen console before starting a session.");
+      }
+
       const collarMaxMs = collar.session_limits.max_duration_minutes * 60 * 1000;
       const collarExpiry = new Date(Date.now() + collarMaxMs);
       const passExpiry = new Date(pass.expires_at);

@@ -61,7 +61,7 @@ export async function delegationRoutes(server: FastifyInstance) {
         return sendError(reply, 400, "VALIDATION_ERROR", "agent_name is required.");
       }
 
-      // Resolve collar
+      // Resolve collar — optional, agent may connect with no rule set and add one later.
       let collar;
       if (default_collar_id) {
         collar = collars.get(default_collar_id);
@@ -70,13 +70,6 @@ export async function delegationRoutes(server: FastifyInstance) {
         }
         if (collar.user_id !== MOCK_USER_ID || collar.status !== "active") {
           return sendError(reply, 400, "COLLAR_INACTIVE", "Collar is not active.");
-        }
-      } else {
-        collar = Array.from(collars.values())
-          .filter((c) => c.user_id === MOCK_USER_ID && c.status === "active")
-          .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
-        if (!collar) {
-          return sendError(reply, 400, "NO_ACTIVE_COLLAR", "No active collar found for this user.");
         }
       }
 
@@ -92,7 +85,7 @@ export async function delegationRoutes(server: FastifyInstance) {
         user_id: MOCK_USER_ID,
         agent_name,
         purpose: `Delegation for ${agent_name}`,
-        default_collar_id: collar.id,
+        ...(collar ? { default_collar_id: collar.id } : {}),
         status: "active",
         expires_at,
         created_at: now,
@@ -106,7 +99,7 @@ export async function delegationRoutes(server: FastifyInstance) {
         agent_name,
         agent_platform,
         channel,
-        default_collar_id: collar.id,
+        ...(collar ? { default_collar_id: collar.id } : {}),
         status: "active",
         token_id: pass.id,
         created_at: now,

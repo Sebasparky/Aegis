@@ -12,7 +12,7 @@ export interface PassValidationError {
 export interface PassValidationSuccess {
   ok: true;
   pass: PassWithToken;
-  collar: Collar;
+  collar: Collar | undefined;
 }
 
 export type PassValidationResult = PassValidationSuccess | PassValidationError;
@@ -48,13 +48,16 @@ export function validatePassToken(token: string | undefined): PassValidationResu
     return { ok: false, code: "PASS_EXPIRED", message: "This Antigen Pass has expired." };
   }
 
-  const collar = collars.get(pass.default_collar_id);
-  if (!collar) {
-    return { ok: false, code: "NOT_FOUND", message: "The collar attached to this pass was not found." };
-  }
-
-  if (collar.status !== "active") {
-    return { ok: false, code: "COLLAR_REVOKED", message: "The collar attached to this pass is not active." };
+  // Collar is optional — agents may connect with no rule set and add one later.
+  let collar: Collar | undefined;
+  if (pass.default_collar_id) {
+    collar = collars.get(pass.default_collar_id);
+    if (!collar) {
+      return { ok: false, code: "NOT_FOUND", message: "The collar attached to this pass was not found." };
+    }
+    if (collar.status !== "active") {
+      return { ok: false, code: "COLLAR_REVOKED", message: "The collar attached to this pass is not active." };
+    }
   }
 
   // Update last_used_at on every successful validation

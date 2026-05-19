@@ -2015,6 +2015,44 @@ export interface CredentialUseAuthorization {
   use_counts: { username: number; password: number };
 }
 
+// ─── Login Failure Diagnostics v1 ────────────────────────────────────────────
+
+export type LoginOutcomeCode =
+  | "login_success"
+  | "invalid_credentials"
+  | "manual_challenge_required"
+  | "captcha_required"
+  | "rate_limited"
+  | "unknown_failure";
+
+export interface LoginOutcome {
+  outcome: LoginOutcomeCode;
+  failure_reason?: string;
+  user_message: string;
+  recommended_action: string;
+  signals_detected: string[];
+  related_pass_id?: string;
+  browser_session_id?: string;
+  raw_secret_revealed_to_agent: false;
+}
+
+export interface StoredLoginDiagnostic {
+  diagnostic_id: string;
+  user_id: string;
+  browser_session_id: string;
+  delegation_id?: string;
+  domain: string;
+  pass_label?: string;
+  related_pass_id?: string;
+  outcome: LoginOutcomeCode;
+  user_message: string;
+  recommended_action: string;
+  failure_reason?: string;
+  signals_detected: string[];
+  detected_at: string;
+  raw_secret_revealed_to_agent: false;
+}
+
 // ─── Challenge Relay v1 ──────────────────────────────────────────────────────
 
 export type SecurityChallengeType =

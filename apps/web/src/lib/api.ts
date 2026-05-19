@@ -825,3 +825,32 @@ export const revokeAgentConnector = (id: string) =>
     `/api/agent-connectors/${id}/revoke`,
     { method: "POST", body: JSON.stringify({}) },
   );
+
+// ─── Login Failure Diagnostics v1 ────────────────────────────────────────────
+
+export type LoginOutcomeCode =
+  | "login_success"
+  | "invalid_credentials"
+  | "manual_challenge_required"
+  | "captcha_required"
+  | "rate_limited"
+  | "unknown_failure";
+
+export interface LoginDiagnosticView {
+  diagnostic_id: string;
+  browser_session_id: string;
+  delegation_id?: string;
+  domain: string;
+  pass_label?: string;
+  related_pass_id?: string;
+  outcome: LoginOutcomeCode;
+  user_message: string;
+  recommended_action: string;
+  failure_reason?: string;
+  signals_detected: string[];
+  detected_at: string;
+  raw_secret_revealed_to_agent: false;
+}
+
+export const listLoginDiagnostics = () =>
+  request<LoginDiagnosticView[]>("/api/internal/login-diagnostics/recent");

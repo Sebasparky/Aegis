@@ -27,6 +27,7 @@ import {
   startChallengeEmailResolution,
   cancelChallengeEmailResolution,
   listSensitiveGrants,
+  listLoginDiagnostics,
   type RouteRunWithSummary,
   type CredentialSessionView,
   type RunApprovalContext,
@@ -38,6 +39,7 @@ import {
   type SecurityChallengeView,
   type EmailResolverStatusView,
   type ChallengeEmailResolutionView,
+  type LoginDiagnosticView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -971,6 +973,79 @@ function PendingChallengeCard({
   );
 }
 
+// ── Login diagnostic card ──────────────────────────────────────────────────────
+
+function LoginDiagnosticCard({
+  diagnostic,
+  onDismiss,
+}: {
+  diagnostic: LoginDiagnosticView;
+  onDismiss: () => void;
+}) {
+  const isInvalidCreds = diagnostic.outcome === "invalid_credentials";
+  const isChallengeRequired = diagnostic.outcome === "manual_challenge_required";
+  const outcomeLabel =
+    isInvalidCreds ? "Wrong credentials" :
+    isChallengeRequired ? "Verification required" :
+    diagnostic.outcome === "captcha_required" ? "CAPTCHA detected" :
+    diagnostic.outcome === "rate_limited" ? "Rate limited" :
+    "Login failed";
+
+  return (
+    <div
+      className="apr-card"
+      style={{
+        borderColor: isInvalidCreds ? "var(--amber-ring)" : "var(--hairline)",
+        background: isInvalidCreds ? "var(--amber-soft)" : "rgba(255,255,255,0.78)",
+      }}
+    >
+      <div className="apr-card__head" style={{ alignItems: "flex-start" }}>
+        <div>
+          <span className="a-status a-status--amber" style={{ marginBottom: 8, display: "inline-flex" }}>
+            {outcomeLabel}
+          </span>
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "6px 0 2px" }}>
+            {diagnostic.pass_label ?? diagnostic.domain}
+          </p>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, fontFamily: "monospace" }}>
+            {diagnostic.domain} · {new Date(diagnostic.detected_at).toLocaleTimeString()}
+          </p>
+        </div>
+        <button
+          onClick={onDismiss}
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-4)", fontSize: 16, padding: "0 0 0 8px", flexShrink: 0 }}
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="apr-card__body">
+        <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 12px", lineHeight: 1.55 }}>
+          {diagnostic.user_message}
+        </p>
+        <div style={{ background: "var(--green-soft)", border: "1px solid var(--green-ring)", borderRadius: "var(--r-2)", padding: "10px 14px", marginBottom: 14 }}>
+          <p style={{ fontSize: 12.5, color: "oklch(0.42 0.09 150)", margin: 0, lineHeight: 1.5 }}>
+            The agent never saw your password — credentials remain in your vault.
+          </p>
+        </div>
+        <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          <strong style={{ color: "var(--ink-2)" }}>Recommended:</strong> {diagnostic.recommended_action}
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {isInvalidCreds && (
+            <a href="/passes" className="a-btn a-btn--primary" style={{ fontSize: 13 }}>
+              Update saved credential
+            </a>
+          )}
+          <button onClick={onDismiss} className="a-btn a-btn--ghost" style={{ fontSize: 13 }}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Active grants panel ────────────────────────────────────────────────────────
 
 function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
@@ -1038,6 +1113,8 @@ export default function RouteRunApprovalsPage() {
   const [loadingContexts, setLoadingContexts] = useState<Set<string>>(new Set());
   const [activeGrants, setActiveGrants] = useState<SensitiveGrant[]>([]);
   const [lastDecision, setLastDecision] = useState<{ action: "approved" | "denied"; note: string } | null>(null);
+  const [loginDiagnostics, setLoginDiagnostics] = useState<LoginDiagnosticView[]>([]);
+  const [dismissedDiagnostics, setDismissedDiagnostics] = useState<Set<string>>(new Set());
   const [showDisclosure, setShowDisclosure] = useState(false);
 
   useEffect(() => {
@@ -1050,8 +1127,9 @@ export default function RouteRunApprovalsPage() {
       listSecurityChallenges(),
       getEmailResolverStatus().catch(() => null),
       listSensitiveGrants({ status: "active" }).catch(() => []),
+      listLoginDiagnostics().catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1060,6 +1138,7 @@ export default function RouteRunApprovalsPage() {
         setChallenges(chlgs);
         setEmailResolverStatus(emailStatus);
         setActiveGrants(grants);
+        setLoginDiagnostics(diags);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1090,6 +1169,17 @@ export default function RouteRunApprovalsPage() {
     }, 8000);
     return () => clearInterval(id);
   }, [challenges.length]);
+
+  // Poll for login diagnostics every 10 seconds
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const fresh = await listLoginDiagnostics();
+        setLoginDiagnostics(fresh);
+      } catch { /* non-fatal */ }
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   async function handleApprove(runId: string) {
     setActionError(null);
@@ -1222,6 +1312,12 @@ export default function RouteRunApprovalsPage() {
       setActionError(err.message ?? "Failed to cancel challenge.");
     }
   }
+
+  function handleDismissDiagnostic(id: string) {
+    setDismissedDiagnostics((prev) => new Set(prev).add(id));
+  }
+
+  const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
   const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + challenges.length;
 
@@ -1492,6 +1588,23 @@ export default function RouteRunApprovalsPage() {
             </div>
           )}
         </div>
+
+        {/* ── Login failure diagnostics ─────────────────────────────────── */}
+        {visibleDiagnostics.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)" }}>Recent login results</div>
+              <span className="a-status a-status--amber">{visibleDiagnostics.length} issue{visibleDiagnostics.length !== 1 ? "s" : ""}</span>
+            </div>
+            {visibleDiagnostics.map((d) => (
+              <LoginDiagnosticCard
+                key={d.diagnostic_id}
+                diagnostic={d}
+                onDismiss={() => handleDismissDiagnostic(d.diagnostic_id)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* ── How Antigen protects approvals ───────────────────────────── */}
         <div style={{

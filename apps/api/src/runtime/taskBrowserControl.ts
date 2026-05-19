@@ -1,10 +1,23 @@
 import { chromium } from "playwright";
 import type { ObservationDryRunOpenSummary } from "@aegis/types";
 import { buildMinimalOpenObservation } from "./agentSafeObservation.js";
+import { extractPageTextSignals } from "../lib/loginDiagnostics.js";
 
 export interface TaskBrowserControlResult {
   current_url: string;
   snapshot: ObservationDryRunOpenSummary;
+  /** @internal — stripped from API responses; used by the click handler for login diagnostics */
+  _page_text_signals?: string[];
+}
+
+function safeDisconnectFromCdp(browser: unknown): void {
+  try {
+    if (typeof (browser as any)?.disconnect === "function") {
+      (browser as any).disconnect();
+    }
+  } catch {
+    // cleanup errors must not propagate — operation result takes priority
+  }
 }
 
 async function getActivePage(browser: Awaited<ReturnType<typeof chromium.connectOverCDP>>) {
@@ -38,7 +51,7 @@ export async function connectAndNavigate(cdp_url: string, url: string): Promise<
     const snapshot = await buildMinimalOpenObservation(page);
     return { current_url: page.url(), snapshot };
   } finally {
-    (browser as any).disconnect();
+    safeDisconnectFromCdp(browser);
   }
 }
 
@@ -56,7 +69,7 @@ export async function connectAndObserve(cdp_url: string): Promise<TaskBrowserCon
     const snapshot = await buildMinimalOpenObservation(page);
     return { current_url: page.url(), snapshot };
   } finally {
-    (browser as any).disconnect();
+    safeDisconnectFromCdp(browser);
   }
 }
 
@@ -80,9 +93,10 @@ export async function connectAndClick(cdp_url: string, selector: string): Promis
       throw e;
     }
     await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+    const _page_text_signals = await extractPageTextSignals(page);
     const snapshot = await buildMinimalOpenObservation(page);
-    return { current_url: page.url(), snapshot };
+    return { current_url: page.url(), snapshot, _page_text_signals };
   } finally {
-    (browser as any).disconnect();
+    safeDisconnectFromCdp(browser);
   }
 }

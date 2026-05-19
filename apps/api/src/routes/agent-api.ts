@@ -68,6 +68,7 @@ import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
 import { checkSensitiveGrant } from "../lib/sensitiveGrants.js";
 import { runObservationDryRun } from "../runtime/observationDryRun.js";
 import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
+import { classifyLoginOutcome, storeDiagnostic } from "../lib/loginDiagnostics.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -969,13 +970,45 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       try {
         const result = await connectAndClick(session.cdp_url, body.selector);
+        const { _page_text_signals, ...safeResult } = result;
+
+        // Classify login outcome from page text signals (never exposed to agent directly)
+        const loginDiagnostic = _page_text_signals ? classifyLoginOutcome(_page_text_signals) : null;
+        if (loginDiagnostic) {
+          // Link to vault pass via any injection tied to this browser session
+          const linkedInjection = [...secretFieldInjections.values()].find(
+            (inj) => inj.browser_session_id === session.browser_session_id,
+          );
+          loginDiagnostic.browser_session_id = session.browser_session_id;
+          loginDiagnostic.related_pass_id = linkedInjection?.pass_id;
+
+          let domain = session.browser_session_id;
+          try { domain = new URL(safeResult.current_url).hostname; } catch { /* keep fallback */ }
+
+          storeDiagnostic({
+            user_id: delegation.user_id,
+            browser_session_id: session.browser_session_id,
+            delegation_id: delegation.id,
+            domain,
+            pass_label: linkedInjection ? aegisVaultPasses.get(linkedInjection.pass_id)?.pass_label : undefined,
+            related_pass_id: linkedInjection?.pass_id,
+            outcome: loginDiagnostic.outcome,
+            user_message: loginDiagnostic.user_message,
+            recommended_action: loginDiagnostic.recommended_action,
+            failure_reason: loginDiagnostic.failure_reason,
+            signals_detected: loginDiagnostic.signals_detected,
+            raw_secret_revealed_to_agent: false,
+          });
+        }
+
         return reply.send({
           ok: true,
           data: {
             browser_session_id: session.browser_session_id,
             clicked: true,
-            current_url: result.current_url,
-            snapshot: result.snapshot,
+            current_url: safeResult.current_url,
+            snapshot: safeResult.snapshot,
+            ...(loginDiagnostic ? { login_diagnostic: loginDiagnostic } : {}),
             raw_cookies_revealed_to_agent: false,
             raw_storage_revealed_to_agent: false,
           },

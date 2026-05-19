@@ -8,6 +8,7 @@ import {
   type CreateTaskBrowserResult,
 } from "../runtime/taskBrowserSessions.js";
 import { requireAgentToken } from "./agent-api.js";
+import { loginDiagnosticsStore } from "../lib/loginDiagnostics.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -137,4 +138,15 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
       }
     },
   );
+
+  // GET /api/internal/login-diagnostics/recent — recent login failure diagnostics for the current user.
+  // Internal/UI-only. Returns newest-first, capped at 20.
+  server.get("/api/internal/login-diagnostics/recent", async (_req, reply) => {
+    const items = Array.from(loginDiagnosticsStore.values())
+      .filter((d) => d.user_id === MOCK_USER_ID)
+      .sort((a, b) => b.detected_at.localeCompare(a.detected_at))
+      .slice(0, 20)
+      .map(({ user_id: _uid, ...rest }) => rest);
+    return reply.send({ ok: true, data: items });
+  });
 }

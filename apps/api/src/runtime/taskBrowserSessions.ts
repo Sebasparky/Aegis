@@ -128,6 +128,85 @@ async function findAvailablePort(ports: number[]): Promise<number | null> {
   return null;
 }
 
+// Like findAvailablePort, but also recycles ports held by tracked terminal sessions.
+// If a port is in use but belongs to a closed/failed/expired session, kill any remaining
+// process and wait briefly for the OS to reclaim the port before moving on.
+async function findAvailablePortWithRecycle(ports: number[]): Promise<number | null> {
+  for (const port of ports) {
+    if (!(await isPortInUse(port))) return port;
+    const session = findSessionByPort(port);
+    if (session && (session.status === "closed" || session.status === "failed" || session.status === "expired")) {
+      const proc = taskBrowserProcesses.get(session.browser_session_id);
+      if (proc) {
+        try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+        taskBrowserProcesses.delete(session.browser_session_id);
+      }
+      const freed = await waitForPortFree(port, 1500);
+      if (freed) return port;
+    }
+  }
+  return null;
+}
+
+// Kills lingering processes for all terminal sessions and expires time-based ones.
+// Returns the count of processes killed so the caller can decide whether to pause.
+function sweepTerminalSessions(): number {
+  expireInactiveTaskBrowserSessions();
+  let killed = 0;
+  for (const [id, session] of taskBrowserSessions.entries()) {
+    if (session.status === "closed" || session.status === "failed" || session.status === "expired") {
+      const proc = taskBrowserProcesses.get(id);
+      if (proc) {
+        try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+        taskBrowserProcesses.delete(id);
+        killed++;
+      }
+    }
+  }
+  return killed;
+}
+
+// Safe diagnostic view for the port-status endpoint — never exposes PIDs, profiles, or secrets.
+export async function getPortStatusForDiagnostics(): Promise<{
+  port_range: string;
+  occupied_count: number;
+  available_count: number;
+  ports: Array<{ port: number; in_use: boolean; session_id: string | null; session_status: string | null; has_tracked_process: boolean }>;
+  sessions: Array<{ session_id: string; status: string; port: number; mode: string; created_at: string; expires_at: string; closed_at?: string; cleanup_complete?: boolean; has_tracked_process: boolean }>;
+}> {
+  const ports = await Promise.all(
+    ALL_CDP_PORTS.map(async (port) => {
+      const session = findSessionByPort(port);
+      return {
+        port,
+        in_use: await isPortInUse(port),
+        session_id: session?.browser_session_id ?? null,
+        session_status: session?.status ?? null,
+        has_tracked_process: session ? taskBrowserProcesses.has(session.browser_session_id) : false,
+      };
+    }),
+  );
+  const sessions = Array.from(taskBrowserSessions.values()).map((s) => ({
+    session_id: s.browser_session_id,
+    status: s.status,
+    port: s.cdp_port,
+    mode: s.mode,
+    created_at: s.created_at,
+    expires_at: s.expires_at,
+    ...(s.closed_at ? { closed_at: s.closed_at } : {}),
+    ...(s.cleanup_complete !== undefined ? { cleanup_complete: s.cleanup_complete } : {}),
+    has_tracked_process: taskBrowserProcesses.has(s.browser_session_id),
+  }));
+  const occupied_count = ports.filter((p) => p.in_use).length;
+  return {
+    port_range: `${DEFAULT_CDP_PORT}–${ALTERNATE_CDP_PORTS[ALTERNATE_CDP_PORTS.length - 1]}`,
+    occupied_count,
+    available_count: ports.length - occupied_count,
+    ports,
+    sessions,
+  };
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export interface CreateTaskBrowserOptions {
@@ -254,13 +333,27 @@ async function launchChrome(
 }
 
 const DEFAULT_CDP_PORT = 9222;
-const ALTERNATE_CDP_PORTS = [9223, 9224, 9225, 9226, 9227, 9228, 9229, 9230];
+const ALTERNATE_CDP_PORTS = [
+  9223, 9224, 9225, 9226, 9227, 9228, 9229, 9230,
+  9231, 9232, 9233, 9234, 9235, 9236, 9237, 9238,
+  9239, 9240, 9241, 9242, 9243, 9244, 9245, 9246,
+  9247, 9248, 9249, 9250,
+];
+export const ALL_CDP_PORTS = [DEFAULT_CDP_PORT, ...ALTERNATE_CDP_PORTS];
 
 export async function createTaskBrowserSession(
   opts: CreateTaskBrowserOptions = {},
 ): Promise<CreateTaskBrowserResult> {
   const debug_visible = opts.debug_visible === true;
   const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
+
+  // Sweep expired/terminal sessions and kill any lingering processes before scanning ports.
+  const killed = sweepTerminalSessions();
+  if (killed > 0) {
+    // Give the OS a brief window to reclaim ports from just-killed processes.
+    await new Promise<void>((r) => setTimeout(r, 300));
+  }
+
   const portBusy = await isPortInUse(DEFAULT_CDP_PORT);
 
   if (!portBusy) {
@@ -275,18 +368,19 @@ export async function createTaskBrowserSession(
     return { session: existing, reused_existing: true, user_message: "Reusing the active Antigen task browser session.", mode: existing.mode };
   }
 
-  // Case B: known stale session (expired or failed) — recycle and try same port
-  if (existing && (existing.status === "expired" || existing.status === "failed")) {
+  // Case B: known stale session (closed, expired, or failed) — recycle and try same port.
+  // Includes "closed" because close() may return before the OS fully releases the port.
+  if (existing && (existing.status === "closed" || existing.status === "expired" || existing.status === "failed")) {
     const proc = taskBrowserProcesses.get(existing.browser_session_id);
     if (proc) {
       try { proc.kill("SIGTERM"); } catch { /* ignore */ }
       taskBrowserProcesses.delete(existing.browser_session_id);
     }
     existing.status = "closed";
-    existing.closed_at = new Date().toISOString();
+    existing.closed_at ??= new Date().toISOString();
     taskBrowserSessions.set(existing.browser_session_id, existing);
 
-    const freed = await waitForPortFree(DEFAULT_CDP_PORT);
+    const freed = await waitForPortFree(DEFAULT_CDP_PORT, 1500);
     if (freed) {
       const session = await launchChrome(opts, DEFAULT_CDP_PORT);
       return { session, user_message: "Started a fresh Antigen task browser session.", mode };
@@ -294,23 +388,37 @@ export async function createTaskBrowserSession(
     // Port still busy after recycle — fall through to alternate ports below
   }
 
-  // Case C: unknown process on default port (or stale port still busy after recycle)
+  // Case C: unknown process on default port (or stale port still busy after recycle).
   // Do not reuse or inject secrets into an untracked browser.
   if (!existing) {
     console.log("[TaskBrowser] Port 9222 occupied by unknown process — launching on alternate port");
   }
 
-  const altPort = await findAvailablePort(ALTERNATE_CDP_PORTS);
+  // Use recycle-aware scan so alternate ports held by terminal sessions can be freed.
+  const altPort = await findAvailablePortWithRecycle(ALTERNATE_CDP_PORTS);
   if (altPort !== null) {
     const session = await launchChrome(opts, altPort);
     return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
-  // Case D: no ports available in 9222–9230 range
-  console.error("[TaskBrowser] All ports 9222–9230 occupied — cannot start task browser session");
+  // Case D: all ports exhausted — include safe diagnostic metadata in the error.
+  const portRange = `9222–${ALTERNATE_CDP_PORTS[ALTERNATE_CDP_PORTS.length - 1]}`;
+  const trackedOccupied = ALL_CDP_PORTS
+    .map((p) => ({ port: p, session: findSessionByPort(p) }))
+    .filter((x) => x.session)
+    .map((x) => ({ session_id: x.session!.browser_session_id, status: x.session!.status, port: x.port }));
+
+  console.error(`[TaskBrowser] All ports ${portRange} occupied — cannot start task browser session`, {
+    tracked_occupied: trackedOccupied.length,
+    total_sessions: taskBrowserSessions.size,
+  });
   throw Object.assign(
-    new Error("Antigen could not start a secure browser session. Please try again."),
-    { code: "NO_PORTS_AVAILABLE" },
+    new Error(`Antigen could not start a secure browser session — all ports ${portRange} are occupied. Close any open task browser sessions and retry.`),
+    {
+      code: "NO_PORTS_AVAILABLE",
+      occupied_port_range: portRange,
+      tracked_occupied_sessions: trackedOccupied,
+    },
   );
 }
 

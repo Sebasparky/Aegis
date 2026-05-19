@@ -5,6 +5,7 @@ import {
   createTaskBrowserSession,
   getTaskBrowserSession,
   closeTaskBrowserSession,
+  getPortStatusForDiagnostics,
   type CreateTaskBrowserResult,
 } from "../runtime/taskBrowserSessions.js";
 import { requireAgentToken } from "./agent-api.js";
@@ -64,8 +65,19 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
       return reply.status(httpStatus).send({ ok: true, data: { ...safeSessionView(session), ...meta } });
     } catch (err: unknown) {
       if (err instanceof Error) {
-        const code = (err as any).code ?? "UNKNOWN_ERROR";
-        if (code === "NO_PORTS_AVAILABLE") return sendError(reply, 503, code, err.message);
+        const e = err as Error & { code?: string; occupied_port_range?: string; tracked_occupied_sessions?: unknown[] };
+        const code = e.code ?? "UNKNOWN_ERROR";
+        if (code === "NO_PORTS_AVAILABLE") {
+          return reply.status(503).send({
+            ok: false,
+            error: {
+              code,
+              message: e.message,
+              ...(e.occupied_port_range ? { occupied_port_range: e.occupied_port_range } : {}),
+              tracked_occupied_sessions: e.tracked_occupied_sessions ?? [],
+            },
+          });
+        }
         if (code === "CHROME_NOT_FOUND") return sendError(reply, 500, code, err.message);
         if (code === "CDP_NOT_READY") return sendError(reply, 500, code, err.message);
         return sendError(reply, 500, code, err.message);
@@ -138,6 +150,13 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
       }
     },
   );
+
+  // GET /api/internal/task-browser-port-status — dev diagnostic: port occupancy and session inventory.
+  // Never returns PIDs, user_data_dir paths, secrets, or credentials.
+  server.get("/api/internal/task-browser-port-status", async (_req, reply) => {
+    const status = await getPortStatusForDiagnostics();
+    return reply.send({ ok: true, data: status });
+  });
 
   // GET /api/internal/login-diagnostics/recent — recent login failure diagnostics for the current user.
   // Internal/UI-only. Returns newest-first, capped at 20.

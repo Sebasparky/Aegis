@@ -58,6 +58,9 @@ async function createUserApprovalReceipt(
   };
 
   const receipt = await buildSignedUserApprovalReceipt(fields);
+  if (!receipt.verification.jws_present) {
+    throw new Error("APPROVAL_RECEIPT_SIGNING_FAILED");
+  }
   userApprovalReceipts.set(receipt.receipt_id, receipt);
 }
 
@@ -90,12 +93,15 @@ export async function approvalRoutes(server: FastifyInstance) {
 
       const now = new Date().toISOString();
       const updated: ApprovalRequest = { ...approval, status: "approved", resolved_at: now };
-      approvals.set(updated.id, updated);
 
-      // Create a signed liability receipt for this user decision (non-blocking).
-      createUserApprovalReceipt(updated, "approved", now).catch((err) => {
-        console.error("[approvals] Failed to create user approval receipt:", err);
-      });
+      // Signed receipt must exist before authority is released. Fail closed if signing fails.
+      try {
+        await createUserApprovalReceipt(updated, "approved", now);
+      } catch {
+        return reply.status(500).send({ ok: false, error: { code: "APPROVAL_RECEIPT_SIGNING_FAILED", message: "Unable to create signed approval receipt. Approval not processed." } });
+      }
+
+      approvals.set(updated.id, updated);
 
       // Create and execute a runner task before resuming the session
       const runnerTask = createRunnerTaskFromApproval(updated);

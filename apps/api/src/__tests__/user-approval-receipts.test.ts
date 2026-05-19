@@ -216,6 +216,51 @@ describe("ApprovalRequest approve → UserApprovalReceipt", () => {
     expect(r.verification.jws_present).toBe(true);
     expect(r.verification.signing_alg).toBe("EdDSA");
   });
+
+  it("returns 500 and does not commit approval state when receipt signing throws", async () => {
+    const { buildSignedUserApprovalReceipt } = await import("../lib/userApprovalReceiptSigning.js");
+    (buildSignedUserApprovalReceipt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Signing key unavailable"),
+    );
+
+    seedApproval("sign_throw_001");
+    const res = await server.inject({ method: "POST", url: "/api/approvals/sign_throw_001/approve", headers: { "content-type": "application/json" }, payload: {} });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("APPROVAL_RECEIPT_SIGNING_FAILED");
+
+    // Approval must not have been committed
+    expect(approvals.get("sign_throw_001")?.status).toBe("pending");
+    // No unsigned receipt stored
+    expect(userApprovalReceipts.size).toBe(0);
+  });
+
+  it("returns 500 and does not commit approval state when receipt is unsigned (jws_present=false)", async () => {
+    const { buildSignedUserApprovalReceipt } = await import("../lib/userApprovalReceiptSigning.js");
+    (buildSignedUserApprovalReceipt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (fields: Record<string, unknown>) => ({
+        ...fields,
+        outcome: "pending",
+        raw_secrets_in_receipt: false,
+        raw_credentials_in_receipt: false,
+        verification: {
+          canonical_payload_hash: "deadbeef",
+          jws: "",
+          jws_present: false,
+          signing_alg: "EdDSA",
+          signed_at: new Date().toISOString(),
+        },
+      }),
+    );
+
+    seedApproval("sign_unsigned_001");
+    const res = await server.inject({ method: "POST", url: "/api/approvals/sign_unsigned_001/approve", headers: { "content-type": "application/json" }, payload: {} });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("APPROVAL_RECEIPT_SIGNING_FAILED");
+
+    expect(approvals.get("sign_unsigned_001")?.status).toBe("pending");
+    // Unsigned receipt must NOT be stored
+    expect(userApprovalReceipts.size).toBe(0);
+  });
 });
 
 // ─── 2. ApprovalRequest deny ──────────────────────────────────────────────────

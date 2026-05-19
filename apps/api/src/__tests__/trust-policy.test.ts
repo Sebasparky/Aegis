@@ -10,6 +10,13 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
+// Route-run approve now requires signed ActionAuthorizationReceipt before releasing authority.
+// Mock signing so tests don't require real EdDSA keys.
+vi.mock("../lib/actionAuthorizationSigning.js", () => ({
+  hashActionAuthorization: vi.fn().mockReturnValue("mock_auth_hash"),
+  signActionAuthorizationJws: vi.fn().mockResolvedValue("mock.authz.jws"),
+}));
+
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
 import {

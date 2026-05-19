@@ -615,12 +615,10 @@ export async function routeRunRoutes(server: FastifyInstance) {
         return sendError(reply, 400, "INVALID_STATE", `Run is not pending approval (status: ${run.status}).`);
       }
       const approvedAt = new Date().toISOString();
-      run.status = "pending";
-      run.approved_at = approvedAt;
-      run.approved_permissions = run.approval_required_permissions ?? [];
 
-      // Create a signed action authorization receipt at approval time.
-      // This proves the human explicitly approved this specific action before execution began.
+      // ActionAuthorizationReceipt is the blocking authorization proof for route-run approvals.
+      // run.status is NOT mutated until signing succeeds — fail closed on signing failure.
+      // Note: a UserApprovalReceipt for the user's approval click may be added in a future increment.
       try {
         const user = users.get(run.user_id);
         const delegation = run.delegation_id ? agentDelegations.get(run.delegation_id) : undefined;
@@ -709,11 +707,15 @@ export async function routeRunRoutes(server: FastifyInstance) {
         actionAuthorizations.set(authorization_id, fullAuth);
         run.authorization_id = authorization_id;
         run.authorization_hash = authorization_hash;
-      } catch (authErr: any) {
-        // Authorization creation failure does not block approval — log and continue.
-        // The run proceeds without a signed authorization receipt in this case.
-        console.error("[approve] Failed to create action authorization receipt:", authErr?.message);
+      } catch {
+        // Signing failure is fail-closed — run stays at pending_approval, no authority released.
+        return sendError(reply, 500, "APPROVAL_RECEIPT_SIGNING_FAILED", "Unable to create signed authorization receipt. Approval not processed.");
       }
+
+      // Only mutate run status after signed authorization proof exists.
+      run.status = "pending";
+      run.approved_at = approvedAt;
+      run.approved_permissions = run.approval_required_permissions ?? [];
 
       const route = routes.get(run.route_id);
       const canAutoStart = route?.execution_mode === "aegis_controlled" && !!route.start_url;

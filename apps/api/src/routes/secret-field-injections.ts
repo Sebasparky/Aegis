@@ -7,8 +7,8 @@ import { buildSensitiveGrant } from "../lib/sensitiveGrants.js";
 
 /**
  * Create a UserApprovalReceipt + SensitiveGrant for a credential injection approval.
- * Non-blocking: if UAR creation fails, no grant is created. Caller wraps in .catch().
- * Constraint: a grant is only created when a valid UAR can be produced first.
+ * Throws APPROVAL_RECEIPT_SIGNING_FAILED if signing fails — unsigned receipts are never stored
+ * and grants are never created without a signed UAR. Callers must await and handle the throw.
  */
 async function createCredentialGrant(auth: CredentialUseAuthorization): Promise<void> {
   const now = new Date().toISOString();
@@ -33,6 +33,10 @@ async function createCredentialGrant(auth: CredentialUseAuthorization): Promise<
     raw_secrets_in_receipt: false,
     raw_credentials_in_receipt: false,
   });
+
+  if (!uar.verification.jws_present) {
+    throw new Error("APPROVAL_RECEIPT_SIGNING_FAILED");
+  }
 
   userApprovalReceipts.set(uarId, uar);
 
@@ -110,16 +114,19 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
         return sendError(reply, 400, "EXPIRED", "Authorization has expired.");
       }
 
-      auth.status = "approved";
-      auth.approved_at = new Date().toISOString();
-      credentialUseAuthorizations.set(auth.authorization_id, auth);
+      // Signed receipt and SensitiveGrant must exist before authority is released.
+      // Pass approvedAt via spread so auth is not mutated until signing succeeds.
+      const approvedAt = new Date().toISOString();
+      try {
+        await createCredentialGrant({ ...auth, approved_at: approvedAt });
+      } catch {
+        return sendError(reply, 500, "APPROVAL_RECEIPT_SIGNING_FAILED", "Unable to create signed approval receipt. Authorization not processed.");
+      }
 
-      // Non-blocking: create UserApprovalReceipt + SensitiveGrant for this approval.
-      // If UAR signing fails, no grant is created (grant invariant: must link to a valid UAR).
-      // Parent endpoint always returns 200 regardless of grant creation success.
-      createCredentialGrant(auth).catch((err) => {
-        console.error("[credential-authorizations] Failed to create sensitive grant:", err);
-      });
+      // Only mutate auth state after signed proof exists.
+      auth.status = "approved";
+      auth.approved_at = approvedAt;
+      credentialUseAuthorizations.set(auth.authorization_id, auth);
 
       // Promote all linked pending injections
       for (const inj of secretFieldInjections.values()) {

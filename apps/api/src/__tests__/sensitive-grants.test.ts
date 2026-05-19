@@ -241,7 +241,7 @@ describe("credential authorization approval → UAR + SensitiveGrant", () => {
     expect(grant.raw_credentials_in_grant).toBe(false);
   });
 
-  it("approval endpoint still returns 200 when grant creation fails (non-blocking)", async () => {
+  it("returns 500 and leaves auth in pending_approval when receipt signing throws", async () => {
     const { buildSignedUserApprovalReceipt } = await import("../lib/userApprovalReceiptSigning.js");
     (buildSignedUserApprovalReceipt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("Signing key unavailable"),
@@ -254,10 +254,47 @@ describe("credential authorization approval → UAR + SensitiveGrant", () => {
       headers: { "content-type": "application/json" },
       payload: {},
     });
-    expect(res.statusCode).toBe(200);
-    await settle();
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("APPROVAL_RECEIPT_SIGNING_FAILED");
 
-    // No grant created when UAR fails (invariant: grant must link to a valid UAR)
+    // Auth must not have been committed to approved
+    expect(credentialUseAuthorizations.get("auth_test_001")?.status).toBe("pending_approval");
+    // No unsigned receipt stored, no grant created
+    expect(userApprovalReceipts.size).toBe(0);
+    expect(sensitiveGrants.size).toBe(0);
+  });
+
+  it("returns 500 and leaves auth in pending_approval when receipt is unsigned (jws_present=false)", async () => {
+    const { buildSignedUserApprovalReceipt } = await import("../lib/userApprovalReceiptSigning.js");
+    (buildSignedUserApprovalReceipt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (fields: Record<string, unknown>) => ({
+        ...fields,
+        outcome: "pending",
+        raw_secrets_in_receipt: false,
+        raw_credentials_in_receipt: false,
+        verification: {
+          canonical_payload_hash: "deadbeef",
+          jws: "",
+          jws_present: false,
+          signing_alg: "EdDSA",
+          signed_at: new Date().toISOString(),
+        },
+      }),
+    );
+
+    seedAuth();
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/internal/credential-authorizations/auth_test_001/approve",
+      headers: { "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("APPROVAL_RECEIPT_SIGNING_FAILED");
+
+    expect(credentialUseAuthorizations.get("auth_test_001")?.status).toBe("pending_approval");
+    // Unsigned receipt must NOT be stored
+    expect(userApprovalReceipts.size).toBe(0);
     expect(sensitiveGrants.size).toBe(0);
   });
 

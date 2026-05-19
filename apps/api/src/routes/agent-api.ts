@@ -39,6 +39,7 @@ import {
   aegisVaultPasses,
   secretFieldInjections,
   credentialUseAuthorizations,
+  sensitiveGrants,
   securityChallenges,
   challengeEmailResolutions,
   aegisWorkspaces,
@@ -58,6 +59,7 @@ import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { schedulePersist } from "../store/persistence.js";
 import { computeWebsiteAgentSafetyProfile } from "./website-agent-safety.js";
 import { getWebsiteAegisPolicyForDomain } from "./website-aegis-policy.js";
+import { checkSensitiveGrant } from "../lib/sensitiveGrants.js";
 import { runObservationDryRun } from "../runtime/observationDryRun.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
@@ -1067,6 +1069,27 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         );
       }
 
+      // SensitiveGrant enforcement — active, non-consumed, non-revoked, non-expired grant required
+      const grantCheck = checkSensitiveGrant(sensitiveGrants, {
+        user_id: injection.user_id,
+        delegation_id: injection.delegation_id,
+        domain: injection.domain,
+        grant_type: "credential_injection",
+        pass_id: injection.pass_id,
+        authorization_id: injection.authorization_id,
+      });
+      if (!grantCheck.valid) {
+        const grantErrorDetails: Record<string, [number, string, string]> = {
+          consumed: [409, "SENSITIVE_GRANT_CONSUMED",  "This credential injection grant has already been consumed. Request a new injection."],
+          expired:  [400, "SENSITIVE_GRANT_EXPIRED",   "The sensitive grant for this injection has expired. Request a new injection."],
+          revoked:  [403, "SENSITIVE_GRANT_REVOKED",   "The sensitive grant for this injection has been revoked."],
+          no_grant: [403, "SENSITIVE_GRANT_REQUIRED",  "No valid sensitive grant found for this injection. Approval is required."],
+        };
+        const [st, code, msg] = grantErrorDetails[grantCheck.reason ?? "no_grant"] ?? [403, "SENSITIVE_GRANT_INVALID", "Grant check failed."];
+        return sendError(reply, st, code, msg);
+      }
+      const activeGrant = grantCheck.grant!;
+
       // Transition to executing
       injection.status = "executing";
       secretFieldInjections.set(injection.injection_request_id, injection);
@@ -1157,6 +1180,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             if (allFulfilled) {
               auth.status = "fulfilled";
               auth.fulfilled_at = now;
+              // Consume the SensitiveGrant — all authorized fields delivered; authority is spent
+              activeGrant.status = "consumed";
+              activeGrant.consumed_at = now;
+              sensitiveGrants.set(activeGrant.grant_id, activeGrant);
             }
             credentialUseAuthorizations.set(auth.authorization_id, auth);
           }
@@ -1774,7 +1801,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 403, "WORKSPACE_COLLAR_INACTIVE", "The workspace collar is inactive or missing.");
       }
 
-      const delegationCollar = collars.get(delegation.default_collar_id);
+      const delegationCollar = delegation.default_collar_id ? collars.get(delegation.default_collar_id) : undefined;
       if (!delegationCollar || delegationCollar.status !== "active") {
         return sendError(reply, 403, "WORKSPACE_COLLAR_INACTIVE", "Your delegation collar is inactive or missing.");
       }
@@ -1840,7 +1867,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // Build recommended_work_queue — per-task enriched entries sorted by priority/readiness
       const artifactNameSet = buildWorkspaceArtifactNames(workspace.workspace_id);
       const enrichedEntries = allTasks.map((t) =>
-        enrichTaskForManifest(t, delegation.id, delegation.default_collar_id, allTasks, artifactNameSet),
+        enrichTaskForManifest(t, delegation.id, delegation.default_collar_id ?? "", allTasks, artifactNameSet),
       );
       const recommendedWorkQueue = buildWorkQueue(enrichedEntries, allTasks);
 

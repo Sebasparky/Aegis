@@ -24,9 +24,10 @@ export interface CheckGrantInput {
   delegation_id: string;
   domain: string;
   grant_type: SensitiveGrantType;
-  pass_id?: string;       // required for credential_injection lookups
-  challenge_id?: string;  // required for challenge_resolution lookups
-  task_id?: string;       // if provided, grant.scope.task_id must match
+  pass_id?: string;           // required for credential_injection lookups
+  challenge_id?: string;      // required for challenge_resolution lookups
+  task_id?: string;           // if provided, grant.scope.task_id must match
+  authorization_id?: string;  // preferred for credential_injection — avoids matching unrelated grants for the same pass
 }
 
 export type CheckGrantReason = "no_grant" | "expired" | "consumed" | "revoked";
@@ -69,6 +70,7 @@ export function checkSensitiveGrant(
     // Type-specific scope matching
     if (input.grant_type === "credential_injection") {
       if (input.pass_id !== undefined && grant.scope.pass_id !== input.pass_id) continue;
+      if (input.authorization_id !== undefined && grant.scope.authorization_id !== input.authorization_id) continue;
     }
     if (input.grant_type === "challenge_resolution") {
       if (input.challenge_id !== undefined && grant.scope.challenge_id !== input.challenge_id) continue;

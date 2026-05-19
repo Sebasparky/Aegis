@@ -13,6 +13,7 @@ vi.mock("../runtime/taskBrowserSessions.js", async (importOriginal) => {
   return {
     ...actual,
     createTaskBrowserSession: vi.fn(),
+    getTaskBrowserSessionForReuse: vi.fn(),
   };
 });
 
@@ -34,7 +35,7 @@ import {
 } from "../store/index.js";
 import type { PassWithToken } from "../store/index.js";
 import type { AgentDelegation, Collar } from "@aegis/types";
-import { createTaskBrowserSession } from "../runtime/taskBrowserSessions.js";
+import { createTaskBrowserSession, getTaskBrowserSessionForReuse } from "../runtime/taskBrowserSessions.js";
 
 let server: FastifyInstance;
 
@@ -505,5 +506,103 @@ describe("POST /api/task-browser-sessions — headless mode", () => {
     expect(data.browser_session_id).toBeTruthy();
     expect(data.status).toBe("ready");
     expect(data.mode).toBe("headless");
+  });
+});
+
+// ─── Authenticated Session login-request — browser_session_id reuse ───────────
+
+describe("POST /api/agent/v1/authenticated-sessions/login-request — browser_session_id", () => {
+  const AUTH = { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" };
+  const BASE_BODY = {
+    domain: "github.com",
+    login_url: "https://github.com/login",
+    task_summary: "Log in to GitHub",
+  };
+
+  beforeEach(() => {
+    vi.mocked(getTaskBrowserSessionForReuse).mockReset();
+  });
+
+  it("without browser_session_id — creates handle with no task_browser_session_id (fresh behavior preserved)", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: AUTH,
+      payload: BASE_BODY,
+    });
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json();
+    expect(data.session_id).toMatch(/^authsess_/);
+    expect(data.status).toBe("pending_approval");
+    expect(data.task_browser_session_id).toBeUndefined();
+    expect(vi.mocked(getTaskBrowserSessionForReuse)).not.toHaveBeenCalled();
+  });
+
+  it("with valid browser_session_id — creates handle with task_browser_session_id set", async () => {
+    vi.mocked(getTaskBrowserSessionForReuse).mockReturnValueOnce({
+      browser_session_id: "tbsess_abc123",
+      cdp_url: "http://localhost:9222",
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: AUTH,
+      payload: { ...BASE_BODY, browser_session_id: "tbsess_abc123" },
+    });
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json();
+    expect(data.session_id).toMatch(/^authsess_/);
+    expect(data.status).toBe("pending_approval");
+    expect(data.task_browser_session_id).toBe("tbsess_abc123");
+    expect(vi.mocked(getTaskBrowserSessionForReuse)).toHaveBeenCalledWith("tbsess_abc123", IDS.USER);
+  });
+
+  it("with browser_session_id not available (not ready / wrong user) — returns 400 TASK_BROWSER_SESSION_NOT_AVAILABLE", async () => {
+    vi.mocked(getTaskBrowserSessionForReuse).mockReturnValueOnce(undefined);
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: AUTH,
+      payload: { ...BASE_BODY, browser_session_id: "tbsess_nonexistent" },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error.code).toBe("TASK_BROWSER_SESSION_NOT_AVAILABLE");
+  });
+
+  it("with browser_session_id as non-string — returns 400 INVALID_BROWSER_SESSION_ID", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: AUTH,
+      payload: { ...BASE_BODY, browser_session_id: 12345 },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error.code).toBe("INVALID_BROWSER_SESSION_ID");
+    expect(vi.mocked(getTaskBrowserSessionForReuse)).not.toHaveBeenCalled();
+  });
+
+  it("existing required-field validation is preserved — missing domain returns 400 MISSING_DOMAIN", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: AUTH,
+      payload: { login_url: "https://github.com/login", task_summary: "test" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("MISSING_DOMAIN");
+  });
+
+  it("auth is required — 401 without a valid token", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/authenticated-sessions/login-request",
+      headers: { "content-type": "application/json" },
+      payload: BASE_BODY,
+    });
+    expect(res.statusCode).toBe(401);
   });
 });

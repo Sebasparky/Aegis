@@ -1913,6 +1913,8 @@ export interface AuthenticatedSessionHandle {
   initial_observation?: ObservationDryRunOpenSummary;
   created_at: string;
   expires_at: string;
+  /** Set when the session borrowed an existing task browser session instead of launching a fresh browser. */
+  task_browser_session_id?: string;
 }
 
 export interface AuthenticatedSessionLoginRequest {
@@ -1920,6 +1922,10 @@ export interface AuthenticatedSessionLoginRequest {
   login_url: string;
   task_summary: string;
   pass_id?: string;
+  /** Optional. If provided, the authenticated session will borrow this task browser session
+   *  (via CDP) instead of launching a new isolated headless browser. The task browser is
+   *  NOT closed when the authenticated session ends — only Aegis's page is closed. */
+  browser_session_id?: string;
 }
 
 export interface AuthenticatedSessionObserveResult {

@@ -323,6 +323,24 @@ export function getTaskBrowserSession(
   return session;
 }
 
+export interface TaskBrowserSessionForReuse {
+  browser_session_id: string;
+  cdp_url: string;
+}
+
+/** Returns CDP metadata for a ready task browser session owned by userId. Returns undefined if
+ *  the session does not exist, does not belong to the user, or is not in 'ready' status. */
+export function getTaskBrowserSessionForReuse(
+  browser_session_id: string,
+  userId: string,
+): TaskBrowserSessionForReuse | undefined {
+  const session = taskBrowserSessions.get(browser_session_id);
+  if (!session) return undefined;
+  if (session.user_id !== userId) return undefined;
+  if (session.status !== "ready") return undefined;
+  return { browser_session_id: session.browser_session_id, cdp_url: session.cdp_url };
+}
+
 export async function closeTaskBrowserSession(id: string, userId: string): Promise<TaskBrowserSession> {
   const session = taskBrowserSessions.get(id);
   if (!session) throw Object.assign(new Error("Session not found."), { code: "NOT_FOUND" });

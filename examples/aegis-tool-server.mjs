@@ -1442,10 +1442,11 @@ async function startTaskBrowserSession({ delegation_id, debug_visible = false } 
   return {
     browser_session_id: s.browser_session_id,
     status: s.status,
+    mode: s.mode ?? "headless",
+    debug_visible: s.debug_visible === true,
     cdp_url: s.cdp_url,
+    cdp_port: s.cdp_port ?? null,
     ephemeral: s.ephemeral,
-    mode: res.data?.mode ?? s.mode ?? "headless",
-    debug_visible: s.debug_visible ?? false,
     expires_at: s.expires_at,
     cleanup_complete: s.cleanup_complete ?? false,
     reused_existing: reused,
@@ -1509,12 +1510,13 @@ async function closeTaskBrowserSession({ browser_session_id } = {}) {
 
 // ─── Authenticated Session Boundary handlers ─────────────────────────────────
 
-async function requestAuthenticatedSessionLogin({ domain, login_url, task_summary, pass_id }) {
+async function requestAuthenticatedSessionLogin({ domain, login_url, task_summary, pass_id, browser_session_id } = {}) {
   if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
   if (!login_url) return { error: "VALIDATION_ERROR", message: "login_url is required." };
   if (!task_summary) return { error: "VALIDATION_ERROR", message: "task_summary is required." };
   const body = { domain, login_url, task_summary };
   if (pass_id) body.pass_id = pass_id;
+  if (browser_session_id) body.browser_session_id = browser_session_id;
   let res;
   try {
     res = await request("POST", "/api/agent/v1/authenticated-sessions/login-request", body);
@@ -1525,6 +1527,7 @@ async function requestAuthenticatedSessionLogin({ domain, login_url, task_summar
     return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request authenticated session." };
   }
   const handle = res.data;
+  const borrowed = !!handle.task_browser_session_id;
   return {
     session_id: handle.session_id,
     domain: handle.domain,
@@ -1532,12 +1535,15 @@ async function requestAuthenticatedSessionLogin({ domain, login_url, task_summar
     task_summary: handle.task_summary,
     status: handle.status,
     capabilities: handle.capabilities,
+    task_browser_session_id: handle.task_browser_session_id ?? null,
     raw_cookies_revealed_to_agent: false,
     raw_storage_revealed_to_agent: false,
     raw_credentials_revealed_to_agent: false,
     created_at: handle.created_at,
     expires_at: handle.expires_at,
-    next_action: `Session created with status="${handle.status}". Direct the user to ${APPROVAL_UI} to approve the login request under "Login session requests". After approval, Aegis performs the login in an isolated Playwright session. Poll get_authenticated_session until status is "authenticated" or "manual_step_required".`,
+    next_action: borrowed
+      ? `Session created with status="${handle.status}" and bound to task browser session "${handle.task_browser_session_id}". Direct the user to ${APPROVAL_UI} to approve the login request under "Login session requests". After approval, Aegis performs the login in the existing task browser (not a fresh browser). If status becomes "manual_step_required" (passkey/2FA), the user can complete the challenge directly in the task browser window — the session stays open for user interaction. Poll get_authenticated_session until status is "authenticated".`
+      : `Session created with status="${handle.status}". Direct the user to ${APPROVAL_UI} to approve the login request under "Login session requests". After approval, Aegis performs the login in an isolated Playwright session. Poll get_authenticated_session until status is "authenticated" or "manual_step_required".`,
   };
 }
 
@@ -2631,14 +2637,22 @@ const TOOLS = [
   {
     name: "request_authenticated_session_login",
     description:
-      "SECONDARY/EXPERIMENTAL — Do not use for normal login when the agent has a Playwright browser. " +
+      "SECONDARY/EXPERIMENTAL — Do not use for normal login when the agent has a Playwright browser and is not hitting a passkey/trusted-device wall. " +
       "Primary path for login fields is request_secret_field_injection: agent navigates its own browser, Aegis fills only the protected fields via CDP.\n\n" +
-      "Use request_authenticated_session_login ONLY when: (1) the agent has no browser of its own, " +
-      "(2) the user explicitly asks Aegis to perform an isolated login, or (3) the task description says to use an authenticated session handle.\n\n" +
-      "What it does: Aegis performs the ENTIRE login workflow in an isolated headless Playwright session using a KMS-vaulted credential. " +
+      "Use request_authenticated_session_login WHEN:\n" +
+      "  (1) The agent has no browser of its own.\n" +
+      "  (2) The user explicitly asks Aegis to perform an isolated login.\n" +
+      "  (3) The task requires an authenticated session handle for observe/navigate.\n" +
+      "  (4) The site requires a passkey or trusted-device challenge — pass browser_session_id from start_task_browser_session so the user can complete the challenge in the visible task browser window.\n\n" +
+      "TRUSTED BROWSER REUSE (browser_session_id): If the site blocks login from a fresh headless browser (e.g. GitHub passkey), pass the browser_session_id returned by start_task_browser_session. " +
+      "Aegis will connect to that existing browser via CDP instead of launching a new one. " +
+      "If a passkey or challenge appears, the user can complete it directly in the task browser window — the session stays open for interaction. " +
+      "The task browser is NOT closed when the authenticated session ends (only Aegis's page is closed). " +
+      "Recommended workflow: call start_task_browser_session first, then pass its browser_session_id here.\n\n" +
+      "What it does: Aegis performs the ENTIRE login workflow using a KMS-vaulted credential. " +
       "The agent receives only an authenticated_session_id handle — never the password, cookies, localStorage, sessionStorage, storageState, Set-Cookie headers, auth tokens, secret_ref values, pass_id, KMS envelopes, or ciphertext. " +
       "After calling, direct the user to /route-run-approvals. Poll get_authenticated_session until status is 'authenticated' or 'manual_step_required'. " +
-      "If status becomes 'manual_step_required', stop immediately — Aegis does not bypass 2FA, CAPTCHA, passkey, or device verification.",
+      "If status becomes 'manual_step_required' and you passed browser_session_id, tell the user to complete the challenge in the task browser window, then poll again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2657,6 +2671,10 @@ const TOOLS = [
         pass_id: {
           type: "string",
           description: "Optional. The pass_id from list_vault_passes to use for login. If omitted, Aegis selects the first matching credential for the domain.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional but recommended. The browser_session_id from start_task_browser_session. If provided, Aegis connects to that existing task browser via CDP instead of launching a fresh headless browser. Use this when the site requires a passkey or trusted-device check — the user can complete it in the visible task browser window. The task browser is NOT closed when the session ends.",
         },
       },
       required: ["domain", "login_url", "task_summary"],

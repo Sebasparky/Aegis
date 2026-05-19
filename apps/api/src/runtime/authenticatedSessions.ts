@@ -16,6 +16,7 @@ import {
   buildMinimalOpenObservation,
   scanPageForSensitivitySignals,
 } from "./agentSafeObservation.js";
+import { getTaskBrowserSessionForReuse } from "./taskBrowserSessions.js";
 
 // ─── Internal record (holds Playwright refs — never exposed to agents) ─────────
 
@@ -24,6 +25,9 @@ interface AuthenticatedSessionRecord {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  /** True when the browser was connected via CDP from a task browser session.
+   *  On close/reject: close our page and disconnect; do NOT close the underlying browser. */
+  borrowed: boolean;
 }
 
 // ─── In-memory Maps (not persisted — Playwright refs cannot be serialized) ────
@@ -588,6 +592,7 @@ export function createAuthenticatedSession(
     raw_credentials_revealed_to_agent: false,
     created_at: now.toISOString(),
     expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+    ...(req.browser_session_id ? { task_browser_session_id: req.browser_session_id } : {}),
   };
 
   authenticatedSessionHandles.set(sessionId, handle);
@@ -635,13 +640,34 @@ export function executeLoginForAuthenticatedSession(sessionId: string): Promise<
     let browser: Browser | undefined;
     let context: BrowserContext | undefined;
     let page: Page | undefined;
+    let borrowed = false;
 
     try {
-      browser = await chromium.launch({ headless: true });
-      context = await browser.newContext();
-      page = await context.newPage();
+      const taskBrowserSessionId = handle.task_browser_session_id;
 
-      authenticatedSessionRecords.set(sessionId, { session_id: sessionId, browser, context, page });
+      if (taskBrowserSessionId) {
+        // Borrowed path: connect to an existing task browser via CDP.
+        // The task browser is not closed when this authenticated session ends.
+        const reuse = getTaskBrowserSessionForReuse(taskBrowserSessionId, handle.user_id);
+        if (!reuse) {
+          handle.status = "failed";
+          handle.manual_step_reason = `Task browser session '${taskBrowserSessionId}' is not available or not ready.`;
+          return;
+        }
+        browser = await chromium.connectOverCDP(reuse.cdp_url);
+        // Use the first existing context to inherit any session state (cookies, trust).
+        const existingContexts = browser.contexts();
+        context = existingContexts.length > 0 ? existingContexts[0] : await browser.newContext();
+        page = await context.newPage();
+        borrowed = true;
+      } else {
+        // Fresh path: launch an isolated headless browser (existing behavior).
+        browser = await chromium.launch({ headless: true });
+        context = await browser.newContext();
+        page = await context.newPage();
+      }
+
+      authenticatedSessionRecords.set(sessionId, { session_id: sessionId, browser, context, page, borrowed });
 
       await page.goto(handle.login_url, { waitUntil: "domcontentloaded" });
 
@@ -765,9 +791,15 @@ export function executeLoginForAuthenticatedSession(sessionId: string): Promise<
       diag.completed_at = new Date().toISOString();
       handle.status = "failed";
       handle.manual_step_reason = err instanceof Error ? err.message : "Login failed.";
-      // Close browser on failure (keep open for manual_step_required to allow observation)
+      // Close browser on failure (keep open for manual_step_required to allow observation).
+      // Borrowed sessions: close only our page and disconnect — never close the task browser.
       if (browser) {
-        await browser.close().catch(() => {});
+        if (borrowed) {
+          if (page) await page.close().catch(() => {});
+          (browser as unknown as { disconnect(): void }).disconnect();
+        } else {
+          await browser.close().catch(() => {});
+        }
         authenticatedSessionRecords.delete(sessionId);
       }
     }
@@ -913,7 +945,12 @@ export function rejectAuthenticatedSession(sessionId: string): void {
   handle.manual_step_reason = "Rejected by user.";
   const record = authenticatedSessionRecords.get(sessionId);
   if (record) {
-    record.browser.close().catch(() => {});
+    if (record.borrowed) {
+      record.page.close().catch(() => {});
+      (record.browser as unknown as { disconnect(): void }).disconnect();
+    } else {
+      record.browser.close().catch(() => {});
+    }
     authenticatedSessionRecords.delete(sessionId);
   }
 }
@@ -923,7 +960,12 @@ export async function closeAuthenticatedSession(sessionId: string): Promise<void
   if (handle) handle.status = "expired";
   const record = authenticatedSessionRecords.get(sessionId);
   if (record) {
-    await record.browser.close().catch(() => {});
+    if (record.borrowed) {
+      await record.page.close().catch(() => {});
+      (record.browser as unknown as { disconnect(): void }).disconnect();
+    } else {
+      await record.browser.close().catch(() => {});
+    }
     authenticatedSessionRecords.delete(sessionId);
   }
 }

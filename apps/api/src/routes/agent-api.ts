@@ -29,6 +29,7 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
+import { getTaskBrowserSessionForReuse } from "../runtime/taskBrowserSessions.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import {
   agentDelegations,
@@ -742,6 +743,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         login_url?: unknown;
         task_summary?: unknown;
         pass_id?: unknown;
+        browser_session_id?: unknown;
       };
 
       if (!body.domain || typeof body.domain !== "string" || !body.domain.trim()) {
@@ -756,12 +758,28 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (!body.task_summary || typeof body.task_summary !== "string" || !body.task_summary.trim()) {
         return sendError(reply, 400, "MISSING_TASK_SUMMARY", "task_summary is required and must be a non-empty string.");
       }
+      if (body.browser_session_id !== undefined && typeof body.browser_session_id !== "string") {
+        return sendError(reply, 400, "INVALID_BROWSER_SESSION_ID", "browser_session_id must be a string if provided.");
+      }
+
+      let resolvedBrowserSessionId: string | undefined;
+      if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
+        const reuse = getTaskBrowserSessionForReuse(body.browser_session_id.trim(), delegation.user_id);
+        if (!reuse) {
+          return sendError(
+            reply, 400, "TASK_BROWSER_SESSION_NOT_AVAILABLE",
+            "The referenced task browser session is not available, not in 'ready' status, or does not belong to this delegation.",
+          );
+        }
+        resolvedBrowserSessionId = reuse.browser_session_id;
+      }
 
       const loginReq: AuthenticatedSessionLoginRequest = {
         domain: (body.domain as string).trim(),
         login_url: body.login_url as string,
         task_summary: (body.task_summary as string).trim(),
         pass_id: typeof body.pass_id === "string" ? body.pass_id : undefined,
+        browser_session_id: resolvedBrowserSessionId,
       };
 
       const handle = createAuthenticatedSession(loginReq, delegation);

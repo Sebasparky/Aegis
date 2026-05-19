@@ -16,8 +16,9 @@ import type { SecretFieldInjection } from "@aegis/types";
 export async function executeSecretInjectionViaCDP(
   injection: SecretFieldInjection,
   resolvedValue: string,
+  cdpUrlOverride?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const cdpBase = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+  const cdpBase = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
   if (!cdpBase) {
     return {
       success: false,

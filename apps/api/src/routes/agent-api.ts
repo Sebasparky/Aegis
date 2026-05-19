@@ -15,6 +15,7 @@ import type {
   AuthenticatedSessionLoginRequest,
   SecretFieldInjection,
   SecretFieldInjectionStatus,
+  TaskBrowserSession,
   CredentialUseAuthorization,
   SecurityChallenge,
   SecurityChallengeType,
@@ -29,7 +30,8 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse } from "../runtime/taskBrowserSessions.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession } from "../runtime/taskBrowserSessions.js";
+import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import {
   agentDelegations,
@@ -856,6 +858,137 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     },
   );
 
+  // ─── Controlled Browser Bridge v1 ──────────────────────────────────────────
+  // For agents that do not bring their own browser runtime (e.g. Claude Cowork).
+  // Navigate, observe, and click inside an Antigen-owned task browser session.
+
+  function validateTaskBrowserSession(
+    id: string,
+    delegation: AgentDelegation,
+    reply: FastifyReply,
+  ): TaskBrowserSession | null {
+    const session = getTaskBrowserSession(id, MOCK_USER_ID);
+    if (!session) {
+      sendError(reply, 404, "SESSION_NOT_FOUND", "Task browser session not found.");
+      return null;
+    }
+    if (session.delegation_id !== delegation.id) {
+      sendError(reply, 403, "FORBIDDEN", "This task browser session does not belong to your delegation.");
+      return null;
+    }
+    if (session.status !== "ready") {
+      sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+      return null;
+    }
+    return session;
+  }
+
+  server.post<{ Params: { id: string } }>(
+    "/api/agent/v1/task-browser-sessions/:id/navigate",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const session = validateTaskBrowserSession(req.params.id, delegation, reply);
+      if (!session) return;
+
+      const body = req.body as { url?: unknown };
+      if (!body.url || typeof body.url !== "string") {
+        return sendError(reply, 400, "MISSING_URL", "url is required and must be a string.");
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(body.url);
+      } catch {
+        return sendError(reply, 400, "INVALID_URL", "url is not a valid URL.");
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return sendError(reply, 400, "INVALID_PROTOCOL", "Only http:// and https:// URLs are allowed.");
+      }
+
+      try {
+        const result = await connectAndNavigate(session.cdp_url, body.url);
+        return reply.send({
+          ok: true,
+          data: {
+            browser_session_id: session.browser_session_id,
+            current_url: result.current_url,
+            snapshot: result.snapshot,
+            raw_cookies_revealed_to_agent: false,
+            raw_storage_revealed_to_agent: false,
+          },
+        });
+      } catch (err: unknown) {
+        const e = err as { code?: string; message?: string };
+        if (e.code === "CDP_CONNECT_FAILED") return sendError(reply, 503, "CDP_CONNECT_FAILED", e.message ?? "Failed to connect to browser.");
+        if (e.code === "NAVIGATION_FAILED") return sendError(reply, 502, "NAVIGATION_FAILED", e.message ?? "Navigation failed.");
+        return sendError(reply, 500, "NAVIGATE_ERROR", e.message ?? "Unexpected error during navigation.");
+      }
+    },
+  );
+
+  server.get<{ Params: { id: string } }>(
+    "/api/agent/v1/task-browser-sessions/:id/observe",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const session = validateTaskBrowserSession(req.params.id, delegation, reply);
+      if (!session) return;
+
+      try {
+        const result = await connectAndObserve(session.cdp_url);
+        return reply.send({
+          ok: true,
+          data: {
+            browser_session_id: session.browser_session_id,
+            current_url: result.current_url,
+            snapshot: result.snapshot,
+            raw_cookies_revealed_to_agent: false,
+            raw_storage_revealed_to_agent: false,
+          },
+        });
+      } catch (err: unknown) {
+        const e = err as { code?: string; message?: string };
+        if (e.code === "CDP_CONNECT_FAILED") return sendError(reply, 503, "CDP_CONNECT_FAILED", e.message ?? "Failed to connect to browser.");
+        return sendError(reply, 500, "OBSERVE_ERROR", e.message ?? "Unexpected error during observation.");
+      }
+    },
+  );
+
+  server.post<{ Params: { id: string } }>(
+    "/api/agent/v1/task-browser-sessions/:id/click",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+      const session = validateTaskBrowserSession(req.params.id, delegation, reply);
+      if (!session) return;
+
+      const body = req.body as { selector?: unknown; description?: unknown };
+      if (!body.selector || typeof body.selector !== "string" || !body.selector.trim()) {
+        return sendError(reply, 400, "MISSING_SELECTOR", "selector is required and must be a non-empty string.");
+      }
+
+      try {
+        const result = await connectAndClick(session.cdp_url, body.selector);
+        return reply.send({
+          ok: true,
+          data: {
+            browser_session_id: session.browser_session_id,
+            clicked: true,
+            current_url: result.current_url,
+            snapshot: result.snapshot,
+            raw_cookies_revealed_to_agent: false,
+            raw_storage_revealed_to_agent: false,
+          },
+        });
+      } catch (err: unknown) {
+        const e = err as { code?: string; message?: string };
+        if (e.code === "SELECTOR_NOT_FOUND" || e.code === "CLICK_FAILED") return sendError(reply, 422, e.code, e.message ?? "Selector not found or not clickable.");
+        if (e.code === "CDP_CONNECT_FAILED") return sendError(reply, 503, "CDP_CONNECT_FAILED", e.message ?? "Failed to connect to browser.");
+        return sendError(reply, 500, "CLICK_ERROR", e.message ?? "Unexpected error during click.");
+      }
+    },
+  );
+
   // ─── Agent-Browser Secret Injection v1 ─────────────────────────────────────
 
   function injectionNextAction(status: SecretFieldInjectionStatus, authCovered?: boolean): string {
@@ -903,6 +1036,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           selector_hint?: string;
         };
         reason?: string;
+        browser_session_id?: string;
       };
 
       if (!body.domain || typeof body.domain !== "string") {
@@ -931,6 +1065,22 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           `Antigen will not inject ${body.domain} credentials into ${pageHostname}. ` +
           `Navigate to the ${body.domain} login page (using username/password, not OAuth) before requesting injection.`,
         );
+      }
+
+      // Validate optional browser_session_id binding
+      let resolvedBrowserSessionId: string | undefined;
+      if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
+        const bs = getTaskBrowserSession(body.browser_session_id.trim(), MOCK_USER_ID);
+        if (!bs) {
+          return sendError(reply, 404, "TASK_BROWSER_SESSION_NOT_FOUND", "The referenced task browser session does not exist.");
+        }
+        if (bs.delegation_id !== delegation.id) {
+          return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "The referenced task browser session does not belong to your delegation.");
+        }
+        if (bs.status !== "ready") {
+          return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready' to bind to an injection.`);
+        }
+        resolvedBrowserSessionId = bs.browser_session_id;
       }
 
       // Find the vault pass
@@ -1029,6 +1179,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         reason: body.reason,
         status: injectionStatus,
         authorization_id: auth.authorization_id,
+        ...(resolvedBrowserSessionId ? { browser_session_id: resolvedBrowserSessionId } : {}),
         raw_value_revealed_to_agent: false,
         created_at: new Date().toISOString(),
         expires_at: auth.expires_at,
@@ -1282,7 +1433,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
 
       // CDP fill — resolvedValue used here and immediately discarded; never returned in response
-      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue);
+      // If the injection was bound to a task browser session, use that session's CDP URL.
+      let cdpUrlOverride: string | undefined;
+      if (injection.browser_session_id) {
+        const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
+        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+      }
+      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride);
 
       if (fillResult.success) {
         injection.status = "filled";

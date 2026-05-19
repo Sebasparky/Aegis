@@ -1973,6 +1973,7 @@ export interface SecretFieldInjection {
   reason: string;
   status: SecretFieldInjectionStatus;
   authorization_id?: string;
+  browser_session_id?: string;
   raw_value_revealed_to_agent: false;
   created_at: string;
   expires_at: string;

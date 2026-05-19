@@ -1508,6 +1508,74 @@ async function closeTaskBrowserSession({ browser_session_id } = {}) {
   };
 }
 
+// ─── Controlled Browser Bridge v1 handlers ────────────────────────────────────
+// For agents without their own browser runtime (e.g. Claude Cowork).
+
+async function navigateTaskBrowserSession({ browser_session_id, url } = {}) {
+  if (!browser_session_id) return { error: "VALIDATION_ERROR", message: "browser_session_id is required." };
+  if (!url) return { error: "VALIDATION_ERROR", message: "url is required." };
+  if (!/^https?:\/\//i.test(url)) {
+    return { error: "INVALID_PROTOCOL", message: "Only http:// and https:// URLs are allowed." };
+  }
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/task-browser-sessions/${encodeURIComponent(browser_session_id)}/navigate`, { url });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Navigation failed." };
+  const d = res.data;
+  return {
+    browser_session_id: d.browser_session_id,
+    current_url: d.current_url,
+    snapshot: d.snapshot,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+  };
+}
+
+async function observeTaskBrowserSession({ browser_session_id } = {}) {
+  if (!browser_session_id) return { error: "VALIDATION_ERROR", message: "browser_session_id is required." };
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/task-browser-sessions/${encodeURIComponent(browser_session_id)}/observe`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Observation failed." };
+  const d = res.data;
+  return {
+    browser_session_id: d.browser_session_id,
+    current_url: d.current_url,
+    snapshot: d.snapshot,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+  };
+}
+
+async function clickElementInTaskBrowserSession({ browser_session_id, selector, description } = {}) {
+  if (!browser_session_id) return { error: "VALIDATION_ERROR", message: "browser_session_id is required." };
+  if (!selector) return { error: "VALIDATION_ERROR", message: "selector is required." };
+  const body = { selector };
+  if (description) body.description = description;
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/task-browser-sessions/${encodeURIComponent(browser_session_id)}/click`, body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Click failed." };
+  const d = res.data;
+  return {
+    browser_session_id: d.browser_session_id,
+    clicked: d.clicked,
+    current_url: d.current_url,
+    snapshot: d.snapshot,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+  };
+}
+
 // ─── Authenticated Session Boundary handlers ─────────────────────────────────
 
 async function requestAuthenticatedSessionLogin({ domain, login_url, task_summary, pass_id, browser_session_id } = {}) {
@@ -1636,7 +1704,7 @@ async function navigateAuthenticatedSession({ session_id, url }) {
 
 // ─── Agent-Browser Secret Injection v1 handlers ──────────────────────────────
 
-async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason } = {}) {
+async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason, browser_session_id } = {}) {
   if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
   if (!field_kind || !["username", "password"].includes(field_kind)) {
     return { error: "VALIDATION_ERROR", message: "field_kind must be 'username' or 'password'." };
@@ -1647,6 +1715,7 @@ async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_u
   const body = { domain, field_kind, page_url, reason };
   if (pass_id) body.pass_id = pass_id;
   if (element_hint && Object.keys(element_hint).length > 0) body.element_hint = element_hint;
+  if (browser_session_id) body.browser_session_id = browser_session_id;
 
   let res;
   try {
@@ -2635,6 +2704,81 @@ const TOOLS = [
     },
   },
   {
+    name: "navigate_task_browser_session",
+    description:
+      "Navigate the active task browser session to a URL and return a safe page summary. " +
+      "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork). " +
+      "If the agent already has Playwright MCP, use that instead — this tool is a compatibility bridge only.\n\n" +
+      "Only http:// and https:// URLs are accepted. file://, javascript:, and data: are blocked.\n\n" +
+      "Returns: current_url and a safe snapshot (page_title, headings, links_sample, buttons_sample, forms_detected). " +
+      "Never returns input values, cookies, session storage, credentials, or screenshots.\n\n" +
+      "Typical flow: start_task_browser_session → navigate_task_browser_session → observe_task_browser_session " +
+      "→ request_secret_field_injection (with browser_session_id) → click_element_in_task_browser_session → observe_task_browser_session\n\n" +
+      "IMPORTANT: Credential fields (username, password) MUST go through request_secret_field_injection — never type credentials directly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browser_session_id: {
+          type: "string",
+          description: "The browser_session_id from start_task_browser_session.",
+        },
+        url: {
+          type: "string",
+          description: "The URL to navigate to. Must be http:// or https://.",
+        },
+      },
+      required: ["browser_session_id", "url"],
+    },
+  },
+  {
+    name: "observe_task_browser_session",
+    description:
+      "Observe the current page in the task browser session without navigating. " +
+      "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork).\n\n" +
+      "Returns a safe summary of the current page: page_title, headings, links_sample, buttons_sample, forms_detected. " +
+      "Never returns input values, cookies, session storage, screenshots, credentials, or raw DOM.\n\n" +
+      "Call this after navigate_task_browser_session or after click_element_in_task_browser_session to read updated page state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browser_session_id: {
+          type: "string",
+          description: "The browser_session_id from start_task_browser_session.",
+        },
+      },
+      required: ["browser_session_id"],
+    },
+  },
+  {
+    name: "click_element_in_task_browser_session",
+    description:
+      "Click an element in the task browser session by CSS selector and return a safe observation of the resulting page. " +
+      "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork).\n\n" +
+      "IMPORTANT: Do NOT use this to type text or fill credential fields. " +
+      "Username and password fields MUST go through request_secret_field_injection — never click+type credentials. " +
+      "Only use this for non-sensitive interactive elements: submit buttons, links, tabs, toggles, checkboxes.\n\n" +
+      "Returns: clicked=true, current_url, and a safe page snapshot after the click. " +
+      "Never returns input values, cookies, storage, or credentials.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browser_session_id: {
+          type: "string",
+          description: "The browser_session_id from start_task_browser_session.",
+        },
+        selector: {
+          type: "string",
+          description: "A CSS selector identifying the element to click, e.g. 'button[type=submit]', 'a[href=\"/login\"]'.",
+        },
+        description: {
+          type: "string",
+          description: "Optional. Human-readable description of what is being clicked, e.g. 'Sign in button'. Used for audit context.",
+        },
+      },
+      required: ["browser_session_id", "selector"],
+    },
+  },
+  {
     name: "request_authenticated_session_login",
     description:
       "SECONDARY/EXPERIMENTAL — Do not use for normal login when the agent has a Playwright browser and is not hitting a passkey/trusted-device wall. " +
@@ -2783,6 +2927,10 @@ const TOOLS = [
         reason: {
           type: "string",
           description: "Short explanation shown to the user in the approval UI. E.g. 'Filling GitHub username to log in to github.com/login'.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional. The browser_session_id from start_task_browser_session. When provided, Aegis will inject into that task browser session's CDP URL instead of AEGIS_PLAYWRIGHT_CDP_URL. Required when you are using navigate_task_browser_session and click_element_in_task_browser_session for navigation (i.e. the agent has no external Playwright MCP).",
         },
       },
       required: ["domain", "field_kind", "page_url", "reason"],
@@ -3319,6 +3467,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "close_task_browser_session":
       result = await closeTaskBrowserSession(a);
+      break;
+    case "navigate_task_browser_session":
+      result = await navigateTaskBrowserSession(a);
+      break;
+    case "observe_task_browser_session":
+      result = await observeTaskBrowserSession(a);
+      break;
+    case "click_element_in_task_browser_session":
+      result = await clickElementInTaskBrowserSession(a);
       break;
     case "request_authenticated_session_login":
       result = await requestAuthenticatedSessionLogin(a);

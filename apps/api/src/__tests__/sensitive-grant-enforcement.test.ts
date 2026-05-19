@@ -98,6 +98,7 @@ import type { AgentDelegation, AegisVaultPass, CredentialUseAuthorization, Secre
 import {
   agentDelegations,
   aegisVaultPasses,
+  collars,
   encryptedSecretVault,
   credentialUseAuthorizations,
   secretFieldInjections,
@@ -123,6 +124,7 @@ afterAll(async () => {
 beforeEach(() => {
   agentDelegations.clear();
   aegisVaultPasses.clear();
+  collars.clear();
   encryptedSecretVault.clear();
   credentialUseAuthorizations.clear();
   secretFieldInjections.clear();
@@ -141,16 +143,31 @@ const GRANT_ID = "sg_test_001";
 const BEARER_TOKEN = "tok_test_001";
 
 function seedDelegation() {
+  // Seed an active collar so requireActiveCollar passes for injection tests
+  collars.set("col_test", {
+    id: "col_test",
+    user_id: MOCK_USER_ID,
+    name: "Test Collar",
+    status: "active",
+    allowed_actions: ["login", "credential_fill"],
+    approval_required_actions: [],
+    blocked_actions: [],
+    spending_limits: { max_without_approval: 0, max_with_approval: 0, subscriptions_allowed: false },
+    counterparty_rules: { sensitive_actions_require_verified_business: false, block_known_prompt_injection_sites: false },
+    session_limits: { max_duration_minutes: 60, max_active_sessions: 1 },
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  } as any);
+
   const delegation: AgentDelegation = {
     id: DELEGATION_ID,
     agent_name: "TestAgent",
     token_id: BEARER_TOKEN,
-    collar_id: "col_test",
+    default_collar_id: "col_test",
     user_id: MOCK_USER_ID,
     created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 3600_000).toISOString(),
     status: "active",
-    scopes: ["credential_injection"],
   } as AgentDelegation;
   agentDelegations.set(BEARER_TOKEN, delegation);
   return delegation;

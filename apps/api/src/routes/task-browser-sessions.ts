@@ -7,6 +7,7 @@ import {
   closeTaskBrowserSession,
   type CreateTaskBrowserResult,
 } from "../runtime/taskBrowserSessions.js";
+import { requireAgentToken, requireActiveCollar } from "./agent-api.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -34,13 +35,18 @@ function safeSessionView(session: ReturnType<typeof getTaskBrowserSession>) {
 }
 
 export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise<void> {
-  // POST /api/task-browser-sessions — create an ephemeral task browser session
+  // POST /api/task-browser-sessions — create an ephemeral task browser session.
+  // Requires a valid Bearer token and an active collar. delegation_id is derived
+  // from the token; any delegation_id in the request body is ignored.
   server.post("/api/task-browser-sessions", async (req, reply) => {
-    const body = (req.body ?? {}) as { delegation_id?: string };
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+    if (!requireActiveCollar(delegation, reply)) return;
+
     try {
       const result: CreateTaskBrowserResult = await createTaskBrowserSession({
         user_id: MOCK_USER_ID,
-        delegation_id: body.delegation_id,
+        delegation_id: delegation.id,
       });
       const { session, reused_existing, port_auto_selected, requires_browser_reconnect, user_message } = result;
       const meta: Record<string, unknown> = { user_message };
@@ -61,7 +67,7 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
     }
   });
 
-  // GET /api/task-browser-sessions — list sessions for local dev user
+  // GET /api/task-browser-sessions — list sessions (internal/UI-only, not for external agents).
   server.get("/api/task-browser-sessions", async (req, reply) => {
     const { status } = (req.query ?? {}) as { status?: string };
     let items = Array.from(taskBrowserSessions.values()).filter(
@@ -71,30 +77,47 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
     return reply.send({ ok: true, data: items.map(safeSessionView) });
   });
 
-  // GET /api/task-browser-sessions/:id — get a single session
+  // GET /api/task-browser-sessions/:id — get a single session.
+  // Requires a valid Bearer token; the session must belong to the caller's delegation.
   server.get<{ Params: { id: string } }>(
     "/api/task-browser-sessions/:id",
     async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
       const session = getTaskBrowserSession(req.params.id, MOCK_USER_ID);
       if (!session) return sendError(reply, 404, "NOT_FOUND", "Session not found.");
+      if (session.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This session does not belong to your delegation.");
+      }
       return reply.send({ ok: true, data: safeSessionView(session) });
     },
   );
 
-  // POST /api/task-browser-sessions/:id/close — close and destroy profile
+  // POST /api/task-browser-sessions/:id/close — close and destroy profile.
+  // Requires a valid Bearer token; the session must belong to the caller's delegation.
   server.post<{ Params: { id: string } }>(
     "/api/task-browser-sessions/:id/close",
     async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const session = getTaskBrowserSession(req.params.id, MOCK_USER_ID);
+      if (!session) return sendError(reply, 404, "NOT_FOUND", "Session not found.");
+      if (session.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This session does not belong to your delegation.");
+      }
+
       try {
-        const session = await closeTaskBrowserSession(req.params.id, MOCK_USER_ID);
+        const closed = await closeTaskBrowserSession(req.params.id, MOCK_USER_ID);
         return reply.send({
           ok: true,
           data: {
-            browser_session_id: session.browser_session_id,
-            status: session.status,
-            closed_at: session.closed_at,
-            cleanup_complete: session.cleanup_complete,
-            ...(session.error ? { error: session.error } : {}),
+            browser_session_id: closed.browser_session_id,
+            status: closed.status,
+            closed_at: closed.closed_at,
+            cleanup_complete: closed.cleanup_complete,
+            ...(closed.error ? { error: closed.error } : {}),
           },
         });
       } catch (err: unknown) {

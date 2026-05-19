@@ -4,6 +4,7 @@ import { routeRunRoutes } from "../routes/route-runs.js";
 import { receiptRoutes } from "../routes/receipts.js";
 import { workspaceRoutes } from "../routes/workspaces.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
+import { taskBrowserSessionRoutes } from "../routes/task-browser-sessions.js";
 import {
   users,
   collars,
@@ -330,6 +331,7 @@ export async function buildTestServer(): Promise<FastifyInstance> {
   await server.register(routeRunRoutes);
   await server.register(receiptRoutes);
   await server.register(agentApiRoutes);
+  await server.register(taskBrowserSessionRoutes);
   await server.ready();
   return server;
 }

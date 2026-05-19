@@ -27,6 +27,7 @@ import {
   IDS,
 } from "./helpers.js";
 import { agentDelegations, routeRuns, routeRunReceipts, installedSkills } from "../store/index.js";
+import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
 let server: FastifyInstance;
 
@@ -782,5 +783,147 @@ describe("Full RouteRun lifecycle", () => {
     expect(completeRes.json().data.status).toBe("completed");
 
     expect(routeRunReceipts.size).toBe(1);
+  });
+});
+
+// ─── 8. Task browser session trust boundary ───────────────────────────────────
+
+describe("Task browser session trust boundary — POST /api/task-browser-sessions", () => {
+  beforeEach(() => {
+    taskBrowserSessions.clear();
+  });
+
+  it("returns 401 AUTH_REQUIRED when Authorization header is missing", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("AUTH_REQUIRED");
+  });
+
+  it("returns 401 INVALID_TOKEN for an unrecognized bearer token", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: "Bearer token_does_not_exist", "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("INVALID_TOKEN");
+  });
+
+  it("returns 401 DELEGATION_REVOKED when the delegation is revoked", async () => {
+    const delegation = agentDelegations.get(IDS.DELEGATION_ALL)!;
+    delegation.status = "revoked";
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    delegation.status = "active";
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("DELEGATION_REVOKED");
+  });
+
+  it("returns 401 DELEGATION_EXPIRED when the delegation has expired", async () => {
+    const delegation = agentDelegations.get(IDS.DELEGATION_ALL)!;
+    const originalExpiry = delegation.expires_at;
+    delegation.expires_at = new Date(Date.now() - 1000).toISOString();
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    delegation.expires_at = originalExpiry;
+    delegation.status = "active";
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("DELEGATION_EXPIRED");
+  });
+
+  it("returns 403 COLLAR_REQUIRED for a no-collar delegation", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/task-browser-sessions",
+      headers: { authorization: `Bearer ${IDS.TOKEN_NO_COLLAR}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("COLLAR_REQUIRED");
+    expect(body.error.message).toContain("no rule set");
+  });
+});
+
+describe("Task browser session trust boundary — ownership enforcement", () => {
+  const OTHER_DELEGATION_ID = "delg_other_test";
+  const SESSION_ID = "tbsess_test_001";
+
+  beforeEach(() => {
+    taskBrowserSessions.clear();
+    taskBrowserSessions.set(SESSION_ID, {
+      browser_session_id: SESSION_ID,
+      user_id: "user_001",
+      delegation_id: OTHER_DELEGATION_ID,
+      status: "ready",
+      cdp_url: "http://localhost:9222",
+      cdp_port: 9222,
+      user_data_dir: "/tmp/aegis-agent-browser-test",
+      ephemeral: true,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    });
+  });
+
+  it("GET /:id returns 403 FORBIDDEN when session belongs to a different delegation", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/task-browser-sessions/${SESSION_ID}`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}` },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("FORBIDDEN");
+  });
+
+  it("POST /:id/close returns 403 FORBIDDEN when session belongs to a different delegation", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/task-browser-sessions/${SESSION_ID}/close`,
+      headers: { authorization: `Bearer ${IDS.TOKEN_ALL}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("FORBIDDEN");
+  });
+
+  it("GET /:id returns 401 AUTH_REQUIRED when Authorization header is missing", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/task-browser-sessions/${SESSION_ID}`,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("AUTH_REQUIRED");
+  });
+
+  it("POST /:id/close returns 401 AUTH_REQUIRED when Authorization header is missing", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/task-browser-sessions/${SESSION_ID}/close`,
+      headers: { "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("AUTH_REQUIRED");
   });
 });

@@ -83,7 +83,7 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
 }
 
 /** Validates Bearer token and returns the matched AgentDelegation, or writes a 401 and returns null. */
-async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<AgentDelegation | null> {
+export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<AgentDelegation | null> {
   const authHeader = (req.headers["authorization"] as string | undefined) ?? "";
   const bearerMatch = authHeader.match(/^Bearer (.+)$/i);
   const token = bearerMatch?.[1]?.trim();
@@ -121,7 +121,7 @@ async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Prom
 }
 
 /** Returns the active collar for a delegation, or writes a 403 and returns null. */
-function requireActiveCollar(
+export function requireActiveCollar(
   delegation: AgentDelegation,
   reply: FastifyReply
 ): { collar: Collar } | null {

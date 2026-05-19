@@ -37,6 +37,10 @@ import type {
   WebsiteTrustProfileVerificationResult,
   WebsiteViolationReceipt,
   WebsiteViolationReceiptVerificationResult,
+  AgentConnector,
+  AgentConnectorPlatform,
+  ConnectorPolicyMode,
+  ConnectorStatus,
 } from "@aegis/types";
 
 const BASE = "http://localhost:4000";
@@ -788,4 +792,36 @@ export const revokeSensitiveGrant = (grantId: string, reason?: string) =>
   request<{ grant_id: string; status: string }>(
     `/api/sensitive-grants/${grantId}/revoke`,
     { method: "POST", body: JSON.stringify({ reason }) },
+  );
+
+// ─── Agent Connectors ─────────────────────────────────────────────────────────
+
+export const createAgentConnector = (body: {
+  display_name: string;
+  platform: AgentConnectorPlatform;
+  policy_mode: ConnectorPolicyMode;
+  collar_id?: string;
+}) =>
+  request<{ connector: AgentConnector; delegation: AgentDelegation; setup: unknown }>(
+    "/api/agent-connectors",
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const listAgentConnectors = () =>
+  request<AgentConnector[]>("/api/agent-connectors");
+
+export const getAgentConnectorStatus = (id: string) =>
+  request<{
+    connector_id: string;
+    display_name: string;
+    status: ConnectorStatus;
+    last_seen_at?: string;
+    delegation_id: string;
+    delegation_status: string;
+  }>(`/api/agent-connectors/${id}/status`);
+
+export const revokeAgentConnector = (id: string) =>
+  request<{ connector_id: string; status: "revoked"; delegation_revoked: boolean }>(
+    `/api/agent-connectors/${id}/revoke`,
+    { method: "POST" },
   );

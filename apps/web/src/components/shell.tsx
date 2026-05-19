@@ -27,6 +27,7 @@ const Icons = {
   websites:  (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></Ic>,
   settings:  (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></Ic>,
   bell:      (s = 15) => <Ic size={s}><path d="M6 16V11a6 6 0 0112 0v5l1.5 2H4.5L6 16z"/><path d="M10 20a2 2 0 004 0"/></Ic>,
+  connect:   (s = 16) => <Ic size={s}><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></Ic>,
 };
 
 // ── Nav config ─────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ type NavItem = { href: string; label: string; icon: (s?: number) => React.ReactN
 const NAV_ITEMS: NavItem[] = [
   { href: "/",                    label: "Command",    icon: Icons.command    },
   { href: "/delegations",         label: "Agents",     icon: Icons.agents     },
+  { href: "/connect-agent",       label: "Connect",    icon: Icons.connect    },
   { href: "/collars",             label: "Collars",    icon: Icons.collars    },
   { href: "/route-run-approvals", label: "Approvals",  icon: Icons.approvals, badge: true },
   { href: "/passes",              label: "Secrets",    icon: Icons.secrets    },
@@ -48,6 +50,7 @@ const NAV_ITEMS: NavItem[] = [
 const PAGE_LABELS: Record<string, string> = {
   "/":                    "Command",
   "/delegations":         "Agents",
+  "/connect-agent":       "Connect Agent",
   "/collars":             "Collars",
   "/route-run-approvals": "Approvals",
   "/passes":              "Secrets",

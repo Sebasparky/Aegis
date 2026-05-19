@@ -1,4 +1,5 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { timingSafeEqual, randomBytes } from "crypto";
 import {
   aegisVaultPasses,
   credentialSessions,
@@ -11,11 +12,51 @@ import {
 } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
+import { recordKmsAuditEvent } from "../lib/kmsAudit.js";
 
-// Field-level credential delegation — dev prototype only.
-// Production implementation requires proper per-request authentication for the resolve-value endpoint.
+// Field-level credential delegation — extension-only surface.
+// Two-layer protection: AEGIS_EXTENSION_SECRET (shared local secret) + per-request resolve_token (one-time).
 
 const SESSION_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+
+// Warn at startup if extension secret is not configured.
+if (!process.env.AEGIS_EXTENSION_SECRET) {
+  console.warn(
+    "[credential-sessions] AEGIS_EXTENSION_SECRET is not set — GET /api/credential-fill-requests " +
+      "and POST /api/credential-fill-requests/:id/resolve-value are unauthenticated. " +
+      "Set AEGIS_EXTENSION_SECRET in .env to enable Layer 1 protection."
+  );
+}
+
+// Timing-safe equality that returns false on missing or length-mismatched inputs.
+// Node's timingSafeEqual throws when buffer lengths differ — this guard prevents that.
+function safeTokenEquals(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+function generateResolveToken(): string {
+  return randomBytes(32).toString("hex"); // 64-char hex, 256 bits
+}
+
+// Layer 1 guard — must pass before any credential fill metadata or secret is returned.
+// Reads process.env dynamically so tests can use vi.stubEnv without module reset.
+function checkExtensionAuth(req: FastifyRequest, reply: FastifyReply): boolean {
+  const secret = process.env.AEGIS_EXTENSION_SECRET;
+  if (!secret) return true; // not configured → allow (backward-compat; startup warning above)
+  const presented = req.headers["x-aegis-extension-secret"];
+  if (!safeTokenEquals(presented as string | undefined, secret)) {
+    reply.status(401).send({
+      ok: false,
+      error: { code: "EXTENSION_AUTH_REQUIRED", message: "Missing or invalid X-Aegis-Extension-Secret header." },
+    });
+    return false;
+  }
+  return true;
+}
 
 function isSessionExpired(session: CredentialUseSession): boolean {
   if (!session.expires_at) return false;
@@ -170,6 +211,7 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
   /**
    * POST /api/credential-sessions/:sessionId/approve
    * User approves a pending credential session. Activates it for 10 minutes.
+   * Generates resolve_token for all pre-existing pending fill requests under this session.
    */
   server.post<{ Params: { sessionId: string } }>("/api/credential-sessions/:sessionId/approve", async (req, reply) => {
     const session = credentialSessions.get(req.params.sessionId);
@@ -188,6 +230,14 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
       updated_at: now.toISOString(),
     };
     credentialSessions.set(session.session_id, updated);
+
+    // Generate resolve tokens for any pending fill requests created before approval.
+    for (const [id, fillReq] of credentialFillRequests.entries()) {
+      if (fillReq.session_id === session.session_id && fillReq.status === "pending" && !fillReq.resolve_token) {
+        credentialFillRequests.set(id, { ...fillReq, resolve_token: generateResolveToken() });
+      }
+    }
+
     schedulePersist();
 
     return { ok: true, data: sessionView(updated) };
@@ -232,6 +282,9 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
       domain: session.domain,
       status: "pending",
       created_at: now,
+      // Session is already active — generate resolve token immediately.
+      // If session were still pending_approval (shouldn't reach here), token generated at approval.
+      resolve_token: generateResolveToken(),
     };
     credentialFillRequests.set(fillReq.request_id, fillReq);
     schedulePersist();
@@ -251,9 +304,13 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
   /**
    * GET /api/credential-fill-requests
    * Extension polls this to find pending fill requests for the current active tab domain.
-   * Never returns credential values — only metadata.
+   * Requires X-Aegis-Extension-Secret header (Layer 1).
+   * Returns resolve_token for unconsumed requests — extension must present it to resolve-value.
+   * Never returns credential values.
    */
-  server.get<{ Querystring: { domain?: string; status?: string } }>("/api/credential-fill-requests", async (req) => {
+  server.get<{ Querystring: { domain?: string; status?: string } }>("/api/credential-fill-requests", async (req, reply) => {
+    if (!checkExtensionAuth(req, reply)) return;
+
     const { domain, status } = req.query;
     let requests = Array.from(credentialFillRequests.values());
     if (domain) requests = requests.filter((r) => r.domain === domain);
@@ -266,7 +323,14 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
     const withContext = requests.sort((a, b) => a.created_at.localeCompare(b.created_at)).map((r) => {
       const session = credentialSessions.get(r.session_id);
       return {
-        ...r,
+        request_id: r.request_id,
+        session_id: r.session_id,
+        field: r.field,
+        domain: r.domain,
+        status: r.status,
+        created_at: r.created_at,
+        // Omit resolve_token once consumed — extension must poll for a fresh request on retry.
+        resolve_token: r.resolve_token_used ? undefined : r.resolve_token,
         session_context: {
           target_url: session?.target_url,
           url_match: session?.url_match,
@@ -280,14 +344,20 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
    * POST /api/credential-fill-requests/:requestId/resolve-value
    * Extension calls this to get the actual credential value for field injection.
    *
-   * DEV PROTOTYPE ONLY — NOT PRODUCTION-AUTHENTICATED.
-   * This endpoint returns secret material (password) from encryptedSecretVault via KMS decryption.
-   * It is intended exclusively for the Antigen Chrome extension running locally.
-   * Production must authenticate the extension caller (e.g., short-lived nonce,
-   * mutual TLS, or extension signing) before returning any secret material.
+   * Two-layer protection:
+   *   Layer 1 — X-Aegis-Extension-Secret: shared local secret (AEGIS_EXTENSION_SECRET env var)
+   *   Layer 2 — X-Aegis-Resolve-Token: per-request one-time token generated at session approval
+   *
+   * The token is consumed (nullified + resolve_token_used=true) before KMS decryption —
+   * any subsequent call returns 409 RESOLVE_TOKEN_CONSUMED even if decryption failed.
+   *
    * This endpoint MUST NOT be exposed to agents, MCP tools, logs, or any public surface.
+   * The value field in the response must never be logged.
    */
   server.post<{ Params: { requestId: string } }>("/api/credential-fill-requests/:requestId/resolve-value", async (req, reply) => {
+    // Layer 1: extension shared secret
+    if (!checkExtensionAuth(req, reply)) return;
+
     const fillReq = credentialFillRequests.get(req.params.requestId);
     if (!fillReq)
       return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Fill request not found." } });
@@ -306,9 +376,36 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
       return reply.status(400).send({ ok: false, error: { code: "SESSION_EXPIRED", message: "Credential session has expired." } });
     }
 
+    // Layer 2: one-time resolve token
+    const presentedToken = req.headers["x-aegis-resolve-token"] as string | undefined;
+    if (!presentedToken) {
+      return reply.status(401).send({ ok: false, error: { code: "RESOLVE_TOKEN_REQUIRED", message: "Missing X-Aegis-Resolve-Token header." } });
+    }
+    // Check consumed before checking existence — token is nullified after first use, so
+    // replay must return 409 (not 403) even when resolve_token field is now undefined.
+    if (fillReq.resolve_token_used) {
+      return reply.status(409).send({ ok: false, error: { code: "RESOLVE_TOKEN_CONSUMED", message: "This fill request has already been resolved. Create a new fill request to retry." } });
+    }
+    if (!fillReq.resolve_token) {
+      return reply.status(403).send({ ok: false, error: { code: "NO_RESOLVE_TOKEN", message: "Fill request has no resolve token. Session may not yet be approved." } });
+    }
+    if (!safeTokenEquals(presentedToken, fillReq.resolve_token)) {
+      return reply.status(403).send({ ok: false, error: { code: "INVALID_RESOLVE_TOKEN", message: "Invalid resolve token." } });
+    }
+
     const pass = aegisVaultPasses.get(session.pass_id);
     if (!pass)
       return reply.status(404).send({ ok: false, error: { code: "PASS_NOT_FOUND", message: "Vault pass not found." } });
+
+    // Consume the token before decryption — fail closed if decrypt throws.
+    // resolve_token is nullified so it cannot be presented again even in error recovery.
+    credentialFillRequests.set(fillReq.request_id, {
+      ...fillReq,
+      status: "running",
+      resolve_token: undefined,
+      resolve_token_used: true,
+    });
+    schedulePersist();
 
     let value: string;
     if (fillReq.field === "username") {
@@ -328,15 +425,28 @@ export async function credentialSessionRoutes(server: FastifyInstance) {
           purpose: "login_password",
         };
         value = await kms.decryptSecret(blob, kmsContext);
+        recordKmsAuditEvent({
+          operation: "resolve_secret_for_runtime",
+          provider: kms.provider,
+          user_id: pass.user_id,
+          pass_id: pass.pass_id,
+          domain: pass.domain,
+          success: true,
+        });
       } catch {
+        recordKmsAuditEvent({
+          operation: "resolve_secret_for_runtime",
+          provider: getKmsProvider().provider,
+          user_id: pass.user_id,
+          pass_id: pass.pass_id,
+          domain: pass.domain,
+          success: false,
+          error_code: "DECRYPT_FAILED",
+        });
         console.error("[credential-sessions] Decrypt failed for pass", pass.pass_id);
         return reply.status(500).send({ ok: false, error: { code: "SECRET_DECRYPT_FAILED", message: "Failed to decrypt credential." } });
       }
     }
-
-    // Mark as running so duplicate resolve-value calls don't re-enter
-    credentialFillRequests.set(fillReq.request_id, { ...fillReq, status: "running" });
-    schedulePersist();
 
     // Value is returned only to the extension — never logged, never forwarded to agents.
     return {

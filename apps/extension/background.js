@@ -1,3 +1,7 @@
+// LOCAL DEV ONLY — must match AEGIS_EXTENSION_SECRET in .env
+// Replace with native messaging or extension signing before any real deployment.
+const AEGIS_EXTENSION_SECRET = 'local-dev-change-me';
+
 function defaultState() {
   return { recording: false, tabId: null, domain: null, eventCount: 0 };
 }
@@ -779,7 +783,8 @@ async function maybeProcessCredentialFills(hostname) {
   let fillRequests;
   try {
     const res = await fetch(
-      `http://localhost:4000/api/credential-fill-requests?domain=${encodeURIComponent(hostname)}&status=pending`
+      `http://localhost:4000/api/credential-fill-requests?domain=${encodeURIComponent(hostname)}&status=pending`,
+      { headers: { 'X-Aegis-Extension-Secret': AEGIS_EXTENSION_SECRET } }
     );
     const json = await res.json();
     if (!json.ok || !json.data?.length) return;
@@ -817,7 +822,13 @@ async function maybeProcessCredentialFills(hostname) {
       try {
         const res = await fetch(
           `http://localhost:4000/api/credential-fill-requests/${fillReq.request_id}/resolve-value`,
-          { method: 'POST' }
+          {
+            method: 'POST',
+            headers: {
+              'X-Aegis-Extension-Secret': AEGIS_EXTENSION_SECRET,
+              'X-Aegis-Resolve-Token': fillReq.resolve_token ?? '',
+            },
+          }
         );
         const json = await res.json();
         if (!json.ok) {

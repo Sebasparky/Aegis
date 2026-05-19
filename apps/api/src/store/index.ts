@@ -182,6 +182,8 @@ export interface CredentialFillRequest {
   created_at: string;
   completed_at?: string;
   error?: string;
+  resolve_token?: string;       // one-time token; generated at session approval or fill creation
+  resolve_token_used?: boolean; // true after first successful resolution; prevents replay
 }
 
 // Field-level credential delegation sessions — dev prototype only.

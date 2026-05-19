@@ -12,6 +12,7 @@ import type { VaultPassView, RoutePassBinding } from "@/lib/api";
 import { findCredentialProviderByDomain } from "@/lib/credentialProviders";
 import type { AegisRoute } from "@aegis/types";
 import { listRoutes } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 function LockSVG() {
   return (
@@ -199,7 +200,7 @@ export default function PassesPage() {
     <div className="page">
 
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -235,39 +236,7 @@ export default function PassesPage() {
             <HeaderStat value={0} label="Raw secrets exposed" />
           </div>
         </div>
-      </div>
-
-      {/* ── New token banner ──────────────────────────────────────────────── */}
-      {newToken && (
-        <div className="ag-token-banner">
-          <div>
-            <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>
-              Pass created · {newToken.agent_name}
-            </div>
-            <p style={{ fontSize: 12.5, color: "oklch(0.45 0.12 75)", margin: 0 }}>
-              Copy this token now — it will not be shown again.
-            </p>
-          </div>
-          <code style={{
-            display: "block", background: "rgba(255,255,255,0.7)",
-            border: "1px solid var(--amber-ring)", borderRadius: "var(--r-2)",
-            padding: "12px 14px", fontSize: 12,
-            fontFamily: '"JetBrains Mono", monospace',
-            color: "var(--ink-1)", wordBreak: "break-all",
-          }}>
-            {newToken.token}
-          </code>
-          <div>
-            <button
-              type="button"
-              onClick={() => setNewToken(null)}
-              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: "oklch(0.55 0.12 75)", padding: 0 }}
-            >
-              Dismiss ×
-            </button>
-          </div>
-        </div>
-      )}
+      </SpotlightHeroCard>
 
       {/* ── KMS notice ───────────────────────────────────────────────────── */}
       <div style={{
@@ -317,9 +286,9 @@ export default function PassesPage() {
           {/* Stored credentials */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 }}>
-              <div className="a-eyebrow">Stored credentials</div>
+              <div className="a-eyebrow">Saved protected logins</div>
               <span style={{ fontSize: 12, color: "var(--ink-3)" }}>
-                Passwords are encrypted — agents never receive raw values.
+                Passwords are encrypted. Agents never see the raw values.
               </span>
             </div>
 
@@ -337,10 +306,10 @@ export default function PassesPage() {
                   No credentials sealed yet.
                 </p>
                 <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "0 0 14px", lineHeight: 1.5 }}>
-                  Seal a login credential so agents can use it during controlled execution.
+                  Save a login so Antigen can use it during controlled workflows without revealing it to an agent.
                 </p>
                 <button type="button" onClick={() => setTab("seal")} className="a-btn a-btn--primary">
-                  Seal first credential
+                  Save first login
                 </button>
               </div>
             )}
@@ -411,113 +380,50 @@ export default function PassesPage() {
             })}
           </div>
 
-          {/* Agent passes */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 }}>
-              <div className="a-eyebrow">Agent passes</div>
-              <span style={{ fontSize: 12, color: "var(--ink-3)" }}>
-                Delegation tokens — no raw secrets inside.
-              </span>
-            </div>
-
-            {loading && (
-              <div style={{ height: 64, borderRadius: "var(--r-2)", background: "var(--graphite-soft)", opacity: 0.45 }} />
-            )}
-
-            {!loading && passes.length === 0 && (
-              <div className="a-card" style={{ textAlign: "center", padding: "24px" }}>
-                <p style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 4px" }}>
-                  No agent passes yet.
-                </p>
-                <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                  Create a pass to grant an outside agent delegated, collared access.
-                </p>
-              </div>
-            )}
-
-            {passes.map((pass) => (
-              <div key={pass.id} className="ag-row">
-                {/* Avatar — blue initial for agent passes */}
-                <div className="ag-avatar">
-                  {pass.agent_name?.[0]?.toUpperCase() ?? "A"}
-                </div>
-
-                {/* Content */}
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
-                    <span style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)" }}>
-                      {pass.agent_name}
-                    </span>
-                    {pass.status === "active" ? (
-                      <span className="metadata-state metadata-state--good">{pass.status}</span>
-                    ) : (
-                      <span className={`a-status a-status--${statusClass(pass.status)}`}>{pass.status}</span>
-                    )}
-                  </div>
-                  {pass.purpose && (
-                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "0 0 4px", lineHeight: 1.4 }}>
-                      {pass.purpose}
-                    </p>
-                  )}
-                  <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>
-                    Expires {new Date(pass.expires_at).toLocaleDateString()}
-                  </span>
-                </div>
-
-                {/* Actions */}
-                <div style={{ flexShrink: 0 }}>
-                  {pass.status === "active" && (
-                    <button
-                      type="button"
-                      onClick={() => handleRevoke(pass.id)}
-                      className="a-btn a-btn--danger"
-                    >
-                      Revoke
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
       )}
 
       {/* ══ Tab: Seal ═══════════════════════════════════════════════════════ */}
       {tab === "seal" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.65fr 1fr", gap: 20, alignItems: "start" }}>
 
-          {/* Credential form */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Left — main form card */}
+          <form
+            onSubmit={handleCreateVaultPass}
+            className="a-card"
+            style={{ display: "flex", flexDirection: "column", gap: 16 }}
+          >
             <div>
-              <div className="a-eyebrow" style={{ marginBottom: 4 }}>Seal a credential</div>
+              <div className="a-eyebrow" style={{ marginBottom: 4 }}>Save a protected login</div>
               <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                Store a login credential for Antigen-controlled injection.
-                The password is encrypted on entry and never returned.
+                Store a username and password once. Antigen can fill it later without revealing the password to an agent.
               </p>
             </div>
 
-            <form
-              onSubmit={handleCreateVaultPass}
-              className="a-card"
-              style={{ display: "flex", flexDirection: "column", gap: 14 }}
-            >
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <div>
-                <label className="ag-label">Label *</label>
+                <label className="ag-label">Name *</label>
                 <input
                   value={vaultLabel}
                   onChange={(e) => setVaultLabel(e.target.value)}
                   placeholder="e.g. Demo Store Login"
                   className="ag-input"
                 />
+                <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: "4px 0 0", lineHeight: 1.4 }}>
+                  A label you'll recognize, like Demo Store Login.
+                </p>
               </div>
               <div>
-                <label className="ag-label">Domain *</label>
+                <label className="ag-label">Website or app *</label>
                 <input
                   value={vaultDomain}
                   onChange={(e) => setVaultDomain(e.target.value)}
                   placeholder="e.g. github.com"
                   className="ag-input"
                 />
+                <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: "4px 0 0", lineHeight: 1.4 }}>
+                  The domain where this login is used.
+                </p>
               </div>
               <div>
                 <label className="ag-label">Username *</label>
@@ -540,118 +446,58 @@ export default function PassesPage() {
                   className="ag-input"
                 />
               </div>
+            </div>
 
-              {vaultFormError && (
-                <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{vaultFormError}</p>
-              )}
-              {vaultCreated && (
-                <p style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", margin: 0 }}>
-                  Credential sealed. Password will not be shown again.
-                </p>
-              )}
+            {vaultFormError && (
+              <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{vaultFormError}</p>
+            )}
+            {vaultCreated && (
+              <p style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", margin: 0 }}>
+                Protected login saved. You can assign it to a workflow now.
+              </p>
+            )}
 
-              <button
-                type="submit"
-                disabled={creatingVault}
-                className="a-btn a-btn--primary"
-                style={{ justifyContent: "center" }}
-              >
-                {creatingVault ? "Sealing…" : "Seal credential"}
-              </button>
-            </form>
+            <button
+              type="submit"
+              disabled={creatingVault}
+              className="a-btn a-btn--primary"
+            >
+              {creatingVault ? "Saving…" : "Save protected login"}
+            </button>
+          </form>
 
-            <p style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.5 }}>
-              Password is stored encrypted in the dev vault and never returned after creation.
-              Agents resolve it only during approved Antigen-controlled execution.
-            </p>
-          </div>
+          {/* Right — safety explanation card */}
+          <div className="a-card" style={{ display: "flex", flexDirection: "column", gap: 0, padding: 0, overflow: "hidden" }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--hairline)" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-1)" }}>What Antigen protects</div>
+            </div>
 
-          {/* Agent pass form */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div>
-              <div className="a-eyebrow" style={{ marginBottom: 4 }}>Create agent pass</div>
-              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                Issue a delegation token to an outside agent, scoped to a collar.
-                The token does not contain any raw secrets.
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--hairline)" }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-1)", marginBottom: 4 }}>
+                Agents never see the password
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                Antigen fills the login only when the workflow is approved to use it.
               </p>
             </div>
 
-            <form
-              onSubmit={handleCreate}
-              className="a-card"
-              style={{ display: "flex", flexDirection: "column", gap: 14 }}
-            >
-              <div>
-                <label className="ag-label">Agent Name *</label>
-                <input
-                  value={agentName}
-                  onChange={(e) => setAgentName(e.target.value)}
-                  placeholder="e.g. Shopping Agent"
-                  className="ag-input"
-                />
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--hairline)" }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-1)", marginBottom: 4 }}>
+                You choose where it can be used
               </div>
-              <div>
-                <label className="ag-label">Task Purpose</label>
-                <input
-                  value={purpose}
-                  onChange={(e) => setPurpose(e.target.value)}
-                  placeholder="e.g. Find running shoes under $100"
-                  className="ag-input"
-                />
-              </div>
-              <div>
-                <label className="ag-label">Collar *</label>
-                {activeCollars.length === 0 ? (
-                  <p style={{ fontSize: 12.5, color: "oklch(0.45 0.12 75)", margin: 0 }}>
-                    No active collars.{" "}
-                    <Link
-                      href="/collars/new"
-                      style={{ color: "var(--blue)", textDecoration: "none", borderBottom: "1px solid var(--blue-ring)" }}
-                    >
-                      Create one first.
-                    </Link>
-                  </p>
-                ) : (
-                  <select
-                    value={collarId}
-                    onChange={(e) => setCollarId(e.target.value)}
-                    className="ag-select"
-                  >
-                    {activeCollars.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              <div>
-                <label className="ag-label">Expires in (minutes)</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={expiresMin}
-                  onChange={(e) => setExpiresMin(e.target.value)}
-                  className="ag-input"
-                  style={{ maxWidth: 120 }}
-                />
-              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                After saving, assign this login to specific workflows from the Assignments tab.
+              </p>
+            </div>
 
-              {formError && (
-                <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{formError}</p>
-              )}
-
-              <button
-                type="submit"
-                disabled={creating || activeCollars.length === 0}
-                className="a-btn a-btn--primary"
-                style={{ justifyContent: "center" }}
-              >
-                {creating ? "Creating…" : "Create pass"}
-              </button>
-            </form>
-
-            <p style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.5 }}>
-              This pass does not contain passwords, cards, or identity. It only lets the agent request controlled capabilities from Antigen.
-            </p>
+            <div style={{ padding: "14px 18px" }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-1)", marginBottom: 4 }}>
+                Raw values stay sealed
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                The password is encrypted and never returned to an agent.
+              </p>
+            </div>
           </div>
         </div>
       )}
@@ -659,10 +505,9 @@ export default function PassesPage() {
       {/* ══ Tab: Assignments ════════════════════════════════════════════════ */}
       {tab === "assignments" && controlledRoutes.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div className="a-eyebrow" style={{ marginBottom: 2 }}>Credential assignments</div>
+          <div className="a-eyebrow" style={{ marginBottom: 2 }}>Workflow assignments</div>
           <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 12px", lineHeight: 1.5 }}>
-            Choose which stored credential each Antigen-controlled skill uses at execution time.
-            The agent never sees the password.
+            Choose which protected information each workflow can use. Antigen fills it when needed without revealing it to the agent.
           </p>
 
           {controlledRoutes.map((route) => {
@@ -678,32 +523,40 @@ export default function PassesPage() {
             const msg     = bindingMsg[route.route_id];
 
             return (
-              <div key={route.route_id} className="a-card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+              <div key={route.route_id} className="a-card" style={{ display: "flex", flexDirection: "column", gap: 0, padding: 0, overflow: "hidden" }}>
+                {/* Card header */}
+                <div style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "14px 18px", borderBottom: "1px solid var(--hairline)",
+                  gap: 12, flexWrap: "wrap",
+                }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", marginBottom: 2 }}>
                       {route.workflow_name}
                     </div>
-                    <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: '"JetBrains Mono", monospace', marginBottom: 6 }}>
-                      {route.domain} · {route.execution_mode}
+                    <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: '"JetBrains Mono", monospace' }}>
+                      {route.domain}
                     </div>
-                    {currentPass ? (
-                      <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
-                        Current:{" "}
-                        <span style={{ color: "var(--ink-2)", fontWeight: 500 }}>{currentPass.label}</span>
-                        {" · "}
-                        <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{currentPass.username}</span>
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: 12, color: "var(--ink-4)" }}>Using route default credential</div>
-                    )}
                   </div>
+                  <span style={{ fontSize: 12, color: "var(--ink-3)", flexShrink: 0 }}>
+                    {currentPass ? `Login: ${currentPass.label}` : "Login: workflow default"}
+                  </span>
+                </div>
 
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                {/* Assignment rows */}
+                <div style={{ display: "flex", flexDirection: "column" }}>
+
+                  {/* Login row — functional */}
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 12,
+                    padding: "12px 18px", borderBottom: "1px solid var(--hairline)",
+                    flexWrap: "wrap",
+                  }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 500, color: "var(--ink-2)", minWidth: 64 }}>Login</span>
                     {domainPasses.length === 0 ? (
-                      <p style={{ fontSize: 12, color: "oklch(0.45 0.12 75)", margin: 0 }}>
-                        No {route.domain} login credentials yet.
-                      </p>
+                      <span style={{ fontSize: 12.5, color: "var(--ink-4)", flex: 1 }}>
+                        No saved login for this website yet.
+                      </span>
                     ) : (
                       <>
                         <select
@@ -712,9 +565,9 @@ export default function PassesPage() {
                             setBindingDraft((d) => ({ ...d, [route.route_id]: e.target.value }))
                           }
                           className="ag-select"
-                          style={{ minWidth: 200 }}
+                          style={{ flex: 1, minWidth: 180 }}
                         >
-                          <option value="">— route default —</option>
+                          <option value="">Use workflow default</option>
                           {domainPasses.map((vp) => (
                             <option key={vp.pass_id} value={vp.pass_id}>
                               {vp.label} ({vp.username})
@@ -732,17 +585,25 @@ export default function PassesPage() {
                       </>
                     )}
                   </div>
+
+                  <div style={{ padding: "10px 18px" }}>
+                    <span style={{ fontSize: 12, color: "var(--ink-4)", fontStyle: "italic" }}>
+                      More protected item types like payment methods and addresses are coming later.
+                    </span>
+                  </div>
                 </div>
 
                 {msg && (
-                  <p style={{
-                    fontSize: 12, margin: 0,
-                    color: msg.startsWith("Failed") || msg.includes("mismatch")
-                      ? "oklch(0.45 0.13 25)"
-                      : "oklch(0.42 0.09 150)",
-                  }}>
-                    {msg}
-                  </p>
+                  <div style={{ padding: "8px 18px", borderTop: "1px solid var(--hairline)" }}>
+                    <p style={{
+                      fontSize: 12, margin: 0,
+                      color: msg.startsWith("Failed") || msg.includes("mismatch")
+                        ? "oklch(0.45 0.13 25)"
+                        : "oklch(0.42 0.09 150)",
+                    }}>
+                      {msg}
+                    </p>
+                  </div>
                 )}
               </div>
             );

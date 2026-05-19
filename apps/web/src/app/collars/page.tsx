@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Collar } from "@aegis/types";
 import { listCollars, revokeCollar } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 function ShieldSVG() {
   return (
@@ -23,6 +24,7 @@ export default function CollarsPage() {
   const [collars, setCollars] = useState<Collar[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState<string | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -36,13 +38,19 @@ export default function CollarsPage() {
 
   useEffect(() => { load(); }, []);
 
-  async function handleRevoke(id: string) {
-    if (!confirm("Revoke this collar? Passes using it will stop working.")) return;
+  function handleRevoke(id: string) {
+    setPendingRevoke(id);
+  }
+
+  async function confirmRevoke() {
+    if (!pendingRevoke) return;
+    const id = pendingRevoke;
+    setPendingRevoke(null);
     try {
       await revokeCollar(id);
       await load();
     } catch {
-      alert("Failed to revoke collar.");
+      setError("Failed to revoke rule set.");
     }
   }
 
@@ -50,7 +58,7 @@ export default function CollarsPage() {
     <div className="page">
 
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
@@ -68,7 +76,7 @@ export default function CollarsPage() {
             + New Collar
           </Link>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Error ────────────────────────────────────────────────────────── */}
       {error && (
@@ -139,7 +147,7 @@ export default function CollarsPage() {
                 )}
 
                 <div className="a-meta-line" style={{ marginTop: collar.purpose ? 0 : 6 }}>
-                  <span>{(collar.allowed_actions ?? []).length} allowed</span>
+                  <span style={{ color: "var(--green)" }}>{(collar.allowed_actions ?? []).length} allowed</span>
                   {(collar.approval_required_actions ?? []).length > 0 && (
                     <>
                       <span className="a-meta-line__sep">·</span>
@@ -177,6 +185,37 @@ export default function CollarsPage() {
 
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── Revoke modal ────────────────────────────────────────────────── */}
+      {pendingRevoke && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 50,
+          background: "rgba(20,22,30,0.35)",
+          backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+        }}>
+          <div className="a-card" style={{ maxWidth: 400, width: "100%", boxShadow: "var(--shadow-3)", padding: "28px 28px 24px" }}>
+            <h2 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 10px", letterSpacing: "-0.012em", color: "var(--ink-1)" }}>
+              Revoke this rule set?
+            </h2>
+            <p style={{ fontSize: 13.5, color: "var(--ink-2)", margin: "0 0 24px", lineHeight: 1.55 }}>
+              Agents using these access rules may stop working. You can create a new rule set later if needed.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="a-btn a-btn--ghost" onClick={() => setPendingRevoke(null)}>
+                Cancel
+              </button>
+              <button
+                className="a-btn"
+                style={{ background: "var(--red-soft)", color: "oklch(0.45 0.13 25)", border: "1px solid var(--red-ring)" }}
+                onClick={confirmRevoke}
+              >
+                Revoke rule set
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

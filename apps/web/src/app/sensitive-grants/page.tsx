@@ -482,15 +482,27 @@ export default function SensitiveGrantsPage() {
   return (
     <div className="page">
 
+      {/* ── Back nav ── */}
+      <div style={{ marginBottom: 16 }}>
+        <a
+          href="/route-run-approvals"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 12.5, color: "var(--ink-3)", textDecoration: "none",
+          }}
+        >
+          ← Back to approvals
+        </a>
+      </div>
+
       {/* ── Header ── */}
       <div style={{ marginBottom: 24 }}>
-        <span className="a-eyebrow">Sensitive Grants</span>
+        <span className="a-eyebrow">Approvals</span>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--ink-1)", margin: "4px 0 6px" }}>
-          Authority tokens
+          Temporary access
         </h1>
         <p style={{ fontSize: 13.5, color: "var(--ink-3)", maxWidth: 520, margin: 0, lineHeight: 1.5 }}>
-          Issued when you approved a sensitive operation. Revoke any active grant to cancel delegated
-          authority immediately. No passwords or raw secrets are stored here.
+          These are approvals that are still active. Revoke one if you no longer want an agent to use that access.
         </p>
       </div>
 
@@ -558,10 +570,9 @@ export default function SensitiveGrantsPage() {
       {/* ── Empty state ── */}
       {!loading && !error && grants.length === 0 && (
         <div style={{ border: "1px solid var(--hairline)", borderRadius: "var(--r-3)", padding: "40px 32px", textAlign: "center" }}>
-          <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-2)", margin: "0 0 6px" }}>No sensitive grants found</p>
+          <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-2)", margin: "0 0 6px" }}>No temporary access is active.</p>
           <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0, maxWidth: 380, marginInline: "auto" }}>
-            Grants are created when you approve a credential injection or challenge resolution. Run an
-            Antigen login flow to create one.
+            When you approve a sensitive request for a limited time, it will appear here so you can revoke it early.
           </p>
         </div>
       )}

@@ -7,6 +7,7 @@ import {
   listSkills, installSkill, uninstallSkill,
 } from "../../lib/api";
 import type { SkillWithInstalled } from "../../lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -970,7 +971,7 @@ export default function RailsPage() {
     <div className="page">
 
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -988,7 +989,7 @@ export default function RailsPage() {
             <HeaderStat value={skillsLoading ? "—" : installedCount} label="Installed" />
           </div>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Lifecycle strip ───────────────────────────────────────────────── */}
       <div className="a-card" style={{ padding: "12px 20px" }}>

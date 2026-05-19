@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 import type {
   Receipt,
   RouteRunReceipt,
@@ -377,7 +378,7 @@ export default function ReceiptsPage() {
     <div className="page">
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -398,7 +399,7 @@ export default function ReceiptsPage() {
             <HeaderStat value={loading ? "—" : runReceipts.length} label="Route runs" />
           </div>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Content ───────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 720 }}>

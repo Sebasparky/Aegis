@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
+import Link from "next/link";
 import { parseCredentialCsv } from "@/lib/csvImport";
 import type { ParsedCredential } from "@/lib/csvImport";
 import { findCredentialProviderByDomain, normalizeLoginDomain } from "@/lib/credentialProviders";
@@ -136,6 +137,16 @@ export default function VaultImportPage() {
 
       {/* ── Header ── */}
       <div style={{ marginBottom: 24 }}>
+        <Link
+          href="/passes"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            fontSize: 12.5, color: "var(--ink-3)", textDecoration: "none",
+            marginBottom: 12,
+          }}
+        >
+          ← Back to secrets
+        </Link>
         <span className="a-eyebrow">Secrets · Import</span>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--ink-1)", margin: "4px 0 6px" }}>
           Import credentials

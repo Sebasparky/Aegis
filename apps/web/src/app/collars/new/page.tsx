@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createCollar } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 const ACTION_OPTIONS = [
   "browse", "search", "read", "compare", "draft", "add_to_cart",
@@ -14,7 +16,58 @@ const ACTION_OPTIONS = [
   "account_setting_change", "delete_account", "connect_app", "oauth_authorize",
 ];
 
+const ACTION_DISPLAY: Record<string, string> = {
+  browse:                    "Browse websites",
+  search:                    "Search the web",
+  read:                      "Read page content",
+  compare:                   "Compare options",
+  draft:                     "Draft text or forms",
+  add_to_cart:               "Add to cart",
+  login:                     "Log in",
+  purchase:                  "Make purchases",
+  payment:                   "Use payment details",
+  subscription:              "Start subscriptions",
+  post_publicly:             "Publish publicly",
+  comment:                   "Leave comments",
+  direct_message:            "Send direct messages",
+  send_email:                "Send emails",
+  forward_email:             "Forward emails",
+  upload_file:               "Upload files",
+  download_file:             "Download files",
+  submit_form:               "Submit forms",
+  create_account:            "Create accounts",
+  share_email:               "Share your email",
+  share_phone:               "Share your phone",
+  share_address:             "Share your address",
+  identity_disclosure:       "Disclose identity",
+  government_id_upload:      "Upload government ID",
+  medical_data_disclosure:   "Share medical data",
+  financial_data_disclosure: "Share financial data",
+  account_setting_change:    "Change account settings",
+  delete_account:            "Delete accounts",
+  connect_app:               "Connect apps",
+  oauth_authorize:           "Authorize via OAuth",
+};
+
+function displayName(action: string) {
+  return ACTION_DISPLAY[action] ?? action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 type ActionBucket = "allowed" | "approval" | "blocked" | "";
+
+const bucketLabel: Record<ActionBucket, string> = {
+  "":       "Default",
+  allowed:  "Allow",
+  approval: "Ask me first",
+  blocked:  "Block",
+};
+
+const bucketCls: Record<ActionBucket, string> = {
+  "":       "dflt",
+  allowed:  "allow",
+  approval: "ask",
+  blocked:  "block",
+};
 
 export default function NewCollarPage() {
   const router = useRouter();
@@ -37,7 +90,7 @@ export default function NewCollarPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) { setError("Name is required."); return; }
+    if (!name.trim()) { setError("Rule set name is required."); return; }
 
     setSaving(true);
     setError(null);
@@ -62,142 +115,161 @@ export default function NewCollarPage() {
       });
       router.push("/collars");
     } catch (e: any) {
-      setError(e.message ?? "Failed to create collar.");
+      setError(e.message ?? "Failed to create rule set.");
     } finally {
       setSaving(false);
     }
   }
 
-  const bucketLabel: Record<ActionBucket, string> = {
-    "": "Unset",
-    allowed: "Allow",
-    approval: "Ask First",
-    blocked: "Block",
-  };
-
-  const bucketColors: Record<ActionBucket, string> = {
-    "": "bg-gray-800 text-gray-500",
-    allowed: "bg-green-900 text-green-400",
-    approval: "bg-yellow-900 text-yellow-400",
-    blocked: "bg-red-900 text-red-400",
-  };
+  const purchaseRelatedActions = ["purchase", "payment", "subscription"];
+  const shouldShowSpendingLimits = purchaseRelatedActions.some((action) => {
+    const bucket = buckets[action] ?? "";
+    return bucket === "allowed" || bucket === "approval";
+  });
 
   return (
-    <div className="max-w-2xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-white">New Collar</h1>
-        <p className="mt-1 text-gray-400 text-sm">Define what an agent can do, what requires approval, and what is never allowed.</p>
+    <div className="page">
+
+      {/* ── Back nav ─────────────────────────────────────────────────────── */}
+      <div>
+        <Link href="/collars" className="a-btn a-btn--ghost" style={{ fontSize: 12.5, padding: "5px 10px", gap: 6 }}>
+          ← Back to access rules
+        </Link>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Basic info */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 space-y-4">
-          <h2 className="text-sm font-medium text-gray-300">Basic Info</h2>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Collar Name *</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Research & Shopping"
-              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Purpose</label>
-            <input
-              value={purpose}
-              onChange={(e) => setPurpose(e.target.value)}
-              placeholder="e.g. Find running shoes under $100"
-              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Description</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={2}
-              placeholder="Optional notes about this collar"
-              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 resize-none"
-            />
-          </div>
+      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+        <span className="cmd-hero__aura" aria-hidden="true" />
+        <span className="cmd-hero__grain" aria-hidden="true" />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div className="a-eyebrow">Access Rules</div>
+          <h1 className="cmd-hero__title" style={{ fontSize: 28, margin: "6px 0 8px" }}>
+            Create a{" "}
+            <span className="cmd-hero__title-mark">new rule set</span>
+          </h1>
+          <p className="cmd-hero__sub" style={{ fontSize: 13.5, textAlign: "left", margin: 0 }}>
+            Choose what an AI agent can do, what needs your approval, and what is always blocked.
+          </p>
         </div>
+      </SpotlightHeroCard>
 
-        {/* Action rules */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-5">
-          <h2 className="text-sm font-medium text-gray-300 mb-1">Action Rules</h2>
-          <p className="text-xs text-gray-600 mb-4">Set each action to Allow, Ask First, or Block.</p>
-          <div className="space-y-2">
-            {ACTION_OPTIONS.map((action) => {
-              const current = buckets[action] ?? "";
-              return (
-                <div key={action} className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-gray-400 font-mono">{action}</span>
-                  <div className="flex gap-1">
-                    {(["allowed", "approval", "blocked", ""] as ActionBucket[]).map((b) => (
-                      <button
-                        key={b}
-                        type="button"
-                        onClick={() => setActionBucket(action, b)}
-                        className={`text-xs px-2 py-0.5 rounded transition-colors ${
-                          current === b
-                            ? bucketColors[b]
-                            : "bg-gray-800 text-gray-600 hover:text-gray-400"
-                        }`}
-                      >
-                        {bucketLabel[b]}
-                      </button>
-                    ))}
+      {/* ── Form ─────────────────────────────────────────────────────────── */}
+      <div style={{ maxWidth: 672 }}>
+        <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+          {/* Rule set details */}
+          <div className="a-card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="collar-section-label">Rule set details</div>
+            <div>
+              <label className="ag-label">Rule set name *</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Research & Shopping"
+                className="ag-input"
+              />
+            </div>
+            <div>
+              <label className="ag-label">What this is for</label>
+              <input
+                value={purpose}
+                onChange={(e) => setPurpose(e.target.value)}
+                placeholder="e.g. Find running shoes under $100"
+                className="ag-input"
+              />
+            </div>
+            <div>
+              <label className="ag-label">Notes</label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                placeholder="Optional notes about this rule set"
+                className="ag-input"
+                style={{ resize: "none" }}
+              />
+            </div>
+          </div>
+
+          {/* Permissions */}
+          <div className="a-card">
+            <div className="collar-section-label">Permissions</div>
+            <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "0 0 18px", lineHeight: 1.55 }}>
+              <strong style={{ color: "var(--ink-2)", fontWeight: 500 }}>Allow</strong> — the agent acts automatically.{" "}
+              <strong style={{ color: "var(--ink-2)", fontWeight: 500 }}>Ask me first</strong> — requires your approval.{" "}
+              <strong style={{ color: "var(--ink-2)", fontWeight: 500 }}>Block</strong> — always prevented.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {ACTION_OPTIONS.map((action) => {
+                const current = buckets[action] ?? "";
+                return (
+                  <div key={action} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+                    <span style={{ fontSize: 13.5, color: "var(--ink-1)", minWidth: 0 }}>{displayName(action)}</span>
+                    <div className="collar-seg">
+                      {(["allowed", "approval", "blocked"] as ActionBucket[]).map((b) => (
+                        <button
+                          key={b}
+                          type="button"
+                          onClick={() => setActionBucket(action, b)}
+                          className={`collar-seg__btn${current === b ? ` collar-seg__btn--${bucketCls[b]}` : ""}`}
+                        >
+                          {bucketLabel[b]}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        {/* Spending limits */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 space-y-4">
-          <h2 className="text-sm font-medium text-gray-300">Spending Limits</h2>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Max with approval ($)</label>
-            <input
-              type="number"
-              min="0"
-              value={maxWithApproval}
-              onChange={(e) => setMaxWithApproval(e.target.value)}
-              className="w-32 bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-            />
+          {/* Spending limits — only shown when purchase-related actions are enabled */}
+          {shouldShowSpendingLimits && (
+            <div className="a-card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <div className="collar-section-label">Spending limits</div>
+              <div>
+                <label className="ag-label">Max with approval ($)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={maxWithApproval}
+                  onChange={(e) => setMaxWithApproval(e.target.value)}
+                  className="ag-input"
+                  style={{ maxWidth: 160 }}
+                />
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={subscriptionsAllowed}
+                  onChange={(e) => setSubscriptionsAllowed(e.target.checked)}
+                  style={{ accentColor: "var(--blue)", width: 14, height: 14 }}
+                />
+                <span style={{ fontSize: 13.5, color: "var(--ink-2)" }}>Allow subscriptions</span>
+              </label>
+            </div>
+          )}
+
+          {error && (
+            <p style={{ fontSize: 13, color: "var(--red)", margin: 0 }}>{error}</p>
+          )}
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button type="submit" disabled={saving} className="a-btn a-btn--primary">
+              {saving ? "Saving…" : "Create rule set"}
+            </button>
+            <button
+              type="button"
+              onClick={() => router.push("/collars")}
+              className="a-btn a-btn--ghost"
+            >
+              Cancel
+            </button>
           </div>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={subscriptionsAllowed}
-              onChange={(e) => setSubscriptionsAllowed(e.target.checked)}
-              className="accent-indigo-500"
-            />
-            <span className="text-xs text-gray-400">Allow subscriptions</span>
-          </label>
-        </div>
 
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        </form>
+      </div>
 
-        <div className="flex gap-3">
-          <button
-            type="submit"
-            disabled={saving}
-            className="bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-sm px-5 py-2 rounded-md transition-colors"
-          >
-            {saving ? "Saving…" : "Save Collar"}
-          </button>
-          <button
-            type="button"
-            onClick={() => router.push("/collars")}
-            className="text-sm text-gray-400 hover:text-white px-4 py-2 rounded-md transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
     </div>
   );
 }

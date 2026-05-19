@@ -694,6 +694,8 @@ export const createWorkspaceTask = (
 ) => request<WorkspaceTask>(`/api/workspaces/${workspaceId}/tasks`, { method: "POST", body: JSON.stringify(body) });
 export const resetWorkspaceTask = (workspaceId: string, taskId: string) =>
   request<WorkspaceTask>(`/api/workspaces/${workspaceId}/tasks/${taskId}/reset`, { method: "PATCH" });
+export const createWorkspace = (body: { name: string; description?: string; collar_id: string; participant_delegation_ids?: string[] }) =>
+  request<AegisWorkspace>("/api/workspaces", { method: "POST", body: JSON.stringify(body) });
 export const listWorkspaceArtifacts = (workspaceId: string) =>
   request<WorkspaceArtifactMeta[]>(`/api/workspaces/${workspaceId}/artifacts`);
 export const getWorkspaceArtifact = (workspaceId: string, artifactId: string) =>

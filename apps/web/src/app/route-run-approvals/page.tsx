@@ -41,6 +41,7 @@ import {
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 // ── Tone / risk helpers ────────────────────────────────────────────────────────
 
@@ -979,7 +980,7 @@ function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
     <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 24, display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)" }}>Active Sensitive Grants</span>
+          <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)" }}>Temporary access you approved</span>
           {grants.length > 0 && (
             <span className="a-status a-status--quiet">{grants.length}</span>
           )}
@@ -987,7 +988,12 @@ function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
         <a href="/sensitive-grants" style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none" }}>View all →</a>
       </div>
       {grants.length === 0 ? (
-        <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No active grants right now.</p>
+        <div>
+          <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: "0 0 4px" }}>No active temporary access.</p>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5 }}>
+            When you approve access for a limited time, it will appear here so you can revoke it early.
+          </p>
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {displayed.map((g) => (
@@ -1032,6 +1038,7 @@ export default function RouteRunApprovalsPage() {
   const [loadingContexts, setLoadingContexts] = useState<Set<string>>(new Set());
   const [activeGrants, setActiveGrants] = useState<SensitiveGrant[]>([]);
   const [lastDecision, setLastDecision] = useState<{ action: "approved" | "denied"; note: string } | null>(null);
+  const [showDisclosure, setShowDisclosure] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -1222,7 +1229,7 @@ export default function RouteRunApprovalsPage() {
     <div className="page">
 
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -1247,10 +1254,10 @@ export default function RouteRunApprovalsPage() {
             <HeaderStat value={loading ? "—" : activeGrants.length} label="Active grants" />
           </div>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Content column ────────────────────────────────────────────────── */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 32, maxWidth: 720 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 720 }}>
 
         {/* Error banner */}
         {actionError && (
@@ -1286,202 +1293,300 @@ export default function RouteRunApprovalsPage() {
           </div>
         )}
 
-        {/* ── Route run approvals ──────────────────────────────────────── */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {loading ? (
+        {/* ── Review queue ─────────────────────────────────────────────── */}
+        <div className="a-card" style={{ padding: "28px 32px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+            <div className="a-eyebrow">Review queue</div>
+            {!loading && pendingCount > 0 && (
+              <span className="a-status a-status--amber">
+                <span className="a-status__dot" />{pendingCount} waiting
+              </span>
+            )}
+          </div>
+
+          {/* Loading skeletons */}
+          {loading && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {[1, 2].map((i) => (
-                <div key={i} style={{ height: 120, borderRadius: "var(--r-3)", background: "var(--graphite-soft)", opacity: 0.4 }} />
+                <div key={i} style={{ height: 96, borderRadius: "var(--r-3)", background: "var(--graphite-soft)", opacity: 0.4 }} />
               ))}
             </div>
-          ) : runs.length === 0 ? (
-            <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 4px" }}>
+          )}
+
+          {/* Unified empty state */}
+          {!loading && pendingCount === 0 && (
+            <div style={{ textAlign: "center", padding: "32px 24px" }}>
+              <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>
                 No agents are waiting right now.
               </p>
-              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                When an external agent needs a sensitive capability approved, it will appear here.
+              <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5, maxWidth: 360, marginInline: "auto" }}>
+                When an agent needs your approval, Antigen will show what it wants to do before anything sensitive happens.
               </p>
             </div>
-          ) : (
-            runs.map((run) => (
-              <PendingRunCard
-                key={run.run_id}
-                run={run}
-                ctx={contexts.get(run.run_id)}
-                loadingCtx={loadingContexts.has(run.run_id)}
-                onApprove={() => handleApprove(run.run_id)}
-                onReject={() => handleReject(run.run_id)}
-                onContextUpdate={(updated) => handleContextUpdate(run.run_id, updated)}
-              />
-            ))
+          )}
+
+          {/* Populated: all request types in one unified list */}
+          {!loading && pendingCount > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {/* Route runs */}
+              {runs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {runs.map((run) => (
+                    <PendingRunCard
+                      key={run.run_id}
+                      run={run}
+                      ctx={contexts.get(run.run_id)}
+                      loadingCtx={loadingContexts.has(run.run_id)}
+                      onApprove={() => handleApprove(run.run_id)}
+                      onReject={() => handleReject(run.run_id)}
+                      onContextUpdate={(updated) => handleContextUpdate(run.run_id, updated)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Credential sessions */}
+              {credSessions.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Use a saved login</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent is asking Antigen to use saved login details without revealing them to the agent.
+                    </p>
+                  </div>
+                  {credSessions.map((session) => (
+                    <div key={session.session_id} className="apr-card apr-card--blue">
+                      <div className="apr-card__head">
+                        <div>
+                          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
+                            Allow agent to use{" "}
+                            <span style={{ color: "var(--blue)" }}>{session.pass_label ?? "stored credential"}</span>
+                            {" "}on <span style={{ color: "var(--blue)" }}>{session.domain}</span>?
+                          </p>
+                          {session.pass_username && (
+                            <p style={{ fontSize: 11.5, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>
+                              username: {session.pass_username}
+                            </p>
+                          )}
+                        </div>
+                        <span style={{
+                          background: "var(--blue-soft)", color: "oklch(0.42 0.12 245)", border: "1px solid var(--blue-ring)",
+                          fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, flexShrink: 0,
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                        }}>
+                          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor" }} />
+                          Waiting
+                        </span>
+                      </div>
+                      <div className="apr-card__body">
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 24px", fontSize: 12, color: "var(--ink-4)" }}>
+                          <span>Domain: <span style={{ color: "var(--ink-2)" }}>{session.domain}</span></span>
+                          <span>Created: <span style={{ color: "var(--ink-2)" }}>{new Date(session.created_at).toLocaleString()}</span></span>
+                        </div>
+                        <div style={{ fontSize: 12 }}>
+                          <span style={{ color: "var(--ink-4)" }}>Fields: </span>
+                          {session.allowed_fields.map((f) => (
+                            <span key={f} style={{
+                              display: "inline-block", marginRight: 4,
+                              background: "var(--blue-soft)", border: "1px solid var(--blue-ring)",
+                              color: "oklch(0.42 0.12 245)", fontSize: 11, padding: "1px 7px", borderRadius: 999, fontFamily: "monospace",
+                            }}>{f}</span>
+                          ))}
+                        </div>
+                        <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+                          Session expires 10 minutes after approval. Credentials are filled by Antigen only — never returned to the agent.
+                        </p>
+                        <button onClick={() => handleApproveCredSession(session.session_id)} className="a-btn a-btn--primary">
+                          Approve session
+                        </button>
+                        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{session.session_id}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Auth sessions */}
+              {authSessions.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Start a login session</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent wants Antigen to log in on its behalf. The agent receives a session, not your password.
+                    </p>
+                  </div>
+                  {authSessions.map((session) => (
+                    <PendingAuthSessionCard
+                      key={session.session_id}
+                      session={session}
+                      onApprove={() => handleApproveAuthSession(session.session_id)}
+                      onReject={() => handleRejectAuthSession(session.session_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Login credentials */}
+              {credAuths.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Fill login credentials</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent is requesting permission to use stored credentials to log in. Antigen resolves and injects — the agent never receives them.
+                    </p>
+                  </div>
+                  {credAuths.map((auth) => (
+                    <PendingCredAuthCard
+                      key={auth.authorization_id}
+                      auth={auth}
+                      onApprove={() => handleApproveCredAuth(auth.authorization_id)}
+                      onDeny={() => handleDenyCredAuth(auth.authorization_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Field injections */}
+              {injections.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.42 0.09 150)", marginBottom: 4 }}>Fill a protected field</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent wants Antigen to fill a protected field directly. The agent never sees the secret.
+                    </p>
+                  </div>
+                  {injections.map((inj) => (
+                    <PendingInjectionCard
+                      key={inj.injection_request_id}
+                      injection={inj}
+                      onApprove={() => handleApproveInjection(inj.injection_request_id)}
+                      onDeny={() => handleDenyInjection(inj.injection_request_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Security challenges */}
+              {challenges.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Enter a security code</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent hit a verification step, like an email code or device check. You can provide the code without showing it to the agent.
+                    </p>
+                  </div>
+                  {challenges.map((ch) => (
+                    <PendingChallengeCard
+                      key={ch.challenge_id}
+                      challenge={ch}
+                      onSubmitCode={(code) => handleSubmitChallengeCode(ch.challenge_id, code)}
+                      onComplete={() => handleCompleteChallenge(ch.challenge_id)}
+                      onCancel={() => handleCancelChallenge(ch.challenge_id)}
+                      emailResolverStatus={emailResolverStatus}
+                    />
+                  ))}
+                </div>
+              )}
+
+            </div>
           )}
         </div>
 
-        {/* ── Credential session requests ──────────────────────────────── */}
-        {(credSessions.length > 0 || !loading) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
-              <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Credential sessions</div>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting access to use one of your stored credentials. Approving lets Antigen fill credentials on the specified domain. Secrets are never returned to the agent.
-              </p>
+        {/* ── How Antigen protects approvals ───────────────────────────── */}
+        <div style={{
+          background: "rgba(255,255,255,0.55)",
+          border: "1px solid var(--hairline)",
+          borderRadius: "var(--r-3)",
+          boxShadow: "var(--shadow-1)",
+          overflow: "hidden",
+        }}>
+          <button
+            onClick={() => setShowDisclosure((v) => !v)}
+            style={{
+              width: "100%", background: "none", border: "none", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
+              padding: "16px 20px", textAlign: "left",
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)", marginBottom: 2 }}>
+                How Antigen protects approvals
+              </div>
+              <div style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.4 }}>
+                Learn what agents may request and what Antigen keeps hidden.
+              </div>
             </div>
-            {loading ? null : credSessions.length === 0 ? (
-              <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No credential session requests waiting for approval.</p>
-            ) : (
-              credSessions.map((session) => (
-                <div key={session.session_id} className="apr-card apr-card--blue">
-                  <div className="apr-card__head">
-                    <div>
-                      <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
-                        Allow agent to use{" "}
-                        <span style={{ color: "var(--blue)" }}>{session.pass_label ?? "stored credential"}</span>
-                        {" "}on <span style={{ color: "var(--blue)" }}>{session.domain}</span>?
-                      </p>
-                      {session.pass_username && (
-                        <p style={{ fontSize: 11.5, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>
-                          username: {session.pass_username}
-                        </p>
-                      )}
+            <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, fontSize: 12, color: "var(--ink-4)" }}>
+              {showDisclosure ? "Hide" : "Show"}
+              <span style={{
+                fontSize: 8, display: "inline-block",
+                transform: showDisclosure ? "rotate(180deg)" : "none",
+                transition: "transform 0.2s",
+              }}>▼</span>
+            </div>
+          </button>
+
+          {showDisclosure && (
+            <div style={{
+              borderTop: "1px solid var(--hairline)",
+              padding: "20px",
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "20px 28px",
+            }}>
+              {([
+                {
+                  dot: "var(--blue)",
+                  title: "Review sensitive actions",
+                  desc: "Agents pause before purchases, submissions, or account changes you want to approve first.",
+                },
+                {
+                  dot: "var(--green)",
+                  title: "Keep secrets hidden",
+                  desc: "Antigen can fill passwords or protected fields without revealing the secret to the agent.",
+                },
+                {
+                  dot: "var(--blue)",
+                  title: "Handle login safely",
+                  desc: "Agents can ask Antigen to start a session. They receive access, not your password or cookies.",
+                },
+                {
+                  dot: "var(--amber)",
+                  title: "Resolve security checks",
+                  desc: "Verification codes and device checks are handled through Antigen so the agent never sees the code.",
+                },
+                {
+                  dot: "oklch(0.65 0.003 250)",
+                  title: "Limit temporary access",
+                  desc: "Approvals create temporary access that you can review or revoke at any time.",
+                },
+                {
+                  dot: "oklch(0.50 0.10 150)",
+                  title: "Record proof",
+                  desc: "Important approvals and sensitive actions leave a signed record for accountability.",
+                },
+              ]).map(({ dot, title, desc }) => (
+                <div key={title} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                  <span style={{
+                    width: 7, height: 7, borderRadius: "50%",
+                    background: dot, flexShrink: 0, marginTop: 4,
+                  }} />
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-2)", marginBottom: 3 }}>
+                      {title}
                     </div>
-                    <span style={{
-                      background: "var(--blue-soft)", color: "oklch(0.42 0.12 245)", border: "1px solid var(--blue-ring)",
-                      fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, flexShrink: 0,
-                      display: "inline-flex", alignItems: "center", gap: 5,
-                    }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor" }} />
-                      Waiting
-                    </span>
-                  </div>
-                  <div className="apr-card__body">
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 24px", fontSize: 12, color: "var(--ink-4)" }}>
-                      <span>Domain: <span style={{ color: "var(--ink-2)" }}>{session.domain}</span></span>
-                      <span>Created: <span style={{ color: "var(--ink-2)" }}>{new Date(session.created_at).toLocaleString()}</span></span>
+                    <div style={{ fontSize: 12, color: "var(--ink-4)", lineHeight: 1.5 }}>
+                      {desc}
                     </div>
-                    <div style={{ fontSize: 12 }}>
-                      <span style={{ color: "var(--ink-4)" }}>Fields: </span>
-                      {session.allowed_fields.map((f) => (
-                        <span key={f} style={{
-                          display: "inline-block", marginRight: 4,
-                          background: "var(--blue-soft)", border: "1px solid var(--blue-ring)",
-                          color: "oklch(0.42 0.12 245)", fontSize: 11, padding: "1px 7px", borderRadius: 999, fontFamily: "monospace",
-                        }}>{f}</span>
-                      ))}
-                    </div>
-                    <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
-                      Session expires 10 minutes after approval. Credentials are filled by Antigen only — never returned to the agent.
-                    </p>
-                    <button onClick={() => handleApproveCredSession(session.session_id)} className="a-btn a-btn--primary">
-                      Approve session
-                    </button>
-                    <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{session.session_id}</p>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {/* ── Login session requests ───────────────────────────────────── */}
-        {(authSessions.length > 0 || !loading) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
-              <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Login sessions</div>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting Antigen to log in on its behalf. The agent receives only a session handle, never cookies, storage, or your password.
-              </p>
+              ))}
             </div>
-            {loading ? null : authSessions.length === 0 ? (
-              <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No login session requests waiting for approval.</p>
-            ) : (
-              authSessions.map((session) => (
-                <PendingAuthSessionCard
-                  key={session.session_id}
-                  session={session}
-                  onApprove={() => handleApproveAuthSession(session.session_id)}
-                  onReject={() => handleRejectAuthSession(session.session_id)}
-                />
-              ))
-            )}
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* ── Login credential requests ────────────────────────────────── */}
-        {(credAuths.length > 0 || !loading) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
-              <div className="a-eyebrow" style={{ color: "var(--blue)", marginBottom: 4 }}>Login credentials</div>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting permission to use one of your stored credentials to log in. One approval covers both fields for this attempt. Antigen resolves and injects — the agent never receives them.
-              </p>
-            </div>
-            {loading ? null : credAuths.length === 0 ? (
-              <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No login credential requests waiting for approval.</p>
-            ) : (
-              credAuths.map((auth) => (
-                <PendingCredAuthCard
-                  key={auth.authorization_id}
-                  auth={auth}
-                  onApprove={() => handleApproveCredAuth(auth.authorization_id)}
-                  onDeny={() => handleDenyCredAuth(auth.authorization_id)}
-                />
-              ))
-            )}
-          </div>
-        )}
-
-        {/* ── Secret field injection ───────────────────────────────────── */}
-        {(injections.length > 0 || !loading) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
-              <div className="a-eyebrow" style={{ color: "oklch(0.42 0.09 150)", marginBottom: 4 }}>Secret field injections</div>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent is requesting Antigen to fill a credential field directly in its active browser via CDP. The agent never receives the raw credential.
-              </p>
-            </div>
-            {loading ? null : injections.length === 0 ? (
-              <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No secret field injection requests waiting for approval.</p>
-            ) : (
-              injections.map((inj) => (
-                <PendingInjectionCard
-                  key={inj.injection_request_id}
-                  injection={inj}
-                  onApprove={() => handleApproveInjection(inj.injection_request_id)}
-                  onDeny={() => handleDenyInjection(inj.injection_request_id)}
-                />
-              ))
-            )}
-          </div>
-        )}
-
-        {/* ── Security challenges ──────────────────────────────────────── */}
-        {(challenges.length > 0 || !loading) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
-              <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Security challenges</div>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                An agent encountered a security challenge (device verification, email code, etc.) and paused. Enter the code here — Antigen injects it once. The agent never sees the code.
-              </p>
-            </div>
-            {loading ? null : challenges.length === 0 ? (
-              <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No security challenges waiting.</p>
-            ) : (
-              challenges.map((ch) => (
-                <PendingChallengeCard
-                  key={ch.challenge_id}
-                  challenge={ch}
-                  onSubmitCode={(code) => handleSubmitChallengeCode(ch.challenge_id, code)}
-                  onComplete={() => handleCompleteChallenge(ch.challenge_id)}
-                  onCancel={() => handleCancelChallenge(ch.challenge_id)}
-                  emailResolverStatus={emailResolverStatus}
-                />
-              ))
-            )}
-          </div>
-        )}
-
-        {/* ── Active grants ────────────────────────────────────────────── */}
+        {/* ── Temporary access ──────────────────────────────────────────── */}
         {!loading && <ActiveGrantsPanel grants={activeGrants} />}
 
       </div>

@@ -20,26 +20,68 @@ import {
   type WorkspaceArtifactMeta,
   type WorkspaceArtifactFull,
 } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 type Readiness = WorkspaceTaskWithReadiness["readiness"];
 type TabId = "tasks" | "artifacts" | "participants";
 
-// ─── Shared style helpers ──────────────────────────────────────────────────────
+// ─── Shared UI helpers ─────────────────────────────────────────────────────────
 
-function permChip(color: "green" | "amber" | "red" | "graphite" | "blue"): React.CSSProperties {
-  const map: Record<string, React.CSSProperties> = {
-    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)" },
-    graphite: { background: "var(--graphite-soft)", color: "var(--ink-2)",         border: "1px solid var(--hairline)" },
-  };
-  return {
-    ...map[color],
-    fontSize: 11, fontWeight: 500,
-    padding: "2px 9px", borderRadius: 999,
-    display: "inline-flex", alignItems: "center", gap: 4,
-  };
+function HeaderStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="header-stat">
+      <div className="header-stat__value">{value}</div>
+      <div className="header-stat__label">{label}</div>
+    </div>
+  );
+}
+
+// ─── Agent identity helpers ─────────────────────────────────────────────────────
+
+function djb2Hash(str: string): number {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+const AGENT_ACCENTS = [
+  { border: "oklch(0.68 0.07 240)", bg: "oklch(0.68 0.07 240 / 0.04)" },
+  { border: "oklch(0.68 0.07 160)", bg: "oklch(0.68 0.07 160 / 0.04)" },
+  { border: "oklch(0.68 0.07 290)", bg: "oklch(0.68 0.07 290 / 0.04)" },
+  { border: "oklch(0.68 0.07 55)",  bg: "oklch(0.68 0.07 55  / 0.04)" },
+  { border: "oklch(0.68 0.07 20)",  bg: "oklch(0.68 0.07 20  / 0.04)" },
+] as const;
+
+function participantAccent(id: string) {
+  return AGENT_ACCENTS[djb2Hash(id) % AGENT_ACCENTS.length];
+}
+
+// ─── Display helpers ────────────────────────────────────────────────────────────
+
+function taskModeLabel(mode: string): string {
+  if (mode === "direct") return "Assigned directly";
+  if (mode === "plan_first") return "Needs plan first";
+  return mode;
+}
+
+function taskKindLabel(kind: string): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1).replace(/_/g, " ");
+}
+
+function assignmentLabel(type: string, collarId?: string | null, delegationId?: string | null): string {
+  if (type === "open") return "Open assignment";
+  if (type === "collar") return `Rule set: ${collarId ?? "—"}`;
+  if (type === "delegation") return `Connected agent: ${delegationId ?? "—"}`;
+  return type;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -150,7 +192,7 @@ export default function WorkspaceDetailPage() {
       </Link>
 
       {/* ── Hero ── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 0" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 0" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -165,17 +207,12 @@ export default function WorkspaceDetailPage() {
                   {workspace.description}
                 </p>
               )}
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <span className={`a-status a-status--${workspace.status === "active" ? "green" : "graphite"}`}>
-                  <span className="a-status__dot" />
-                  {workspace.status}
-                </span>
-                <span style={permChip("graphite")}>
-                  collar: <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>{workspace.collar_id}</span>
-                </span>
-                <span style={permChip("graphite")}>
-                  {workspace.participant_delegation_ids.length} participant{workspace.participant_delegation_ids.length !== 1 ? "s" : ""}
-                </span>
+              <div className="a-meta-line" style={{ marginTop: workspace.description ? 0 : 4 }}>
+                <span>Status: {workspace.status === "active" ? "Active" : "Archived"}</span>
+                <span className="a-meta-line__sep">·</span>
+                <span>Rule set: {workspace.collar_id}</span>
+                <span className="a-meta-line__sep">·</span>
+                <span>Agents: {workspace.participant_delegation_ids.length}</span>
               </div>
             </div>
             <button
@@ -189,28 +226,13 @@ export default function WorkspaceDetailPage() {
         </div>
 
         {/* Stat strip */}
-        <div className="cmd-pulse" style={{ marginTop: 24, paddingBottom: 24, borderTop: "1px solid var(--hairline)", justifyContent: "flex-start" }}>
-          <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-            <span className="cmd-pulse__num">{open}</span>
-            <span className="cmd-pulse__lab">Open</span>
-          </div>
-          <div className="cmd-pulse__div" />
-          <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-            <span className="cmd-pulse__num">{in_progress}</span>
-            <span className="cmd-pulse__lab">In Progress</span>
-          </div>
-          <div className="cmd-pulse__div" />
-          <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-            <span className="cmd-pulse__num">{completed}</span>
-            <span className="cmd-pulse__lab">Completed</span>
-          </div>
-          <div className="cmd-pulse__div" />
-          <div className="cmd-pulse__item" style={{ cursor: "default" }}>
-            <span className="cmd-pulse__num">{workspace.artifact_count}</span>
-            <span className="cmd-pulse__lab">Artifacts</span>
-          </div>
+        <div className="header-stats" style={{ paddingBottom: 24 }}>
+          <HeaderStat value={open} label="Open" />
+          <HeaderStat value={in_progress} label="In Progress" />
+          <HeaderStat value={completed} label="Completed" />
+          <HeaderStat value={workspace.artifact_count} label="Outputs" />
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Tabs ── */}
       <div className="ag-tabs">
@@ -220,22 +242,9 @@ export default function WorkspaceDetailPage() {
             className={`ag-tab${activeTab === tab ? " ag-tab--active" : ""}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
-            {tab === "tasks" && (
-              <span style={{ marginLeft: 6, ...permChip("graphite"), fontSize: 10.5, padding: "1px 7px" }}>
-                {tasks.length}
-              </span>
-            )}
-            {tab === "artifacts" && (
-              <span style={{ marginLeft: 6, ...permChip("graphite"), fontSize: 10.5, padding: "1px 7px" }}>
-                {artifacts.length}
-              </span>
-            )}
-            {tab === "participants" && (
-              <span style={{ marginLeft: 6, ...permChip("graphite"), fontSize: 10.5, padding: "1px 7px" }}>
-                {workspace.participant_delegation_ids.length}
-              </span>
-            )}
+            {tab === "tasks" && `Tasks (${tasks.length})`}
+            {tab === "artifacts" && `Outputs (${artifacts.length})`}
+            {tab === "participants" && `Agents (${workspace.participant_delegation_ids.length})`}
           </button>
         ))}
       </div>
@@ -250,7 +259,7 @@ export default function WorkspaceDetailPage() {
               style={{ fontSize: 12.5 }}
               onClick={() => { setShowTaskForm((s) => !s); setArtifactFormMode("none"); }}
             >
-              {showTaskForm ? "Cancel" : "+ Create Task"}
+              {showTaskForm ? "Cancel" : "+ Create task"}
             </button>
           </div>
 
@@ -274,7 +283,7 @@ export default function WorkspaceDetailPage() {
       {activeTab === "artifacts" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span className="a-eyebrow">Shared Context</span>
+            <span className="a-eyebrow">Shared Outputs</span>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 className="a-btn a-btn--ghost"
@@ -288,7 +297,7 @@ export default function WorkspaceDetailPage() {
                 style={{ fontSize: 12.5 }}
                 onClick={() => { setArtifactFormMode((m) => m === "file" ? "none" : "file"); setShowTaskForm(false); }}
               >
-                {artifactFormMode === "file" ? "Cancel" : "+ Upload File"}
+                {artifactFormMode === "file" ? "Cancel" : "+ Upload file"}
               </button>
             </div>
           </div>
@@ -312,10 +321,10 @@ export default function WorkspaceDetailPage() {
           {artifacts.length === 0 && artifactFormMode === "none" && (
             <div className="a-card" style={{ textAlign: "center", padding: "40px 24px" }}>
               <p style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 4px" }}>
-                No artifacts yet.
+                No outputs yet.
               </p>
               <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-                Agents create artifacts when completing tasks, or add one above.
+                Agents create outputs when completing tasks, or add one above.
               </p>
             </div>
           )}
@@ -331,19 +340,29 @@ export default function WorkspaceDetailPage() {
                     borderTop: i > 0 ? "1px solid var(--hairline)" : undefined,
                   }}
                 >
-                  <KindBadge kind={a.kind} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-1)" }}>{a.name}</span>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0 12px", marginTop: 2 }}>
+                    <div className="a-meta-line" style={{ marginTop: 3 }}>
+                      <span>Type: {taskKindLabel(a.kind)}</span>
                       {a.task_id && (
-                        <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>task: <span style={{ fontFamily: "monospace", fontSize: 11 }}>{a.task_id}</span></span>
+                        <>
+                          <span className="a-meta-line__sep">·</span>
+                          <span style={{ fontFamily: "monospace", fontSize: 11 }}>{a.task_id}</span>
+                        </>
                       )}
                       {a.created_by_delegation_id && (
-                        <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>by: <span style={{ fontFamily: "monospace", fontSize: 11 }}>{a.created_by_delegation_id}</span></span>
+                        <>
+                          <span className="a-meta-line__sep">·</span>
+                          <span style={{ fontFamily: "monospace", fontSize: 11 }}>{a.created_by_delegation_id}</span>
+                        </>
                       )}
-                      <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>{formatBytes(a.size_bytes)}</span>
+                      <span className="a-meta-line__sep">·</span>
+                      <span>{formatBytes(a.size_bytes)}</span>
                       {a.kind === "file" && a.mime_type && (
-                        <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>{a.mime_type}</span>
+                        <>
+                          <span className="a-meta-line__sep">·</span>
+                          <span>{a.mime_type}</span>
+                        </>
                       )}
                     </div>
                   </div>
@@ -386,7 +405,7 @@ export default function WorkspaceDetailPage() {
                   onClick={() => setViewingArtifact(null)}
                   style={{ fontSize: 12, color: "var(--ink-4)", background: "none", border: "none", cursor: "pointer" }}
                 >
-                  Close ✕
+                  Close
                 </button>
               </div>
               <pre style={{
@@ -406,11 +425,11 @@ export default function WorkspaceDetailPage() {
       {/* ── Participants tab ── */}
       {activeTab === "participants" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <span className="a-eyebrow">Participants ({workspace.participant_delegation_ids.length})</span>
+          <span className="a-eyebrow">Agents ({workspace.participant_delegation_ids.length})</span>
 
           {workspace.participant_delegation_ids.length === 0 ? (
             <div className="a-card" style={{ textAlign: "center", padding: "40px 24px" }}>
-              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0 }}>No participants assigned.</p>
+              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0 }}>No agents assigned.</p>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -418,26 +437,35 @@ export default function WorkspaceDetailPage() {
                 const delg = participantDelegations.find((d) => d.id === delgId);
                 const name = delg?.agent_name ?? delgId;
                 const initials = name.slice(0, 2).toUpperCase();
+                const accent = participantAccent(delgId);
                 return (
-                  <div key={delgId} className="ag-row">
-                    <div className="ag-avatar">
+                  <div
+                    key={delgId}
+                    className="ag-row"
+                    style={{ borderLeft: `3px solid ${accent.border}`, background: accent.bg }}
+                  >
+                    <div
+                      className="ag-avatar"
+                      style={{ borderColor: accent.border, color: accent.border }}
+                    >
                       <span style={{ fontSize: 11, fontWeight: 700 }}>{initials}</span>
                     </div>
-                    <div style={{ minWidth: 0 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <span style={{ fontWeight: 600, fontSize: 14, color: "var(--ink-1)" }}>
                         {delg?.agent_name ?? delgId}
                       </span>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
-                        <span style={{ fontSize: 11.5, color: "var(--ink-4)", fontFamily: "monospace" }}>{delgId}</span>
+                      <div className="a-meta-line" style={{ marginTop: 3 }}>
+                        <span style={{ fontFamily: "monospace", fontSize: 11 }}>{delgId}</span>
                         {delg?.default_collar_id && (
-                          <span style={permChip("graphite")}>
-                            collar: <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>{delg.default_collar_id}</span>
-                          </span>
+                          <>
+                            <span className="a-meta-line__sep">·</span>
+                            <span>Rule set: {delg.default_collar_id}</span>
+                          </>
                         )}
                       </div>
                     </div>
-                    <div style={{ flexShrink: 0 }}>
-                      <span style={permChip("blue")}>participant</span>
+                    <div style={{ flexShrink: 0, fontSize: 12, color: "var(--ink-3)" }}>
+                      Role: Participant
                     </div>
                   </div>
                 );
@@ -493,7 +521,7 @@ function TaskGroup({
           {label}
         </span>
         <span style={{ fontSize: 12, color: "var(--ink-4)" }}>({count})</span>
-        <span style={{ fontSize: 10, color: "var(--ink-4)", marginLeft: 2 }}>{open ? "▲" : "▼"}</span>
+        <span style={{ fontSize: 11, color: "var(--ink-4)", marginLeft: 2 }}>{open ? "Hide" : "Show"}</span>
       </button>
 
       {open && (
@@ -519,36 +547,43 @@ function TaskGroup({
 // ─── Task Card ─────────────────────────────────────────────────────────────────
 
 function TaskCard({ task, onReset }: { task: WorkspaceTaskWithReadiness; onReset?: () => void }) {
-  const readinessColor: Record<Readiness, "green" | "blue" | "amber" | "graphite" | "red"> = {
-    ready:            "green",
-    in_progress_other: "blue",
-    in_progress_mine:  "blue",
-    blocked:          "amber",
-    completed:        "graphite",
-    cancelled:        "graphite",
-  };
   const readinessLabel: Record<Readiness, string> = {
-    ready:             "ready",
-    in_progress_other: "in progress",
-    in_progress_mine:  "in progress",
-    blocked:           "blocked",
-    completed:         "completed",
-    cancelled:         "cancelled",
+    ready:             "Ready",
+    in_progress_other: "In progress",
+    in_progress_mine:  "In progress",
+    blocked:           "Blocked",
+    completed:         "Completed",
+    cancelled:         "Cancelled",
   };
-  const statusClass = `a-status a-status--${readinessColor[task.readiness]}`;
+  const readinessColor: Record<Readiness, string> = {
+    ready:             "var(--green)",
+    in_progress_other: "var(--blue)",
+    in_progress_mine:  "var(--blue)",
+    blocked:           "var(--amber)",
+    completed:         "var(--ink-4)",
+    cancelled:         "var(--ink-4)",
+  };
+
+  const priorityColor: Record<string, string> = {
+    urgent: "oklch(0.45 0.13 25)",
+    high:   "oklch(0.45 0.12 75)",
+    low:    "var(--ink-4)",
+    normal: "var(--ink-4)",
+  };
 
   return (
     <div className="a-card" style={{ padding: "14px 16px" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 4 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 4 }}>
         <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", lineHeight: 1.4 }}>
           {task.title}
         </span>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
           {task.priority && task.priority !== "normal" && (
-            <PriorityChip priority={task.priority} />
+            <span style={{ fontSize: 12, color: priorityColor[task.priority] ?? "var(--ink-4)" }}>
+              Priority: {task.priority.charAt(0).toUpperCase() + task.priority.slice(1)}
+            </span>
           )}
-          <span className={statusClass}>
-            <span className="a-status__dot" />
+          <span style={{ fontSize: 12, color: readinessColor[task.readiness], fontWeight: 500 }}>
             {readinessLabel[task.readiness]}
           </span>
           {task.status === "in_progress" && onReset && (
@@ -569,26 +604,18 @@ function TaskCard({ task, onReset }: { task: WorkspaceTaskWithReadiness; onReset
         </p>
       )}
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 8px", alignItems: "center", fontSize: 12, color: "var(--ink-3)" }}>
-        {task.task_kind && <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{task.task_kind}</span>}
-        {task.task_kind && task.task_mode && <span style={{ color: "var(--ink-4)" }}>·</span>}
-        {task.task_mode && <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{task.task_mode}</span>}
+      <div className="a-meta-line" style={{ marginTop: 4 }}>
+        {task.task_kind && (
+          <span>Type: {taskKindLabel(task.task_kind)}</span>
+        )}
+        {task.task_kind && task.task_mode && <span className="a-meta-line__sep">·</span>}
+        {task.task_mode && (
+          <span>How: {taskModeLabel(task.task_mode)}</span>
+        )}
         {task.assignment_type && (
           <>
-            <span style={{ color: "var(--ink-4)" }}>·</span>
-            {task.assignment_type === "open" && (
-              <span style={{ fontSize: 11.5, ...permChip("graphite"), padding: "1px 7px" }}>open</span>
-            )}
-            {task.assignment_type === "collar" && task.required_collar_id && (
-              <span style={{ fontSize: 11.5, ...permChip("blue"), padding: "1px 7px" }}>
-                collar: <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>{task.required_collar_id}</span>
-              </span>
-            )}
-            {task.assignment_type === "delegation" && task.assigned_delegation_id && (
-              <span style={{ fontSize: 11.5, ...permChip("blue"), padding: "1px 7px" }}>
-                <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>{task.assigned_delegation_id}</span>
-              </span>
-            )}
+            <span className="a-meta-line__sep">·</span>
+            <span>{assignmentLabel(task.assignment_type, task.required_collar_id, task.assigned_delegation_id)}</span>
           </>
         )}
       </div>
@@ -597,25 +624,24 @@ function TaskCard({ task, onReset }: { task: WorkspaceTaskWithReadiness; onReset
         <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 3 }}>
           {task.blocker_reasons.incomplete_dependency_task_ids?.map((id) => (
             <p key={id} style={{ margin: 0, fontSize: 12, color: "oklch(0.45 0.12 75)" }}>
-              ⏳ waiting on: <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{id}</span>
+              Waiting on: <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{id}</span>
             </p>
           ))}
           {task.blocker_reasons.missing_artifact_names?.map((name) => (
             <p key={name} style={{ margin: 0, fontSize: 12, color: "oklch(0.45 0.12 75)" }}>
-              missing artifact: <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{name}</span>
+              Missing output: <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>{name}</span>
             </p>
           ))}
         </div>
       )}
 
       {(task.required_artifact_names?.length ?? 0) > 0 && task.readiness !== "blocked" && (
-        <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {task.required_artifact_names!.map((name) => (
-            <span key={name} style={{ ...permChip("graphite"), fontSize: 11, fontFamily: "monospace", padding: "1px 8px" }}>
-              {name}
-            </span>
-          ))}
-        </div>
+        <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ink-4)" }}>
+          Expected outputs:{" "}
+          <span style={{ fontFamily: "monospace", fontSize: 11.5 }}>
+            {task.required_artifact_names!.join(", ")}
+          </span>
+        </p>
       )}
     </div>
   );
@@ -650,8 +676,8 @@ function CreateTaskForm({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim()) { setErr("Title is required."); return; }
-    if (assignmentType === "delegation" && !assignedDelegationId) { setErr("Select a delegation to assign this task."); return; }
-    if (assignmentType === "collar" && !requiredCollarId.trim()) { setErr("Enter a collar ID for collar-assigned tasks."); return; }
+    if (assignmentType === "delegation" && !assignedDelegationId) { setErr("Select a connected agent for this task."); return; }
+    if (assignmentType === "collar" && !requiredCollarId.trim()) { setErr("Enter a rule set ID for rule set–assigned tasks."); return; }
     setSubmitting(true);
     setErr(null);
     try {
@@ -675,9 +701,15 @@ function CreateTaskForm({
     }
   }
 
+  const assignmentOptions: { value: "open" | "delegation" | "collar"; label: string }[] = [
+    { value: "open", label: "Open — any eligible agent" },
+    { value: "delegation", label: "Specific agent" },
+    { value: "collar", label: "Specific rule set" },
+  ];
+
   return (
     <form onSubmit={handleSubmit} className="a-card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, border: "1px solid var(--blue-ring)" }}>
-      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>New Task</div>
+      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>Create a task</div>
 
       {err && (
         <div style={{ fontSize: 12.5, color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-1)", padding: "8px 12px" }}>
@@ -692,50 +724,50 @@ function CreateTaskForm({
 
       <div>
         <label className="ag-label">Description</label>
-        <textarea className="ag-input" style={{ resize: "none" }} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional context for the agent." />
+        <textarea className="ag-input" style={{ resize: "none" }} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Describe what an agent should do." />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <div>
-          <label className="ag-label">Kind</label>
+          <label className="ag-label">Task type</label>
           <select className="ag-select" value={taskKind} onChange={(e) => setTaskKind(e.target.value as TaskKind)}>
             {(["research","analysis","draft","review","shopping","coding","planning","approval_prep","execution","other"] as TaskKind[]).map((k) => (
-              <option key={k} value={k}>{k}</option>
+              <option key={k} value={k}>{taskKindLabel(k)}</option>
             ))}
           </select>
         </div>
         <div>
-          <label className="ag-label">Mode</label>
+          <label className="ag-label">How it should run</label>
           <select className="ag-select" value={taskMode} onChange={(e) => setTaskMode(e.target.value as TaskMode)}>
-            <option value="direct">direct</option>
-            <option value="plan_first">plan_first</option>
+            <option value="direct">Assigned directly</option>
+            <option value="plan_first">Needs plan first</option>
           </select>
         </div>
         <div>
           <label className="ag-label">Priority</label>
           <select className="ag-select" value={priority} onChange={(e) => setPriority(e.target.value as TaskPriority)}>
-            <option value="low">low</option>
-            <option value="normal">normal</option>
-            <option value="high">high</option>
-            <option value="urgent">urgent</option>
+            <option value="low">Low</option>
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
           </select>
         </div>
       </div>
 
       <div>
-        <label className="ag-label">Assignment</label>
+        <label className="ag-label">Who should do it</label>
         <div style={{ display: "flex", gap: 16 }}>
-          {(["open", "delegation", "collar"] as const).map((t) => (
-            <label key={t} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
+          {assignmentOptions.map(({ value, label }) => (
+            <label key={value} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
               <input
                 type="radio"
                 name="assignment_type"
-                value={t}
-                checked={assignmentType === t}
-                onChange={() => setAssignmentType(t)}
+                value={value}
+                checked={assignmentType === value}
+                onChange={() => setAssignmentType(value)}
                 style={{ accentColor: "var(--blue)" }}
               />
-              <span style={{ color: "var(--ink-2)" }}>{t}</span>
+              <span style={{ color: "var(--ink-2)" }}>{label}</span>
             </label>
           ))}
         </div>
@@ -743,9 +775,9 @@ function CreateTaskForm({
 
       {assignmentType === "delegation" && (
         <div>
-          <label className="ag-label">Delegation</label>
+          <label className="ag-label">Connected agent</label>
           <select className="ag-select" value={assignedDelegationId} onChange={(e) => setAssignedDelegationId(e.target.value)}>
-            <option value="">— select participant —</option>
+            <option value="">— select an agent —</option>
             {participantDelegations.map((d) => (
               <option key={d.id} value={d.id}>{d.agent_name} ({d.id})</option>
             ))}
@@ -755,14 +787,14 @@ function CreateTaskForm({
 
       {assignmentType === "collar" && (
         <div>
-          <label className="ag-label">Required Collar ID</label>
+          <label className="ag-label">Rule set ID</label>
           <input className="ag-input" value={requiredCollarId} onChange={(e) => setRequiredCollarId(e.target.value)} placeholder="collar_research_001" />
         </div>
       )}
 
       {tasks.length > 0 && (
         <div>
-          <label className="ag-label">Depends on tasks</label>
+          <label className="ag-label">Wait for these tasks first</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 140, overflowY: "auto" }}>
             {tasks.map((t) => (
               <label key={t.task_id} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
@@ -785,13 +817,13 @@ function CreateTaskForm({
       )}
 
       <div>
-        <label className="ag-label">Required artifact names (comma-separated)</label>
+        <label className="ag-label">Expected outputs (comma-separated)</label>
         <input className="ag-input" value={requiredArtifacts} onChange={(e) => setRequiredArtifacts(e.target.value)} placeholder="antigen-pillars-summary.md, analysis-report.json" />
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button type="submit" disabled={submitting} className="a-btn a-btn--primary">
-          {submitting ? "Creating…" : "Create Task"}
+          {submitting ? "Creating…" : "Create task"}
         </button>
       </div>
     </form>
@@ -826,7 +858,7 @@ function CreateArtifactForm({
       await createWorkspaceArtifact(workspaceId, { name: name.trim(), kind, content, task_id: taskId || undefined });
       onCreated();
     } catch (ex: unknown) {
-      setErr(ex instanceof Error ? ex.message : "Failed to create artifact.");
+      setErr(ex instanceof Error ? ex.message : "Failed to create output.");
     } finally {
       setSubmitting(false);
     }
@@ -834,7 +866,7 @@ function CreateArtifactForm({
 
   return (
     <form onSubmit={handleSubmit} className="a-card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, border: "1px solid var(--blue-ring)" }}>
-      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>New Text Artifact</div>
+      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>New text output</div>
       <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-3)" }}>Supports text, markdown, JSON, and CSV. Max 50 KB.</p>
 
       {err && (
@@ -849,12 +881,12 @@ function CreateArtifactForm({
           <input className="ag-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="antigen-pillars-summary.md" required />
         </div>
         <div>
-          <label className="ag-label">Kind</label>
+          <label className="ag-label">Type</label>
           <select className="ag-select" value={kind} onChange={(e) => setKind(e.target.value as WorkspaceArtifactKind)}>
-            <option value="text">text</option>
-            <option value="markdown">markdown</option>
-            <option value="json">json</option>
-            <option value="csv">csv</option>
+            <option value="text">Text</option>
+            <option value="markdown">Markdown</option>
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
           </select>
         </div>
       </div>
@@ -878,7 +910,7 @@ function CreateArtifactForm({
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button type="submit" disabled={submitting} className="a-btn a-btn--primary">
-          {submitting ? "Saving…" : "Save Artifact"}
+          {submitting ? "Saving…" : "Save output"}
         </button>
       </div>
     </form>
@@ -926,7 +958,7 @@ function UploadArtifactForm({
 
   return (
     <form onSubmit={handleSubmit} className="a-card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16, border: "1px solid var(--blue-ring)" }}>
-      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>Upload File</div>
+      <div className="a-eyebrow" style={{ color: "var(--blue)" }}>Upload file</div>
       <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-3)" }}>PDF, PNG, JPEG, TXT, CSV, JSON, DOCX. Max 10 MB.</p>
 
       {err && (
@@ -971,42 +1003,4 @@ function UploadArtifactForm({
       </div>
     </form>
   );
-}
-
-// ─── Shared UI helpers ─────────────────────────────────────────────────────────
-
-function PriorityChip({ priority }: { priority: string }) {
-  const color: Record<string, "red" | "amber" | "graphite"> = {
-    urgent: "red",
-    high:   "amber",
-    low:    "graphite",
-  };
-  const c = color[priority] ?? "graphite";
-  return (
-    <span style={{ ...permChip(c), fontSize: 11, padding: "2px 8px" }}>
-      {priority}
-    </span>
-  );
-}
-
-function KindBadge({ kind }: { kind: string }) {
-  const styles: Record<string, React.CSSProperties> = {
-    markdown: { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    json:     { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    csv:      { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    text:     { background: "var(--graphite-soft)", color: "var(--ink-2)",         border: "1px solid var(--hairline)" },
-    file:     { background: "var(--graphite-soft)", color: "var(--ink-2)",         border: "1px solid var(--hairline)" },
-  };
-  const s = styles[kind] ?? styles.text;
-  return (
-    <span style={{ ...s, fontSize: 11, fontWeight: 500, fontFamily: "monospace", padding: "2px 9px", borderRadius: 6, flexShrink: 0 }}>
-      {kind}
-    </span>
-  );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

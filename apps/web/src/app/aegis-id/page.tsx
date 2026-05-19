@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { AegisIDTrustClaims } from "@aegis/types";
 import { getAegisIDTrustClaims } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 // ── Primitives ─────────────────────────────────────────────────────────────────
 
@@ -101,7 +102,7 @@ export default function AegisIDPage() {
     <div className="page">
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -120,7 +121,7 @@ export default function AegisIDPage() {
             <HeaderStat value={loading ? "—" : (claims?.runner_completed_purchases ?? 0)} label="Runner purchases" />
           </div>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Loading skeletons ─────────────────────────────────────────────── */}
       {loading && (

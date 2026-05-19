@@ -14,14 +14,18 @@ import {
   listWebsiteViolationReceipts,
   verifyWebsiteTrustProfile,
 } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-type StatusVariant = "green" | "amber" | "red" | "graphite" | "quiet" | "outline-red" | "outline-amber";
 type VerifyState = { status: "idle" | "loading" | "done"; result?: WebsiteTrustProfileVerificationResult };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function truncateHash(hash: string) {
   return hash.length > 20 ? `${hash.slice(0, 8)}…${hash.slice(-8)}` : hash;
+}
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 const TRUST_STATUS_LABEL: Record<string, string> = {
@@ -30,46 +34,37 @@ const TRUST_STATUS_LABEL: Record<string, string> = {
   unverified: "Unverified",
 };
 
-const TRUST_STATUS_VARIANT: Record<string, StatusVariant> = {
-  verified_demo_business: "quiet",
-  flagged: "red",
-  unverified: "quiet",
-};
-
 const ACTION_LABEL: Record<string, string> = {
-  allow_normal_browsing: "Allow",
+  allow_normal_browsing: "Normal browsing allowed",
   require_extra_approval: "Approval required",
-  block_sensitive_actions: "Block",
+  block_sensitive_actions: "Blocked",
 };
 
-const ACTION_VARIANT: Record<string, StatusVariant> = {
-  allow_normal_browsing: "green",
-  require_extra_approval: "amber",
-  block_sensitive_actions: "red",
-};
-
-const VERIFY_STATUS_VARIANT: Record<string, StatusVariant> = {
-  verified: "quiet",
-  unverified: "quiet",
-  suspended: "red",
-};
-
-const PROFILE_STATUS_VARIANT: Record<string, StatusVariant> = {
-  active: "quiet",
-  revoked: "outline-red",
-  superseded: "outline-amber",
-};
-
-// ── Primitives ─────────────────────────────────────────────────────────────────
-function AStatus({ label, variant = "graphite" }: { label: string; variant?: StatusVariant }) {
-  return (
-    <span className={`a-status a-status--${variant}`}>
-      <span className="a-status__dot" />
-      {label}
-    </span>
-  );
+// ── Color helpers ──────────────────────────────────────────────────────────────
+function trustStatusColor(status: string): string {
+  if (status === "flagged") return "oklch(0.45 0.13 25)";
+  return "var(--ink-2)";
 }
 
+function actionColor(action: string): string {
+  if (action === "block_sensitive_actions") return "oklch(0.45 0.13 25)";
+  if (action === "require_extra_approval") return "oklch(0.45 0.12 75)";
+  return "var(--ink-2)";
+}
+
+function profileStatusColor(status: string): string {
+  if (status === "suspended" || status === "revoked") return "oklch(0.45 0.13 25)";
+  if (status === "superseded") return "oklch(0.45 0.12 75)";
+  return "var(--ink-3)";
+}
+
+function severityColor(severity: string): string {
+  if (severity === "critical" || severity === "high") return "oklch(0.45 0.13 25)";
+  if (severity === "medium") return "oklch(0.45 0.12 75)";
+  return "var(--ink-4)";
+}
+
+// ── Primitives ─────────────────────────────────────────────────────────────────
 function HeaderStat({ value, label }: { value: string | number; label: string }) {
   return (
     <div className="header-stat">
@@ -100,10 +95,13 @@ function VerificationBadge({ state }: { state?: VerifyState }) {
     );
   }
   const r = state.result!;
-  if (r.error === "SIGNING_KEY_UNAVAILABLE") return <AStatus label="Dev mode" variant="amber" />;
-  if (r.valid) return <span style={{ fontSize: 11.5, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Valid</span>;
-  if (r.hash_valid) return <AStatus label="Unsigned" variant="amber" />;
-  return <AStatus label="Invalid" variant="red" />;
+  if (r.error === "SIGNING_KEY_UNAVAILABLE")
+    return <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>Dev mode</span>;
+  if (r.valid)
+    return <span style={{ fontSize: 11.5, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Valid</span>;
+  if (r.hash_valid)
+    return <span style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", fontWeight: 500 }}>Unsigned</span>;
+  return <span style={{ fontSize: 11.5, color: "oklch(0.45 0.13 25)", fontWeight: 500 }}>Invalid</span>;
 }
 
 function BoolDisplay({ value }: { value: boolean }) {
@@ -234,7 +232,7 @@ export default function WebsiteAegisIDPage() {
     <div className="page">
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
+      <SpotlightHeroCard className="cmd-hero cmd-hero--ceramic" style={{ padding: "28px 32px 24px" }}>
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
         <div style={{ position: "relative", zIndex: 1 }}>
@@ -254,7 +252,7 @@ export default function WebsiteAegisIDPage() {
             <HeaderStat value={loadingList ? "—" : list.length} label="Known identities" />
           </div>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 720 }}>
 
@@ -266,7 +264,7 @@ export default function WebsiteAegisIDPage() {
                 Domain lookup
               </label>
               <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "2px 0 0" }}>
-                Look up a domain's trust claims, safety promises, and violation history.
+                Look up a domain&apos;s trust claims, safety promises, and violation history.
               </p>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -315,36 +313,37 @@ export default function WebsiteAegisIDPage() {
 
         {claims && !loadingClaims && (
           <div className="apr-card">
+            {/* Domain header — structured two-column layout */}
             <div className="apr-card__head">
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink-1)" }}>{claims.domain}</span>
-                  {claims.trust_status === "flagged" ? (
-                    <AStatus label={TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status} variant="red" />
-                  ) : (
-                    <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status}</span>
-                  )}
-                  {claims.recommended_agent_action === "allow_normal_browsing" ? (
-                    <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)" }}>normal browsing allowed</span>
-                  ) : (
-                    <AStatus
-                      label={ACTION_LABEL[claims.recommended_agent_action] ?? claims.recommended_agent_action}
-                      variant={ACTION_VARIANT[claims.recommended_agent_action] ?? "graphite"}
-                    />
-                  )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 0 }}>
+                <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink-1)" }}>{claims.domain}</span>
+                <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>{claims.business_name}</span>
+                <div style={{ display: "flex", gap: 20, marginTop: 6 }}>
+                  <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                    Status:{" "}
+                    <span style={{ color: trustStatusColor(claims.trust_status), fontWeight: 500 }}>
+                      {TRUST_STATUS_LABEL[claims.trust_status] ?? claims.trust_status}
+                    </span>
+                  </span>
+                  <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
+                    Browsing:{" "}
+                    <span style={{ color: actionColor(claims.recommended_agent_action), fontWeight: 500 }}>
+                      {ACTION_LABEL[claims.recommended_agent_action] ?? claims.recommended_agent_action}
+                    </span>
+                  </span>
                 </div>
                 <p
                   style={{
-                    fontSize: 11.5,
+                    fontSize: 11,
                     color: "var(--ink-4)",
                     fontFamily: '"JetBrains Mono", monospace',
-                    margin: 0,
+                    margin: "4px 0 0",
                   }}
                 >
                   {claims.website_aegis_id}
                 </p>
               </div>
-              <time style={{ fontSize: 12, color: "var(--ink-4)", flexShrink: 0 }}>
+              <time style={{ fontSize: 12, color: "var(--ink-4)", flexShrink: 0, textAlign: "right" }}>
                 Updated{" "}
                 {new Date(claims.last_updated).toLocaleDateString(undefined, { dateStyle: "medium" })}
               </time>
@@ -394,16 +393,14 @@ export default function WebsiteAegisIDPage() {
                 <div className="apr-box" style={{ marginTop: 12 }}>
                   <div className="apr-box__head">Trust Profile</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      {matchedProfile.verification_status === "suspended" ? (
-                        <AStatus label={matchedProfile.verification_status} variant="red" />
-                      ) : (
-                        <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{matchedProfile.verification_status}</span>
-                      )}
-                      {matchedProfile.status === "active" ? (
-                        <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{matchedProfile.status}</span>
-                      ) : (
-                        <AStatus label={matchedProfile.status} variant={PROFILE_STATUS_VARIANT[matchedProfile.status] ?? "graphite"} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: profileStatusColor(matchedProfile.verification_status) }}>
+                        {capitalize(matchedProfile.verification_status)}
+                      </span>
+                      {matchedProfile.status !== "active" && (
+                        <span style={{ fontSize: 12, color: profileStatusColor(matchedProfile.status) }}>
+                          {capitalize(matchedProfile.status)}
+                        </span>
                       )}
                       <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
                         {matchedProfile.safety_promises.length} promises
@@ -458,19 +455,21 @@ export default function WebsiteAegisIDPage() {
                               alignItems: "center",
                               justifyContent: "space-between",
                               gap: 8,
+                              padding: "6px 0",
+                              borderBottom: "1px solid var(--hairline)",
                             }}
                           >
                             <span style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{sp.title}</span>
-                            <AStatus
-                              label={sp.severity_if_violated}
-                              variant={
-                                sp.severity_if_violated === "critical" || sp.severity_if_violated === "high"
-                                  ? "red"
-                                  : sp.severity_if_violated === "medium"
-                                  ? "amber"
-                                  : "graphite"
-                              }
-                            />
+                            <span
+                              style={{
+                                fontSize: 11.5,
+                                fontWeight: 500,
+                                color: severityColor(sp.severity_if_violated),
+                                flexShrink: 0,
+                              }}
+                            >
+                              {capitalize(sp.severity_if_violated)}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -498,19 +497,17 @@ export default function WebsiteAegisIDPage() {
                   <div key={p.profile_id} className="apr-card" style={cardBorder}>
                     <div className="apr-card__head">
                       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)" }}>
                             {p.domain}
                           </span>
-                          {p.verification_status === "suspended" ? (
-                            <AStatus label={p.verification_status} variant="red" />
-                          ) : (
-                            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.verification_status}</span>
-                          )}
-                          {p.status === "active" ? (
-                            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.status}</span>
-                          ) : (
-                            <AStatus label={p.status} variant={PROFILE_STATUS_VARIANT[p.status] ?? "graphite"} />
+                          <span style={{ fontSize: 12, color: profileStatusColor(p.verification_status) }}>
+                            {capitalize(p.verification_status)}
+                          </span>
+                          {p.status !== "active" && (
+                            <span style={{ fontSize: 12, color: profileStatusColor(p.status) }}>
+                              {capitalize(p.status)}
+                            </span>
                           )}
                         </div>
                         <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0 }}>{p.company_name}</p>
@@ -570,7 +567,7 @@ export default function WebsiteAegisIDPage() {
                       {expandedPromises[p.profile_id] && (
                         <div className="apr-box">
                           <div className="apr-box__head">Safety Promises</div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                             {p.safety_promises.map((sp) => (
                               <div
                                 key={sp.promise_id}
@@ -579,20 +576,21 @@ export default function WebsiteAegisIDPage() {
                                   alignItems: "center",
                                   justifyContent: "space-between",
                                   gap: 8,
+                                  padding: "7px 0",
+                                  borderBottom: "1px solid var(--hairline)",
                                 }}
                               >
                                 <span style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{sp.title}</span>
-                                <AStatus
-                                  label={sp.severity_if_violated}
-                                  variant={
-                                    sp.severity_if_violated === "critical" ||
-                                    sp.severity_if_violated === "high"
-                                      ? "red"
-                                      : sp.severity_if_violated === "medium"
-                                      ? "amber"
-                                      : "graphite"
-                                  }
-                                />
+                                <span
+                                  style={{
+                                    fontSize: 11.5,
+                                    fontWeight: 500,
+                                    color: severityColor(sp.severity_if_violated),
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {capitalize(sp.severity_if_violated)}
+                                </span>
                               </div>
                             ))}
                           </div>
@@ -647,6 +645,9 @@ export default function WebsiteAegisIDPage() {
                     padding: "14px 16px",
                     borderRadius: "var(--r-2)",
                     border: "1px solid var(--hairline)",
+                    borderLeft: item.trust_status === "flagged"
+                      ? "2px solid oklch(0.65 0.15 25)"
+                      : "2px solid transparent",
                     background: "var(--paper)",
                     cursor: "pointer",
                     transition: "border-color 120ms",
@@ -676,15 +677,19 @@ export default function WebsiteAegisIDPage() {
                       {item.business_name}
                     </p>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                     <span style={{ fontSize: 12, color: "var(--ink-4)" }}>
-                      {item.successful_runner_transactions} txn
+                      {item.successful_runner_transactions} transactions
                     </span>
-                    {item.trust_status === "flagged" ? (
-                      <AStatus label={TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status} variant="red" />
-                    ) : (
-                      <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status}</span>
-                    )}
+                    <span
+                      style={{
+                        fontSize: 12,
+                        color: item.trust_status === "flagged" ? "oklch(0.45 0.13 25)" : "var(--ink-3)",
+                        fontWeight: item.trust_status === "flagged" ? 500 : 400,
+                      }}
+                    >
+                      {TRUST_STATUS_LABEL[item.trust_status] ?? item.trust_status}
+                    </span>
                   </div>
                 </button>
               ))}
@@ -695,12 +700,15 @@ export default function WebsiteAegisIDPage() {
         {/* Demo disclaimer */}
         <div
           style={{
-            padding: "12px 16px",
+            padding: "14px 18px",
             borderRadius: "var(--r-2)",
-            background: "var(--blue-soft)",
-            border: "1px solid var(--blue-ring)",
+            background: "var(--graphite-soft)",
+            border: "1px solid var(--hairline)",
           }}
         >
+          <p style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Demo data
+          </p>
           <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
             Local and demo only — this is not real domain verification, real business verification,
             or a public reputation score. Trust records are seeded locally for demo purposes.

@@ -17,6 +17,7 @@ import {
   listWebsiteViolationReceipts,
   listVaultPasses,
 } from "@/lib/api";
+import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 
 // ── Tiny SVG helpers ───────────────────────────────────────────────────────
 function ArrowSVG({ size = 12 }: { size?: number }) {
@@ -39,14 +40,9 @@ function timeAgo(iso: string): string {
 
 // ── RouteLine ──────────────────────────────────────────────────────────────
 function RouteLine({ steps, active = 0 }: { steps: string[]; active?: number }) {
-  const x2 = 14 + ((586 - 14) * active) / Math.max(steps.length - 1, 1);
   return (
     <div className="rline">
-      <svg className="rline__svg" viewBox="0 0 600 36" preserveAspectRatio="none" aria-hidden="true">
-        <line x1="14" y1="18" x2="586" y2="18" stroke="oklch(0.88 0.04 240)" strokeWidth="1" strokeDasharray="3 4" />
-        <line x1="14" y1="18" x2={x2} y2="18" stroke="oklch(0.62 0.09 240)" strokeWidth="1.5" />
-      </svg>
-      <ol className="rline__list" style={{ margin: 0, padding: "0 8px" }}>
+      <ol className="rline__list">
         {steps.map((s, i) => (
           <li key={s} className={`rline__step${i <= active ? " rline__step--on" : ""}`}>
             <span className="rline__bead" />
@@ -56,6 +52,24 @@ function RouteLine({ steps, active = 0 }: { steps: string[]; active?: number }) 
       </ol>
     </div>
   );
+}
+
+// ── Agent Identity Accent ──────────────────────────────────────────────────
+// Muted premium palette — 6 tinted grays with restrained chroma.
+// Colors help distinguish agents without breaking the ceramic/white aesthetic.
+const AGENT_ACCENT_PALETTE = [
+  { base: "oklch(0.58 0.09 240)", soft: "oklch(0.58 0.09 240 / 0.09)", ring: "oklch(0.58 0.09 240 / 0.50)" }, // steel blue
+  { base: "oklch(0.57 0.08 190)", soft: "oklch(0.57 0.08 190 / 0.09)", ring: "oklch(0.57 0.08 190 / 0.50)" }, // teal
+  { base: "oklch(0.56 0.07 150)", soft: "oklch(0.56 0.07 150 / 0.09)", ring: "oklch(0.56 0.07 150 / 0.50)" }, // sage
+  { base: "oklch(0.62 0.09 75)",  soft: "oklch(0.62 0.09 75  / 0.09)", ring: "oklch(0.62 0.09 75  / 0.50)" }, // warm amber
+  { base: "oklch(0.56 0.08 300)", soft: "oklch(0.56 0.08 300 / 0.09)", ring: "oklch(0.56 0.08 300 / 0.50)" }, // muted violet
+  { base: "oklch(0.60 0.09 20)",  soft: "oklch(0.60 0.09 20  / 0.09)", ring: "oklch(0.60 0.09 20  / 0.50)" }, // dusty rose
+] as const;
+
+function getAgentAccent(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) & 0xffff;
+  return AGENT_ACCENT_PALETTE[h % AGENT_ACCENT_PALETTE.length];
 }
 
 // ── AntigenCoreMap ─────────────────────────────────────────────────────────
@@ -128,13 +142,16 @@ function AntigenCoreMap({ delegations, loading }: { delegations: AgentDelegation
       >
         {nodes.map((n) => {
           const rad = (n.angle * Math.PI) / 180;
+          const accent = n.overflow ? null : getAgentAccent(n.id);
+          const isVisible = hoveredId === n.id;
           return (
             <line
               key={n.id}
               x1="0" y1="0"
               x2={Math.cos(rad) * n.r}
               y2={Math.sin(rad) * n.r}
-              className={`antigen-line${hoveredId === n.id ? " antigen-line--visible" : ""}`}
+              className={`antigen-line${isVisible ? " antigen-line--visible" : ""}`}
+              style={isVisible && accent ? { stroke: accent.base } : undefined}
               strokeLinecap="round"
             />
           );
@@ -174,6 +191,12 @@ function AntigenCoreMap({ delegations, loading }: { delegations: AgentDelegation
         const statusColor = n.status === "verified" ? "green" : n.status === "blocked" ? "red" : "amber";
         const cardX = x + (x >= 0 ? 28 : -28);
         const cardY = y + (y >= 0 ? 22 : -22);
+        const accent = getAgentAccent(n.id);
+        const accentVars = {
+          "--agent-accent":      accent.base,
+          "--agent-accent-soft": accent.soft,
+          "--agent-accent-ring": accent.ring,
+        } as React.CSSProperties;
 
         return (
           <Fragment key={n.id}>
@@ -184,6 +207,7 @@ function AntigenCoreMap({ delegations, loading }: { delegations: AgentDelegation
                 position: "absolute", top: "50%", left: "50%",
                 transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`,
                 zIndex: 3,
+                ...accentVars,
               }}
               onMouseEnter={() => setHoveredId(n.id)}
               onMouseLeave={() => setHoveredId(null)}
@@ -200,22 +224,28 @@ function AntigenCoreMap({ delegations, loading }: { delegations: AgentDelegation
                   zIndex: 10, pointerEvents: "none",
                 }}
               >
-                <div className="antigen-card">
-                  <div style={{ fontWeight: 600, fontSize: 12.5, color: "var(--ink-1)", marginBottom: 2 }}>
-                    {n.name}
-                  </div>
-                  {(n.platform || n.channel) && (
-                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginBottom: 6 }}>
-                      {[n.platform, n.channel].filter(Boolean).join(" · ")}
+                <div className="antigen-card" style={accentVars}>
+                  <div className="antigen-card__accent" />
+                  <div className="antigen-card__eyebrow">Agent Passport</div>
+                  <div className="antigen-card__head">
+                    <div className="antigen-card__avatar">
+                      {n.name[0]?.toUpperCase() ?? "A"}
                     </div>
-                  )}
+                    <div>
+                      <div className="antigen-card__name">{n.name}</div>
+                      {(n.platform || n.channel) && (
+                        <div className="antigen-card__meta">
+                          {[n.platform, n.channel].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="antigen-card__divider" />
                   <span className={`a-status a-status--${statusColor}`} style={{ fontSize: 11 }}>
                     <span className="a-status__dot" />
                     {n.status}
                   </span>
-                  <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 7, fontFamily: '"JetBrains Mono", monospace', letterSpacing: "0.02em" }}>
-                    Protected by Antigen
-                  </div>
+                  <div className="antigen-card__footer">Protected by Antigen</div>
                 </div>
               </div>
             )}
@@ -268,25 +298,23 @@ function ConnectedAgents({ delegations, loading }: { delegations: AgentDelegatio
         />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {delegations.slice(0, 5).map((d) => (
-            <div
-              key={d.id}
-              style={{
-                display: "grid", gridTemplateColumns: "32px 1fr auto", alignItems: "center", gap: 12,
-                padding: "10px 12px", border: "1px solid var(--hairline)",
-                borderRadius: "var(--r-2)", background: "rgba(255,255,255,0.5)",
-              }}
-            >
-              <div style={{
-                width: 32, height: 32, borderRadius: 9, display: "grid", placeItems: "center",
-                background: "var(--blue-soft)", border: "1px solid var(--blue-ring)",
-                fontSize: 11, fontWeight: 600, color: "oklch(0.45 0.09 240)",
-              }}>
+          {delegations.slice(0, 5).map((d) => {
+            const accent = getAgentAccent(d.id);
+            return (
+            <div key={d.id} className="cmd-agent-row">
+              <div
+                className="cmd-agent-row__avatar"
+                style={{
+                  "--agent-accent":      accent.base,
+                  "--agent-accent-soft": accent.soft,
+                  "--agent-accent-ring": accent.ring,
+                } as React.CSSProperties}
+              >
                 {d.agent_name?.[0]?.toUpperCase() ?? "A"}
               </div>
               <div>
-                <div style={{ fontWeight: 500, fontSize: 13.5, color: "var(--ink-1)" }}>{d.agent_name}</div>
-                <div style={{ fontSize: 12, color: "var(--ink-3)" }}>{d.channel}</div>
+                <div className="cmd-agent-row__name">{d.agent_name}</div>
+                <div className="cmd-agent-row__channel">{d.channel}</div>
               </div>
               {d.status === "active" ? (
                 <span className="metadata-state metadata-state--good">{d.status}</span>
@@ -294,7 +322,8 @@ function ConnectedAgents({ delegations, loading }: { delegations: AgentDelegatio
                 <span className="a-status a-status--graphite">{d.status}</span>
               )}
             </div>
-          ))}
+            );
+          })}
           {delegations.length > 5 && (
             <Link href="/delegations" className="a-link" style={{ justifyContent: "center", fontSize: 12 }}>
               View all {delegations.length} agents <ArrowSVG />
@@ -457,7 +486,7 @@ export default function CommandPage() {
     <div className="page page--command">
 
       {/* ── Hero panel ─────────────────────────────────────────────────── */}
-      <div className="cmd-hero cmd-hero--big cmd-hero--ceramic">
+      <SpotlightHeroCard className="cmd-hero cmd-hero--big cmd-hero--ceramic">
         <span className="cmd-hero__aura" aria-hidden="true" />
         <span className="cmd-hero__grain" aria-hidden="true" />
 
@@ -493,7 +522,7 @@ export default function CommandPage() {
             <span className="cmd-pulse__tick" />
           </button>
         </div>
-      </div>
+      </SpotlightHeroCard>
 
       {/* ── Trust route setup strip ─────────────────────────────────────── */}
       {showSetup && (
@@ -508,7 +537,7 @@ export default function CommandPage() {
               type="button"
               onClick={() => setShowSetup(false)}
               aria-label="Dismiss"
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-3)", fontSize: 18, lineHeight: 1, padding: "4px 6px" }}
+              className="cmd-setup__dismiss"
             >
               ×
             </button>

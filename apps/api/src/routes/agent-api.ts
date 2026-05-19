@@ -48,6 +48,7 @@ import {
   workspaceTasks,
   workspaceArtifacts,
   websiteTrustProfiles,
+  agentConnectors,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
@@ -274,6 +275,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(mode === "exclude" ? { excluded_skill_ids: ids } : {}),
       },
     };
+
+    // Update connector status when agent successfully calls /me
+    const connector = Array.from(agentConnectors.values()).find(
+      (c) => c.delegation_id === delegation.id
+    );
+    if (connector && connector.status !== "revoked") {
+      const now = new Date().toISOString();
+      agentConnectors.set(connector.connector_id, {
+        ...connector,
+        status: "connected",
+        last_seen_at: now,
+        updated_at: now,
+      });
+      schedulePersist();
+    }
 
     return reply.send({ ok: true, data: identity });
   });

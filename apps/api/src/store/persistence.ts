@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -16,6 +16,7 @@ import {
   domainTrust,
   agentTasks,
   agentDelegations,
+  agentConnectors,
   routes,
   skills,
   installedSkills,
@@ -517,6 +518,7 @@ export function persistStore(): void {
       domainTrust: Array.from(domainTrust.entries()),
       agentTasks: Array.from(agentTasks.entries()),
       agentDelegations: Array.from(agentDelegations.entries()),
+      agentConnectors: Array.from(agentConnectors.entries()),
       routes: Array.from(routes.entries()),
       skills: Array.from(skills.entries()),
       installedSkills: Array.from(installedSkills.entries()),
@@ -593,6 +595,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.domainTrust ?? [])) domainTrust.set(k, v as DomainTrustRecord);
     for (const [k, v] of (data.agentTasks ?? [])) agentTasks.set(k, v as AgentTask);
     for (const [k, v] of (data.agentDelegations ?? [])) agentDelegations.set(k, v as AgentDelegation);
+    for (const [k, v] of (data.agentConnectors ?? [])) agentConnectors.set(k, v as AgentConnector);
     for (const [k, v] of (data.routes ?? [])) routes.set(k, v as AegisRoute);
     for (const [k, v] of (data.skills ?? [])) skills.set(k, v as Skill);
     for (const [k, v] of (data.installedSkills ?? [])) installedSkills.set(k, v as InstalledSkill);

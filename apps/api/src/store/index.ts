@@ -10,6 +10,7 @@ import type {
   RunnerTask,
   AgentTask,
   AgentDelegation,
+  AgentConnector,
   AegisRoute,
   Skill,
   InstalledSkill,
@@ -109,6 +110,8 @@ export const domainTrust = new Map<string, DomainTrustRecord>();
 export const agentTasks = new Map<string, AgentTask>();
 
 export const agentDelegations = new Map<string, AgentDelegation>();
+
+export const agentConnectors = new Map<string, AgentConnector>();
 
 export const routes = new Map<string, AegisRoute>();
 

@@ -16,6 +16,28 @@ export type AgentDelegationStatus = "active" | "revoked" | "expired";
 export type AgentDelegationChannel = "slack" | "discord" | "api" | "other";
 export type SkillAccessMode = "all" | "exclude" | "only";
 
+export type AgentConnectorPlatform =
+  | "claude_cowork"
+  | "claude_desktop"
+  | "generic_mcp"
+  | "custom_http";
+export type ConnectorPolicyMode = "baseline" | "collar";
+export type ConnectorStatus = "created" | "connected" | "revoked";
+
+export interface AgentConnector {
+  connector_id: string;
+  user_id: string;
+  delegation_id: string;
+  platform: AgentConnectorPlatform;
+  display_name: string;
+  policy_mode: ConnectorPolicyMode;
+  collar_id?: string;
+  status: ConnectorStatus;
+  created_at: string;
+  updated_at: string;
+  last_seen_at?: string;
+}
+
 export interface AgentDelegation {
   id: string;
   user_id: string;

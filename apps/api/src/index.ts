@@ -22,6 +22,7 @@ import { agentRoutes } from "./routes/agent.js";
 import { runnerRoutes } from "./routes/runners.js";
 import { taskRoutes } from "./routes/tasks.js";
 import { delegationRoutes } from "./routes/delegations.js";
+import { agentConnectorRoutes } from "./routes/agent-connectors.js";
 import { routeRoutes } from "./routes/routes.js";
 import { skillRoutes } from "./routes/skills.js";
 import { routeRunRoutes } from "./routes/route-runs.js";
@@ -96,6 +97,7 @@ async function main() {
   await server.register(runnerRoutes);
   await server.register(taskRoutes);
   await server.register(delegationRoutes);
+  await server.register(agentConnectorRoutes);
   await server.register(routeRoutes);
   await server.register(skillRoutes);
   await server.register(routeRunRoutes);

@@ -1,16 +1,13 @@
-import { randomUUID } from "crypto";
 import type { FastifyInstance } from "fastify";
 import type { AgentDelegation, AgentDelegationChannel, SkillAccessMode } from "@aegis/types";
 import {
   agentDelegations,
-  passes,
   collars,
-  users,
   MOCK_USER_ID,
-  newId,
 } from "../store/index.js";
-import type { PassWithToken } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
+import { createDelegationWithPass } from "../lib/createDelegationWithPass.js";
+import { revokeDelegationById } from "../lib/revokeDelegation.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -62,9 +59,8 @@ export async function delegationRoutes(server: FastifyInstance) {
       }
 
       // Resolve collar — optional, agent may connect with no rule set and add one later.
-      let collar;
       if (default_collar_id) {
-        collar = collars.get(default_collar_id);
+        const collar = collars.get(default_collar_id);
         if (!collar) {
           return sendError(reply, 404, "NOT_FOUND", "Collar not found.");
         }
@@ -73,44 +69,16 @@ export async function delegationRoutes(server: FastifyInstance) {
         }
       }
 
-      const user = users.get(MOCK_USER_ID);
-      const user_aegis_id = user?.aegis_id ?? "aid_user_001";
-
-      const now = new Date().toISOString();
-      const expires_at = new Date(Date.now() + expires_in_minutes * 60 * 1000).toISOString();
-
-      const pass: PassWithToken = {
-        id: newId("pass"),
-        token: `aegis_pass_${randomUUID().replace(/-/g, "")}`,
-        user_id: MOCK_USER_ID,
-        agent_name,
-        purpose: `Delegation for ${agent_name}`,
-        ...(collar ? { default_collar_id: collar.id } : {}),
-        status: "active",
-        expires_at,
-        created_at: now,
-      };
-      passes.set(pass.id, pass);
-
-      const delegation: AgentDelegation = {
-        id: newId("delg"),
-        user_id: MOCK_USER_ID,
-        user_aegis_id,
+      const { delegation, token } = createDelegationWithPass({
         agent_name,
         agent_platform,
         channel,
-        ...(collar ? { default_collar_id: collar.id } : {}),
-        status: "active",
-        token_id: pass.id,
-        created_at: now,
-        updated_at: now,
-        expires_at,
-      };
-      agentDelegations.set(delegation.id, delegation);
-      schedulePersist();
+        default_collar_id,
+        expires_in_minutes,
+      });
 
       // token returned once only — not stored in AgentDelegation
-      return { ok: true, data: { delegation, delegation_token: pass.token } };
+      return { ok: true, data: { delegation, delegation_token: token } };
     }
   );
 
@@ -145,27 +113,15 @@ export async function delegationRoutes(server: FastifyInstance) {
   server.post<{ Params: { delegationId: string } }>(
     "/api/delegations/:delegationId/revoke",
     async (req, reply) => {
-      const delegation = agentDelegations.get(req.params.delegationId);
-      if (!delegation || delegation.user_id !== MOCK_USER_ID) {
-        return sendError(reply, 404, "NOT_FOUND", "Delegation not found.");
+      const result = revokeDelegationById(req.params.delegationId);
+      if (!result.ok) {
+        if (result.error === "NOT_FOUND") {
+          return sendError(reply, 404, "NOT_FOUND", "Delegation not found.");
+        }
+        const delegation = agentDelegations.get(req.params.delegationId);
+        return sendError(reply, 400, "INVALID_STATE", `Delegation is already ${delegation?.status}.`);
       }
-      if (delegation.status !== "active") {
-        return sendError(reply, 400, "INVALID_STATE", `Delegation is already ${delegation.status}.`);
-      }
-
-      const now = new Date().toISOString();
-      delegation.status = "revoked";
-      delegation.updated_at = now;
-
-      // Revoke underlying pass so existing MCP tools stop working with this token
-      const pass = passes.get(delegation.token_id);
-      if (pass && pass.status === "active") {
-        pass.status = "revoked";
-        (pass as PassWithToken & { revoked_at: string }).revoked_at = now;
-      }
-
-      schedulePersist();
-      return { ok: true, data: { id: delegation.id, status: delegation.status } };
+      return { ok: true, data: { id: result.delegation_id, status: "revoked" } };
     }
   );
 }

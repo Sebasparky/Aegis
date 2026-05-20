@@ -1974,6 +1974,7 @@ export interface SecretFieldInjection {
   status: SecretFieldInjectionStatus;
   authorization_id?: string;
   browser_session_id?: string;
+  external_cdp_url?: string;
   raw_value_revealed_to_agent: false;
   created_at: string;
   expires_at: string;

@@ -860,8 +860,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   );
 
   // ─── Controlled Browser Bridge v1 ──────────────────────────────────────────
-  // For agents that do not bring their own browser runtime (e.g. Claude Cowork).
-  // Navigate, observe, and click inside an Antigen-owned task browser session.
+  // Compatibility mode for agents that do not bring their own browser runtime.
+  // Navigate, observe, and click inside an Aegis-owned task browser session.
+  // If the agent already has @playwright/mcp or another browser tool, it should
+  // use External Browser Handoff instead: navigate with its own tools, then call
+  // request_secret_field_injection with external_cdp_url for credential fields.
 
   function validateTaskBrowserSession(
     id: string,
@@ -911,6 +914,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.send({
           ok: true,
           data: {
+            agent_browser_mode: "controlled_browser_bridge",
             browser_session_id: session.browser_session_id,
             current_url: result.current_url,
             snapshot: result.snapshot,
@@ -940,6 +944,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.send({
           ok: true,
           data: {
+            agent_browser_mode: "controlled_browser_bridge",
             browser_session_id: session.browser_session_id,
             current_url: result.current_url,
             snapshot: result.snapshot,
@@ -1004,6 +1009,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.send({
           ok: true,
           data: {
+            agent_browser_mode: "controlled_browser_bridge",
             browser_session_id: session.browser_session_id,
             clicked: true,
             current_url: safeResult.current_url,
@@ -1023,6 +1029,40 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   );
 
   // ─── Agent-Browser Secret Injection v1 ─────────────────────────────────────
+  // Primary path for agents that own their browser (e.g. Claude Code + @playwright/mcp).
+  // The agent navigates with its own tools; Aegis fills only the protected credential
+  // fields via CDP injection and returns a status receipt — no page content is returned.
+
+  type CdpUrlValidationResult = { valid: true } | { valid: false; code: string; message: string };
+  function validateExternalCdpUrl(raw: string): CdpUrlValidationResult {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return { valid: false, code: "INVALID_CDP_URL", message: "external_cdp_url is not a valid URL." };
+    }
+    if (url.protocol !== "http:") {
+      return {
+        valid: false, code: "INVALID_CDP_PROTOCOL",
+        message: "external_cdp_url must use http:// — HTTPS and other schemes are not supported for local CDP endpoints.",
+      };
+    }
+    const allowedHosts = ["localhost", "127.0.0.1", "[::1]"];
+    if (!allowedHosts.includes(url.hostname)) {
+      return {
+        valid: false, code: "EXTERNAL_CDP_LOCALHOST_ONLY",
+        message: "external_cdp_url must target localhost (http://localhost:<port> or http://127.0.0.1:<port>). Remote injection targets are not permitted.",
+      };
+    }
+    const port = parseInt(url.port, 10);
+    if (!url.port || isNaN(port) || port < 1024 || port > 65535) {
+      return {
+        valid: false, code: "INVALID_CDP_PORT",
+        message: "external_cdp_url must include a valid port in the range 1024–65535 (e.g. http://localhost:9222).",
+      };
+    }
+    return { valid: true };
+  }
 
   function injectionNextAction(status: SecretFieldInjectionStatus, authCovered?: boolean): string {
     switch (status) {
@@ -1070,6 +1110,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         };
         reason?: string;
         browser_session_id?: string;
+        external_cdp_url?: string;
       };
 
       if (!body.domain || typeof body.domain !== "string") {
@@ -1114,6 +1155,23 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready' to bind to an injection.`);
         }
         resolvedBrowserSessionId = bs.browser_session_id;
+      }
+
+      // Validate optional external_cdp_url — mutually exclusive with browser_session_id
+      let resolvedExternalCdpUrl: string | undefined;
+      if (typeof body.external_cdp_url === "string" && body.external_cdp_url.trim()) {
+        if (resolvedBrowserSessionId) {
+          return sendError(
+            reply, 400, "CONFLICT",
+            "Provide either external_cdp_url or browser_session_id, not both. " +
+            "Use external_cdp_url when you own the browser; use browser_session_id for an Aegis-managed task browser session.",
+          );
+        }
+        const cdpCheck = validateExternalCdpUrl(body.external_cdp_url.trim());
+        if (!cdpCheck.valid) {
+          return sendError(reply, 400, cdpCheck.code, cdpCheck.message);
+        }
+        resolvedExternalCdpUrl = body.external_cdp_url.trim();
       }
 
       // Find the vault pass
@@ -1213,6 +1271,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         status: injectionStatus,
         authorization_id: auth.authorization_id,
         ...(resolvedBrowserSessionId ? { browser_session_id: resolvedBrowserSessionId } : {}),
+        ...(resolvedExternalCdpUrl ? { external_cdp_url: resolvedExternalCdpUrl } : {}),
         raw_value_revealed_to_agent: false,
         created_at: new Date().toISOString(),
         expires_at: auth.expires_at,
@@ -1466,11 +1525,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
 
       // CDP fill — resolvedValue used here and immediately discarded; never returned in response
-      // If the injection was bound to a task browser session, use that session's CDP URL.
+      // Priority: Aegis-managed task browser session → agent-provided external_cdp_url → AEGIS_PLAYWRIGHT_CDP_URL env
       let cdpUrlOverride: string | undefined;
       if (injection.browser_session_id) {
         const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
         if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+      } else if (injection.external_cdp_url) {
+        cdpUrlOverride = injection.external_cdp_url;
       }
       const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride);
 

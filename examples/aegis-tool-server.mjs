@@ -423,18 +423,18 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
           "username and password for the login attempt. After both fields are filled, the agent clicks Submit itself.",
         next_tool: "request_secret_field_injection",
         workflow: [
-          "0. If no Playwright browser is running or the CDP connection is unavailable: call start_task_browser_session. If the response includes reused_existing=true, the session is already active — no reconnect needed. If requires_browser_reconnect=true, use the returned cdp_url with your browser adapter before navigating.",
+          "0. [Path selection] If you already have @playwright/mcp or another browser tool: SKIP start_task_browser_session — you own the browser. Note the CDP port your browser is running on (e.g. 9222) and pass it as external_cdp_url in steps 4 and 7. If you have NO browser tool: call start_task_browser_session. If reused_existing=true, session is already active. If requires_browser_reconnect=true, reconnect your adapter using the returned cdp_url before navigating.",
           "1. Navigate to the login page in your Playwright browser.",
           "2. Choose username/password path (not OAuth — Aegis cannot fill OAuth flows).",
           "3. Call list_vault_passes to find the pass_id for the credential provider domain. Each pass has a domain field (e.g. 'github.com') — select the pass whose domain matches the login page you navigated to, not the originating site. If Supabase redirected you to github.com for OAuth login, find the GitHub credential (domain='github.com'), not a Supabase credential.",
-          "4. Call request_secret_field_injection({ domain, field_kind: 'username', page_url, reason }).",
+          "4. Call request_secret_field_injection({ domain, field_kind: 'username', page_url, reason, external_cdp_url? }). If you own the browser (External Browser Handoff path), pass external_cdp_url (e.g. 'http://localhost:9222'). If you used start_task_browser_session, pass browser_session_id instead. Do not pass both.",
           "5. If status='pending_approval': tell the user to approve in Aegis UI, then call wait_for_credential_authorization({ authorization_id }) — do NOT ask user to type 'done'.",
           "6. When wait_for_credential_authorization returns status='approved': call execute_secret_field_injection with the injection_request_id.",
-          "7. Call request_secret_field_injection again for field_kind: 'password' (auto-attached to same authorization, no second approval needed if already approved).",
+          "7. Call request_secret_field_injection again for field_kind: 'password' with the same external_cdp_url or browser_session_id (auto-attached to same authorization, no second approval needed if already approved).",
           "8. Call execute_secret_field_injection for the password injection.",
           "9. Click Submit / Sign In yourself in your Playwright browser.",
           "9a. If a security verification challenge appears after Submit (device verification email, 2FA, TOTP): call report_security_challenge({ domain, page_url, challenge_type, browser_session_id }) — always include the browser_session_id from step 0. Without it, Aegis injects into the wrong browser port and fails. Then call wait_for_security_challenge, and either inject_security_challenge_code (manual) or request_challenge_email_resolution → wait_for_challenge_email_resolution → inject_challenge_email_code (Gmail). After injection, click Verify yourself.",
-          "10. Continue using the browser for the rest of the task. Only call close_task_browser_session after the full task is complete — closing destroys cookies and session data.",
+          "10. Continue using your browser for the rest of the task. Use your own tools (@playwright/mcp) to navigate, read, and summarize pages — Aegis does not observe or read page content on the External Browser Handoff path. Only call close_task_browser_session if you used an Aegis-managed session (step 0 bridge path), and only after the full task is complete.",
           "11. [GitHub repo listing and similar dynamic lists] After login, navigate to the target page yourself. Verify dynamic content: check displayed count, scroll to load all visible items, inspect pagination links. Do not claim 'all repos' or 'all items' unless you verified count and pagination. If uncertain, report exactly what you can see: 'I can see X items on the current page.' Aegis does not read or summarize content — you own the reading step.",
         ],
         note: "DO NOT use request_authenticated_session_login for normal login when you have a Playwright browser — that tool performs the ENTIRE login in a separate Aegis-controlled browser and is secondary/experimental. DO NOT use start_credential_session — that targets the Aegis Chrome extension on the user's tab, incompatible with agent Playwright browsers.",
@@ -718,6 +718,22 @@ async function assessSensitiveRequirements({ task, domain } = {}) {
         "email challenge resolution if a verification email is sent (Connected Email Challenge Resolver)",
         "manual challenge code relay if automatic email resolution fails or domain is not supported",
       ],
+      browser_mode_guidance: {
+        if_agent_has_own_browser_tooling: {
+          path: "external_browser_handoff",
+          description:
+            "You own the browser. Use @playwright/mcp (or equivalent) for all navigation, clicking, and page reading. " +
+            "Pass external_cdp_url (e.g. 'http://localhost:9222') to request_secret_field_injection — Aegis fills only the " +
+            "protected credential fields. Do NOT call start_task_browser_session — you already have a browser.",
+          skip_tools: ["start_task_browser_session", "navigate_task_browser_session", "observe_task_browser_session", "click_task_browser_session"],
+        },
+        if_agent_has_no_browser_tooling: {
+          path: "controlled_browser_bridge",
+          description:
+            "Aegis owns the browser. Call start_task_browser_session first, then use the bridge navigate/observe/click " +
+            "endpoints for page interaction. Pass browser_session_id (not external_cdp_url) to request_secret_field_injection.",
+        },
+      },
       must_not_do: [
         "ask the user to paste verification codes into chat — use report_security_challenge instead",
         "request raw credentials from the user",
@@ -726,6 +742,7 @@ async function assessSensitiveRequirements({ task, domain } = {}) {
         "inject credentials into a requesting site's domain just because it initiated an OAuth redirect",
         "use start_credential_session or fill_credential_field — those target the Chrome extension, not an agent Playwright browser",
         "use request_authenticated_session_login unless the agent has no Playwright browser of its own",
+        "pass both external_cdp_url and browser_session_id to request_secret_field_injection — they are mutually exclusive",
       ],
     };
   }

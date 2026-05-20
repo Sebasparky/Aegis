@@ -2114,6 +2114,10 @@ export type ChallengeEmailResolutionStatus =
   | "expired"
   | "cancelled";
 
+export type ChallengeEmailSearchErrorCode =
+  | "GMAIL_RECONNECT_REQUIRED"
+  | "GMAIL_SEARCH_UNAVAILABLE";
+
 export interface ChallengeEmailResolution {
   resolution_id: string;
   challenge_id: string;
@@ -2138,6 +2142,10 @@ export interface ChallengeEmailResolution {
   /** Safe metadata: which phase found the code — never contains the code or email text. */
   extraction_source?: "subject_snippet" | "body_text";
   error?: string;
+  /** Stable code for the frontend to branch on — not raw OAuth error details */
+  email_search_error_code?: ChallengeEmailSearchErrorCode;
+  /** Always true when status is "failed" — manual entry is always the fallback */
+  manual_entry_available?: true;
   created_at: string;
   updated_at: string;
 }

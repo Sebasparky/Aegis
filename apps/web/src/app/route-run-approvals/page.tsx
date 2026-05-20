@@ -804,7 +804,7 @@ function PendingChallengeCard({
       );
     }
 
-    const { status, sender_domain, received_at, error } = emailResolution;
+    const { status, sender_domain, received_at, error, email_search_error_code } = emailResolution;
 
     if (status === "code_found") {
       const seconds = received_at
@@ -848,11 +848,30 @@ function PendingChallengeCard({
     }
 
     if (status === "failed") {
+      const isReconnectRequired = email_search_error_code === "GMAIL_RECONNECT_REQUIRED";
       return (
-        <SectionCard label="Or: Find code automatically">
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>Search failed. Enter the code manually below.</p>
-            {error && <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{error}</p>}
+        <SectionCard label="Email search unavailable">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {isReconnectRequired ? (
+              <>
+                <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", fontWeight: 500, margin: 0 }}>
+                  Your Gmail connection expired or was revoked. Reconnect Gmail to let Antigen find verification codes automatically.
+                </p>
+                <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+                  Reconnect Gmail is not available in this local build. You can still enter the code manually below.
+                </p>
+                <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>
+                  Developer note: update <code>GOOGLE_REFRESH_TOKEN</code> and restart Antigen.
+                </p>
+              </>
+            ) : (
+              <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>
+                Gmail search is currently unavailable.
+              </p>
+            )}
+            <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>
+              You can still enter the code manually below. The agent will never see it.
+            </p>
           </div>
         </SectionCard>
       );

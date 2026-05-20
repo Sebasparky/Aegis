@@ -1,4 +1,4 @@
-import type { SecurityChallenge } from "@aegis/types";
+import type { SecurityChallenge, ChallengeEmailSearchErrorCode } from "@aegis/types";
 
 /**
  * Memory-only store for resolved verification codes.
@@ -126,6 +126,27 @@ export async function refreshGmailAccessToken(): Promise<string> {
   }
 
   return data.access_token;
+}
+
+/**
+ * Classify a Gmail search failure into a stable error code and user-safe message.
+ * Raw OAuth error details are never surfaced to the user.
+ */
+export function classifyGmailError(err: unknown): {
+  email_search_error_code: ChallengeEmailSearchErrorCode;
+  user_message: string;
+} {
+  const msg = err instanceof Error ? err.message : "";
+  if (msg.startsWith("GMAIL_TOKEN_REFRESH_FAILED")) {
+    return {
+      email_search_error_code: "GMAIL_RECONNECT_REQUIRED",
+      user_message: "Your Gmail connection expired or was revoked.",
+    };
+  }
+  return {
+    email_search_error_code: "GMAIL_SEARCH_UNAVAILABLE",
+    user_message: "Gmail search is currently unavailable.",
+  };
 }
 
 /**

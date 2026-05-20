@@ -411,3 +411,58 @@ describe("Email resolution lazy expiry invariants", () => {
     expect(challengeEmailResolutions.get(res.resolution_id)!.status).toBe("expired");
   });
 });
+
+// ─── Group E: Gmail error classification ──────────────────────────────────────
+
+describe("Email Resolution Error Classification", () => {
+  async function startAndExpectFailure(errorMessage: string) {
+    const challenge = injectChallenge({ challenge_id: uid("chlg") });
+    vi.mocked(searchGmailForChallengeCode).mockRejectedValueOnce(new Error(errorMessage));
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/internal/challenge-email-resolutions/start",
+      headers: { "content-type": "application/json" },
+      payload: { challenge_id: challenge.challenge_id },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("failed");
+    return body.data;
+  }
+
+  it("GMAIL_TOKEN_REFRESH_FAILED with invalid_grant → GMAIL_RECONNECT_REQUIRED, user-safe error", async () => {
+    const data = await startAndExpectFailure(
+      'GMAIL_TOKEN_REFRESH_FAILED: 400 {"error":"invalid_grant","error_description":"Token has been expired or revoked."}',
+    );
+    expect(data.email_search_error_code).toBe("GMAIL_RECONNECT_REQUIRED");
+    expect(data.error).toBe("Your Gmail connection expired or was revoked.");
+    expect(data.error).not.toContain("invalid_grant");
+    expect(data.error).not.toContain("{");
+  });
+
+  it("GMAIL_TOKEN_REFRESH_FAILED without invalid_grant → GMAIL_RECONNECT_REQUIRED", async () => {
+    const data = await startAndExpectFailure("GMAIL_TOKEN_REFRESH_FAILED: No access_token in response.");
+    expect(data.email_search_error_code).toBe("GMAIL_RECONNECT_REQUIRED");
+    expect(data.error).toBe("Your Gmail connection expired or was revoked.");
+  });
+
+  it("non-token Gmail failure → GMAIL_SEARCH_UNAVAILABLE", async () => {
+    const data = await startAndExpectFailure("GMAIL_SEARCH_FAILED: 503 Service Unavailable");
+    expect(data.email_search_error_code).toBe("GMAIL_SEARCH_UNAVAILABLE");
+    expect(data.error).toBe("Gmail search is currently unavailable.");
+  });
+
+  it("failed resolution always has manual_entry_available: true", async () => {
+    const data = await startAndExpectFailure("GMAIL_TOKEN_REFRESH_FAILED: test");
+    expect(data.manual_entry_available).toBe(true);
+  });
+
+  it("raw OAuth JSON is not included in the error field", async () => {
+    const data = await startAndExpectFailure(
+      'GMAIL_TOKEN_REFRESH_FAILED: 400 {"error":"invalid_grant"}',
+    );
+    expect(data.error).not.toContain("{");
+    expect(data.error).not.toContain("invalid_grant");
+  });
+});

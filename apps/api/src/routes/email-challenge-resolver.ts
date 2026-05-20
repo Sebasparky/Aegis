@@ -11,6 +11,7 @@ import {
   getEmailResolverStatus,
   searchGmailForChallengeCode,
   isEmailChallengeSupported,
+  classifyGmailError,
 } from "../runtime/emailChallengeResolver.js";
 import { schedulePersist } from "../store/persistence.js";
 
@@ -35,6 +36,8 @@ function safeResolution(res: ChallengeEmailResolution) {
     received_at: res.received_at,
     extraction_source: res.extraction_source,
     error: res.error,
+    email_search_error_code: res.email_search_error_code,
+    manual_entry_available: res.status === "failed" ? (true as const) : undefined,
     created_at: res.created_at,
     updated_at: res.updated_at,
   };
@@ -163,8 +166,11 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
           resolution.updated_at = new Date().toISOString();
         }
       } catch (err: unknown) {
+        const { email_search_error_code, user_message } = classifyGmailError(err);
+        console.error("[email-resolver] Gmail search failed:", err instanceof Error ? err.message : err);
         resolution.status = "failed";
-        resolution.error = err instanceof Error ? err.message : "Gmail search failed.";
+        resolution.error = user_message;
+        resolution.email_search_error_code = email_search_error_code;
         resolution.updated_at = new Date().toISOString();
       }
 
@@ -222,8 +228,11 @@ export async function emailChallengeResolverRoutes(server: FastifyInstance): Pro
           resolution.updated_at = new Date().toISOString();
         }
       } catch (err: unknown) {
+        const { email_search_error_code, user_message } = classifyGmailError(err);
+        console.error("[email-resolver] Gmail search failed:", err instanceof Error ? err.message : err);
         resolution.status = "failed";
-        resolution.error = err instanceof Error ? err.message : "Gmail search failed.";
+        resolution.error = user_message;
+        resolution.email_search_error_code = email_search_error_code;
         resolution.updated_at = new Date().toISOString();
       }
 

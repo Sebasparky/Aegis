@@ -626,7 +626,10 @@ export interface ChallengeEmailResolutionView {
   injected_at?: string;
   sender_domain?: string;
   received_at?: string;
+  extraction_source?: "subject_snippet" | "body_text";
   error?: string;
+  email_search_error_code?: "GMAIL_RECONNECT_REQUIRED" | "GMAIL_SEARCH_UNAVAILABLE";
+  manual_entry_available?: true;
   created_at: string;
   updated_at: string;
 }

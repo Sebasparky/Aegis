@@ -83,13 +83,29 @@ export async function executeSecretInjectionViaCDP(
     }
 
     // Embed resolvedValue as a JSON string literal so it never appears in logs as plain text.
+    // For password fields: after dispatching events, shadow el.value with an own-property
+    // getter that returns '' — preventing aria snapshot readback via element.value while
+    // keeping the native form value intact for browser form submission.
+    // React/Vue/Angular capture the value during the input event; masking after is safe for
+    // those frameworks. Vanilla JS onsubmit handlers that read el.value will get ''.
+    // This is a JS-layer mitigation, not a browser-engine security boundary.
+    const maskBlock = injection.field_kind === "password"
+      ? `
+      Object.defineProperty(el, 'value', {
+        get: function() { return ''; },
+        set: function(v) { setter.call(el, v); },
+        configurable: true,
+      });`
+      : "";
+
     const fillExpr = `(function() {
       var el = ${selectorExpr};
       if (!el) return { ok: false, reason: 'element not found' };
       var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(el, ${JSON.stringify(resolvedValue)});
       el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));${maskBlock}
+      el.setAttribute('data-antigen-filled', 'true');
       return { ok: true };
     })()`;
 

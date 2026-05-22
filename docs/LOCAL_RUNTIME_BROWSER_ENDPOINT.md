@@ -205,7 +205,13 @@ These constraints apply in all three browser modes.
 
 **Secrets never reach the agent.** Raw passwords, card numbers, CVV, auth tokens, cookies, `secret_ref` values, KMS material, and `storageState` must never appear in tool responses, API responses, logs, or Playwright page content visible to the agent. CDP injection is the only path to the field — the agent never sees the resolved value.
 
-**Aegis temporarily masks agent observation during sensitive handoff.** When Aegis is filling a credential or payment field via CDP, the agent must not be able to read back the injected value. Observation mode must not weaken this constraint.
+**Aegis masks the injected value in the DOM after sensitive field fill.** For password fields, after the CDP fill and event dispatch, Aegis applies a JavaScript own-property shadow on the input element:
+```javascript
+Object.defineProperty(el, 'value', { get: () => '', set: (v) => nativeSetter.call(el, v), configurable: true });
+```
+This makes `element.value` return `""` for all subsequent JavaScript reads — including `@playwright/mcp`'s `browser_snapshot` (which uses `element.value` in its aria snapshot serializer), Playwright's `locator.inputValue()`, and `page.evaluate` calls.
+
+**Known limitation of DOM masking.** This is a JavaScript-layer mitigation, not a browser-engine security boundary. Browser native form collection (used for form submission) reads from internal C++ bindings and is unaffected by JS property shadowing — form submission works. However, vanilla JavaScript `onsubmit` handlers that read `el.value` directly will receive `""`. Login flows on major services (React, Vue, Angular) capture field values during the `input` event and are unaffected. Agents must proceed to form submission immediately after injection without re-reading or re-snapshotting the filled field.
 
 **Sensitive handoff requires explicit approval.** Password injection always requires user approval. Payment/card injection always requires approval. Approval is one-time, same-domain, short-lived (5 min TTL), single-field-per-authorization.
 
@@ -229,6 +235,16 @@ These are explicit non-directions. Do not build these.
 - **Do not expand the Controlled Browser Bridge** unless an explicit compatibility requirement demands it. It exists for agents with no browser tooling; it is not the product direction.
 - **Do not add Playwright handles, CDP connections, or `storageState` to agent-facing responses** under any circumstances.
 - **Do not require agents to call both `start_task_browser_session` and `get_runtime_browser_endpoint`.** One call should be enough.
+
+---
+
+## Future Direction: Fill-and-Submit Handoff
+
+The DOM masking approach (above) prevents aria snapshot readback but is not a browser-engine security boundary. The architecturally stronger approach for high-risk fields (password, card number, CVV) is **fill-and-submit handoff**:
+
+Antigen fills the protected field AND clicks the approved submit/confirm element inside the same CDP session. The sensitive value never has a window to be snapshotted by the agent because the form navigates away before the agent's browser tooling regains control. `execute_secret_field_injection` would accept an optional `submit_selector`; if provided, Antigen performs fill → mask → click submit → await navigation → return control after page change.
+
+This is the recommended v2 direction for payment and authentication flows. Do not build before Secret Field Masking v1 is verified through real login smoke tests.
 
 ---
 

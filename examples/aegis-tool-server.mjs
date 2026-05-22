@@ -1849,13 +1849,21 @@ async function executeSecretFieldInjection({ injection_request_id } = {}) {
   }
   const data = res.data;
   // IMPORTANT: Only metadata is returned. The raw credential value is NEVER in this response.
+  // For password fields, Aegis also masks el.value in the browser after injection so that
+  // aria snapshots return '' for the field. This is a JS-layer mitigation, not a
+  // browser-engine security boundary.
+  const fieldKind = data.field_kind;
+  const nextAction = fieldKind === "password"
+    ? "Password field filled. Do not read or snapshot the filled field — proceed directly to the next step (e.g. click Sign in / Next). If you need to confirm the page state, call browser_snapshot only after navigating away from the login form."
+    : "Field filled. Continue your workflow — navigate, click submit, etc.";
   return {
     injection_request_id: data.injection_request_id,
     status: data.status,
-    field_kind: data.field_kind,
+    field_kind: fieldKind,
     domain: data.domain,
     filled_at: data.filled_at ?? null,
     raw_value_revealed_to_agent: false,
+    next_action: nextAction,
     note: data.note ?? "Aegis injected the field value directly via CDP. The raw credential was never returned to the agent.",
   };
 }
@@ -3067,11 +3075,14 @@ const TOOLS = [
     description:
       "Execute an approved secret field injection — Aegis resolves the credential from the KMS vault " +
       "and injects it into the browser field via CDP. The raw credential value is NEVER returned to the agent. " +
+      "For password fields, Aegis additionally masks el.value in the browser after injection so that " +
+      "browser_snapshot and accessibility snapshots return an empty string for that field — " +
+      "this is a JS-layer mitigation, not a browser-engine security boundary. " +
       "Requires AEGIS_PLAYWRIGHT_CDP_URL to be configured on the Aegis API server and the Playwright MCP " +
       "server to be started with --cdp-port matching that URL. " +
       "Only call this after: (1) the injection status is 'approved', AND (2) the agent has navigated to the page " +
-      "containing the target field. After the field is filled, the agent must continue: click Next, Sign In, " +
-      "or submit the form itself. Aegis does not submit forms.",
+      "containing the target field. After the field is filled, proceed directly to the next step — " +
+      "do NOT snapshot the filled password field. Aegis does not submit forms.",
     inputSchema: {
       type: "object",
       properties: {

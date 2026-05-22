@@ -30,6 +30,7 @@ function safeSessionView(session: ReturnType<typeof getTaskBrowserSession>) {
     ephemeral: session.ephemeral,
     mode: session.mode,
     debug_visible: session.debug_visible,
+    runtime_mode: session.runtime_mode,
     created_at: session.created_at,
     expires_at: session.expires_at,
     closed_at: session.closed_at,

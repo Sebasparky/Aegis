@@ -213,6 +213,7 @@ export interface CreateTaskBrowserOptions {
   user_id?: string;
   delegation_id?: string;
   debug_visible?: boolean;
+  runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
 }
 
 export interface CreateTaskBrowserResult {
@@ -258,6 +259,7 @@ async function launchChrome(
     debug_visible,
     created_at: now.toISOString(),
     expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+    ...(opts.runtime_mode ? { runtime_mode: opts.runtime_mode } : {}),
   };
   taskBrowserSessions.set(browser_session_id, session);
 
@@ -447,6 +449,24 @@ export function getTaskBrowserSessionForReuse(
   if (session.user_id !== userId) return undefined;
   if (session.status !== "ready") return undefined;
   return { browser_session_id: session.browser_session_id, cdp_url: session.cdp_url };
+}
+
+/** Returns the first ready task browser session matching the given delegation_id and userId.
+ *  Used by get_runtime_browser_endpoint to reuse an existing runtime before provisioning a new one. */
+export function findReadySessionByDelegationId(
+  delegation_id: string,
+  userId: string,
+): TaskBrowserSession | undefined {
+  for (const session of taskBrowserSessions.values()) {
+    if (
+      session.delegation_id === delegation_id &&
+      session.user_id === userId &&
+      session.status === "ready"
+    ) {
+      return session;
+    }
+  }
+  return undefined;
 }
 
 export async function closeTaskBrowserSession(id: string, userId: string): Promise<TaskBrowserSession> {

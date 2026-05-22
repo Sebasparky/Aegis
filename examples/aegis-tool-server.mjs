@@ -1414,6 +1414,49 @@ async function injectChallengeEmailCode({ resolution_id } = {}) {
 
 // ─── Task Browser Lifecycle handlers ─────────────────────────────────────────
 
+async function getRuntimeBrowserEndpoint({ mode } = {}) {
+  const body = {};
+  if (mode === "visible") body.mode = "visible";
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/runtime/browser-endpoint", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    if (res.error?.code === "NO_PORTS_AVAILABLE") {
+      return { error: "NO_PORTS_AVAILABLE", message: "Aegis could not provision a browser runtime. All ports are occupied. Close any open sessions and retry." };
+    }
+    if (res.error?.code === "CHROME_NOT_FOUND") {
+      return { error: "CHROME_NOT_FOUND", message: "Chrome is not installed. Install Google Chrome or Chromium and retry." };
+    }
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to initialize browser runtime." };
+  }
+  const d = res.data;
+  const reused = d.reused_existing === true;
+  const autoPort = d.port_auto_selected === true;
+
+  const next_action = reused
+    ? "Local browser runtime is already active. Attach your browser tooling to cdp_url and proceed with normal browsing. Call request_secret_field_injection (with browser_runtime_id) when a credential field is reached."
+    : autoPort
+      ? "Local browser runtime started on an alternate port (port_auto_selected=true). Reconnect your browser adapter using the returned cdp_url before navigating. Then proceed normally."
+      : "Local browser runtime is ready. Attach your browser tooling to cdp_url (e.g. @playwright/mcp --cdp-endpoint=" + d.cdp_url + "). Use your browser tools for all navigation, reading, and clicking. Call request_secret_field_injection (with browser_runtime_id as browser_session_id) when a credential field is reached. Do not close the runtime until the full task is complete.";
+
+  return {
+    browser_runtime_id: d.browser_runtime_id,
+    cdp_url: d.cdp_url,
+    status: d.status,
+    runtime_mode: d.runtime_mode,
+    ephemeral: d.ephemeral,
+    reused_existing: reused,
+    port_auto_selected: autoPort,
+    expires_at: d.expires_at,
+    raw_cookies_revealed_to_agent: false,
+    raw_storage_revealed_to_agent: false,
+    next_action,
+  };
+}
+
 async function startTaskBrowserSession({ delegation_id, debug_visible = false } = {}) {
   const body = {};
   if (delegation_id) body.delegation_id = delegation_id;
@@ -1721,18 +1764,22 @@ async function navigateAuthenticatedSession({ session_id, url }) {
 
 // ─── Agent-Browser Secret Injection v1 handlers ──────────────────────────────
 
-async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason, browser_session_id } = {}) {
+async function requestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason, browser_session_id, external_cdp_url } = {}) {
   if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
   if (!field_kind || !["username", "password"].includes(field_kind)) {
     return { error: "VALIDATION_ERROR", message: "field_kind must be 'username' or 'password'." };
   }
   if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
   if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+  if (browser_session_id && external_cdp_url) {
+    return { error: "VALIDATION_ERROR", message: "browser_session_id and external_cdp_url are mutually exclusive. Use browser_session_id for Aegis-provisioned browsers; use external_cdp_url when you own the browser." };
+  }
 
   const body = { domain, field_kind, page_url, reason };
   if (pass_id) body.pass_id = pass_id;
   if (element_hint && Object.keys(element_hint).length > 0) body.element_hint = element_hint;
   if (browser_session_id) body.browser_session_id = browser_session_id;
+  if (external_cdp_url) body.external_cdp_url = external_cdp_url;
 
   let res;
   try {
@@ -2652,8 +2699,34 @@ const TOOLS = [
     },
   },
   {
+    name: "get_runtime_browser_endpoint",
+    description:
+      "Initialize or retrieve the Aegis local browser runtime for this delegation. " +
+      "Agent browser tooling (e.g. @playwright/mcp) should attach to the returned cdp_url for all ordinary browsing — " +
+      "navigation, reading, clicking, and scrolling. Users should not manually manage this session.\n\n" +
+      "Aegis handles only sensitive handoffs through the runtime: credential field injection, payment fields, " +
+      "sensitive action approvals, challenge relay, and signed receipts. The agent drives everything else.\n\n" +
+      "Call this once at task start. If a ready runtime already exists for this delegation it is returned immediately (reused_existing=true). " +
+      "Otherwise Aegis provisions a fresh ephemeral Chrome session with no-save policy enforced. " +
+      "When port_auto_selected=true, reconnect your browser adapter to the returned cdp_url before navigating.\n\n" +
+      "Pass the returned browser_runtime_id as browser_session_id in request_secret_field_injection calls. " +
+      "Do NOT use navigate_task_browser_session / observe_task_browser_session / click_element_in_task_browser_session if your agent has @playwright/mcp — those are compatibility tools for agents with no browser tooling.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["headless", "visible"],
+          description: "Optional. Default 'headless'. Set to 'visible' ONLY when the user explicitly requests a visible Chrome window for local debugging.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "start_task_browser_session",
     description:
+      "[COMPATIBILITY MODE — Use get_runtime_browser_endpoint instead unless you need low-level session lifecycle control.]\n\n" +
       "Create an ephemeral Chrome browser session for agent-controlled navigation. Sessions are headless by default — no visible Chrome window.\n\n" +
       "Aegis launches Chrome with --remote-debugging-port=9222 and a fresh /tmp profile " +
       "that has password saving, autofill, card saving, and sync disabled. " +
@@ -2723,6 +2796,8 @@ const TOOLS = [
   {
     name: "navigate_task_browser_session",
     description:
+      "[COMPATIBILITY MODE — Use only if your agent has no external browser tooling such as @playwright/mcp. " +
+      "If you have browser tooling, use get_runtime_browser_endpoint and attach your tooling to the returned cdp_url instead.]\n\n" +
       "Navigate the active task browser session to a URL and return a safe page summary. " +
       "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork). " +
       "If the agent already has Playwright MCP, use that instead — this tool is a compatibility bridge only.\n\n" +
@@ -2750,6 +2825,8 @@ const TOOLS = [
   {
     name: "observe_task_browser_session",
     description:
+      "[COMPATIBILITY MODE — Use only if your agent has no external browser tooling such as @playwright/mcp. " +
+      "If you have browser tooling, use get_runtime_browser_endpoint and attach your tooling to the returned cdp_url instead.]\n\n" +
       "Observe the current page in the task browser session without navigating. " +
       "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork).\n\n" +
       "Returns a safe summary of the current page: page_title, headings, links_sample, buttons_sample, forms_detected. " +
@@ -2769,6 +2846,8 @@ const TOOLS = [
   {
     name: "click_element_in_task_browser_session",
     description:
+      "[COMPATIBILITY MODE — Use only if your agent has no external browser tooling such as @playwright/mcp. " +
+      "If you have browser tooling, use get_runtime_browser_endpoint and attach your tooling to the returned cdp_url instead.]\n\n" +
       "Click an element in the task browser session by CSS selector and return a safe observation of the resulting page. " +
       "Use this when the agent does NOT have its own Playwright MCP browser runtime (e.g. Claude Cowork).\n\n" +
       "IMPORTANT: Do NOT use this to type text or fill credential fields. " +
@@ -2947,7 +3026,11 @@ const TOOLS = [
         },
         browser_session_id: {
           type: "string",
-          description: "Optional. The browser_session_id from start_task_browser_session. When provided, Aegis will inject into that task browser session's CDP URL instead of AEGIS_PLAYWRIGHT_CDP_URL. Required when you are using navigate_task_browser_session and click_element_in_task_browser_session for navigation (i.e. the agent has no external Playwright MCP).",
+          description: "Optional. The browser_session_id from start_task_browser_session, or the browser_runtime_id from get_runtime_browser_endpoint. Mutually exclusive with external_cdp_url. Use when the browser was provisioned by Aegis.",
+        },
+        external_cdp_url: {
+          type: "string",
+          description: "Optional. The CDP endpoint of a browser you already own (e.g. 'http://localhost:9222'). Use when you are using @playwright/mcp or another external browser tool and Aegis does not own the browser session. Mutually exclusive with browser_session_id. Must be http://localhost:<port>.",
         },
       },
       required: ["domain", "field_kind", "page_url", "reason"],
@@ -3475,6 +3558,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "check_website_policy_compatibility":
       result = await checkWebsitePolicyCompatibility(a);
+      break;
+    case "get_runtime_browser_endpoint":
+      result = await getRuntimeBrowserEndpoint(a);
       break;
     case "start_task_browser_session":
       result = await startTaskBrowserSession(a);

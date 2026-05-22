@@ -30,7 +30,7 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse, getTaskBrowserSession } from "../runtime/taskBrowserSessions.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import {
@@ -2801,4 +2801,90 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.send(createReadStream(artifact.local_path));
     },
   );
+
+  /**
+   * POST /api/agent/v1/runtime/browser-endpoint
+   *
+   * Initialize or retrieve the Aegis local browser runtime for this delegation.
+   * Agent browser tooling should attach to the returned cdp_url for ordinary browsing.
+   * Aegis handles only sensitive handoffs (credential injection, payment fields, approvals).
+   * Users should not manually manage this session.
+   *
+   * Reuses an existing ready session for the delegation if one exists.
+   * Provisions a new ephemeral session otherwise, using the same port-conflict logic
+   * as POST /api/task-browser-sessions (Cases A–D).
+   */
+  server.post("/api/agent/v1/runtime/browser-endpoint", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { mode?: string };
+    const debug_visible = body.mode === "visible";
+
+    // Return an existing ready session for this delegation rather than provisioning a duplicate.
+    const existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
+    if (existing) {
+      return reply.send({
+        ok: true,
+        data: {
+          browser_runtime_id: existing.browser_session_id,
+          cdp_url: existing.cdp_url,
+          status: existing.status,
+          runtime_mode: existing.runtime_mode ?? "local_runtime_endpoint",
+          ephemeral: true as const,
+          reused_existing: true,
+          port_auto_selected: false,
+          expires_at: existing.expires_at,
+          protection: {
+            raw_cookies_revealed_to_agent: false as const,
+            raw_storage_revealed_to_agent: false as const,
+          },
+        },
+      });
+    }
+
+    let result: CreateTaskBrowserResult;
+    try {
+      result = await createTaskBrowserSession({
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        debug_visible,
+        runtime_mode: "local_runtime_endpoint",
+      });
+    } catch (err: unknown) {
+      const e = err as Error & { code?: string; occupied_port_range?: string; tracked_occupied_sessions?: unknown[] };
+      if (e.code === "NO_PORTS_AVAILABLE") {
+        return reply.status(503).send({
+          ok: false,
+          error: {
+            code: "NO_PORTS_AVAILABLE",
+            message: e.message,
+            ...(e.occupied_port_range ? { occupied_port_range: e.occupied_port_range } : {}),
+            tracked_occupied_sessions: e.tracked_occupied_sessions ?? [],
+          },
+        });
+      }
+      if (e.code === "CHROME_NOT_FOUND") return sendError(reply, 503, "CHROME_NOT_FOUND", e.message ?? "Chrome not found.");
+      return sendError(reply, 500, "BROWSER_LAUNCH_FAILED", e.message ?? "Failed to provision browser runtime.");
+    }
+
+    const session = result.session;
+    return reply.status(201).send({
+      ok: true,
+      data: {
+        browser_runtime_id: session.browser_session_id,
+        cdp_url: session.cdp_url,
+        status: session.status,
+        runtime_mode: session.runtime_mode ?? "local_runtime_endpoint",
+        ephemeral: true as const,
+        reused_existing: false,
+        port_auto_selected: result.port_auto_selected === true,
+        expires_at: session.expires_at,
+        protection: {
+          raw_cookies_revealed_to_agent: false as const,
+          raw_storage_revealed_to_agent: false as const,
+        },
+      },
+    });
+  });
 }

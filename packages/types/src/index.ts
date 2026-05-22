@@ -2176,6 +2176,8 @@ export interface TaskBrowserSession {
   closed_at?: string;
   error?: string;
   cleanup_complete?: boolean;
+  /** Distinguishes auto-provisioned runtimes from manually started compatibility sessions. */
+  runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
 }
 
 // ─── Sensitive Action Receipt Timeline v1 ──────────────────────────────────────

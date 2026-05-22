@@ -1437,10 +1437,18 @@ async function getRuntimeBrowserEndpoint({ mode } = {}) {
   const autoPort = d.port_auto_selected === true;
 
   const next_action = reused
-    ? "Local browser runtime is already active. Attach your browser tooling to cdp_url and proceed with normal browsing. Call request_secret_field_injection (with browser_runtime_id) when a credential field is reached."
+    ? "Antigen local browser runtime is already active at " + d.cdp_url + ". " +
+      "The antigen-browser MCP server should already be connected — use it for all navigation, reading, and clicking. " +
+      "Call request_secret_field_injection (passing browser_runtime_id as browser_session_id) when a credential field is reached."
     : autoPort
-      ? "Local browser runtime started on an alternate port (port_auto_selected=true). Reconnect your browser adapter using the returned cdp_url before navigating. Then proceed normally."
-      : "Local browser runtime is ready. Attach your browser tooling to cdp_url (e.g. @playwright/mcp --cdp-endpoint=" + d.cdp_url + "). Use your browser tools for all navigation, reading, and clicking. Call request_secret_field_injection (with browser_runtime_id as browser_session_id) when a credential field is reached. Do not close the runtime until the full task is complete.";
+      ? "Antigen local browser runtime started on an alternate port at " + d.cdp_url + " (port_auto_selected=true). " +
+        "The antigen-browser MCP server in your connector config points at http://localhost:9222 and must be updated. " +
+        "Update --cdp-endpoint to " + d.cdp_url + " in the antigen-browser MCP args and restart your agent platform before proceeding."
+      : "Antigen local browser runtime is ready at " + d.cdp_url + ". " +
+        "The antigen-browser MCP server (configured with --cdp-endpoint " + d.cdp_url + ") is now live — " +
+        "use it for all navigation, reading, and clicking. " +
+        "Call request_secret_field_injection (passing browser_runtime_id as browser_session_id) when a credential field is reached. " +
+        "Do not close the runtime until the full task is complete.";
 
   return {
     browser_runtime_id: d.browser_runtime_id,

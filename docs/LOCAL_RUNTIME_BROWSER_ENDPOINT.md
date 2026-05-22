@@ -160,6 +160,39 @@ Navigate, observe, click tools in `aegis-tool-server.mjs` and `taskBrowserContro
 
 > Compatibility mode. Use these tools only if your agent cannot attach its own browser tooling. Do not use these as the primary browsing path for agents that have native browser capabilities.
 
+### Connector MCP Config Shape
+
+The Aegis connector returns **two MCP server entries**. Both are required for the full Local Runtime Browser Endpoint experience on platforms that support local MCP processes (Claude Desktop, Cursor, Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "antigen": {
+      "command": "node",
+      "args": ["<ABSOLUTE_PATH_TO_REPO>/examples/aegis-tool-server.mjs"],
+      "env": {
+        "AEGIS_API_BASE": "http://localhost:4000",
+        "AEGIS_AGENT_TOKEN": "<delegation-token>"
+      }
+    },
+    "antigen-browser": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"]
+    }
+  }
+}
+```
+
+**`antigen`** — Trust tools. Credential injection, approvals, sensitive action gates, receipts, vault passes, runtime guardrails. All Aegis-owned operations go through this server.
+
+**`antigen-browser`** — Browser adapter. Attaches the agent's own browser tooling to the Antigen local runtime via CDP. The agent uses this server for all ordinary browsing — navigation, reading, clicking, scrolling. Aegis does not see or control these operations.
+
+**Port handling.** The `antigen-browser` server config hard-codes port 9222, which is the default Aegis runtime port. If `get_runtime_browser_endpoint` returns `port_auto_selected=true` (meaning Chrome launched on an alternate port), update `--cdp-endpoint` to the returned `cdp_url` and restart the agent platform. This is the only case that requires user action after initial setup.
+
+**Platforms without local process support** (e.g., Claude in Chrome extension) receive the `antigen` MCP config only and use the Controlled Browser Bridge compatibility tools (`navigate_task_browser_session`, `observe_task_browser_session`, `click_element_in_task_browser_session`).
+
+**CDP coexistence.** `@playwright/mcp` holds one CDP connection for agent browsing. When Aegis needs to inject a credential, it opens a second raw CDP WebSocket connection to the same Chrome instance. The two connections coexist without conflict. After injection, Aegis disconnects (`browser.disconnect()`, not `browser.close()`) — the agent's MCP session and all open tabs are preserved.
+
 ---
 
 ## Security Model
@@ -225,10 +258,14 @@ New MCP tool and backing endpoint:
 - Expose as `get_runtime_browser_endpoint` in `aegis-tool-server.mjs`
 - `request_secret_field_injection` accepts `browser_runtime_id` as an alternative to `browser_session_id` / `external_cdp_url`
 
-### Increment 4 — Update Connector Setup
+### Increment 4 — Update Connector Setup (complete)
 
-- Connector setup guidance (agent onboarding copy, AGENT_INTEGRATION_CONTRACT.md) should tell agents: use `get_runtime_browser_endpoint` when you need a dedicated isolated browser; use `request_secret_field_injection` for credentials; use navigate/observe/click only if your agent has no browser tooling.
-- Stop suggesting navigate/click tools as the first-choice integration path for agents that have `@playwright/mcp` or equivalent.
+- `buildSetup()` in `agent-connectors.ts` returns two MCP server entries: `antigen` (trust tools) and `antigen-browser` (`@playwright/mcp --cdp-endpoint http://localhost:9222`).
+- `browser_runtime_guidance` field added to setup response: labels each server, explains first-run call to `get_runtime_browser_endpoint`, documents port-conflict fallback.
+- Setup `instructions` updated to include `get_runtime_browser_endpoint` on first run and port-conflict recovery step.
+- `connect-agent` UI displays both server entries and a legend explaining their roles.
+- `get_runtime_browser_endpoint` `next_action` text updated to reference `antigen-browser` by name and give explicit port-conflict recovery guidance.
+- See "Connector MCP Config Shape" section above for the canonical config.
 
 ### Increment 5 — Runtime Status UI
 

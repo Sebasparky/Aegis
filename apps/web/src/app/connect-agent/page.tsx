@@ -26,6 +26,13 @@ interface SetupMcp {
   path_placeholder: string;
   mcp_config: unknown;
   instructions: string[];
+  browser_runtime_guidance?: {
+    antigen_role: string;
+    "antigen-browser_role": string;
+    first_run: string;
+    port_conflict_note: string;
+    compatibility_note: string;
+  };
 }
 
 interface SetupHttp {
@@ -509,6 +516,34 @@ export default function ConnectAgentPage() {
                 copy={copy}
                 copied={copied}
               />
+              {mcpSetup.browser_runtime_guidance && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: "10px 14px",
+                    borderRadius: "var(--r-1)",
+                    background: "var(--surface-1)",
+                    border: "1px solid var(--hairline)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-1)" }}>
+                    Two MCP servers are included:
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: 12, color: "var(--ink-2)" }}>
+                      <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink-1)" }}>antigen</span>
+                      {" — "}{mcpSetup.browser_runtime_guidance.antigen_role}
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--ink-2)" }}>
+                      <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink-1)" }}>antigen-browser</span>
+                      {" — "}{mcpSetup.browser_runtime_guidance["antigen-browser_role"]}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

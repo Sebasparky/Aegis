@@ -39,13 +39,26 @@ function buildSetup(
               AEGIS_AGENT_TOKEN: token,
             },
           },
+          "antigen-browser": {
+            command: "npx",
+            args: ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"],
+          },
         },
+      },
+      browser_runtime_guidance: {
+        antigen_role: "Trust tools — credential injection, approvals, sensitive action gates, receipts.",
+        "antigen-browser_role": "Browser adapter — attaches your agent's browser tooling to the Antigen local runtime for ordinary browsing.",
+        first_run: "Call get_runtime_browser_endpoint once at task start. The antigen-browser server connects automatically to http://localhost:9222.",
+        port_conflict_note: "If get_runtime_browser_endpoint returns port_auto_selected=true, update --cdp-endpoint in the antigen-browser args to the returned cdp_url and restart your platform.",
+        compatibility_note: "Agents without local process support use navigate_task_browser_session / observe_task_browser_session / click_element_in_task_browser_session (compatibility mode only).",
       },
       instructions: [
         "Copy the mcp_config block into your Claude Desktop config.json or Cursor MCP settings.",
         "Replace <ABSOLUTE_PATH_TO_REPO> with the absolute path to your Aegis repository root.",
         "Save the AEGIS_AGENT_TOKEN now — it will not be shown again.",
         "Restart your agent platform after saving the config.",
+        "On first run, call get_runtime_browser_endpoint to initialize the Antigen local browser runtime. The antigen-browser server attaches to it automatically.",
+        "If port_auto_selected=true is returned, update --cdp-endpoint in the antigen-browser args to the returned cdp_url and restart your platform.",
         "This is a local development setup. A hosted one-click connector is planned for a future release.",
       ],
     };

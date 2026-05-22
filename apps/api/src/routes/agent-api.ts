@@ -34,7 +34,7 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
-import { performSubmitAndWait } from "../runtime/credentialStepHandoff.js";
+import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
 import {
   agentDelegations,
   passes,
@@ -54,6 +54,8 @@ import {
   workspaceArtifacts,
   websiteTrustProfiles,
   agentConnectors,
+  credentialStepHandoffs,
+  type CredentialStepHandoffRecord,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
@@ -1768,6 +1770,41 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 500, "CREDENTIAL_RESOLVE_FAILED", msg);
       }
 
+      // Pre-flight: validate button_text against blocklist before resolving credentials or touching CDP
+      if (submit?.button_text) {
+        const bt = submit.button_text.trim();
+        if (SUBMIT_BLOCKLIST.test(bt)) {
+          const handoffId = newId("csh");
+          const completedAt = new Date().toISOString();
+          credentialStepHandoffs.set(handoffId, {
+            handoff_id: handoffId,
+            injection_request_id,
+            delegation_id: delegation.id,
+            user_id: injection.user_id,
+            domain: injection.domain,
+            step_kind,
+            pass_label: aegisVaultPasses.get(injection.pass_id)?.pass_label ?? injection.domain,
+            outcome: "blocked_policy",
+            raw_value_revealed_to_agent: false,
+            completed_at: completedAt,
+            ...(injection.authorization_id ? { authorization_id: injection.authorization_id } : {}),
+          } satisfies CredentialStepHandoffRecord);
+          return reply.send({
+            ok: true,
+            data: {
+              handoff_id: handoffId,
+              status: "blocked_policy" as const,
+              step_kind,
+              domain: injection.domain,
+              completed_at: completedAt,
+              raw_value_revealed_to_agent: false,
+              blocked_reason: `Submit button text "${bt.slice(0, 60)}" is on the payment/destructive action blocklist. Credential was not filled.`,
+              next_action: { recommended: "stop_and_ask_user" as const, reason: "Blocked before credential fill — no credential was resolved or injected." },
+            } satisfies CredentialStepHandoffResult,
+          });
+        }
+      }
+
       // Phase 1: CDP fill — same path as execute_secret_field_injection
       let cdpUrlOverride: string | undefined;
       if (injection.browser_session_id) {
@@ -1785,6 +1822,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
         const handoffId = newId("csh");
+        const completedAt = new Date().toISOString();
+        credentialStepHandoffs.set(handoffId, {
+          handoff_id: handoffId,
+          injection_request_id,
+          delegation_id: delegation.id,
+          user_id: injection.user_id,
+          domain: injection.domain,
+          step_kind,
+          pass_label: pass.pass_label ?? pass.domain,
+          outcome: "submit_failed",
+          raw_value_revealed_to_agent: false,
+          completed_at: completedAt,
+          ...(injection.authorization_id ? { authorization_id: injection.authorization_id } : {}),
+        } satisfies CredentialStepHandoffRecord);
         return reply.status(500).send({
           ok: false,
           data: {
@@ -1792,7 +1843,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             status: "submit_failed",
             step_kind,
             domain: injection.domain,
-            completed_at: new Date().toISOString(),
+            completed_at: completedAt,
             raw_value_revealed_to_agent: false,
             blocked_reason: "Field fill (CDP) failed before submit could be attempted.",
             next_action: { recommended: "stop_and_ask_user", reason: fillResult.error ?? "CDP fill failed." },
@@ -1843,6 +1894,23 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
 
       const handoffId = newId("csh");
+      const completedAt = new Date().toISOString();
+
+      credentialStepHandoffs.set(handoffId, {
+        handoff_id: handoffId,
+        injection_request_id,
+        delegation_id: delegation.id,
+        user_id: injection.user_id,
+        domain: injection.domain,
+        step_kind,
+        pass_label: pass.pass_label ?? pass.domain,
+        outcome: submitResult.status,
+        raw_value_revealed_to_agent: false,
+        completed_at: completedAt,
+        ...(submitResult.challenge_kind ? { challenge_kind: submitResult.challenge_kind } : {}),
+        ...(injection.authorization_id ? { authorization_id: injection.authorization_id } : {}),
+      } satisfies CredentialStepHandoffRecord);
+
       return reply.send({
         ok: true,
         data: {
@@ -1850,7 +1918,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           status: submitResult.status,
           step_kind,
           domain: injection.domain,
-          completed_at: new Date().toISOString(),
+          completed_at: completedAt,
           raw_value_revealed_to_agent: false,
           ...(submitResult.current_url ? { current_url: submitResult.current_url } : {}),
           ...(submitResult.page_title ? { page_title: submitResult.page_title } : {}),

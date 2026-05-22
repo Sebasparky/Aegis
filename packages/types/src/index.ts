@@ -2221,6 +2221,7 @@ export type SensitiveActionEventType =
   | "credential_authorization_approved"
   | "credential_authorization_fulfilled"
   | "secret_field_injected"
+  | "credential_step_handoff_executed"
   | "security_challenge_reported"
   | "challenge_code_submitted_manual"
   | "challenge_code_injected"

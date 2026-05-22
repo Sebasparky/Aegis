@@ -31,7 +31,7 @@ export interface SubmitAndWaitResult {
 const SUBMIT_ALLOWLIST = /^(sign\s?in|log\s?in|login|continue|next|verify|submit|log\s?on|sign\s?on)$/i;
 
 // Payment / destructive button text (substring match — block any button containing these)
-const SUBMIT_BLOCKLIST = /\b(pay|buy|purchase|place\s?order|subscribe|delete|remove|deactivate|transfer)\b/i;
+export const SUBMIT_BLOCKLIST = /\b(pay|buy|purchase|place\s?order|subscribe|delete|remove|deactivate|transfer)\b/i;
 
 function safeDisconnect(browser: Browser): void {
   try { (browser as unknown as { disconnect(): void }).disconnect(); } catch { /* ignore */ }

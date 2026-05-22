@@ -240,6 +240,26 @@ export const challengeEmailResolutions = new Map<string, ChallengeEmailResolutio
 // Active grants are session-bound: they are expired on restart (same pattern as credentialUseAuthorizations).
 export const sensitiveGrants = new Map<string, SensitiveGrant>();
 
+// Credential Step Handoff v1 audit records. Ephemeral — expire on restart.
+// Never stores pass_id, secret_ref, resolvedValue, or any raw credential material.
+export interface CredentialStepHandoffRecord {
+  handoff_id: string;
+  injection_request_id: string;
+  delegation_id: string;
+  user_id: string;
+  domain: string;
+  step_kind: "username_next" | "password_submit";
+  /** Display label only — never pass_id or raw credential value. */
+  pass_label: string;
+  outcome: string; // CredentialStepHandoffStatus
+  raw_value_revealed_to_agent: false;
+  completed_at: string;
+  challenge_kind?: "totp" | "email_code" | "sms_code" | "captcha" | "unknown";
+  authorization_id?: string;
+}
+
+export const credentialStepHandoffs = new Map<string, CredentialStepHandoffRecord>();
+
 // ─── Aegis Workspaces v0 ──────────────────────────────────────────────────────
 
 export const aegisWorkspaces = new Map<string, AegisWorkspace>();

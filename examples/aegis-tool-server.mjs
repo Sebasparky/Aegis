@@ -3158,8 +3158,10 @@ const TOOLS = [
       "Only call this after: (1) the injection status is 'approved', AND (2) the agent has navigated to the page " +
       "containing the target field. After the field is filled, proceed directly to the next step — " +
       "do NOT snapshot the filled password field. Aegis does not submit forms.\n\n" +
-      "PREFER execute_credential_step_handoff for login flows — it fills the field AND submits atomically, " +
-      "so the password is never readable by the agent between fill and submit.",
+      "STRONGLY PREFER execute_credential_step_handoff for login flows — it fills the field AND submits atomically, " +
+      "so the password is never readable by the agent between fill and submit. " +
+      "Do NOT use this tool + a separate browser_click for password login submit — " +
+      "that two-step pattern leaves the filled password field exposed between calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3197,7 +3199,14 @@ const TOOLS = [
       "- Agent still owns: all navigation, reading pages, choosing login method, clicking non-credential controls\n" +
       "- Aegis owns: the credential fill + one login-submit click + post-submit wait\n" +
       "- Payment, purchase, and account-deletion submits are hard-blocked by policy\n" +
-      "- The raw credential value is NEVER returned to the agent",
+      "- The raw credential value is NEVER returned to the agent\n\n" +
+      "ANTI-PATTERNS — do not do these:\n" +
+      "- Do NOT call browser_snapshot or any browser read tool between credential fill and submit. " +
+      "This handoff performs fill and submit atomically — no snapshot step belongs between them.\n" +
+      "- Do NOT use execute_secret_field_injection + a separate browser_click for password login submit. " +
+      "That pattern leaves the filled password field readable by browser tools between the two calls.\n" +
+      "- Do NOT use Antigen compatibility browser tools (navigate/observe/click) while antigen-browser is active — " +
+      "use antigen-browser for all navigation, reading, and clicking outside of this handoff.",
     inputSchema: {
       type: "object",
       required: ["injection_request_id", "step_kind", "reason"],

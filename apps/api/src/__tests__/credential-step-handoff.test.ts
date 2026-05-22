@@ -104,7 +104,7 @@ import { chromium } from "playwright";
 
 // ─── Import under test ────────────────────────────────────────────────────────
 
-import { performSubmitAndWait } from "../runtime/credentialStepHandoff.js";
+import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -378,6 +378,95 @@ describe("Credential Step Handoff — security invariants", () => {
     expect(serialized).not.toContain('"form_values"');
     // Safe metadata present
     expect(result.current_url).toBe("https://github.com/dashboard");
+  });
+});
+
+describe("Credential Step Handoff — raw value invariants", () => {
+  it("result never contains raw_value_revealed_to_agent: true", async () => {
+    const page = makePage({
+      buttonText: "Sign in",
+      url: "https://github.com/login",
+      navigatesOnClick: true,
+      navigatedUrl: "https://github.com/",
+    });
+    const browser = makePlaywrightMock(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValueOnce(browser as unknown as Awaited<ReturnType<typeof chromium.connectOverCDP>>);
+
+    const result = await performSubmitAndWait({
+      domain: "github.com",
+      cdpUrl: "http://localhost:9222",
+      step_kind: "password_submit",
+      submit: { button_text: "Sign in" },
+    });
+
+    // raw_value_revealed_to_agent must never be present or be anything other than false
+    expect((result as Record<string, unknown>).raw_value_revealed_to_agent).toBeUndefined();
+    // The result itself must not contain any string that looks like a raw password
+    const serialised = JSON.stringify(result);
+    expect(serialised).not.toMatch(/raw_value_revealed_to_agent.*true/);
+  });
+
+  it("signals_detected contains only page-text classification tokens, not credential-like strings", async () => {
+    const page = makePage({
+      buttonText: "Sign in",
+      url: "https://github.com/login",
+      signals: ["verification", "email", "code"],
+    });
+    const browser = makePlaywrightMock(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValueOnce(browser as unknown as Awaited<ReturnType<typeof chromium.connectOverCDP>>);
+
+    const result = await performSubmitAndWait({
+      domain: "github.com",
+      cdpUrl: "http://localhost:9222",
+      step_kind: "password_submit",
+      submit: { button_text: "Sign in" },
+    });
+
+    if (result.signals_detected) {
+      for (const signal of result.signals_detected) {
+        // Each signal must be a short classification token, not a long credential-like string
+        expect(typeof signal).toBe("string");
+        expect(signal.length).toBeLessThan(200);
+      }
+    }
+  });
+
+  it("blocked_reason does not contain the button text verbatim beyond the first 60 chars", async () => {
+    const longBlockedText = "Pay now with a very long button label that might contain sensitive information in the tail";
+    const page = makePage({ buttonText: longBlockedText, url: "https://github.com/login" });
+    const browser = makePlaywrightMock(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValueOnce(browser as unknown as Awaited<ReturnType<typeof chromium.connectOverCDP>>);
+
+    const result = await performSubmitAndWait({
+      domain: "github.com",
+      cdpUrl: "http://localhost:9222",
+      step_kind: "password_submit",
+      submit: { button_text: longBlockedText },
+    });
+
+    expect(result.status).toBe("blocked_policy");
+    // blocked_reason truncates at 60 chars of button text
+    expect(result.blocked_reason).not.toContain("sensitive information in the tail");
+  });
+});
+
+describe("Credential Step Handoff — SUBMIT_BLOCKLIST export", () => {
+  it("SUBMIT_BLOCKLIST is exported and matches payment/destructive terms", () => {
+    expect(SUBMIT_BLOCKLIST.test("Pay now")).toBe(true);
+    expect(SUBMIT_BLOCKLIST.test("Buy")).toBe(true);
+    expect(SUBMIT_BLOCKLIST.test("Purchase")).toBe(true);
+    expect(SUBMIT_BLOCKLIST.test("Place order")).toBe(true);
+    expect(SUBMIT_BLOCKLIST.test("Delete account")).toBe(true);
+    expect(SUBMIT_BLOCKLIST.test("Transfer funds")).toBe(true);
+  });
+
+  it("SUBMIT_BLOCKLIST does not block login-type button text", () => {
+    expect(SUBMIT_BLOCKLIST.test("Sign in")).toBe(false);
+    expect(SUBMIT_BLOCKLIST.test("Log in")).toBe(false);
+    expect(SUBMIT_BLOCKLIST.test("Continue")).toBe(false);
+    expect(SUBMIT_BLOCKLIST.test("Next")).toBe(false);
+    expect(SUBMIT_BLOCKLIST.test("Submit")).toBe(false);
+    expect(SUBMIT_BLOCKLIST.test("Verify")).toBe(false);
   });
 });
 

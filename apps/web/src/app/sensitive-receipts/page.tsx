@@ -51,6 +51,11 @@ const EVENT_STYLES: Record<
     badge: "bg-emerald-950 text-emerald-300 border-emerald-800",
     label: "Field injected",
   },
+  credential_step_handoff_executed: {
+    dot: "bg-teal-400",
+    badge: "bg-teal-950 text-teal-300 border-teal-800",
+    label: "Handoff executed",
+  },
   security_challenge_reported: {
     dot: "bg-amber-400",
     badge: "bg-amber-950 text-amber-300 border-amber-800",

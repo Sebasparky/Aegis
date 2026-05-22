@@ -6,6 +6,7 @@ import {
   secretFieldInjections,
   securityChallenges,
   challengeEmailResolutions,
+  credentialStepHandoffs,
 } from "../store/index.js";
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
@@ -45,6 +46,7 @@ const EVENT_GROUP_TYPES: Record<string, SensitiveActionEventType[]> = {
     "credential_authorization_approved",
     "credential_authorization_fulfilled",
     "secret_field_injected",
+    "credential_step_handoff_executed",
   ],
   challenge: [
     "security_challenge_reported",
@@ -198,6 +200,38 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
               ]
             : ["Username injected via CDP — not returned to agent"],
           ...(inj.authorization_id ? { authorization_id: inj.authorization_id } : {}),
+        });
+      }
+    }
+
+    // ── Credential step handoffs ──────────────────────────────────────────────
+    // Skip if filtering by browser_session_id or challenge_id — not linked by those IDs
+    if (!bsFilter && !chFilter) {
+      for (const rec of credentialStepHandoffs.values()) {
+        if (rec.user_id !== MOCK_USER_ID) continue;
+        if (authFilter && rec.authorization_id !== authFilter) continue;
+
+        const isPassword = rec.step_kind === "password_submit";
+        items.push({
+          item_id: `credential_step_handoff_executed:${rec.handoff_id}:${rec.completed_at}`,
+          event_type: "credential_step_handoff_executed",
+          timestamp: rec.completed_at,
+          domain: rec.domain,
+          description: isPassword
+            ? `Login submit completed on ${rec.domain} — outcome: ${rec.outcome}`
+            : `Username step completed on ${rec.domain} — outcome: ${rec.outcome}`,
+          metadata: {
+            handoff_id: rec.handoff_id,
+            step_kind: rec.step_kind,
+            outcome: rec.outcome,
+            pass_label: rec.pass_label,
+            ...(rec.challenge_kind ? { challenge_kind: rec.challenge_kind } : {}),
+          },
+          privacy_guarantees: [
+            "Raw credential was not returned to agent",
+            "raw_value_revealed_to_agent: false enforced as TypeScript literal",
+          ],
+          ...(rec.authorization_id ? { authorization_id: rec.authorization_id } : {}),
         });
       }
     }

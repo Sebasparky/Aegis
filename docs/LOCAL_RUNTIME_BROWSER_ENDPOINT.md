@@ -176,8 +176,12 @@ The Aegis connector returns **two MCP server entries**. Both are required for th
       }
     },
     "antigen-browser": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"]
+      "command": "node",
+      "args": ["<ABSOLUTE_PATH_TO_REPO>/examples/antigen-browser-adapter.mjs"],
+      "env": {
+        "AEGIS_API_BASE": "http://localhost:4000",
+        "AEGIS_AGENT_TOKEN": "<delegation-token>"
+      }
     }
   }
 }
@@ -185,9 +189,9 @@ The Aegis connector returns **two MCP server entries**. Both are required for th
 
 **`antigen`** — Trust tools. Credential injection, approvals, sensitive action gates, receipts, vault passes, runtime guardrails. All Aegis-owned operations go through this server.
 
-**`antigen-browser`** — Browser adapter. Attaches the agent's own browser tooling to the Antigen local runtime via CDP. The agent uses this server for all ordinary browsing — navigation, reading, clicking, scrolling. Aegis does not see or control these operations.
+**`antigen-browser`** — Browser adapter. At startup, `antigen-browser-adapter.mjs` calls `POST /api/agent/v1/runtime/browser-endpoint` to get the real CDP endpoint, then spawns `@playwright/mcp --cdp-endpoint <cdp_url>`. The agent uses this server for all ordinary browsing — navigation, reading, clicking, scrolling. Aegis does not see or control these operations.
 
-**Port handling.** The `antigen-browser` server config hard-codes port 9222, which is the default Aegis runtime port. If `get_runtime_browser_endpoint` returns `port_auto_selected=true` (meaning Chrome launched on an alternate port), update `--cdp-endpoint` to the returned `cdp_url` and restart the agent platform. This is the only case that requires user action after initial setup.
+**Port handling.** The adapter resolves the CDP port dynamically at startup. If Chrome launches on an alternate port (`port_auto_selected=true`), the adapter picks up the correct URL automatically — no config editing or platform restart is required.
 
 **Platforms without local process support** (e.g., Claude in Chrome extension) receive the `antigen` MCP config only and use the Controlled Browser Bridge compatibility tools (`navigate_task_browser_session`, `observe_task_browser_session`, `click_element_in_task_browser_session`).
 
@@ -260,11 +264,11 @@ New MCP tool and backing endpoint:
 
 ### Increment 4 — Update Connector Setup (complete)
 
-- `buildSetup()` in `agent-connectors.ts` returns two MCP server entries: `antigen` (trust tools) and `antigen-browser` (`@playwright/mcp --cdp-endpoint http://localhost:9222`).
-- `browser_runtime_guidance` field added to setup response: labels each server, explains first-run call to `get_runtime_browser_endpoint`, documents port-conflict fallback.
-- Setup `instructions` updated to include `get_runtime_browser_endpoint` on first run and port-conflict recovery step.
+- `buildSetup()` in `agent-connectors.ts` returns two MCP server entries: `antigen` (trust tools) and `antigen-browser` (adapter script).
+- `antigen-browser` uses `examples/antigen-browser-adapter.mjs` — resolves the real CDP port at startup by calling the API, then spawns `@playwright/mcp`. No static port hard-coding.
+- `browser_runtime_guidance` field added to setup response: labels each server's role, adapter_note explains automatic port resolution.
 - `connect-agent` UI displays both server entries and a legend explaining their roles.
-- `get_runtime_browser_endpoint` `next_action` text updated to reference `antigen-browser` by name and give explicit port-conflict recovery guidance.
+- `get_runtime_browser_endpoint` `next_action` text updated to reference `antigen-browser` by name; port_auto_selected case no longer instructs users to edit config.
 - See "Connector MCP Config Shape" section above for the canonical config.
 
 ### Increment 5 — Runtime Status UI

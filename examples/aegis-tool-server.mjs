@@ -1442,8 +1442,8 @@ async function getRuntimeBrowserEndpoint({ mode } = {}) {
       "Call request_secret_field_injection (passing browser_runtime_id as browser_session_id) when a credential field is reached."
     : autoPort
       ? "Antigen local browser runtime started on an alternate port at " + d.cdp_url + " (port_auto_selected=true). " +
-        "The antigen-browser MCP server in your connector config points at http://localhost:9222 and must be updated. " +
-        "Update --cdp-endpoint to " + d.cdp_url + " in the antigen-browser MCP args and restart your agent platform before proceeding."
+        "The antigen-browser adapter resolves the port automatically — no config update needed. " +
+        "Use the antigen-browser MCP server for all navigation, reading, and clicking."
       : "Antigen local browser runtime is ready at " + d.cdp_url + ". " +
         "The antigen-browser MCP server (configured with --cdp-endpoint " + d.cdp_url + ") is now live — " +
         "use it for all navigation, reading, and clicking. " +

@@ -23,6 +23,7 @@ import type {
   ChallengeEmailResolution,
   ChallengeEmailResolutionStatus,
   WorkspaceArtifactKind,
+  CredentialStepHandoffResult,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -33,6 +34,7 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
+import { performSubmitAndWait } from "../runtime/credentialStepHandoff.js";
 import {
   agentDelegations,
   passes,
@@ -1587,6 +1589,276 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_value_revealed_to_agent: false,
           note: "Antigen injected the field value directly via CDP. The raw credential was never returned to the agent.",
         },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/credential-step-handoff — fill a credential field + submit atomically
+  server.post<{ Body: {
+    injection_request_id: string;
+    step_kind: "username_next" | "password_submit";
+    submit?: { selector_hint?: string; button_text?: string };
+    reason: string;
+  } }>(
+    "/api/agent/v1/credential-step-handoff",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { injection_request_id, step_kind, submit, reason } = req.body ?? {};
+
+      if (!injection_request_id || typeof injection_request_id !== "string") {
+        return sendError(reply, 400, "MISSING_INJECTION_ID", "injection_request_id is required.");
+      }
+      if (step_kind !== "username_next" && step_kind !== "password_submit") {
+        return sendError(reply, 400, "INVALID_STEP_KIND", "step_kind must be 'username_next' or 'password_submit'.");
+      }
+      if (!reason || typeof reason !== "string") {
+        return sendError(reply, 400, "MISSING_REASON", "reason is required.");
+      }
+
+      const injection = secretFieldInjections.get(injection_request_id);
+      if (!injection) return sendError(reply, 404, "INJECTION_NOT_FOUND", "Injection request not found.");
+      if (injection.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This injection does not belong to your delegation.");
+      }
+
+      // step_kind must match the injection's field_kind
+      const expectedFieldKind = step_kind === "username_next" ? "username" : "password";
+      if (injection.field_kind !== expectedFieldKind) {
+        return sendError(
+          reply, 400, "STEP_KIND_MISMATCH",
+          `step_kind '${step_kind}' requires field_kind '${expectedFieldKind}', but this injection is for '${injection.field_kind}'.`,
+        );
+      }
+
+      // Expiry check
+      if (new Date(injection.expires_at) < new Date() && injection.status !== "filled") {
+        injection.status = "expired";
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 400, "INJECTION_EXPIRED", "Injection has expired. Request a new injection.");
+      }
+
+      // Promote via authorization if still pending; enforce use limits
+      if (injection.authorization_id) {
+        const auth = credentialUseAuthorizations.get(injection.authorization_id);
+        if (auth) {
+          if (new Date(auth.expires_at) < new Date() && auth.status === "approved") {
+            auth.status = "expired";
+            credentialUseAuthorizations.set(auth.authorization_id, auth);
+            schedulePersist();
+          }
+          if (
+            injection.status === "pending_approval" &&
+            auth.status === "approved" &&
+            auth.allowed_field_kinds.includes(injection.field_kind)
+          ) {
+            injection.status = "approved";
+            injection.approved_at = auth.approved_at;
+            secretFieldInjections.set(injection.injection_request_id, injection);
+            schedulePersist();
+          }
+          if (auth.status === "fulfilled") {
+            return sendError(
+              reply, 400, "AUTHORIZATION_FULFILLED",
+              "The credential-use authorization has already been fulfilled. Request a new injection to start a new login attempt.",
+            );
+          }
+          if (injection.status === "approved" || auth.status === "approved") {
+            const used = auth.use_counts[injection.field_kind] ?? 0;
+            const max = auth.max_uses_per_field[injection.field_kind] ?? 1;
+            if (used >= max) {
+              return sendError(
+                reply, 400, "USE_LIMIT_EXCEEDED",
+                `The ${injection.field_kind} field has already been filled once for this login attempt.`,
+              );
+            }
+          }
+        }
+      }
+
+      if (injection.status !== "approved") {
+        return sendError(
+          reply, 400, "INJECTION_NOT_APPROVED",
+          `Injection status is '${injection.status}'; only 'approved' injections can be executed for a step handoff.`,
+        );
+      }
+
+      // SensitiveGrant enforcement
+      const grantCheck = checkSensitiveGrant(sensitiveGrants, {
+        user_id: injection.user_id,
+        delegation_id: injection.delegation_id,
+        domain: injection.domain,
+        grant_type: "credential_injection",
+        pass_id: injection.pass_id,
+        authorization_id: injection.authorization_id,
+      });
+      if (!grantCheck.valid) {
+        const grantErrors: Record<string, [number, string, string]> = {
+          consumed: [409, "SENSITIVE_GRANT_CONSUMED", "This credential injection grant has already been consumed."],
+          expired:  [400, "SENSITIVE_GRANT_EXPIRED",   "The sensitive grant for this injection has expired."],
+          revoked:  [403, "SENSITIVE_GRANT_REVOKED",   "The sensitive grant has been revoked."],
+          no_grant: [403, "SENSITIVE_GRANT_REQUIRED",  "No valid sensitive grant found. Approval is required."],
+        };
+        const [st, code, msg] = grantErrors[grantCheck.reason ?? "no_grant"] ?? [403, "SENSITIVE_GRANT_INVALID", "Grant check failed."];
+        return sendError(reply, st, code, msg);
+      }
+      const activeGrant = grantCheck.grant!;
+
+      // Transition to executing
+      injection.status = "executing";
+      secretFieldInjections.set(injection.injection_request_id, injection);
+      schedulePersist();
+
+      // Resolve credential
+      const vaultRepo = getVaultRepository();
+      const pass = aegisVaultPasses.get(injection.pass_id) ?? await vaultRepo.getVaultPass(injection.pass_id);
+      if (!pass || pass.user_id !== MOCK_USER_ID) {
+        injection.status = "failed";
+        injection.error = "Vault pass not found or access denied.";
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 404, "PASS_NOT_FOUND", "Vault pass not found.");
+      }
+
+      let resolvedValue: string;
+      const kms = getKmsProvider();
+      try {
+        if (injection.field_kind === "username") {
+          if (!pass.username) throw new Error("Pass has no username stored.");
+          resolvedValue = pass.username;
+        } else {
+          const blob = await vaultRepo.getEncryptedSecret(pass.secret_ref);
+          if (!blob) throw new Error(`Secret not available for pass ${pass.pass_id}.`);
+          resolvedValue = await kms.decryptSecret(blob, {
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            purpose: "login_password" as const,
+          });
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            run_id: `handoff:${injection.injection_request_id}`,
+            success: true,
+          });
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Credential resolution failed";
+        if (injection.field_kind === "password") {
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pass.user_id,
+            pass_id: pass.pass_id,
+            domain: pass.domain,
+            run_id: `handoff:${injection.injection_request_id}`,
+            success: false,
+            error_code: "RESOLVE_FAILED",
+          });
+        }
+        injection.status = "failed";
+        injection.error = msg;
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 500, "CREDENTIAL_RESOLVE_FAILED", msg);
+      }
+
+      // Phase 1: CDP fill — same path as execute_secret_field_injection
+      let cdpUrlOverride: string | undefined;
+      if (injection.browser_session_id) {
+        const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
+        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+      } else if (injection.external_cdp_url) {
+        cdpUrlOverride = injection.external_cdp_url;
+      }
+
+      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride);
+
+      if (!fillResult.success) {
+        injection.status = "failed";
+        injection.error = fillResult.error ?? "CDP fill failed";
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        const handoffId = newId("csh");
+        return reply.status(500).send({
+          ok: false,
+          data: {
+            handoff_id: handoffId,
+            status: "submit_failed",
+            step_kind,
+            domain: injection.domain,
+            completed_at: new Date().toISOString(),
+            raw_value_revealed_to_agent: false,
+            blocked_reason: "Field fill (CDP) failed before submit could be attempted.",
+            next_action: { recommended: "stop_and_ask_user", reason: fillResult.error ?? "CDP fill failed." },
+          },
+        });
+      }
+
+      // Fill succeeded — mark injection filled and update use counts before the submit phase
+      injection.status = "filled";
+      injection.filled_at = new Date().toISOString();
+      injection.error = undefined;
+      if (injection.authorization_id) {
+        const auth = credentialUseAuthorizations.get(injection.authorization_id);
+        if (auth) {
+          const now = new Date().toISOString();
+          auth.use_counts[injection.field_kind] = (auth.use_counts[injection.field_kind] ?? 0) + 1;
+          if (!auth.used_field_kinds.includes(injection.field_kind)) {
+            auth.used_field_kinds = [...auth.used_field_kinds, injection.field_kind];
+          }
+          auth.last_used_at = now;
+          const allFulfilled = auth.allowed_field_kinds.every(
+            (fk) => (auth.use_counts[fk] ?? 0) >= (auth.max_uses_per_field[fk] ?? 1),
+          );
+          if (allFulfilled) {
+            auth.status = "fulfilled";
+            auth.fulfilled_at = now;
+            activeGrant.status = "consumed";
+            activeGrant.consumed_at = now;
+            sensitiveGrants.set(activeGrant.grant_id, activeGrant);
+          }
+          credentialUseAuthorizations.set(auth.authorization_id, auth);
+        }
+      }
+      secretFieldInjections.set(injection.injection_request_id, injection);
+      schedulePersist();
+
+      // Phase 2: Submit + Wait — resolvedValue is discarded, never returned
+      resolvedValue = "";
+      const cdpUrl = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL ?? "";
+      const submitResult = await performSubmitAndWait({
+        domain: injection.domain,
+        cdpUrl,
+        step_kind,
+        submit: {
+          selector_hint: submit?.selector_hint,
+          button_text: submit?.button_text,
+        },
+      });
+
+      const handoffId = newId("csh");
+      return reply.send({
+        ok: true,
+        data: {
+          handoff_id: handoffId,
+          status: submitResult.status,
+          step_kind,
+          domain: injection.domain,
+          completed_at: new Date().toISOString(),
+          raw_value_revealed_to_agent: false,
+          ...(submitResult.current_url ? { current_url: submitResult.current_url } : {}),
+          ...(submitResult.page_title ? { page_title: submitResult.page_title } : {}),
+          ...(submitResult.challenge_kind ? { challenge_kind: submitResult.challenge_kind } : {}),
+          ...(submitResult.signals_detected?.length ? { signals_detected: submitResult.signals_detected } : {}),
+          ...(submitResult.blocked_reason ? { blocked_reason: submitResult.blocked_reason } : {}),
+          ...(submitResult.next_action ? { next_action: submitResult.next_action } : {}),
+        } satisfies CredentialStepHandoffResult,
       });
     },
   );

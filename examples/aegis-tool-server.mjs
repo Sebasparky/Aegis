@@ -1868,6 +1868,81 @@ async function executeSecretFieldInjection({ injection_request_id } = {}) {
   };
 }
 
+async function executeCredentialStepHandoff({
+  injection_request_id,
+  step_kind,
+  submit,
+  reason,
+} = {}) {
+  if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
+  if (!step_kind) return { error: "VALIDATION_ERROR", message: "step_kind is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/credential-step-handoff", {
+      injection_request_id,
+      step_kind,
+      submit: submit ?? {},
+      reason,
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Credential step handoff failed.",
+    };
+  }
+
+  const data = res.data;
+  const status = data.status;
+
+  let next_action_guidance;
+  if (status === "navigated") {
+    next_action_guidance =
+      "Page navigated after submit. Check current_url and page_title to determine if login succeeded. " +
+      "If you see a dashboard or home page, login is complete. If the URL is still a login page, read the page content.";
+  } else if (status === "challenge_detected") {
+    next_action_guidance =
+      `A ${data.challenge_kind ?? "verification"} challenge was detected. ` +
+      "Call report_security_challenge with the current page URL and browser_session_id. " +
+      "Do NOT ask the user to paste the code into chat — direct them to the Aegis UI.";
+  } else if (status === "invalid_credentials") {
+    next_action_guidance =
+      "Invalid credentials detected. The vault password may be incorrect or outdated. " +
+      "Stop the login attempt and report to the user. Do not retry automatically.";
+  } else if (status === "blocked_policy") {
+    next_action_guidance =
+      "Submit blocked by Aegis policy. " + (data.blocked_reason ?? "The button was not recognized as a login-type action.");
+  } else if (status === "submit_failed") {
+    next_action_guidance =
+      "The submit button could not be clicked. The field was NOT filled. " +
+      "Provide a more specific selector_hint or button_text and retry, or check the browser state.";
+  } else if (status === "step_completed") {
+    next_action_guidance = "Step completed. No navigation detected. Read the current page to determine next step.";
+  } else {
+    next_action_guidance = "Unknown page state after submit. Read the current page to determine next step.";
+  }
+
+  return {
+    handoff_id: data.handoff_id,
+    status,
+    step_kind: data.step_kind,
+    domain: data.domain,
+    completed_at: data.completed_at,
+    raw_value_revealed_to_agent: false,
+    ...(data.current_url ? { current_url: data.current_url } : {}),
+    ...(data.page_title ? { page_title: data.page_title } : {}),
+    ...(data.challenge_kind ? { challenge_kind: data.challenge_kind } : {}),
+    ...(data.signals_detected?.length ? { signals_detected: data.signals_detected } : {}),
+    ...(data.blocked_reason ? { blocked_reason: data.blocked_reason } : {}),
+    next_action_guidance,
+  };
+}
+
 async function waitForCredentialAuthorization({
   authorization_id,
   timeout_ms = 120000,
@@ -3082,7 +3157,9 @@ const TOOLS = [
       "server to be started with --cdp-port matching that URL. " +
       "Only call this after: (1) the injection status is 'approved', AND (2) the agent has navigated to the page " +
       "containing the target field. After the field is filled, proceed directly to the next step — " +
-      "do NOT snapshot the filled password field. Aegis does not submit forms.",
+      "do NOT snapshot the filled password field. Aegis does not submit forms.\n\n" +
+      "PREFER execute_credential_step_handoff for login flows — it fills the field AND submits atomically, " +
+      "so the password is never readable by the agent between fill and submit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3092,6 +3169,67 @@ const TOOLS = [
         },
       },
       required: ["injection_request_id"],
+    },
+  },
+  {
+    name: "execute_credential_step_handoff",
+    description:
+      "Fill a credential field AND submit the login form in one atomic step — Aegis fills the field via CDP, " +
+      "clicks the specified submit button, waits for the page to settle, then returns control with a safe outcome classification.\n\n" +
+      "USE THIS instead of execute_secret_field_injection + manual browser_click for login flows. " +
+      "The password field is never visible to the agent after handoff — control returns only after navigation or a challenge page appears.\n\n" +
+      "FLOW:\n" +
+      "1. request_secret_field_injection (username or password) → get injection_request_id + authorization_id\n" +
+      "2. wait_for_credential_authorization (poll until approved)\n" +
+      "3. execute_credential_step_handoff (fill + submit + wait)\n\n" +
+      "STEP KINDS:\n" +
+      "- username_next: fill username/email field, click Next/Continue, wait for password page\n" +
+      "- password_submit: fill password field, click Sign in/Submit, wait for navigation or challenge\n\n" +
+      "RESPONSE STATUSES:\n" +
+      "- navigated: page URL changed (likely success or new step)\n" +
+      "- challenge_detected: 2FA/CAPTCHA/email verification required → call report_security_challenge\n" +
+      "- invalid_credentials: bad username/password detected\n" +
+      "- step_completed: submit sent, page settled (no navigation detected)\n" +
+      "- submit_failed: button not found or click failed\n" +
+      "- manual_step_required: unknown page state\n" +
+      "- blocked_policy: button text matched payment/destructive blocklist\n\n" +
+      "BOUNDARIES:\n" +
+      "- Agent still owns: all navigation, reading pages, choosing login method, clicking non-credential controls\n" +
+      "- Aegis owns: the credential fill + one login-submit click + post-submit wait\n" +
+      "- Payment, purchase, and account-deletion submits are hard-blocked by policy\n" +
+      "- The raw credential value is NEVER returned to the agent",
+    inputSchema: {
+      type: "object",
+      required: ["injection_request_id", "step_kind", "reason"],
+      properties: {
+        injection_request_id: {
+          type: "string",
+          description: "The injection_request_id returned by request_secret_field_injection. Must be in 'approved' status.",
+        },
+        step_kind: {
+          type: "string",
+          enum: ["username_next", "password_submit"],
+          description: "Which login micro-step this covers. username_next: fill email/username + click Next. password_submit: fill password + click Sign in.",
+        },
+        submit: {
+          type: "object",
+          description: "Optional hints for locating the submit button. At least one of selector_hint or button_text is recommended.",
+          properties: {
+            selector_hint: {
+              type: "string",
+              description: "CSS selector for the submit button, e.g. 'button[type=\"submit\"]', '#login-submit'. Preferred over button_text.",
+            },
+            button_text: {
+              type: "string",
+              description: "Visible label of the submit button, e.g. 'Sign in', 'Next', 'Continue'. Only login-type text is allowed.",
+            },
+          },
+        },
+        reason: {
+          type: "string",
+          description: "One sentence explaining why this step is being executed, shown in the audit trail.",
+        },
+      },
     },
   },
   {
@@ -3619,6 +3757,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "execute_secret_field_injection":
       result = await executeSecretFieldInjection(a);
+      break;
+    case "execute_credential_step_handoff":
+      result = await executeCredentialStepHandoff(a);
       break;
     case "wait_for_credential_authorization":
       result = await waitForCredentialAuthorization(a);

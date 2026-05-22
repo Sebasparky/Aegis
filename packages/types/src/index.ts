@@ -2016,6 +2016,39 @@ export interface CredentialUseAuthorization {
   use_counts: { username: number; password: number };
 }
 
+// ─── Credential Step Handoff v1 ──────────────────────────────────────────────
+
+export type CredentialStepHandoffStatus =
+  | "step_completed"
+  | "navigated"
+  | "challenge_detected"
+  | "invalid_credentials"
+  | "submit_failed"
+  | "manual_step_required"
+  | "blocked_policy";
+
+export type CredentialStepKind =
+  | "username_next"
+  | "password_submit";
+
+export interface CredentialStepHandoffResult {
+  handoff_id: string;
+  status: CredentialStepHandoffStatus;
+  step_kind: CredentialStepKind;
+  domain: string;
+  completed_at: string;
+  raw_value_revealed_to_agent: false;
+  current_url?: string;
+  page_title?: string;
+  challenge_kind?: "totp" | "email_code" | "sms_code" | "captcha" | "unknown";
+  signals_detected?: string[];
+  blocked_reason?: string;
+  next_action?: {
+    recommended: "report_security_challenge" | "retry_login" | "stop_and_ask_user";
+    reason: string;
+  };
+}
+
 // ─── Login Failure Diagnostics v1 ────────────────────────────────────────────
 
 export type LoginOutcomeCode =

@@ -197,6 +197,20 @@ The Aegis connector returns **two MCP server entries**. Both are required for th
 
 **CDP coexistence.** `@playwright/mcp` holds one CDP connection for agent browsing. When Aegis needs to inject a credential, it opens a second raw CDP WebSocket connection to the same Chrome instance. The two connections coexist without conflict. After injection, Aegis disconnects (`browser.disconnect()`, not `browser.close()`) — the agent's MCP session and all open tabs are preserved.
 
+### Tool Role Summary
+
+For agents using the Local Runtime Browser Endpoint:
+
+| Tool | Purpose |
+|---|---|
+| `get_runtime_browser_endpoint` | Initialize or reuse the Aegis-provisioned local runtime browser |
+| `antigen-browser` (Playwright MCP adapter) | All ordinary browsing — navigation, reading, clicking, scrolling |
+| `request_secret_field_injection` | Create the credential-use authorization request for a field fill |
+| `execute_secret_field_injection` | Fill a credential field via CDP without submitting (non-submit or lower-risk cases) |
+| `execute_credential_step_handoff` | **Preferred for password login submit.** Atomic fill + click submit + wait for navigation — agent does not regain control until after navigation |
+
+For password login, the preferred sequence is: `request_secret_field_injection` to create the authorization → `execute_credential_step_handoff` with `step_type: "password_submit"` to perform the atomic fill and submit.
+
 ---
 
 ## Security Model
@@ -212,6 +226,8 @@ Object.defineProperty(el, 'value', { get: () => '', set: (v) => nativeSetter.cal
 This makes `element.value` return `""` for all subsequent JavaScript reads — including `@playwright/mcp`'s `browser_snapshot` (which uses `element.value` in its aria snapshot serializer), Playwright's `locator.inputValue()`, and `page.evaluate` calls.
 
 **Known limitation of DOM masking.** This is a JavaScript-layer mitigation, not a browser-engine security boundary. Browser native form collection (used for form submission) reads from internal C++ bindings and is unaffected by JS property shadowing — form submission works. However, vanilla JavaScript `onsubmit` handlers that read `el.value` directly will receive `""`. Login flows on major services (React, Vue, Angular) capture field values during the `input` event and are unaffected. Agents must proceed to form submission immediately after injection without re-reading or re-snapshotting the filled field.
+
+**JS masking is defense-in-depth only, not the primary security boundary.** The real v1 protection is Credential Step Handoff: Antigen fills the protected field and clicks the approved submit button inside the same CDP session, waiting for navigation before returning control. The sensitive value never has a window to be snapshotted by the agent because the form navigates away before the agent's browser tooling resumes. For password submit, the preferred flow is `execute_credential_step_handoff` — not `execute_secret_field_injection` followed by a separate agent click. The agent should not regain browser control while a password is sitting in a form.
 
 **Sensitive handoff requires explicit approval.** Password injection always requires user approval. Payment/card injection always requires approval. Approval is one-time, same-domain, short-lived (5 min TTL), single-field-per-authorization.
 
@@ -235,16 +251,45 @@ These are explicit non-directions. Do not build these.
 - **Do not expand the Controlled Browser Bridge** unless an explicit compatibility requirement demands it. It exists for agents with no browser tooling; it is not the product direction.
 - **Do not add Playwright handles, CDP connections, or `storageState` to agent-facing responses** under any circumstances.
 - **Do not require agents to call both `start_task_browser_session` and `get_runtime_browser_endpoint`.** One call should be enough.
+- **Do not expand the Controlled Browser Bridge to solve credential handoff.** The successful path is: Antigen provisions runtime → `antigen-browser` drives ordinary browsing → Antigen executes the sensitive micro-step → `antigen-browser` resumes. Controlled Browser Bridge remains compatibility mode for agents that have no native browser tooling.
+- **Do not make Antigen the ordinary browsing layer.** `antigen-browser` drives all non-sensitive navigation. Antigen tools handle sensitive handoffs only.
 
 ---
 
-## Future Direction: Fill-and-Submit Handoff
+## Proven End-to-End Smoke Test: GitHub Login
 
-The DOM masking approach (above) prevents aria snapshot readback but is not a browser-engine security boundary. The architecturally stronger approach for high-risk fields (password, card number, CVV) is **fill-and-submit handoff**:
+The following flow was verified against a real GitHub account (2026-05-22):
 
-Antigen fills the protected field AND clicks the approved submit/confirm element inside the same CDP session. The sensitive value never has a window to be snapshotted by the agent because the form navigates away before the agent's browser tooling regains control. `execute_secret_field_injection` would accept an optional `submit_selector`; if provided, Antigen performs fill → mask → click submit → await navigation → return control after page change.
+1. **Runtime initialized.** `get_runtime_browser_endpoint` provisioned an ephemeral Chromium instance (`tbsess_751b7d77e99e`).
+2. **antigen-browser attached.** `antigen-browser-adapter.mjs` resolved the dynamic CDP port at startup and spawned `@playwright/mcp` against it — no config editing required.
+3. **Agent navigated normally.** Agent used `antigen-browser` (Playwright MCP) to navigate to `https://github.com/login`, read the page, fill the username field, and click Next.
+4. **Credential authorization granted.** Agent called `request_secret_field_injection` → approval granted in Aegis UI (`credauth_6cc95b34f918`).
+5. **Atomic handoff executed.** `execute_credential_step_handoff` (`csh_20e4559a9c3e`) filled the password field and clicked Sign in inside a single CDP session. No `browser_snapshot` was called between fill and submit.
+6. **Navigation confirmed.** Handoff returned `status: navigated`, post-handoff URL `https://github.com/`, page title "GitHub".
+7. **Agent resumed read-only.** Agent used `antigen-browser` to read the repository list. `NordaTestUser` had 1 private repo (`Test-Repo`). No raw credential value was exposed to the agent at any point.
 
-This is the recommended v2 direction for payment and authentication flows. Do not build before Secret Field Masking v1 is verified through real login smoke tests.
+Key invariants confirmed:
+- Credential value never appeared in any tool response or agent context.
+- Agent's Playwright session and all open tabs were preserved after handoff.
+- No manual CDP URL management or port editing required.
+
+---
+
+## Credential Step Handoff
+
+Credential Step Handoff is not full login automation. The agent still reads the page and decides which micro-step is next. Antigen executes only the approved sensitive step.
+
+This primitive is proven for login credential submit. It is not the approval model for payments, purchases, account deletion, or public posting — those require separate approval flows.
+
+Canonical step types:
+- **`username_next`** — fill username/email → click Next/Continue → return control to agent
+- **`password_submit`** — fill password → click Sign in/Login → wait for navigation or challenge → return control to agent
+
+The agent calls `execute_credential_step_handoff` with the credential authorization ID and the approved step type. Antigen performs fill → mask → click → await navigation inside the same CDP session, then returns a safe outcome (`status`, `post_handoff_url`, challenge signals if any). The agent never sees the password value. The agent's browser session and all open tabs are preserved after the handoff.
+
+For password submit, `execute_credential_step_handoff` is the preferred tool. `execute_secret_field_injection` remains available for non-submit or lower-risk field fills (e.g. filling a username field without clicking Next).
+
+Payment and card field handoffs require a separate approval model and are not part of this primitive.
 
 ---
 
@@ -267,7 +312,7 @@ Review the following against the ownership boundary table and mode definitions:
 
 Produce findings. Do not change code unless a clear invariant violation is found.
 
-### Increment 3 — Implement `get_runtime_browser_endpoint`
+### Increment 3 — Implement `get_runtime_browser_endpoint` (complete)
 
 New MCP tool and backing endpoint:
 
@@ -287,7 +332,23 @@ New MCP tool and backing endpoint:
 - `get_runtime_browser_endpoint` `next_action` text updated to reference `antigen-browser` by name; port_auto_selected case no longer instructs users to edit config.
 - See "Connector MCP Config Shape" section above for the canonical config.
 
-### Increment 5 — Runtime Status UI
+### Increment 5a — Credential Step Handoff v1 (complete)
+
+`execute_credential_step_handoff` implements the atomic fill-and-submit primitive for login credential steps:
+
+- Fills the protected field via CDP injection (same KMS-resolution path as `execute_secret_field_injection`)
+- Applies JS value shadow (defense-in-depth only)
+- Clicks the approved submit button (`Sign in`, `Login`, `Next`, `Continue`, `Verify`, etc.)
+- Waits for navigation or challenge signal before returning control
+- Returns a safe outcome: `status` (`navigated`, `challenge_detected`, `failed`), `post_handoff_url`
+
+Proven for `password_submit` step type via GitHub end-to-end smoke test (2026-05-22). Not for payments, purchases, account deletion, or arbitrary sensitive actions — those require separate approval models.
+
+### Increment 5b — GitHub End-to-End Smoke Test (complete)
+
+Full architecture verified: runtime provisioned → `antigen-browser` attached to dynamic CDP port → agent navigated normally → credential authorization granted → `execute_credential_step_handoff` performed atomic password fill + submit → `status: navigated` returned → agent resumed read-only. See "Proven End-to-End Smoke Test: GitHub Login" section above.
+
+### Increment 6 — Runtime Status UI
 
 Surface on the Aegis UI (agent session view or connector panel):
 
@@ -298,3 +359,12 @@ Surface on the Aegis UI (agent session view or connector panel):
 - Failure cards with next actions
 
 **Do not** add a "Start browser" button as a required user step. The runtime status is informational. Provisioning is automatic.
+
+### Increment 7 — Payment/Card Step Handoff v1
+
+Extend the Credential Step Handoff approval model for card and payment fields. Key design constraints:
+
+- Card fill approval is separate from the final purchase/pay/subscribe approval — two distinct user approvals required
+- `execute_credential_step_handoff` is not the tool for this; a separate `execute_payment_step_handoff` primitive is needed
+- The approval model must prevent filling card details without a confirmed purchase intent
+- Out of scope until login handoff is fully stable across real-world sites

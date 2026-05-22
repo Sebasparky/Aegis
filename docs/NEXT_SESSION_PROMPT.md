@@ -73,6 +73,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 
 > **Also: do NOT rebuild Security Challenge Expiry / Stale Approval Cleanup v1. It is complete. Do not re-implement lazy expiry in `GET /api/internal/security-challenges` (marks pending_user/code_submitted challenges expired, filters terminal statuses by default, supports `?include_terminal=true`), lazy expiry in `GET /api/internal/challenge-email-resolutions` (marks non-terminal resolutions expired when their linked challenge has expired), the `isExpired` setTimeout in `PendingChallengeCard`, the expired card early return, the auto-refresh `useEffect` on `challenges.length`, or the `isEmailTypeChallenge` generalization. Gmail button copy reads "Aegis only searches for this live verification request after you approve." Gmail resolution remains user-initiated (click = approval). Do not remove `TERMINAL_STATUSES` set from `security-challenges.ts`.**
 
+> **Also: do NOT rebuild the Local Runtime Browser Endpoint, antigen-browser adapter, or Credential Step Handoff v1. All are complete. `POST /api/agent/v1/runtime/browser-endpoint` provisions or reuses an ephemeral runtime browser for a delegation. `examples/antigen-browser-adapter.mjs` resolves the dynamic CDP port at startup and spawns `@playwright/mcp` — no static port config required. `execute_credential_step_handoff` is the preferred tool for password login submit: it fills the protected field and clicks the approved submit button atomically inside a single CDP session before returning control to the agent. Proven for `password_submit` step type in a real GitHub login smoke test (tbsess_751b7d77e99e, csh_20e4559a9c3e, status: navigated). JS masking is defense-in-depth only — not the primary security boundary. Credential Step Handoff v1 covers login credential submit; it is not the approval model for payments, purchases, or other sensitive actions.**
+
 ---
 
 ## Completed Increments (as of 2026-05-03)
@@ -738,9 +740,35 @@ Key invariant: `AEGIS_AGENT_TOKEN` must be set to the bearer token value (e.g. `
 
 Do not rebuild unless explicitly requested.
 
+**Local Runtime Browser Endpoint + antigen-browser Adapter + Credential Step Handoff v1 — complete (2026-05-22).**
+
+Full architecture for agent-controlled local browser sessions with Aegis-owned sensitive micro-steps.
+
+Key additions:
+- `POST /api/agent/v1/runtime/browser-endpoint` (`apps/api/src/routes/agent-api.ts` or `task-browser-sessions.ts`) — provisions or reuses an ephemeral runtime browser session for the requesting delegation; returns `browser_runtime_id`, `cdp_url`, `status`, `ephemeral: true`
+- `examples/antigen-browser-adapter.mjs` — resolves the dynamic CDP port at startup via the browser-endpoint API, then spawns `@playwright/mcp --cdp-endpoint <cdp_url>`; no static port config; no platform restart required when Chrome selects an alternate port
+- `apps/api/src/routes/agent-connectors.ts` — `buildSetup()` returns two MCP server entries: `antigen` (trust tools) and `antigen-browser` (adapter script); `browser_runtime_guidance` field explains each server's role
+- `execute_credential_step_handoff` MCP tool — atomic fill + click approved submit button + await navigation; step types: `username_next`, `password_submit`; returns `status` (`navigated`, `challenge_detected`, `failed`), `post_handoff_url`; agent does not regain control until after page navigation
+- JS-layer value shadow applied after CDP fill — defense-in-depth only, not a browser-engine boundary; the primary security protection is the atomic handoff (form navigates away before agent resumes)
+- Password masking from `browser_snapshot`: `Object.defineProperty` shadow makes `element.value` return `""` to Playwright/aria serializers while native form submission is unaffected
+
+GitHub end-to-end smoke test (2026-05-22):
+- `tbsess_751b7d77e99e` — runtime browser session
+- `credauth_6cc95b34f918` — credential-use authorization
+- `csh_20e4559a9c3e` — handoff; status `navigated`; post-handoff URL `https://github.com/`; page title "GitHub"
+- No raw credential value exposed to agent; no `browser_snapshot` between fill and submit
+- `NordaTestUser` — 1 private repo (`Test-Repo`) read post-login; login succeeded without 2FA/passkey/email challenge
+
+Architecture confirmed: Antigen provisions runtime → `antigen-browser` drives ordinary browsing → Antigen executes sensitive micro-step → `antigen-browser` resumes.
+
+Credential Step Handoff v1 covers login credential submit only. Payments, purchases, account deletion, and public posting require separate approval models (Payment/Card Step Handoff v1 is the next candidate).
+
+Do not rebuild unless explicitly requested. See `docs/LOCAL_RUNTIME_BROWSER_ENDPOINT.md` for full architecture and the "Proven End-to-End Smoke Test" and "Credential Step Handoff" sections.
+
 **Candidate next milestones:**
 
-1. **Workspace Artifact Uploads v1** — add file artifact support (PDF, images, Word docs); owner upload form; agent metadata list and download via collar-checked endpoint; local filesystem storage under `.aegis-artifacts/`
+1. **Payment/Card Step Handoff v1** — atomic card-field fill and purchase confirmation as separate approvals; card fill approval is distinct from final pay/subscribe approval; requires a new `execute_payment_step_handoff` primitive (not an extension of `execute_credential_step_handoff`)
+2. **Workspace Artifact Uploads v1** — add file artifact support (PDF, images, Word docs); owner upload form; agent metadata list and download via collar-checked endpoint; local filesystem storage under `.aegis-artifacts/`
 2. **Task-scoped sensitive grants** — per-task autonomy configuration (e.g. "this task may login without additional approval"); deferred until trial feedback indicates need
 3. **Stale task claim leases** — heartbeat + automatic reclaim for abandoned `in_progress` tasks; deferred until trial demonstrates the problem
 4. **Production KMS Provider v1** — real cloud KMS integration (AWS KMS, GCP KMS, or HashiCorp Vault) replacing `cloud_kms_stub`

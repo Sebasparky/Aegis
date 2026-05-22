@@ -3,12 +3,17 @@
  * antigen-browser-adapter.mjs
  *
  * Resolves the Antigen local browser runtime CDP endpoint at startup, then
- * spawns @playwright/mcp with the correct --cdp-endpoint. All MCP protocol
- * traffic flows through stdio; this process is fully transparent after launch.
+ * spawns @playwright/mcp with the correct --cdp-endpoint. MCP protocol
+ * traffic on stdin/stdout is piped transparently to/from the child process.
+ * This process owns stdin/stdout and must not write to stdout itself.
  *
  * Required env vars:
  *   AEGIS_API_BASE    — e.g. http://localhost:4000
  *   AEGIS_AGENT_TOKEN — delegation token from connector setup
+ *
+ * Manual test:
+ *   node examples/antigen-browser-adapter.mjs
+ *   (should keep running when AEGIS_API_BASE and AEGIS_AGENT_TOKEN are valid)
  */
 
 import { spawn } from "node:child_process";
@@ -57,13 +62,24 @@ if (!res.ok) {
 
 const { cdp_url, browser_runtime_id, runtime_mode, reused_existing } = body.data;
 const sessionLabel = reused_existing ? "existing session" : "new session";
-process.stderr.write(`[antigen-browser] Runtime ready (${runtime_mode ?? "local_runtime_endpoint"}, ${sessionLabel}) — attaching @playwright/mcp to ${cdp_url}\n`);
+process.stderr.write(`[antigen-browser] Runtime ready (${runtime_mode ?? "local_runtime_endpoint"}, ${sessionLabel}, id=${browser_runtime_id}) — attaching @playwright/mcp to ${cdp_url}\n`);
 
 const child = spawn(
   "npx",
   ["--yes", "@playwright/mcp@latest", "--cdp-endpoint", cdp_url],
-  { stdio: "inherit" },
+  { stdio: ["pipe", "pipe", "pipe"] },
 );
+
+// Pipe MCP protocol streams: parent stdin → child stdin, child stdout → parent stdout
+process.stdin.pipe(child.stdin);
+child.stdout.pipe(process.stdout);
+
+// Forward child stderr to parent stderr so errors are visible without polluting stdout
+child.stderr.pipe(process.stderr);
+
+// Forward termination signals to the child so it can shut down cleanly
+process.on("SIGINT", () => child.kill("SIGINT"));
+process.on("SIGTERM", () => child.kill("SIGTERM"));
 
 child.on("error", (err) => {
   process.stderr.write(`[antigen-browser] Failed to spawn @playwright/mcp: ${err.message}\n`);

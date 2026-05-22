@@ -478,3 +478,106 @@ describe("Security invariants", () => {
     expect(data.capability_ref).toBe(data.payment_method_id);
   });
 });
+
+// ─── Legacy PaymentMethodCapability compatibility ─────────────────────────────
+
+describe("Legacy PaymentMethodCapability record compatibility", () => {
+  // Seed the exact shape that the demo seed script and persisted store produce.
+  const LEGACY_DEMO: Record<string, unknown> = {
+    payment_method_id: "pay_method_demo_001",
+    user_id: "user_001",
+    label: "Aegis Demo Card",
+    network: "visa",        // legacy field — no brand
+    last4: "4242",
+    billing_country: "US",
+    capability_ref: "demo-payment-method",
+    created_at: "2026-04-30T13:00:00.000Z",
+    // absent: brand, cardholder_name, exp_month, exp_year, is_default, status, updated_at, card_number_ref, cvv_ref
+  };
+
+  beforeEach(() => {
+    // Insert directly as a PaymentMethod to simulate loading from persisted store.
+    paymentMethods.set("pay_method_demo_001", LEGACY_DEMO as any);
+  });
+
+  it("GET /api/payment-methods returns the legacy card without crashing", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+  });
+
+  it("normalizes network→brand (visa)", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(card.brand).toBe("visa");
+    expect(card).not.toHaveProperty("network");
+  });
+
+  it("fills missing cardholder_name with Demo Cardholder", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(typeof card.cardholder_name).toBe("string");
+    expect(card.cardholder_name.length).toBeGreaterThan(0);
+  });
+
+  it("fills missing exp_month with a valid month (1–12)", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(typeof card.exp_month).toBe("number");
+    expect(card.exp_month).toBeGreaterThanOrEqual(1);
+    expect(card.exp_month).toBeLessThanOrEqual(12);
+  });
+
+  it("fills missing exp_year with a 4-digit year", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(typeof card.exp_year).toBe("number");
+    expect(card.exp_year).toBeGreaterThanOrEqual(2000);
+  });
+
+  it("treats missing status as active", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(card.status).toBe("active");
+  });
+
+  it("treats missing is_default as false", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(card.is_default).toBe(false);
+  });
+
+  it("fills missing updated_at from created_at", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    const card = res.json().data[0];
+    expect(card.updated_at).toBe("2026-04-30T13:00:00.000Z");
+  });
+
+  it("never exposes card_number_ref or cvv_ref on legacy record", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    assertNoSecrets(res.json());
+    const card = res.json().data[0];
+    expect(card).not.toHaveProperty("card_number_ref");
+    expect(card).not.toHaveProperty("cvv_ref");
+  });
+
+  it("legacy + new card coexist without crash", async () => {
+    await createCard({ label: "New Card" });
+    const res = await server.inject({ method: "GET", url: "/api/payment-methods" });
+    expect(res.statusCode).toBe(200);
+    const cards = res.json().data;
+    expect(cards).toHaveLength(2);
+    // Both cards must have the required PaymentMethodView fields
+    for (const card of cards) {
+      expect(typeof card.brand).toBe("string");
+      expect(typeof card.cardholder_name).toBe("string");
+      expect(typeof card.exp_month).toBe("number");
+      expect(typeof card.exp_year).toBe("number");
+      expect(typeof card.is_default).toBe("boolean");
+      expect(["active", "archived"]).toContain(card.status);
+    }
+    assertNoSecrets(res.json());
+  });
+});

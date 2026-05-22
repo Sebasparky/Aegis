@@ -41,16 +41,55 @@ function deriveBrand(cardNumber: string): PaymentMethodBrand {
   return "unknown";
 }
 
-// Strips internal secret refs before returning to callers.
-function toView(pm: PaymentMethod): PaymentMethodView {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { card_number_ref, cvv_ref, ...view } = pm;
-  return view;
+// Maps a legacy network string (PaymentMethodCapability) to a PaymentMethodBrand.
+function networkToBrand(network: string | undefined): PaymentMethodBrand {
+  const n = (network ?? "").toLowerCase();
+  if (n === "visa")       return "visa";
+  if (n === "mastercard") return "mastercard";
+  if (n === "amex")       return "amex";
+  if (n === "discover")   return "discover";
+  return "unknown";
 }
 
+// Produces a safe PaymentMethodView from either a full PaymentMethod or a legacy
+// PaymentMethodCapability record loaded from disk/seed. Never exposes card_number_ref,
+// cvv_ref, ciphertext, or any other secret field.
+function normalizePaymentMethodForView(raw: Record<string, unknown>): PaymentMethodView {
+  const brand: PaymentMethodBrand =
+    typeof raw.brand === "string"
+      ? (raw.brand as PaymentMethodBrand)
+      : networkToBrand(raw.network as string | undefined);
+
+  const status: "active" | "archived" =
+    raw.status === "archived" ? "archived" : "active";
+
+  return {
+    payment_method_id: raw.payment_method_id as string,
+    user_id:           raw.user_id as string,
+    label:             raw.label as string,
+    cardholder_name:   typeof raw.cardholder_name === "string" ? raw.cardholder_name : "Demo Cardholder",
+    brand,
+    last4:             raw.last4 as string,
+    exp_month:         typeof raw.exp_month === "number" ? raw.exp_month : 12,
+    exp_year:          typeof raw.exp_year  === "number" ? raw.exp_year  : 2027,
+    billing_zip:       typeof raw.billing_zip     === "string" ? raw.billing_zip     : undefined,
+    billing_country:   typeof raw.billing_country === "string" ? raw.billing_country : undefined,
+    is_default:        raw.is_default === true,
+    status,
+    capability_ref:    raw.capability_ref as string,
+    created_at:        raw.created_at as string,
+    updated_at:        typeof raw.updated_at === "string" ? raw.updated_at : raw.created_at as string,
+  };
+}
+
+// Returns active cards for a user. Treats missing status as "active" to handle
+// legacy PaymentMethodCapability records that predate the status field.
 function getActiveCards(userId: string): PaymentMethod[] {
   return Array.from(paymentMethods.values())
-    .filter((pm) => pm.user_id === userId && pm.status === "active")
+    .filter((pm) => {
+      const raw = pm as unknown as Record<string, unknown>;
+      return raw.user_id === userId && raw.status !== "archived";
+    })
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
@@ -82,7 +121,7 @@ export async function paymentMethodRoutes(server: FastifyInstance) {
     const cards = Array.from(paymentMethods.values())
       .filter((pm) => pm.user_id === MOCK_USER_ID)
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
-      .map(toView);
+      .map((pm) => normalizePaymentMethodForView(pm as unknown as Record<string, unknown>));
     return { ok: true, data: cards };
   });
 
@@ -181,7 +220,7 @@ export async function paymentMethodRoutes(server: FastifyInstance) {
     paymentMethods.set(payment_method_id, pm);
     schedulePersist();
 
-    return reply.status(201).send({ ok: true, data: toView(pm) });
+    return reply.status(201).send({ ok: true, data: normalizePaymentMethodForView(pm as unknown as Record<string, unknown>) });
   });
 
   // PATCH /api/payment-methods/:pmId
@@ -226,7 +265,7 @@ export async function paymentMethodRoutes(server: FastifyInstance) {
       pm.updated_at = now;
       schedulePersist();
 
-      return { ok: true, data: toView(pm) };
+      return { ok: true, data: normalizePaymentMethodForView(pm as unknown as Record<string, unknown>) };
     }
   );
 
@@ -237,7 +276,7 @@ export async function paymentMethodRoutes(server: FastifyInstance) {
       return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Payment method not found." } });
     }
     if (pm.status === "archived") {
-      return { ok: true, data: toView(pm) };
+      return { ok: true, data: normalizePaymentMethodForView(pm as unknown as Record<string, unknown>) };
     }
 
     const wasDefault = pm.is_default;
@@ -250,7 +289,7 @@ export async function paymentMethodRoutes(server: FastifyInstance) {
     }
 
     schedulePersist();
-    return { ok: true, data: toView(pm) };
+    return { ok: true, data: normalizePaymentMethodForView(pm as unknown as Record<string, unknown>) };
   });
 
   // DELETE /api/payment-methods/:pmId

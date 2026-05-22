@@ -221,6 +221,7 @@ export interface AegisPass {
 export type AegisPassKind = "login_password";
 
 // Tokenized payment method capability — metadata only, no raw card data.
+// Used by the runtime capability release system (playwrightRuntime, route-runs).
 export interface PaymentMethodCapability {
   payment_method_id: string;
   user_id: string;
@@ -230,6 +231,51 @@ export interface PaymentMethodCapability {
   billing_country: string;
   capability_ref: string;
   created_at: string;
+}
+
+// ─── Payment Methods (user-managed vault records) ─────────────────────────────
+
+export type PaymentMethodBrand = "visa" | "mastercard" | "amex" | "discover" | "unknown";
+export type PaymentMethodStatus = "active" | "archived";
+
+// Full payment method record stored in-process. Secret refs are internal — never returned via API.
+export interface PaymentMethod {
+  payment_method_id: string;
+  user_id: string;
+  label: string;
+  cardholder_name: string;
+  brand: PaymentMethodBrand;
+  last4: string;
+  exp_month: number;          // 1–12
+  exp_year: number;           // 4-digit
+  billing_zip?: string;
+  billing_country?: string;
+  is_default: boolean;
+  status: PaymentMethodStatus;
+  card_number_ref: string;    // "devvault://{id}/card_number" — encrypted blob ref, internal only
+  cvv_ref: string;            // "devvault://{id}/cvv" — encrypted blob ref, internal only
+  capability_ref: string;     // = payment_method_id, for runtime capability release
+  created_at: string;
+  updated_at: string;
+}
+
+// Safe view returned by all API responses — strips internal secret refs.
+export interface PaymentMethodView {
+  payment_method_id: string;
+  user_id: string;
+  label: string;
+  cardholder_name: string;
+  brand: PaymentMethodBrand;
+  last4: string;
+  exp_month: number;
+  exp_year: number;
+  billing_zip?: string;
+  billing_country?: string;
+  is_default: boolean;
+  status: PaymentMethodStatus;
+  capability_ref: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // Dev prototype only — credential vault metadata. Secret values are stored separately in devSecretVault.

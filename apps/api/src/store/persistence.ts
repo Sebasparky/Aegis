@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethodCapability, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -611,7 +611,7 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.websiteTrustAssertionEntries ?? [])) websiteTrustAssertions.set(k, v as WebsiteTrustAssertion);
     for (const [k, v] of (data.websiteTrustProfiles ?? [])) websiteTrustProfiles.set(k, v as WebsiteTrustProfile);
     for (const [k, v] of (data.websiteViolationReceipts ?? [])) websiteViolationReceipts.set(k, v as WebsiteViolationReceipt);
-    for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethodCapability);
+    for (const [k, v] of (data.paymentMethods ?? [])) paymentMethods.set(k, v as PaymentMethod);
     for (const [k, v] of (data.spendingLimitStepUps ?? [])) spendingLimitStepUps.set(k, v as SpendingLimitStepUp);
 
     for (const [k, v] of (data.aegisWorkspaces ?? [])) aegisWorkspaces.set(k, v as AegisWorkspace);

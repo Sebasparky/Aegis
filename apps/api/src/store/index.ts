@@ -20,6 +20,7 @@ import type {
   ActionAuthorizationReceipt,
   WebsiteTrustAssertion,
   PaymentMethodCapability,
+  PaymentMethod,
   SpendingLimitStepUp,
   SecretFieldInjection,
   CredentialUseAuthorization,
@@ -216,7 +217,7 @@ export const websiteTrustProfiles = new Map<string, WebsiteTrustProfile>();
 export const websiteViolationReceipts = new Map<string, WebsiteViolationReceipt>();
 
 // Tokenized payment method capabilities — metadata only, no raw card data (no PAN, no CVV).
-export const paymentMethods = new Map<string, PaymentMethodCapability>();
+export const paymentMethods = new Map<string, PaymentMethod>();
 
 // One-time user-approved spending step-ups keyed by run_id. Never mutates the collar.
 export const spendingLimitStepUps = new Map<string, SpendingLimitStepUp>();

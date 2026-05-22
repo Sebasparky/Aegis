@@ -11,7 +11,7 @@ export interface KmsContext {
   user_id: string;
   pass_id: string;
   domain: string;
-  purpose: "login_password";
+  purpose: "login_password" | "payment_card_number" | "payment_cvv";
 }
 
 export interface EncryptedSecretBlob {

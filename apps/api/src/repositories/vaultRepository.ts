@@ -17,6 +17,10 @@ export interface VaultRepository {
   deleteVaultPass(passId: string): Promise<void>;
   hasEncryptedSecret(secretRef: string): Promise<boolean>;
   getEncryptedSecret(secretRef: string): Promise<EncryptedSecretBlob | undefined>;
+  // Stores an encrypted blob independently of a vault pass (e.g. payment method card/cvv).
+  storeEncryptedSecret(secretRef: string, blob: EncryptedSecretBlob): Promise<void>;
+  // Removes an encrypted blob by ref (e.g. when deleting a payment method).
+  removeEncryptedSecret(secretRef: string): Promise<void>;
 }
 
 // ─── Local (Map) Implementation ───────────────────────────────────────────────
@@ -47,6 +51,14 @@ class LocalVaultRepository implements VaultRepository {
 
   async getEncryptedSecret(secretRef: string): Promise<EncryptedSecretBlob | undefined> {
     return encryptedSecretVault.get(secretRef);
+  }
+
+  async storeEncryptedSecret(secretRef: string, blob: EncryptedSecretBlob): Promise<void> {
+    encryptedSecretVault.set(secretRef, blob);
+  }
+
+  async removeEncryptedSecret(secretRef: string): Promise<void> {
+    encryptedSecretVault.delete(secretRef);
   }
 }
 
@@ -155,6 +167,21 @@ class SupabaseVaultRepository implements VaultRepository {
       .maybeSingle();
     if (error) throw new Error(`[supabase/encryptedSecrets.get] ${error.message}`);
     return data ? rowToBlob(data) : undefined;
+  }
+
+  async storeEncryptedSecret(secretRef: string, blob: EncryptedSecretBlob): Promise<void> {
+    // TODO(payment-methods-supabase): aegis_encrypted_secrets.pass_id is NOT NULL in the current
+    // schema. Until the column is made nullable for payment method blobs, only write to the local Map.
+    encryptedSecretVault.set(secretRef, blob);
+  }
+
+  async removeEncryptedSecret(secretRef: string): Promise<void> {
+    const { error } = await this.sb
+      .from("aegis_encrypted_secrets")
+      .delete()
+      .eq("secret_ref", secretRef);
+    if (error) throw new Error(`[supabase/encryptedSecrets.remove] ${error.message}`);
+    encryptedSecretVault.delete(secretRef);
   }
 }
 

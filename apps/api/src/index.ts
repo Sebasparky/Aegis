@@ -28,6 +28,7 @@ import { skillRoutes } from "./routes/skills.js";
 import { routeRunRoutes } from "./routes/route-runs.js";
 import { actionRoutes } from "./routes/action.js";
 import { vaultPassRoutes } from "./routes/vault-passes.js";
+import { paymentMethodRoutes } from "./routes/payment-methods.js";
 import { kmsAuditRoutes } from "./routes/kms-audit.js";
 import { routePassBindingRoutes } from "./routes/route-pass-bindings.js";
 import { credentialSessionRoutes } from "./routes/credential-sessions.js";
@@ -103,6 +104,7 @@ async function main() {
   await server.register(routeRunRoutes);
   await server.register(actionRoutes);
   await server.register(vaultPassRoutes);
+  await server.register(paymentMethodRoutes);
   await server.register(kmsAuditRoutes);
   await server.register(routePassBindingRoutes);
   await server.register(credentialSessionRoutes);

@@ -185,7 +185,9 @@ export async function computeDelegationTrustProfile(
   // ── Capability summary ───────────────────────────────────────────────────
 
   const loginCredentialAvailable = vaultPasses.some((p) => p.kind === "login_password");
-  const paymentMethodAvailable = [...paymentMethods.values()].some((pm) => pm.user_id === delegation.user_id);
+  const paymentMethodAvailable = [...paymentMethods.values()].some(
+    (pm) => pm.user_id === delegation.user_id && pm.status === "active"
+  );
   const identityProfileAvailable = false;  // v1: not implemented
   const credentialDomains = [...new Set(vaultPasses.map((p) => p.domain))];
 

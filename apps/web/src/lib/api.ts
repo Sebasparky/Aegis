@@ -378,6 +378,66 @@ export const createVaultPass = (body: { label: string; kind: "login_password"; d
   request<VaultPassView>("/api/vault-passes", { method: "POST", body: JSON.stringify(body) });
 export const deleteVaultPass = (passId: string) =>
   request<{ ok: boolean }>(`/api/vault-passes/${passId}`, { method: "DELETE" });
+
+// ─── Payment Methods ──────────────────────────────────────────────────────────
+
+export type PaymentMethodBrand = "visa" | "mastercard" | "amex" | "discover" | "unknown";
+export type PaymentMethodStatus = "active" | "archived";
+
+export interface PaymentMethodView {
+  payment_method_id: string;
+  user_id: string;
+  label: string;
+  cardholder_name: string;
+  brand: PaymentMethodBrand;
+  last4: string;
+  exp_month: number;
+  exp_year: number;
+  billing_zip?: string;
+  billing_country?: string;
+  is_default: boolean;
+  status: PaymentMethodStatus;
+  capability_ref: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const listPaymentMethods = () =>
+  request<PaymentMethodView[]>("/api/payment-methods");
+
+export const createPaymentMethod = (body: {
+  label: string;
+  cardholder_name: string;
+  card_number: string;
+  cvv: string;
+  exp_month: number;
+  exp_year: number;
+  billing_zip?: string;
+  billing_country?: string;
+}) =>
+  request<PaymentMethodView>("/api/payment-methods", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updatePaymentMethod = (
+  pmId: string,
+  body: { label?: string; cardholder_name?: string; exp_month?: number; exp_year?: number; billing_zip?: string; billing_country?: string; is_default?: boolean }
+) =>
+  request<PaymentMethodView>(`/api/payment-methods/${pmId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export const archivePaymentMethod = (pmId: string) =>
+  request<PaymentMethodView>(`/api/payment-methods/${pmId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+export const deletePaymentMethod = (pmId: string) =>
+  request<{ ok: boolean }>(`/api/payment-methods/${pmId}`, { method: "DELETE" });
+
 export const importVaultPasses = (credentials: Array<{ label: string; kind: "login_password"; domain: string; username: string; password: string }>) =>
   request<{ imported: VaultPassView[]; failed: Array<{ index: number; reason: string }>; total_requested: number; total_imported: number }>(
     "/api/internal/vault-passes/import",

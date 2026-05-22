@@ -566,9 +566,13 @@ export async function executeRouteRunWithPlaywright(runId: string): Promise<Runt
         // For payment/travel routes, create a payment_method release before the click
         // only when the button name indicates a payment submission intent.
         if (actionType && PAYMENT_ACTION_TYPES.has(actionType as any) && isPaymentIntentClick(step)) {
-          const userPaymentMethod = Array.from(paymentMethods.values()).find(
-            (pm) => pm.user_id === run.user_id
-          );
+          const userPaymentMethod =
+            Array.from(paymentMethods.values()).find(
+              (pm) => pm.user_id === run.user_id && pm.is_default && pm.status === "active"
+            ) ??
+            Array.from(paymentMethods.values()).find(
+              (pm) => pm.user_id === run.user_id && pm.status === "active"
+            );
           if (userPaymentMethod) {
             if (!findMatchingCapabilityRelease({
               run_id: run.run_id,

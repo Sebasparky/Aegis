@@ -93,8 +93,12 @@ function buildRunApprovalContext(runId: string): RunApprovalContext | null {
   const delegation = run.delegation_id ? agentDelegations.get(run.delegation_id) : undefined;
 
   const userPaymentMethod =
-    Array.from(paymentMethods.values()).find((pm) => (pm as any).user_id === MOCK_USER_ID) ??
-    Array.from(paymentMethods.values())[0];
+    Array.from(paymentMethods.values()).find(
+      (pm) => pm.user_id === MOCK_USER_ID && pm.is_default && pm.status === "active"
+    ) ??
+    Array.from(paymentMethods.values()).find(
+      (pm) => pm.user_id === MOCK_USER_ID && pm.status === "active"
+    );
 
   const permissions = run.approval_required_permissions ?? [];
 

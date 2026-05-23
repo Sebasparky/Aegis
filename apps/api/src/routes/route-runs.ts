@@ -8,12 +8,14 @@ import { schedulePersist } from "../store/persistence.js";
 import { resolveRouteStepValue } from "../lib/secretResolution.js";
 import { hashActionAuthorization, signActionAuthorizationJws } from "../lib/actionAuthorizationSigning.js";
 import { buildSignedUserApprovalReceipt } from "../lib/userApprovalReceiptSigning.js";
+import { sanitizeReceiptText } from "./sensitive-receipts.js";
 
 export function buildReceipt(
   run: RouteRun,
   status: "completed" | "failed",
   error?: string,
-  executionSurface: AegisExecutionSurface = "chrome_extension"
+  executionSurface: AegisExecutionSurface = "chrome_extension",
+  agentSummary?: string
 ): RouteRunReceipt {
   const skill = skills.get(run.skill_id);
   const route = routes.get(run.route_id);
@@ -52,6 +54,8 @@ export function buildReceipt(
     credential_used: run.credential_used ?? false,
     pass_ids_used: run.pass_ids_used ?? [],
     secret_values_revealed_to_agent: false as const,
+    ...(run.task_browser_session_id ? { task_browser_session_id: run.task_browser_session_id } : {}),
+    ...(agentSummary ? { agent_summary: agentSummary } : {}),
   };
   return receipt;
 }
@@ -545,7 +549,10 @@ export async function routeRunRoutes(server: FastifyInstance) {
    *
    * Mark a run as completed.
    */
-  server.post<{ Params: { runId: string } }>(
+  server.post<{
+    Params: { runId: string };
+    Body: { browser_session_id?: string; summary?: string };
+  }>(
     "/api/route-runs/:runId/complete",
     async (req, reply) => {
       const run = routeRuns.get(req.params.runId);
@@ -557,13 +564,17 @@ export async function routeRunRoutes(server: FastifyInstance) {
         return sendError(reply, 409, "INVALID_STATE", `Run cannot be completed from status "${run.status}". Expected "running".`);
       }
 
+      const sessionId = req.body?.browser_session_id;
+      if (sessionId) run.task_browser_session_id = sessionId;
+      const agentSummary = req.body?.summary ? sanitizeReceiptText(req.body.summary) : undefined;
+
       run.status = "completed";
       run.completed_at = new Date().toISOString();
       routeRuns.set(run.run_id, run);
 
       const existingReceipt = await getReceiptRepository().findByRunId(run.run_id);
       if (!existingReceipt) {
-        const receipt = buildReceipt(run, "completed");
+        const receipt = buildReceipt(run, "completed", undefined, "chrome_extension", agentSummary);
         await getReceiptRepository().createReceipt(receipt);
       }
 
@@ -579,7 +590,7 @@ export async function routeRunRoutes(server: FastifyInstance) {
    */
   server.post<{
     Params: { runId: string };
-    Body: { error?: string };
+    Body: { browser_session_id?: string; error?: string };
   }>("/api/route-runs/:runId/fail", async (req, reply) => {
     const run = routeRuns.get(req.params.runId);
     if (!run) return sendError(reply, 404, "NOT_FOUND", "Route run not found.");
@@ -590,10 +601,12 @@ export async function routeRunRoutes(server: FastifyInstance) {
       return sendError(reply, 409, "INVALID_STATE", `Run cannot be failed from status "${run.status}". Expected "running".`);
     }
 
+    const sessionId = req.body?.browser_session_id;
+    if (sessionId) run.task_browser_session_id = sessionId;
+    const failError = req.body?.error ? sanitizeReceiptText(req.body.error) : undefined;
+    if (failError) run.error = failError;
     run.status = "failed";
     run.completed_at = new Date().toISOString();
-    const failError = req.body?.error;
-    if (failError) run.error = failError;
     routeRuns.set(run.run_id, run);
 
     const existingReceipt = await getReceiptRepository().findByRunId(run.run_id);

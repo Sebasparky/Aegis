@@ -210,7 +210,7 @@ async function getAgentRunnableWorkflow({ skill_id }) {
     trust_tier: route.trust_tier,
     variables: route.variables ?? [],
     steps: route.steps ?? [],
-    guidance: `Execute these steps in your own browser session on ${skill.domain}. Navigate to the domain first if not already there. For each step, use the preferred_locator; fall back to fallback_locators in order if the preferred one is not found. For steps with a variable_binding, substitute the corresponding value from the variables you supply at runtime. Do not request a RouteRun for this workflow — execute it directly with your browser tools.`,
+    guidance: `Execute these steps in your own browser session on ${skill.domain}. Navigate to the domain first if not already there. For each step, use the preferred_locator; fall back to fallback_locators in order if the preferred one is not found. For steps with a variable_binding, substitute the corresponding value from the variables you supply at runtime. Workflow: call request_skill_run to create a run, then start_skill_run before executing, then complete_skill_run (success) or fail_skill_run (failure) after — this closes the audit receipt loop. Do NOT use start_playwright_route_run for agent_runnable skills; that tool is for aegis_controlled runs only.`,
   };
 }
 
@@ -2374,7 +2374,10 @@ const TOOLS = [
   {
     name: "discover_installed_skills",
     description:
-      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. execution_mode='agent_runnable' means Aegis has a verified route recipe the agent can fetch with get_agent_runnable_workflow and execute in its own browser session — no extension handoff, no RouteRun. execution_mode='aegis_controlled' means the workflow is sensitive (credentials, payments, personal data, form submission, account changes) and execution must be delegated to Aegis via request_skill_run. Use this first to understand which Aegis-governed paths exist and how to invoke them.",
+      "Discover which Aegis-installed skills (verified workflow routes) are available to this delegated agent on a given domain. Each skill includes execution_mode and sensitivity_level. " +
+      "execution_mode='agent_runnable': Aegis has a verified route recipe. Call request_skill_run to create a run, start_skill_run to begin it, then execute the steps in your own browser session (get_agent_runnable_workflow returns the recipe), then call complete_skill_run or fail_skill_run to close the audit receipt loop. " +
+      "execution_mode='aegis_controlled': the workflow is sensitive (credentials, payments, personal data, account changes) and must be delegated to Aegis via request_skill_run + start_playwright_route_run. " +
+      "Use this first to understand which Aegis-governed paths exist and how to invoke them.",
     inputSchema: {
       type: "object",
       properties: {

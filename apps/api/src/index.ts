@@ -46,6 +46,7 @@ import { websiteAegisPolicyRoutes } from "./routes/website-aegis-policy.js";
 import { agentApiRoutes } from "./routes/agent-api.js";
 import { authenticatedSessionRoutes } from "./routes/authenticated-sessions.js";
 import { secretFieldInjectionRoutes } from "./routes/secret-field-injections.js";
+import { paymentCardFillRoutes } from "./routes/payment-card-fills.js";
 import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
 import { expireInactiveTaskBrowserSessions } from "./runtime/taskBrowserSessions.js";
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
@@ -121,6 +122,7 @@ async function main() {
   await server.register(websiteViolationReceiptRoutes);
   await server.register(authenticatedSessionRoutes);
   await server.register(secretFieldInjectionRoutes);
+  await server.register(paymentCardFillRoutes);
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);

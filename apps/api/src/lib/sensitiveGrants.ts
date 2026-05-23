@@ -24,10 +24,11 @@ export interface CheckGrantInput {
   delegation_id: string;
   domain: string;
   grant_type: SensitiveGrantType;
-  pass_id?: string;           // required for credential_injection lookups
-  challenge_id?: string;      // required for challenge_resolution lookups
-  task_id?: string;           // if provided, grant.scope.task_id must match
-  authorization_id?: string;  // preferred for credential_injection — avoids matching unrelated grants for the same pass
+  pass_id?: string;             // required for credential_injection lookups
+  challenge_id?: string;        // required for challenge_resolution lookups
+  task_id?: string;             // if provided, grant.scope.task_id must match
+  authorization_id?: string;    // credential_injection / payment_card_fill
+  payment_method_id?: string;   // required for payment_card_fill lookups
 }
 
 export type CheckGrantReason = "no_grant" | "expired" | "consumed" | "revoked";
@@ -74,6 +75,10 @@ export function checkSensitiveGrant(
     }
     if (input.grant_type === "challenge_resolution") {
       if (input.challenge_id !== undefined && grant.scope.challenge_id !== input.challenge_id) continue;
+    }
+    if (input.grant_type === "payment_card_fill") {
+      if (input.payment_method_id !== undefined && grant.scope.payment_method_id !== input.payment_method_id) continue;
+      if (input.authorization_id !== undefined && grant.scope.authorization_id !== input.authorization_id) continue;
     }
 
     // Match found — check status

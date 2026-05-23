@@ -24,6 +24,9 @@ import type {
   ChallengeEmailResolutionStatus,
   WorkspaceArtifactKind,
   CredentialStepHandoffResult,
+  PaymentCardFillAuthorization,
+  PaymentCardFillRequest,
+  PaymentCardField,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -34,6 +37,7 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
+import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
 import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
 import {
   agentDelegations,
@@ -48,6 +52,11 @@ import {
   credentialUseAuthorizations,
   sensitiveGrants,
   securityChallenges,
+  paymentMethods,
+  paymentCardFillAuthorizations,
+  paymentCardFillRequests,
+  paymentCardFillHandoffs,
+  type PaymentCardFillHandoffRecord,
   challengeEmailResolutions,
   aegisWorkspaces,
   workspaceTasks,
@@ -3227,4 +3236,523 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       },
     });
   });
+
+  // ─── Payment Card Fill Handoff v1 ─────────────────────────────────────────────
+  // Agent-facing endpoints for requesting, polling, and executing card field fills.
+  // Purchase confirmation is NOT implemented — card fill does not authorize any purchase.
+
+  const VALID_CARD_FIELDS = new Set<PaymentCardField>([
+    "card_number", "cvv", "expiry_month", "expiry_year", "expiry_combined",
+    "cardholder_name", "billing_zip",
+  ]);
+
+  function cardFillNextAction(status: string, pendingApproval = false): string {
+    switch (status) {
+      case "pending_approval":
+        return pendingApproval
+          ? `Direct the user to /route-run-approvals (under "Payment card requests") to approve. Then call wait_for_payment_card_fill_authorization.`
+          : "Waiting for user approval. Call wait_for_payment_card_fill_authorization.";
+      case "approved":
+        return "Call execute_payment_card_fill_handoff to fill the field.";
+      case "executing":
+        return "Fill is in progress. Wait briefly and poll status.";
+      case "filled":
+        return "Field has been filled. Continue with your task. NOTE: this does NOT authorize a purchase.";
+      case "denied":
+        return "User denied the fill request. Do not attempt to fill card fields without user approval.";
+      case "expired":
+        return "Request has expired. Create a new fill request if still needed.";
+      case "failed":
+        return "CDP fill failed. Check error. You may retry with a new request.";
+      default:
+        return "Unknown status.";
+    }
+  }
+
+  // POST /api/agent/v1/payment-card-fills — create a card field fill request
+  server.post(
+    "/api/agent/v1/payment-card-fills",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = req.body as {
+        domain?: string;
+        payment_method_id?: string;
+        field?: string;
+        page_url?: string;
+        element_hint?: {
+          label?: string;
+          placeholder?: string;
+          input_type?: string;
+          selector_hint?: string;
+        };
+        reason?: string;
+        browser_session_id?: string;
+        external_cdp_url?: string;
+      };
+
+      if (!body.domain || typeof body.domain !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "domain is required.");
+      }
+      if (!body.field || !VALID_CARD_FIELDS.has(body.field as PaymentCardField)) {
+        return sendError(reply, 400, "VALIDATION_ERROR", `field must be one of: ${[...VALID_CARD_FIELDS].join(", ")}.`);
+      }
+      if (!body.page_url || typeof body.page_url !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "page_url is required.");
+      }
+      if (!body.reason || typeof body.reason !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "reason is required.");
+      }
+
+      // Domain must match page_url hostname
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(body.page_url).hostname;
+      } catch {
+        return sendError(reply, 400, "INVALID_URL", "page_url is not a valid URL.");
+      }
+      if (pageHostname !== body.domain && !pageHostname.endsWith(`.${body.domain}`)) {
+        return sendError(
+          reply, 400, "DOMAIN_MISMATCH",
+          `page_url hostname '${pageHostname}' does not match domain '${body.domain}'. ` +
+          `Navigate to the ${body.domain} checkout page before requesting card fill.`,
+        );
+      }
+
+      // Validate selector_hint if provided
+      if (body.element_hint?.selector_hint) {
+        const selectorCheck = validateCardFillSelector(body.element_hint.selector_hint);
+        if (!selectorCheck.valid) {
+          return sendError(reply, 400, "DANGEROUS_SELECTOR", selectorCheck.reason ?? "Selector targets a prohibited element.");
+        }
+      }
+
+      // Validate browser_session_id / external_cdp_url mutual exclusion
+      let resolvedBrowserSessionId: string | undefined;
+      if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
+        const bs = getTaskBrowserSession(body.browser_session_id.trim(), MOCK_USER_ID);
+        if (!bs) return sendError(reply, 404, "TASK_BROWSER_SESSION_NOT_FOUND", "Task browser session not found.");
+        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "Session does not belong to your delegation.");
+        if (bs.status !== "ready") return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready'.`);
+        resolvedBrowserSessionId = bs.browser_session_id;
+      }
+      let resolvedExternalCdpUrl: string | undefined;
+      if (typeof body.external_cdp_url === "string" && body.external_cdp_url.trim()) {
+        if (resolvedBrowserSessionId) {
+          return sendError(reply, 400, "CONFLICT", "Provide either external_cdp_url or browser_session_id, not both.");
+        }
+        resolvedExternalCdpUrl = body.external_cdp_url.trim();
+      }
+
+      // Resolve payment method — explicit ID or default
+      const field = body.field as PaymentCardField;
+      let pm = body.payment_method_id
+        ? paymentMethods.get(body.payment_method_id)
+        : Array.from(paymentMethods.values()).find(
+            (p) => p.user_id === MOCK_USER_ID && p.is_default && p.status === "active",
+          );
+
+      if (!pm) {
+        return sendError(
+          reply, 404, "PAYMENT_METHOD_NOT_FOUND",
+          body.payment_method_id
+            ? `No payment method found with id '${body.payment_method_id}'.`
+            : "No default payment method found. Add a payment method and set it as default, or provide payment_method_id.",
+        );
+      }
+      if (pm.user_id !== MOCK_USER_ID) {
+        return sendError(reply, 403, "FORBIDDEN", "Payment method does not belong to this user.");
+      }
+      if (pm.status !== "active") {
+        return sendError(reply, 400, "PAYMENT_METHOD_NOT_ACTIVE", `Payment method status is '${pm.status}'; only active payment methods can be used.`);
+      }
+
+      const now = new Date();
+
+      // Reuse an existing approved authorization for the same (user, delegation, domain, pm)
+      const approvedAuth = Array.from(paymentCardFillAuthorizations.values()).find(
+        (a) =>
+          a.user_id === MOCK_USER_ID &&
+          a.delegation_id === delegation.id &&
+          a.domain === body.domain &&
+          a.payment_method_id === pm!.payment_method_id &&
+          a.status === "approved" &&
+          new Date(a.expires_at) > now,
+      );
+
+      const pendingAuth = !approvedAuth
+        ? Array.from(paymentCardFillAuthorizations.values()).find(
+            (a) =>
+              a.user_id === MOCK_USER_ID &&
+              a.delegation_id === delegation.id &&
+              a.domain === body.domain &&
+              a.payment_method_id === pm!.payment_method_id &&
+              a.status === "pending_approval" &&
+              new Date(a.expires_at) > now,
+          )
+        : undefined;
+
+      let auth: PaymentCardFillAuthorization;
+      let fillStatus: PaymentCardFillRequest["status"];
+
+      if (approvedAuth) {
+        auth = approvedAuth;
+        fillStatus = "approved";
+      } else if (pendingAuth) {
+        auth = pendingAuth;
+        fillStatus = "pending_approval";
+      } else {
+        auth = {
+          authorization_id: newId("pca"),
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          domain: body.domain,
+          payment_method_id: pm.payment_method_id,
+          payment_method_label: pm.label,
+          last4: pm.last4,
+          is_default: pm.is_default,
+          allowed_fields: [...VALID_CARD_FIELDS] as PaymentCardField[],
+          fields_filled: [],
+          status: "pending_approval",
+          raw_values_revealed_to_agent: false,
+          purchase_not_authorized: true,
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        };
+        paymentCardFillAuthorizations.set(auth.authorization_id, auth);
+        fillStatus = "pending_approval";
+      }
+
+      const fillRequest: PaymentCardFillRequest = {
+        fill_request_id: newId("pcfr"),
+        authorization_id: auth.authorization_id,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain: body.domain,
+        payment_method_id: pm.payment_method_id,
+        field,
+        page_url: body.page_url,
+        element_hint: body.element_hint,
+        reason: body.reason,
+        status: fillStatus,
+        ...(resolvedBrowserSessionId ? { browser_session_id: resolvedBrowserSessionId } : {}),
+        ...(resolvedExternalCdpUrl ? { external_cdp_url: resolvedExternalCdpUrl } : {}),
+        raw_values_revealed_to_agent: false,
+        created_at: new Date().toISOString(),
+        expires_at: auth.expires_at,
+        ...(fillStatus === "approved" ? { approved_at: auth.approved_at } : {}),
+      };
+      paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+      schedulePersist();
+
+      const isPendingApproval = fillStatus === "pending_approval";
+      return reply.send({
+        ok: true,
+        data: {
+          fill_request_id: fillRequest.fill_request_id,
+          authorization_id: auth.authorization_id,
+          status: fillRequest.status,
+          field: fillRequest.field,
+          domain: fillRequest.domain,
+          payment_method_label: pm.label,
+          last4: pm.last4,
+          raw_values_revealed_to_agent: false,
+          purchase_not_authorized: true,
+          expires_at: fillRequest.expires_at,
+          next_action: cardFillNextAction(fillRequest.status, isPendingApproval),
+          note: "This approval covers card field fill only. It does NOT authorize a purchase.",
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/payment-card-fills/:fillRequestId — poll status
+  server.get<{ Params: { fillRequestId: string } }>(
+    "/api/agent/v1/payment-card-fills/:fillRequestId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const fillRequest = paymentCardFillRequests.get(req.params.fillRequestId);
+      if (!fillRequest) return sendError(reply, 404, "FILL_REQUEST_NOT_FOUND", "Fill request not found.");
+      if (fillRequest.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This fill request does not belong to your delegation.");
+      }
+
+      // Lazy status promotion from linked authorization
+      const terminalStatuses = ["filled", "denied", "failed", "expired"] as const;
+      if (!terminalStatuses.includes(fillRequest.status as any)) {
+        if (new Date(fillRequest.expires_at) < new Date()) {
+          fillRequest.status = "expired";
+          paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+          schedulePersist();
+        } else if (fillRequest.status === "pending_approval" && fillRequest.authorization_id) {
+          const auth = paymentCardFillAuthorizations.get(fillRequest.authorization_id);
+          if (auth) {
+            if (auth.status === "approved") {
+              fillRequest.status = "approved";
+              fillRequest.approved_at = auth.approved_at;
+              paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+              schedulePersist();
+            } else if (["denied", "expired", "fulfilled", "revoked"].includes(auth.status)) {
+              fillRequest.status = auth.status === "fulfilled" ? "denied" : (auth.status as any);
+              paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+              schedulePersist();
+            }
+          }
+        }
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          fill_request_id: fillRequest.fill_request_id,
+          authorization_id: fillRequest.authorization_id,
+          status: fillRequest.status,
+          field: fillRequest.field,
+          domain: fillRequest.domain,
+          raw_values_revealed_to_agent: false,
+          purchase_not_authorized: true,
+          expires_at: fillRequest.expires_at,
+          ...(fillRequest.filled_at ? { filled_at: fillRequest.filled_at } : {}),
+          ...(fillRequest.error ? { error: fillRequest.error } : {}),
+          next_action: cardFillNextAction(fillRequest.status),
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/payment-card-fills/:fillRequestId/execute — CDP card fill trigger
+  server.post<{ Params: { fillRequestId: string } }>(
+    "/api/agent/v1/payment-card-fills/:fillRequestId/execute",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const fillRequest = paymentCardFillRequests.get(req.params.fillRequestId);
+      if (!fillRequest) return sendError(reply, 404, "FILL_REQUEST_NOT_FOUND", "Fill request not found.");
+      if (fillRequest.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This fill request does not belong to your delegation.");
+      }
+
+      // Expiry check
+      if (new Date(fillRequest.expires_at) < new Date() && fillRequest.status !== "filled") {
+        fillRequest.status = "expired";
+        paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+        schedulePersist();
+        return sendError(reply, 400, "FILL_EXPIRED", "Fill request has expired. Create a new request.");
+      }
+
+      // Lazy promotion from authorization
+      if (fillRequest.status === "pending_approval" && fillRequest.authorization_id) {
+        const auth = paymentCardFillAuthorizations.get(fillRequest.authorization_id);
+        if (auth?.status === "approved") {
+          fillRequest.status = "approved";
+          fillRequest.approved_at = auth.approved_at;
+          paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+          schedulePersist();
+        }
+      }
+
+      if (fillRequest.status !== "approved") {
+        return sendError(
+          reply, 400, "FILL_NOT_APPROVED",
+          `Fill request status is '${fillRequest.status}'; only 'approved' requests can be executed. ` +
+          cardFillNextAction(fillRequest.status),
+        );
+      }
+
+      // SensitiveGrant enforcement
+      const auth = paymentCardFillAuthorizations.get(fillRequest.authorization_id);
+      if (!auth) {
+        return sendError(reply, 400, "AUTHORIZATION_NOT_FOUND", "Linked authorization not found.");
+      }
+
+      const grantCheck = checkSensitiveGrant(sensitiveGrants, {
+        user_id: fillRequest.user_id,
+        delegation_id: fillRequest.delegation_id,
+        domain: fillRequest.domain,
+        grant_type: "payment_card_fill",
+        payment_method_id: fillRequest.payment_method_id,
+        authorization_id: fillRequest.authorization_id,
+      });
+      if (!grantCheck.valid) {
+        const grantErrorDetails: Record<string, [number, string, string]> = {
+          consumed: [409, "SENSITIVE_GRANT_CONSUMED", "This card fill grant has already been consumed. Create a new fill request."],
+          expired:  [400, "SENSITIVE_GRANT_EXPIRED",  "The sensitive grant has expired. Create a new fill request."],
+          revoked:  [403, "SENSITIVE_GRANT_REVOKED",  "The sensitive grant has been revoked."],
+          no_grant: [403, "SENSITIVE_GRANT_REQUIRED", "No valid sensitive grant found. Approval is required."],
+        };
+        const [st, code, msg] = grantErrorDetails[grantCheck.reason ?? "no_grant"] ?? [403, "SENSITIVE_GRANT_INVALID", "Grant check failed."];
+        return sendError(reply, st, code, msg);
+      }
+      const activeGrant = grantCheck.grant!;
+
+      // Resolve payment method
+      const pm = paymentMethods.get(fillRequest.payment_method_id);
+      if (!pm || pm.user_id !== MOCK_USER_ID || pm.status !== "active") {
+        fillRequest.status = "failed";
+        fillRequest.error = "Payment method not found or no longer active.";
+        paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+        schedulePersist();
+        return sendError(reply, 404, "PAYMENT_METHOD_NOT_FOUND", "Payment method not found or no longer active.");
+      }
+
+      // Transition to executing
+      fillRequest.status = "executing";
+      paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+      schedulePersist();
+
+      // Resolve field value — KMS for card_number and cvv; pm struct for others
+      const vaultRepo = getVaultRepository();
+      const kms = getKmsProvider();
+      const kmsContext = {
+        user_id: pm.user_id,
+        pass_id: pm.payment_method_id,
+        domain: "aegis.payment",
+      };
+
+      let resolvedValue: string;
+      try {
+        if (fillRequest.field === "card_number") {
+          const blob = await vaultRepo.getEncryptedSecret(pm.card_number_ref);
+          if (!blob) throw new Error("Card number secret not available.");
+          resolvedValue = await kms.decryptSecret(blob, { ...kmsContext, purpose: "payment_card_number" });
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pm.user_id,
+            pass_id: pm.payment_method_id,
+            domain: "aegis.payment",
+            run_id: `card_fill:${fillRequest.fill_request_id}`,
+            success: true,
+          });
+        } else if (fillRequest.field === "cvv") {
+          const blob = await vaultRepo.getEncryptedSecret(pm.cvv_ref);
+          if (!blob) throw new Error("CVV secret not available.");
+          resolvedValue = await kms.decryptSecret(blob, { ...kmsContext, purpose: "payment_cvv" });
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pm.user_id,
+            pass_id: pm.payment_method_id,
+            domain: "aegis.payment",
+            run_id: `card_fill:${fillRequest.fill_request_id}`,
+            success: true,
+          });
+        } else if (fillRequest.field === "expiry_month") {
+          resolvedValue = String(pm.exp_month);
+        } else if (fillRequest.field === "expiry_year") {
+          resolvedValue = String(pm.exp_year);
+        } else if (fillRequest.field === "expiry_combined") {
+          resolvedValue = `${String(pm.exp_month).padStart(2, "0")}/${String(pm.exp_year).slice(-2)}`;
+        } else if (fillRequest.field === "cardholder_name") {
+          resolvedValue = pm.cardholder_name;
+        } else if (fillRequest.field === "billing_zip") {
+          resolvedValue = pm.billing_zip ?? "";
+        } else {
+          throw new Error(`Unknown field: ${fillRequest.field}`);
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Field resolution failed";
+        if (fillRequest.field === "card_number" || fillRequest.field === "cvv") {
+          recordKmsAuditEvent({
+            operation: "resolve_secret_for_runtime",
+            provider: kms.provider,
+            user_id: pm.user_id,
+            pass_id: pm.payment_method_id,
+            domain: "aegis.payment",
+            run_id: `card_fill:${fillRequest.fill_request_id}`,
+            success: false,
+            error_code: "RESOLVE_FAILED",
+          });
+        }
+        fillRequest.status = "failed";
+        fillRequest.error = msg;
+        paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+        schedulePersist();
+        return sendError(reply, 500, "FIELD_RESOLVE_FAILED", msg);
+      }
+
+      // CDP fill — resolvedValue used here and immediately discarded; never returned in response
+      let cdpUrlOverride: string | undefined;
+      if (fillRequest.browser_session_id) {
+        const bs = getTaskBrowserSession(fillRequest.browser_session_id, MOCK_USER_ID);
+        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+      } else if (fillRequest.external_cdp_url) {
+        cdpUrlOverride = fillRequest.external_cdp_url;
+      }
+
+      const fillResult = await executePaymentCardFillViaCDP(fillRequest, resolvedValue, cdpUrlOverride);
+      // resolvedValue is no longer referenced after this point
+
+      const completedAt = new Date().toISOString();
+      if (fillResult.success) {
+        fillRequest.status = "filled";
+        fillRequest.filled_at = completedAt;
+        fillRequest.error = undefined;
+
+        // Update authorization fields_filled
+        if (!auth.fields_filled.includes(fillRequest.field)) {
+          auth.fields_filled = [...auth.fields_filled, fillRequest.field];
+        }
+        // Fulfill authorization when all allowed_fields have been filled
+        const allFulfilled = auth.allowed_fields.every((f) => auth.fields_filled.includes(f));
+        if (allFulfilled) {
+          auth.status = "fulfilled";
+          auth.fulfilled_at = completedAt;
+          activeGrant.status = "consumed";
+          (activeGrant as any).consumed_at = completedAt;
+          sensitiveGrants.set(activeGrant.grant_id, activeGrant);
+        }
+        paymentCardFillAuthorizations.set(auth.authorization_id, auth);
+      } else {
+        fillRequest.status = "failed";
+        fillRequest.error = fillResult.error ?? "CDP fill failed";
+      }
+      paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+
+      // Record audit trail — no raw values, no payment_method_id
+      const handoff: PaymentCardFillHandoffRecord = {
+        handoff_id: newId("pcfh"),
+        fill_request_id: fillRequest.fill_request_id,
+        authorization_id: fillRequest.authorization_id,
+        delegation_id: fillRequest.delegation_id,
+        user_id: fillRequest.user_id,
+        domain: fillRequest.domain,
+        field: fillRequest.field,
+        payment_method_label: pm.label,
+        last4: pm.last4,
+        outcome: fillResult.success ? "filled" : "failed",
+        raw_values_revealed_to_agent: false,
+        purchase_not_authorized: true,
+        completed_at: completedAt,
+      };
+      paymentCardFillHandoffs.set(handoff.handoff_id, handoff);
+      schedulePersist();
+
+      if (!fillResult.success) {
+        return sendError(reply, 500, "CDP_FILL_FAILED", fillResult.error ?? "CDP fill failed");
+      }
+
+      // Response NEVER includes resolvedValue, payment_method_id, card_number_ref, cvv_ref
+      return reply.send({
+        ok: true,
+        data: {
+          fill_request_id: fillRequest.fill_request_id,
+          authorization_id: fillRequest.authorization_id,
+          status: "filled",
+          field: fillRequest.field,
+          domain: fillRequest.domain,
+          payment_method_label: pm.label,
+          last4: pm.last4,
+          filled_at: fillRequest.filled_at,
+          raw_values_revealed_to_agent: false,
+          purchase_not_authorized: true,
+          note: "Antigen injected the card field value directly via CDP. Raw values were never returned to the agent. This does NOT authorize a purchase.",
+        },
+      });
+    },
+  );
 }

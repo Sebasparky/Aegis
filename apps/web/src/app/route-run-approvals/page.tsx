@@ -28,6 +28,9 @@ import {
   cancelChallengeEmailResolution,
   listSensitiveGrants,
   listLoginDiagnostics,
+  listPaymentCardFillAuthorizations,
+  approvePaymentCardFillAuthorization,
+  denyPaymentCardFillAuthorization,
   type RouteRunWithSummary,
   type CredentialSessionView,
   type RunApprovalContext,
@@ -40,6 +43,8 @@ import {
   type EmailResolverStatusView,
   type ChallengeEmailResolutionView,
   type LoginDiagnosticView,
+  type PaymentCardFillAuthorizationView,
+  type PaymentCardField,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -696,6 +701,132 @@ function PendingCredAuthCard({
   );
 }
 
+// ── Payment Card Fill Auth card ───────────────────────────────────────────────
+
+const SENSITIVE_CARD_FIELDS = new Set<PaymentCardField>(["card_number", "cvv"]);
+const CARD_FIELD_LABELS: Record<PaymentCardField, string> = {
+  card_number: "card number",
+  cvv: "CVV",
+  expiry_month: "expiry month",
+  expiry_year: "expiry year",
+  expiry_combined: "expiry (MM/YY)",
+  cardholder_name: "cardholder name",
+  billing_zip: "billing ZIP",
+};
+
+function PendingCardFillAuthCard({
+  auth, onApprove, onDeny,
+}: {
+  auth: PaymentCardFillAuthorizationView;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [denying, setDenying] = useState(false);
+
+  return (
+    <div className="apr-card apr-card--amber">
+      <div className="apr-card__head">
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: 0 }}>Payment card fill request</p>
+            {auth.is_default && (
+              <span style={{ background: "var(--amber-soft, oklch(0.97 0.05 90))", color: "oklch(0.45 0.12 75)", border: "1px solid oklch(0.85 0.08 90)", fontSize: 11, fontWeight: 500, padding: "1px 7px", borderRadius: 999 }}>
+                default
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", fontFamily: "monospace", margin: 0 }}>{auth.domain}</p>
+        </div>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>Waiting</span>
+      </div>
+
+      <div className="apr-card__body">
+        <SectionCard label="Payment method">
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
+            {auth.payment_method_label} ···{auth.last4}
+          </p>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+            Fields requested: {auth.allowed_fields.map((f) => CARD_FIELD_LABELS[f] ?? f).join(", ")}
+          </p>
+        </SectionCard>
+
+        <SectionCard label="Fields to fill">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {auth.allowed_fields.map((field) => {
+              const isSensitive = SENSITIVE_CARD_FIELDS.has(field);
+              return (
+                <span key={field} style={{
+                  background: isSensitive ? "var(--red-soft)" : "oklch(0.97 0.01 0)",
+                  color: isSensitive ? "oklch(0.45 0.13 25)" : "var(--ink-2)",
+                  border: `1px solid ${isSensitive ? "var(--red-ring)" : "oklch(0.88 0.01 0)"}`,
+                  fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, fontFamily: "monospace",
+                }}>
+                  {CARD_FIELD_LABELS[field] ?? field}
+                </span>
+              );
+            })}
+          </div>
+          {auth.fields_filled.length > 0 && (
+            <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+              Already filled: {auth.fields_filled.map((f) => CARD_FIELD_LABELS[f] ?? f).join(", ")}
+            </p>
+          )}
+        </SectionCard>
+
+        <SectionCard label="Important">
+          <div style={{ background: "oklch(0.97 0.05 90)", border: "1px solid oklch(0.85 0.08 90)", borderRadius: 8, padding: "10px 14px", marginBottom: 4 }}>
+            <p style={{ fontSize: 12.5, color: "oklch(0.42 0.12 75)", fontWeight: 600, margin: "0 0 4px" }}>
+              This fills card details only.
+            </p>
+            <p style={{ fontSize: 12, color: "oklch(0.45 0.10 75)", margin: 0, lineHeight: 1.55 }}>
+              It does not authorize a purchase. A separate approval is required before any payment is submitted.
+            </p>
+          </div>
+        </SectionCard>
+
+        <SectionCard label="Card data custody">
+          <CheckList items={[
+            "Antigen resolves card_number and CVV server-side via KMS — the agent never sees the raw value.",
+            "Values are injected directly into browser fields via CDP. No raw card data in any API response.",
+            "card_number and CVV fields are masked in the DOM after fill (agent cannot read them back).",
+            "The agent owns all navigation and form submission. Antigen only fills the requested fields.",
+            "This approval covers card FIELD FILL only — not a purchase, charge, or any liability action.",
+          ]} />
+        </SectionCard>
+
+        <SectionCard label="Approving this will">
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.6 }}>
+            · Create a signed UserApprovalReceipt recording your decision<br />
+            · Create a temporary SensitiveGrant — Antigen injects card fields directly, raw values never revealed<br />
+            {auth.expires_at && <span>· Grant expires {formatExpiry(auth.expires_at)}<br /></span>}
+            · Does NOT authorize any purchase, payment, or form submission
+          </p>
+        </SectionCard>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            disabled={approving || denying}
+            onClick={async () => { setApproving(true); try { await onApprove(); } finally { setApproving(false); } }}
+            className="a-btn a-btn--primary"
+          >
+            {approving ? "Approving…" : `Allow card fill for ${auth.payment_method_label} ···${auth.last4}`}
+          </button>
+          <button
+            disabled={approving || denying}
+            onClick={async () => { setDenying(true); try { await onDeny(); } finally { setDenying(false); } }}
+            className="a-btn a-btn--danger"
+          >
+            {denying ? "Denying…" : "Deny"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{auth.authorization_id}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Challenge card ─────────────────────────────────────────────────────────────
 
 function PendingChallengeCard({
@@ -1124,6 +1255,7 @@ export default function RouteRunApprovalsPage() {
   const [authSessions, setAuthSessions] = useState<AuthenticatedSessionHandleView[]>([]);
   const [injections, setInjections] = useState<SecretFieldInjectionView[]>([]);
   const [credAuths, setCredAuths] = useState<CredentialUseAuthorizationView[]>([]);
+  const [cardFillAuths, setCardFillAuths] = useState<PaymentCardFillAuthorizationView[]>([]);
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
   const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1147,8 +1279,9 @@ export default function RouteRunApprovalsPage() {
       getEmailResolverStatus().catch(() => null),
       listSensitiveGrants({ status: "active" }).catch(() => []),
       listLoginDiagnostics().catch(() => []),
+      listPaymentCardFillAuthorizations("pending_approval").catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1158,6 +1291,7 @@ export default function RouteRunApprovalsPage() {
         setEmailResolverStatus(emailStatus);
         setActiveGrants(grants);
         setLoginDiagnostics(diags);
+        setCardFillAuths(cardAuths);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1300,6 +1434,28 @@ export default function RouteRunApprovalsPage() {
     }
   }
 
+  async function handleApproveCardFillAuth(id: string) {
+    setActionError(null);
+    try {
+      await approvePaymentCardFillAuthorization(id);
+      setCardFillAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+      setLastDecision({ action: "approved", note: "Card fill approved. A SensitiveGrant is now active. This does NOT authorize a purchase." });
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to approve card fill authorization.");
+    }
+  }
+
+  async function handleDenyCardFillAuth(id: string) {
+    setActionError(null);
+    try {
+      await denyPaymentCardFillAuthorization(id);
+      setCardFillAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+      setLastDecision({ action: "denied", note: "Card fill denied." });
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to deny card fill authorization.");
+    }
+  }
+
   async function handleSubmitChallengeCode(challengeId: string, code: string) {
     setActionError(null);
     try {
@@ -1338,7 +1494,7 @@ export default function RouteRunApprovalsPage() {
 
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + challenges.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + challenges.length;
 
   return (
     <div className="page">
@@ -1557,6 +1713,26 @@ export default function RouteRunApprovalsPage() {
                       auth={auth}
                       onApprove={() => handleApproveCredAuth(auth.authorization_id)}
                       onDeny={() => handleDenyCredAuth(auth.authorization_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Payment card fill requests */}
+              {cardFillAuths.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Payment card requests</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent is requesting permission to fill saved card details into checkout fields. Antigen resolves and injects — the agent never receives raw card values. This does not authorize any purchase.
+                    </p>
+                  </div>
+                  {cardFillAuths.map((auth) => (
+                    <PendingCardFillAuthCard
+                      key={auth.authorization_id}
+                      auth={auth}
+                      onApprove={() => handleApproveCardFillAuth(auth.authorization_id)}
+                      onDeny={() => handleDenyCardFillAuth(auth.authorization_id)}
                     />
                   ))}
                 </div>

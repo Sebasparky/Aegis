@@ -607,8 +607,9 @@ export type UserApprovalDecision = "approved" | "denied";
 export type UserApprovalSource =
   | "approval_request"
   | "route_run_rejection"
-  | "credential_authorization"   // credential injection approve path
-  | "challenge_code_submission"; // security challenge code submit path
+  | "credential_authorization"        // credential injection approve path
+  | "challenge_code_submission"       // security challenge code submit path
+  | "payment_card_fill_authorization"; // payment card fill approve path
 export type UserApprovalOutcome = "pending" | "completed" | "failed" | "not_applicable";
 
 /**
@@ -715,7 +716,8 @@ export interface UserApprovalReceiptVerificationResult {
 
 export type SensitiveGrantType =
   | "credential_injection"    // user approved a CredentialUseAuthorization
-  | "challenge_resolution";   // user submitted a challenge code via /submit-code
+  | "challenge_resolution"    // user submitted a challenge code via /submit-code
+  | "payment_card_fill";      // user approved a PaymentCardFillAuthorization
 
 export type SensitiveGrantStatus =
   | "active"     // grant is live and not yet expired or consumed
@@ -727,12 +729,13 @@ export interface SensitiveGrantScope {
   user_id: string;
   delegation_id: string;
   domain: string;
-  task_id?: string;           // present if approval occurred in a task context
+  task_id?: string;             // present if approval occurred in a task context
   workspace_id?: string;
   route_run_id?: string;
-  pass_id?: string;           // credential_injection only — vault pass ID, never a raw secret
-  challenge_id?: string;      // challenge_resolution only — challenge ID, never the raw code
-  authorization_id?: string;  // credential_injection only — CredentialUseAuthorization.authorization_id
+  pass_id?: string;             // credential_injection only — vault pass ID, never a raw secret
+  challenge_id?: string;        // challenge_resolution only — challenge ID, never the raw code
+  authorization_id?: string;    // credential_injection / payment_card_fill — linked authorization ID
+  payment_method_id?: string;   // payment_card_fill only — PaymentMethod.payment_method_id, never a raw value
 }
 
 export interface SensitiveGrant {
@@ -1419,6 +1422,8 @@ export interface RouteRunReceipt {
     passport_hash?: string;
   };
   observation_mode_summary?: RuntimeObservationModeState;
+  task_browser_session_id?: string;
+  agent_summary?: string;
 }
 
 // ─── Sensitive Workflow Observation Mode v1 ───────────────────────────────────
@@ -1596,6 +1601,7 @@ export interface RouteRun {
   claimed_execution_surface?: AegisExecutionSurface;
   authorization_id?: string;
   authorization_hash?: string;
+  task_browser_session_id?: string;
 }
 
 // ─── Aegis Action API — Decision Types ────────────────────────────────────────
@@ -2259,6 +2265,112 @@ export interface TaskBrowserSession {
   runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
 }
 
+// ─── Payment Card Fill Handoff v1 ────────────────────────────────────────────
+// Card fill approval + CDP field injection.
+// Does NOT cover purchase confirmation — that is a separate, unimplemented feature.
+
+export type PaymentCardField =
+  | "card_number"       // KMS-resolved from card_number_ref — value never returned to agent
+  | "cvv"               // KMS-resolved from cvv_ref — value never returned to agent
+  | "expiry_month"      // pm.exp_month — cleartext non-secret metadata
+  | "expiry_year"       // pm.exp_year — cleartext non-secret metadata
+  | "expiry_combined"   // "MM/YY" derived — cleartext non-secret metadata
+  | "cardholder_name"   // pm.cardholder_name — cleartext non-secret metadata
+  | "billing_zip";      // pm.billing_zip — cleartext non-secret metadata
+
+export type PaymentCardFillAuthorizationStatus =
+  | "pending_approval"
+  | "approved"
+  | "fulfilled"
+  | "denied"
+  | "expired"
+  | "revoked";
+
+export type PaymentCardFillRequestStatus =
+  | "pending_approval"
+  | "approved"
+  | "executing"
+  | "filled"
+  | "denied"
+  | "failed"
+  | "expired";
+
+export interface PaymentCardFillElementHint {
+  label?: string;
+  placeholder?: string;
+  input_type?: string;
+  /** CSS selector targeting only the input field. Must not target button, submit, form, or a[href] elements. Validated at creation time. */
+  selector_hint?: string;
+}
+
+/** One user approval covering all requested card field fills for a single domain/payment-method combination. */
+export interface PaymentCardFillAuthorization {
+  authorization_id: string;            // "pca_..."
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  /** Internal identifier — never exposed in agent-facing API responses. */
+  payment_method_id: string;
+  payment_method_label: string;
+  last4: string;
+  is_default: boolean;
+  allowed_fields: PaymentCardField[];
+  /** Populated as each field is successfully filled. */
+  fields_filled: PaymentCardField[];
+  status: PaymentCardFillAuthorizationStatus;
+  /** Always the literal false — raw card values are never returned to the agent. */
+  raw_values_revealed_to_agent: false;
+  /** Always the literal true — approving this does not authorize any purchase action. */
+  purchase_not_authorized: true;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+}
+
+/** A single card field fill request linked to a PaymentCardFillAuthorization. */
+export interface PaymentCardFillRequest {
+  fill_request_id: string;             // "pcfr_..."
+  authorization_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  /** Internal identifier — never exposed in agent-facing API responses. */
+  payment_method_id: string;
+  field: PaymentCardField;
+  page_url: string;
+  element_hint?: PaymentCardFillElementHint;
+  reason: string;
+  status: PaymentCardFillRequestStatus;
+  browser_session_id?: string;
+  external_cdp_url?: string;
+  /** Always the literal false — raw card values are never returned to the agent. */
+  raw_values_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  filled_at?: string;
+  error?: string;
+}
+
+/** Returned by execute endpoint — safe metadata only, no raw card values. */
+export interface PaymentCardFillResult {
+  fill_request_id: string;
+  authorization_id: string;
+  status: "filled" | "failed";
+  field: PaymentCardField;
+  domain: string;
+  payment_method_label: string;
+  last4: string;
+  filled_at?: string;
+  /** Always the literal false — raw card values are never returned to the agent. */
+  raw_values_revealed_to_agent: false;
+  /** Always the literal true — filling card fields does not authorize any purchase. */
+  purchase_not_authorized: true;
+  note: string;
+  error?: string;
+}
+
 // ─── Sensitive Action Receipt Timeline v1 ──────────────────────────────────────
 
 export type SensitiveActionEventType =
@@ -2273,7 +2385,8 @@ export type SensitiveActionEventType =
   | "challenge_code_injected"
   | "challenge_email_resolution_requested"
   | "challenge_email_code_found"
-  | "challenge_email_code_injected";
+  | "challenge_email_code_injected"
+  | "payment_card_fill_executed";
 
 export interface SensitiveActionTimelineItem {
   item_id: string;

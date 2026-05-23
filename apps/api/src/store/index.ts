@@ -33,6 +33,9 @@ import type {
   WebsiteTrustProfile,
   WebsiteViolationReceipt,
   SensitiveGrant,
+  PaymentCardFillAuthorization,
+  PaymentCardFillRequest,
+  PaymentCardField,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -260,6 +263,39 @@ export interface CredentialStepHandoffRecord {
 }
 
 export const credentialStepHandoffs = new Map<string, CredentialStepHandoffRecord>();
+
+// ─── Payment Card Fill Handoff v1 ─────────────────────────────────────────────
+// Card fill approval + CDP field injection. Purchase confirmation is NOT implemented.
+
+// One user approval per domain/payment-method combination, covering all requested card fields.
+// Ephemeral — expired on restart (CDP browser context is gone).
+export const paymentCardFillAuthorizations = new Map<string, PaymentCardFillAuthorization>();
+
+// Per-field fill requests linked to a PaymentCardFillAuthorization.
+// Ephemeral — expired on restart.
+export const paymentCardFillRequests = new Map<string, PaymentCardFillRequest>();
+
+// Audit records for completed card fill handoffs. Ephemeral — never persisted.
+// Never stores payment_method_id, card_number_ref, cvv_ref, or any raw card value.
+export interface PaymentCardFillHandoffRecord {
+  handoff_id: string;                    // "pcfh_..."
+  fill_request_id: string;
+  authorization_id: string;
+  delegation_id: string;
+  user_id: string;
+  domain: string;
+  field: PaymentCardField;
+  /** Display label only — never payment_method_id or any raw card data. */
+  payment_method_label: string;
+  last4: string;
+  outcome: "filled" | "failed";
+  /** Always the literal false — raw card values are never returned to the agent. */
+  raw_values_revealed_to_agent: false;
+  /** Always the literal true — filling card fields does not authorize any purchase. */
+  purchase_not_authorized: true;
+  completed_at: string;
+}
+export const paymentCardFillHandoffs = new Map<string, PaymentCardFillHandoffRecord>();
 
 // ─── Aegis Workspaces v0 ──────────────────────────────────────────────────────
 

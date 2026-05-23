@@ -438,6 +438,47 @@ export const archivePaymentMethod = (pmId: string) =>
 export const deletePaymentMethod = (pmId: string) =>
   request<{ ok: boolean }>(`/api/payment-methods/${pmId}`, { method: "DELETE" });
 
+// ─── Payment Card Fill Authorizations ─────────────────────────────────────────
+
+export type PaymentCardField =
+  | "card_number" | "cvv" | "expiry_month" | "expiry_year"
+  | "expiry_combined" | "cardholder_name" | "billing_zip";
+
+export interface PaymentCardFillAuthorizationView {
+  authorization_id: string;
+  domain: string;
+  payment_method_label: string;
+  last4: string;
+  is_default: boolean;
+  allowed_fields: PaymentCardField[];
+  fields_filled: PaymentCardField[];
+  status: string;
+  raw_values_revealed_to_agent: false;
+  purchase_not_authorized: true;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+  // Note: payment_method_id intentionally absent — never returned by server
+}
+
+export const listPaymentCardFillAuthorizations = (status?: string) =>
+  request<PaymentCardFillAuthorizationView[]>(
+    `/api/internal/payment-card-fill-authorizations${status ? `?status=${status}` : ""}`,
+  );
+
+export const approvePaymentCardFillAuthorization = (id: string) =>
+  request<{ authorization_id: string; status: string }>(
+    `/api/internal/payment-card-fill-authorizations/${id}/approve`,
+    { method: "POST" },
+  );
+
+export const denyPaymentCardFillAuthorization = (id: string) =>
+  request<{ authorization_id: string; status: string }>(
+    `/api/internal/payment-card-fill-authorizations/${id}/deny`,
+    { method: "POST" },
+  );
+
 export const importVaultPasses = (credentials: Array<{ label: string; kind: "login_password"; domain: string; username: string; password: string }>) =>
   request<{ imported: VaultPassView[]; failed: Array<{ index: number; reason: string }>; total_requested: number; total_imported: number }>(
     "/api/internal/vault-passes/import",

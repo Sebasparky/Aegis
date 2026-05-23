@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -44,6 +44,8 @@ import {
   websiteTrustProfiles,
   websiteViolationReceipts,
   sensitiveGrants,
+  paymentCardFillAuthorizations,
+  paymentCardFillRequests,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -545,6 +547,8 @@ export function persistStore(): void {
       websiteTrustProfiles: Array.from(websiteTrustProfiles.entries()),
       websiteViolationReceipts: Array.from(websiteViolationReceipts.entries()),
       sensitiveGrants: Array.from(sensitiveGrants.entries()),
+      paymentCardFillAuthorizations: Array.from(paymentCardFillAuthorizations.entries()),
+      paymentCardFillRequests: Array.from(paymentCardFillRequests.entries()),
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -672,6 +676,24 @@ export async function loadStore(): Promise<void> {
         res.updated_at = new Date().toISOString();
       }
       challengeEmailResolutions.set(k, res);
+    }
+
+    // Payment card fill authorizations cannot survive restart — CDP browser context is gone.
+    for (const [k, v] of (data.paymentCardFillAuthorizations ?? [])) {
+      const auth = v as PaymentCardFillAuthorization;
+      if (auth.status === "pending_approval" || auth.status === "approved") {
+        auth.status = "expired";
+      }
+      paymentCardFillAuthorizations.set(k, auth);
+    }
+
+    // Payment card fill requests — same expiry logic.
+    for (const [k, v] of (data.paymentCardFillRequests ?? [])) {
+      const req = v as PaymentCardFillRequest;
+      if (["pending_approval", "approved", "executing"].includes(req.status)) {
+        req.status = "expired";
+      }
+      paymentCardFillRequests.set(k, req);
     }
 
     // Load encrypted vault blobs (ciphertext only — never plaintext).

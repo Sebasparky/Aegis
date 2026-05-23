@@ -7,12 +7,13 @@ import {
   securityChallenges,
   challengeEmailResolutions,
   credentialStepHandoffs,
+  paymentCardFillHandoffs,
 } from "../store/index.js";
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function sanitizeReceiptText(input: unknown, maxLen = 160): string {
+export function sanitizeReceiptText(input: unknown, maxLen = 160): string {
   if (typeof input !== "string") return "";
   let s = input.replace(/\s+/g, " ").trim();
   s = s.replace(/\b\d{6,8}\b/g, "[redacted-code]");
@@ -58,6 +59,7 @@ const EVENT_GROUP_TYPES: Record<string, SensitiveActionEventType[]> = {
     "challenge_email_code_found",
     "challenge_email_code_injected",
   ],
+  payment: ["payment_card_fill_executed"],
 };
 
 // ─── Route ────────────────────────────────────────────────────────────────────
@@ -359,6 +361,38 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
             resolution_id: res.resolution_id,
           });
         }
+      }
+    }
+
+    // ── Payment card fill handoffs ────────────────────────────────────────────
+    // Skip if filtering by browser_session_id or challenge_id — not linked by those IDs
+    if (!bsFilter && !chFilter) {
+      for (const rec of paymentCardFillHandoffs.values()) {
+        if (rec.user_id !== MOCK_USER_ID) continue;
+        if (authFilter && rec.authorization_id !== authFilter) continue;
+
+        items.push({
+          item_id: `payment_card_fill_executed:${rec.handoff_id}:${rec.completed_at}`,
+          event_type: "payment_card_fill_executed",
+          timestamp: rec.completed_at,
+          domain: rec.domain,
+          description: `Card field '${rec.field}' fill ${rec.outcome} on ${rec.domain} — ${rec.payment_method_label} ···${rec.last4}`,
+          metadata: {
+            handoff_id: rec.handoff_id,
+            field: rec.field,
+            outcome: rec.outcome,
+            payment_method_label: rec.payment_method_label,
+            last4: rec.last4,
+            raw_values_revealed_to_agent: false,
+            purchase_not_authorized: true,
+          },
+          privacy_guarantees: [
+            "Raw card values were not returned to the agent",
+            "raw_values_revealed_to_agent: false enforced as TypeScript literal",
+            "purchase_not_authorized: true — this is card field fill only, not a purchase authorization",
+          ],
+          authorization_id: rec.authorization_id,
+        });
       }
     }
 

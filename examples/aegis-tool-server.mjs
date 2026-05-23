@@ -2001,6 +2001,126 @@ async function waitForCredentialAuthorization({
   };
 }
 
+// ─── Payment Card Fill Handoff v1 handlers ────────────────────────────────────
+
+async function requestPaymentCardFill({
+  domain, payment_method_id, field, page_url, element_hint, reason,
+  browser_session_id, external_cdp_url,
+} = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!field) return { error: "VALIDATION_ERROR", message: "field is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  const body = { domain, field, page_url, reason };
+  if (payment_method_id) body.payment_method_id = payment_method_id;
+  if (element_hint) body.element_hint = element_hint;
+  if (browser_session_id) body.browser_session_id = browser_session_id;
+  if (external_cdp_url) body.external_cdp_url = external_cdp_url;
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/payment-card-fills", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create card fill request." };
+  }
+  return res.data;
+}
+
+async function waitForPaymentCardFillAuthorization({
+  authorization_id,
+  timeout_ms = 300000,
+  poll_interval_ms = 3000,
+} = {}) {
+  if (!authorization_id) return { error: "VALIDATION_ERROR", message: "authorization_id is required." };
+
+  const TERMINAL = new Set(["approved", "denied", "expired", "fulfilled", "revoked"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      // Poll via the internal list endpoint — filter by ID
+      res = await request("GET", `/api/internal/payment-card-fill-authorizations?status=approved`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+
+    // Also check if it now appears as non-pending by fetching a fill request linked to it
+    // Simpler: poll the agent-facing fill request status via a fill_request linked to auth
+    // The cleanest poll is to check the agent-facing status via any fill_request from this auth.
+    // We'll use a separate internal poll below.
+    break; // Exit the approval poll loop — handled below
+  }
+
+  // Poll approach: check internal endpoint for the authorization status
+  const deadline2 = Date.now() + timeout_ms;
+  while (Date.now() < deadline2) {
+    let res;
+    try {
+      res = await request("GET", `/api/internal/payment-card-fill-authorizations`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll card fill authorization." };
+    }
+
+    const auth = res.data?.find((a) => a.authorization_id === authorization_id);
+    if (!auth) {
+      return { error: "NOT_FOUND", message: `Authorization ${authorization_id} not found.` };
+    }
+
+    if (TERMINAL.has(auth.status)) {
+      let next_action;
+      if (auth.status === "approved") {
+        next_action = "Authorization approved. Call execute_payment_card_fill_handoff for each fill_request_id to fill the card fields.";
+      } else {
+        next_action = `Authorization ${auth.status}. Do not attempt card fill. Report outcome to the user.`;
+      }
+      return {
+        authorization_id: auth.authorization_id,
+        status: auth.status,
+        domain: auth.domain,
+        payment_method_label: auth.payment_method_label,
+        last4: auth.last4,
+        raw_values_revealed_to_agent: false,
+        purchase_not_authorized: true,
+        ...(auth.approved_at ? { approved_at: auth.approved_at } : {}),
+        next_action,
+      };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, poll_interval_ms));
+  }
+
+  return {
+    status: "timeout",
+    authorization_id,
+    raw_values_revealed_to_agent: false,
+    purchase_not_authorized: true,
+    next_action: "Approval has not arrived within the timeout window. Ask the user whether to continue waiting or cancel.",
+  };
+}
+
+async function executePaymentCardFillHandoff({ fill_request_id } = {}) {
+  if (!fill_request_id) return { error: "VALIDATION_ERROR", message: "fill_request_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/payment-card-fills/${encodeURIComponent(fill_request_id)}/execute`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Card fill execution failed." };
+  }
+  return res.data;
+}
+
 // ─── Workspace handlers ───────────────────────────────────────────────────────
 
 async function getWorkspaceManifest({ workspace_id } = {}) {
@@ -2106,6 +2226,87 @@ async function createWorkspaceArtifact({ workspace_id, name, kind, content, task
     };
   }
   return res.data;
+}
+
+// ─── Agent-Runnable Skill Run Lifecycle handlers ──────────────────────────────
+
+async function startSkillRun({ run_id } = {}) {
+  if (!run_id) return { error: "VALIDATION_ERROR", message: "run_id is required." };
+  let res;
+  try {
+    res = await request("POST", `/api/route-runs/${encodeURIComponent(run_id)}/start`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to start skill run." };
+  }
+  const run = res.data;
+  return {
+    run_id: run.run_id,
+    status: run.status,
+    skill_id: run.skill_id,
+    domain: run.domain,
+    started_at: run.started_at ?? null,
+    next_action:
+      "Run is now running. Execute the workflow steps using your own browser/runtime tools. " +
+      "When finished, call complete_skill_run (on success) or fail_skill_run (on failure) " +
+      "to close the audit receipt loop. Do not leave runs in running status.",
+  };
+}
+
+async function completeSkillRun({ run_id, browser_session_id, summary } = {}) {
+  if (!run_id) return { error: "VALIDATION_ERROR", message: "run_id is required." };
+  const body = {};
+  if (browser_session_id) body.browser_session_id = browser_session_id;
+  if (summary) body.summary = summary;
+  let res;
+  try {
+    res = await request("POST", `/api/route-runs/${encodeURIComponent(run_id)}/complete`, body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to complete skill run." };
+  }
+  const run = res.data;
+  return {
+    run_id: run.run_id,
+    status: run.status,
+    domain: run.domain,
+    completed_at: run.completed_at ?? null,
+    ...(run.task_browser_session_id ? { task_browser_session_id: run.task_browser_session_id } : {}),
+    next_action:
+      "Run completed. A signed RouteRunReceipt has been generated. " +
+      "Call get_route_run_receipt to retrieve the audit record.",
+  };
+}
+
+async function failSkillRun({ run_id, error, browser_session_id } = {}) {
+  if (!run_id) return { error: "VALIDATION_ERROR", message: "run_id is required." };
+  if (!error) return { error: "VALIDATION_ERROR", message: "error is required." };
+  const body = { error };
+  if (browser_session_id) body.browser_session_id = browser_session_id;
+  let res;
+  try {
+    res = await request("POST", `/api/route-runs/${encodeURIComponent(run_id)}/fail`, body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to fail skill run." };
+  }
+  const run = res.data;
+  return {
+    run_id: run.run_id,
+    status: run.status,
+    domain: run.domain,
+    error: run.error ?? null,
+    completed_at: run.completed_at ?? null,
+    next_action:
+      "Run marked as failed. A signed RouteRunReceipt has been generated with status 'failed'. " +
+      "Call get_route_run_receipt to retrieve the audit record.",
+  };
 }
 
 // ─── Tool definitions ────────────────────────────────────────────────────────
@@ -2347,6 +2548,80 @@ const TOOLS = [
         },
       },
       required: ["run_id"],
+    },
+  },
+  {
+    name: "start_skill_run",
+    description:
+      "Transition an approved agent-runnable skill run from pending to running. " +
+      "Call this after request_skill_run returns status='pending' (meaning the run is approved and ready). " +
+      "This tool does NOT browse, click, type, scroll, fill forms, or inspect pages. " +
+      "After calling this, execute the workflow yourself using your own browser/runtime tools (e.g. @playwright/mcp). " +
+      "When the workflow is done, call complete_skill_run (success) or fail_skill_run (failure) " +
+      "so the audit receipt loop closes. Leaving a run in 'running' status indefinitely is incorrect. " +
+      "For aegis_controlled skills, use start_playwright_route_run instead — that tool runs the workflow inside the Aegis controlled runtime.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The run_id from request_skill_run. Run must be in 'pending' status.",
+        },
+      },
+      required: ["run_id"],
+    },
+  },
+  {
+    name: "complete_skill_run",
+    description:
+      "Mark a running agent-runnable skill run as completed and generate a signed RouteRunReceipt. " +
+      "Call this after the agent has successfully executed all workflow steps in its own browser session. " +
+      "This tool does NOT browse, click, type, or inspect pages — it only records the outcome. " +
+      "Use Aegis handoff tools (request_secret_field_injection, report_security_challenge, etc.) separately for sensitive credentials, payments, or challenge codes. " +
+      "Always call complete_skill_run or fail_skill_run when the task finishes — the audit receipt loop does not close otherwise.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The run_id to complete. Run must be in 'running' status.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional. The task browser session ID used during execution, for audit linkage. Must not expose CDP URL, cookies, or credentials — only the session ID.",
+        },
+        summary: {
+          type: "string",
+          description: "Optional. Brief agent-provided summary of what was accomplished (max 160 chars). Will be sanitized.",
+        },
+      },
+      required: ["run_id"],
+    },
+  },
+  {
+    name: "fail_skill_run",
+    description:
+      "Mark a running agent-runnable skill run as failed and generate a signed RouteRunReceipt with status='failed'. " +
+      "Call this when the workflow could not be completed — navigation error, unexpected page state, challenge not resolved, etc. " +
+      "This tool does NOT browse, click, type, or inspect pages — it only records the failure outcome. " +
+      "Always call complete_skill_run or fail_skill_run when the task finishes — the audit receipt loop does not close otherwise.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The run_id to fail. Run must be in 'running' status.",
+        },
+        error: {
+          type: "string",
+          description: "Brief description of what failed (max 160 chars). Will be sanitized. Required.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional. The task browser session ID used during execution, for audit linkage.",
+        },
+      },
+      required: ["run_id", "error"],
     },
   },
   {
@@ -3241,6 +3516,135 @@ const TOOLS = [
       },
     },
   },
+  // ─── Payment Card Fill Handoff v1 ────────────────────────────────────────────
+  {
+    name: "request_payment_card_fill",
+    description:
+      "Request Aegis to fill a stored payment card field in the active browser via CDP — without returning raw card values to the agent.\n\n" +
+      "CRITICAL PRODUCT BOUNDARY:\n" +
+      "- This approval covers card FIELD FILL only.\n" +
+      "- It does NOT authorize a purchase, charge, subscription, or any payment action.\n" +
+      "- A separate (not yet implemented) purchase confirmation approval is required before any payment is submitted.\n" +
+      "- The agent owns all navigation and form submission decisions. Antigen only fills the requested fields.\n\n" +
+      "SECURITY:\n" +
+      "- card_number and CVV are resolved server-side via KMS and injected via CDP. The agent never receives them.\n" +
+      "- card_number and CVV fields are masked in the DOM after fill (agent cannot read them back).\n" +
+      "- Non-secret fields (expiry, cardholder_name, billing_zip) are filled without KMS.\n\n" +
+      "FLOW:\n" +
+      "1. Navigate to the checkout page in your browser.\n" +
+      "2. Call request_payment_card_fill for each field you need (card_number, cvv, expiry_combined, etc.).\n" +
+      "   - If status='approved': call execute_payment_card_fill_handoff immediately.\n" +
+      "   - If status='pending_approval': tell the user to approve at /route-run-approvals under 'Payment card requests'.\n" +
+      "     Then call wait_for_payment_card_fill_authorization with the returned authorization_id.\n" +
+      "3. Once approved, call execute_payment_card_fill_handoff for each fill_request_id.\n" +
+      "4. After all fields are filled, YOU decide whether to submit the form — Aegis does not submit for you.\n\n" +
+      "FIELD NAMES: card_number, cvv, expiry_month, expiry_year, expiry_combined (MM/YY), cardholder_name, billing_zip\n\n" +
+      "SELECTOR SAFETY: selector_hint must target the INPUT field only. Never use selectors for button, submit, form, a[href], or [role=button].\n\n" +
+      "PAYMENT METHOD: omit payment_method_id to use the default payment method.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "field", "page_url", "reason"],
+      properties: {
+        domain: {
+          type: "string",
+          description: "The checkout domain, e.g. 'checkout.example.com'. Must match the page_url hostname.",
+        },
+        payment_method_id: {
+          type: "string",
+          description: "Optional. Omit to use the user's default payment method.",
+        },
+        field: {
+          type: "string",
+          enum: ["card_number", "cvv", "expiry_month", "expiry_year", "expiry_combined", "cardholder_name", "billing_zip"],
+          description: "Which card field to fill. card_number and cvv are KMS-protected — raw values are never returned.",
+        },
+        page_url: {
+          type: "string",
+          description: "Full URL of the checkout page, e.g. 'https://checkout.example.com/payment'.",
+        },
+        element_hint: {
+          type: "object",
+          description: "Optional hints to locate the input field. selector_hint must target only an input element.",
+          properties: {
+            label: { type: "string", description: "Visible label text for the input field." },
+            placeholder: { type: "string", description: "Placeholder text of the input." },
+            input_type: { type: "string", description: "The type attribute of the input, e.g. 'tel', 'text'." },
+            selector_hint: {
+              type: "string",
+              description: "CSS selector for the INPUT field only. Must not target button, submit, form, or a[href] elements.",
+            },
+          },
+        },
+        reason: {
+          type: "string",
+          description: "One sentence explaining why this fill is needed, shown in the audit trail.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Aegis-managed task browser session ID from start_task_browser_session. Mutually exclusive with external_cdp_url.",
+        },
+        external_cdp_url: {
+          type: "string",
+          description: "CDP base URL for an agent-owned browser, e.g. 'http://localhost:9222'. Mutually exclusive with browser_session_id.",
+        },
+      },
+    },
+  },
+  {
+    name: "wait_for_payment_card_fill_authorization",
+    description:
+      "Poll until the user approves or denies a pending payment card fill authorization.\n\n" +
+      "Use after request_payment_card_fill returns status='pending_approval'.\n" +
+      "Tell the user: \"Please approve the card fill request at /route-run-approvals under 'Payment card requests'.\"\n" +
+      "Do NOT ask the user to confirm in chat.\n\n" +
+      "Terminal statuses: approved, denied, expired, revoked, fulfilled.\n" +
+      "On 'approved': call execute_payment_card_fill_handoff for each pending fill_request_id.\n" +
+      "On 'denied' or 'expired': do not attempt card fill without a new user approval.",
+    inputSchema: {
+      type: "object",
+      required: ["authorization_id"],
+      properties: {
+        authorization_id: {
+          type: "string",
+          description: "The authorization_id returned by request_payment_card_fill.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Max polling duration in milliseconds. Default: 300000 (5 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Polling interval in milliseconds. Default: 3000.",
+        },
+      },
+    },
+  },
+  {
+    name: "execute_payment_card_fill_handoff",
+    description:
+      "Execute an approved payment card fill — Aegis resolves the field value from KMS and injects it via CDP.\n\n" +
+      "CRITICAL:\n" +
+      "- Raw card values (card_number, CVV) are NEVER returned to the agent.\n" +
+      "- card_number and CVV are masked in the DOM after fill.\n" +
+      "- This call does NOT submit any form, click any button, or authorize any purchase.\n" +
+      "- The agent owns all submission decisions after this call.\n\n" +
+      "Call only after:\n" +
+      "1. fill_request status is 'approved' (confirmed via request_payment_card_fill or wait_for_payment_card_fill_authorization)\n" +
+      "2. The agent's browser is on the page containing the target field.\n\n" +
+      "If the field is inside an iframe, this call will return a clear error (IFRAME_NOT_SUPPORTED). " +
+      "Do not attempt workarounds — iframes require a future Aegis increment.\n\n" +
+      "If the field cannot be found, this call fails safely. Never try to click Next/Submit/Continue to recover.",
+    inputSchema: {
+      type: "object",
+      required: ["fill_request_id"],
+      properties: {
+        fill_request_id: {
+          type: "string",
+          description: "The fill_request_id returned by request_payment_card_fill.",
+        },
+      },
+    },
+  },
   {
     name: "report_security_challenge",
     description:
@@ -3671,6 +4075,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "start_playwright_route_run":
       result = await startPlaywrightRouteRun(a);
       break;
+    case "start_skill_run":
+      result = await startSkillRun(a);
+      break;
+    case "complete_skill_run":
+      result = await completeSkillRun(a);
+      break;
+    case "fail_skill_run":
+      result = await failSkillRun(a);
+      break;
     case "create_delegation_passport":
       result = await createDelegationPassport(a);
       break;
@@ -3772,6 +4185,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "wait_for_credential_authorization":
       result = await waitForCredentialAuthorization(a);
+      break;
+    case "request_payment_card_fill":
+      result = await requestPaymentCardFill(a);
+      break;
+    case "wait_for_payment_card_fill_authorization":
+      result = await waitForPaymentCardFillAuthorization(a);
+      break;
+    case "execute_payment_card_fill_handoff":
+      result = await executePaymentCardFillHandoff(a);
       break;
     case "report_security_challenge":
       result = await reportSecurityChallenge(a);

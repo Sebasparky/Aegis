@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -46,6 +46,9 @@ import {
   sensitiveGrants,
   paymentCardFillAuthorizations,
   paymentCardFillRequests,
+  verificationCards,
+  disclosureReceipts,
+  trustSignalDisclosureRecords,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -549,6 +552,10 @@ export function persistStore(): void {
       sensitiveGrants: Array.from(sensitiveGrants.entries()),
       paymentCardFillAuthorizations: Array.from(paymentCardFillAuthorizations.entries()),
       paymentCardFillRequests: Array.from(paymentCardFillRequests.entries()),
+      verificationCards: Array.from(verificationCards.entries()),
+      disclosureReceipts: Array.from(disclosureReceipts.entries()),
+      trustSignalDisclosureRecords: Array.from(trustSignalDisclosureRecords.entries()),
+      // verificationProviderSessions intentionally omitted — ephemeral; browser context gone on restart.
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -622,6 +629,11 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.workspaceTasks ?? [])) workspaceTasks.set(k, v as WorkspaceTask);
     for (const [k, v] of (data.workspaceArtifacts ?? [])) workspaceArtifacts.set(k, v as WorkspaceArtifact);
     for (const [k, v] of (data.workspaceAuditEvents ?? [])) workspaceAuditEvents.set(k, v as WorkspaceAuditEvent);
+
+    for (const [k, v] of (data.verificationCards ?? [])) verificationCards.set(k, v as VerificationCard);
+    for (const [k, v] of (data.disclosureReceipts ?? [])) disclosureReceipts.set(k, v as DisclosureReceipt);
+    for (const [k, v] of (data.trustSignalDisclosureRecords ?? [])) trustSignalDisclosureRecords.set(k, v as TrustSignalDisclosureRecord);
+    // verificationProviderSessions: not persisted — ephemeral by design.
 
     // Injection requests cannot survive restart — CDP browser context is gone.
     for (const [k, v] of (data.secretFieldInjections ?? [])) {

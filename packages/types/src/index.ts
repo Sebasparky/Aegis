@@ -2539,3 +2539,157 @@ export interface WorkspaceTaskManifestEntry {
   recommended_action: TaskRecommendedAction;
   reason: string;
 }
+
+// ─── Verification Foundation v1 ───────────────────────────────────────────────
+
+export type VerificationType =
+  | "email_ownership"
+  | "phone_ownership"
+  | "government_id"
+  | "student_status"
+  | "military_status"
+  | "business_org_control"
+  | "domain_ownership"
+  | "employment_status";
+
+export type AssuranceLevel =
+  | "self_asserted"
+  | "provider_verified"
+  | "document_verified";
+
+export type DisclosurePolicy =
+  | "user_approval_required"
+  | "agent_visible"
+  | "website_allowed"
+  | "restricted";
+
+export interface VerificationProviderSession {
+  session_id: string;           // vps_...
+  user_id: string;
+  verification_type: VerificationType;
+  provider_name: string;
+  /** Opaque token from the provider. Optional until the provider confirms initiation. */
+  provider_session_id?: string;
+  status: "initiated" | "in_progress" | "completed" | "failed" | "expired" | "cancelled";
+  created_at: string;
+  expires_at: string;
+}
+
+/**
+ * Typed, normalized claim values. These are stored internally and correspond to
+ * Tier 2 claim details — they are never auto-disclosed as Tier 1 trust signals.
+ * Tier 1 exposes only boolean availability flags (does the user have this claim type?).
+ *
+ * Fields like `country_code` and `id_type` for government_id are Tier 2 only.
+ * Raw document scans, SSNs, DOB, legal name, address, biometrics, and document
+ * numbers are never stored here — those remain with the provider.
+ */
+export type VerifiedClaimValue =
+  | { kind: "email_ownership"; email_domain: string }
+  | { kind: "phone_ownership"; phone_country_code: string }
+  /** Tier 2 only — country_code and id_type are claim details, not trust signals. */
+  | { kind: "government_id"; country_code: string; id_type: string }
+  | { kind: "student_status"; institution_name: string; enrollment_status: string }
+  | { kind: "military_status"; branch: string }
+  | { kind: "business_control"; business_name: string }
+  | { kind: "domain_ownership"; domain: string }
+  | { kind: "employment_status"; employer_name?: string };
+
+export interface VerifiedClaim {
+  claim_id: string;    // vc_claim_...
+  card_id: string;
+  claim_type: VerificationType;
+  claim_value: VerifiedClaimValue;
+  assurance_level: AssuranceLevel;
+  /**
+   * Opaque reference token from the provider. Internal use only.
+   * Must never be returned to agents, websites, or external API callers.
+   */
+  provider_reference_id?: string;
+  verified_at: string;
+  expires_at?: string;
+}
+
+export interface VerificationCard {
+  card_id: string;            // vc_...
+  schema_version: "1.0";
+  issuer: "aegis";
+  user_id: string;
+  claims: VerifiedClaim[];
+  disclosure_policy: DisclosurePolicy;
+  issued_at: string;
+  expires_at?: string;
+  /**
+   * Mutable field — intentionally excluded from the canonical hash so that
+   * revocation does not invalidate the signed content of the card.
+   */
+  revocation_status: "active" | "revoked";
+  limitations: {
+    /** Always the literal false — raw documents are never revealed to agents. */
+    raw_document_revealed_to_agent: false;
+    /** Always the literal false — raw documents are never revealed to websites. */
+    raw_document_revealed_to_website: false;
+    /** Always true — only normalized provider-verified claims are stored. */
+    provider_result_only: true;
+    /** Always true — a VerificationCard is not a legal guarantee. */
+    not_a_guarantee: true;
+  };
+  verification?: {
+    card_hash: string;
+    card_jws: string;
+    jws_present: boolean;
+    signing_alg: "EdDSA";
+    signed_at: string;
+    signing_key_id?: string;
+  };
+}
+
+export interface DisclosureReceipt {
+  receipt_id: string;         // vcdiscl_...
+  receipt_type: "claim_disclosure";
+  card_id: string;
+  user_id: string;
+  /** Specific claim types shared — never the full card or raw claim values. */
+  claim_types_disclosed: VerificationType[];
+  disclosure_target:
+    | { kind: "agent"; agent_id: string; delegation_id: string }
+    | { kind: "website"; domain: string };
+  disclosure_policy_at_time: DisclosurePolicy;
+  purpose?: string;
+  approved_at: string;
+  /** Linked UserApprovalReceipt when disclosure required explicit user approval. */
+  uar_id?: string;
+  limitations: {
+    /** Always the literal false — raw documents are never included in disclosure receipts. */
+    raw_document_revealed_to_target: false;
+    /** Always the literal false — raw documents are never stored in receipts. */
+    raw_document_in_receipt: false;
+    /** Always the literal false — only specific claim types are disclosed, not the full card. */
+    full_card_revealed: false;
+  };
+  verification?: {
+    receipt_hash: string;
+    receipt_jws: string;
+    jws_present: boolean;
+    signing_alg: "EdDSA";
+    signed_at: string;
+    signing_key_id?: string;
+  };
+}
+
+/** Lightweight audit log for Tier 1 trust-signal disclosures in active delegation contexts. */
+export interface TrustSignalDisclosureRecord {
+  record_id: string;          // tsdr_...
+  user_id: string;
+  delegation_id: string;
+  /** Claim types the user has — boolean availability only, no claim values. */
+  verification_types_available: VerificationType[];
+  disclosed_at: string;
+  context: "active_delegation";
+  limitations: {
+    /** Always the literal false — raw documents are never revealed. */
+    raw_document_revealed_to_agent: false;
+    /** Always true — trust signals are not a legal guarantee. */
+    not_a_guarantee: true;
+  };
+}

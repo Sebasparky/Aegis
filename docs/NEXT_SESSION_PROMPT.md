@@ -468,6 +468,21 @@ Everything below is implemented and working.
 - 26 automated tests in `apps/api/src/__tests__/website-violation-receipts.test.ts`
 - Do not rebuild unless explicitly requested
 
+### Verification Foundation v1
+**Completed 2026-05-23.** Types, store maps, persistence, and EdDSA signing helpers for VerificationCards and DisclosureReceipts. No routes, UI, mock providers, or disclosure API yet.
+
+- `VerificationType`, `AssuranceLevel`, `DisclosurePolicy`, `VerificationProviderSession`, `VerifiedClaimValue`, `VerifiedClaim`, `VerificationCard`, `DisclosureReceipt`, `TrustSignalDisclosureRecord` added to `packages/types/src/index.ts`
+- `VerificationProviderSession.provider_session_id` is optional — provider may not return an ID until `initiate()` succeeds
+- `VerifiedClaimValue` fields (e.g. `government_id.country_code`, `government_id.id_type`) are Tier 2 claim details — never auto-disclosed as Tier 1 trust signals; no raw SSNs, DOB, legal name, address, biometrics, or document numbers stored
+- `provider_reference_id` on `VerifiedClaim` is internal only — must never appear in agent or website responses
+- `VerificationCard.limitations.raw_document_revealed_to_agent: false` and `raw_document_revealed_to_website: false` are TypeScript literal types
+- `VerificationCard.revocation_status` is intentionally excluded from canonical hash — revocation does not invalidate the signed claim content
+- `apps/api/src/lib/verificationCardSigning.ts` — `hashVerificationCard` (SHA-256 of sorted JSON, excludes `verification` + `revocation_status`), `signVerificationCardJws` (EdDSA, `aegis-verification-card+jws`), `buildSignedVerificationCard` (non-throwing), `verifyStoredVerificationCard` (hash + JWS cross-check)
+- `verificationProviderSessions`, `verificationCards`, `disclosureReceipts`, `trustSignalDisclosureRecords` Maps added to `apps/api/src/store/index.ts`
+- `verificationCards`, `disclosureReceipts`, `trustSignalDisclosureRecords` wired into `persistStore`/`loadStore`; `verificationProviderSessions` intentionally not persisted (ephemeral)
+- Tests: `apps/api/src/__tests__/verification-card-signing.test.ts` — hash stability, revocation hash invariant, mutation detection, signing dev-mode (no key), privacy literal assertions, forbidden-field scanning
+- Do not rebuild unless explicitly requested. Next: mock provider + card issuance, then `/verify` UI, then scoped disclosure API.
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script

@@ -36,6 +36,10 @@ import type {
   PaymentCardFillAuthorization,
   PaymentCardFillRequest,
   PaymentCardField,
+  VerificationProviderSession,
+  VerificationCard,
+  DisclosureReceipt,
+  TrustSignalDisclosureRecord,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -323,6 +327,17 @@ export interface WorkspaceAuditEvent {
 }
 
 export const workspaceAuditEvents = new Map<string, WorkspaceAuditEvent>();
+
+// ─── Verification Foundation v1 ───────────────────────────────────────────────
+
+/** Ephemeral provider sessions — not persisted; expire after 30 min or on restart. */
+export const verificationProviderSessions = new Map<string, VerificationProviderSession>();
+
+export const verificationCards = new Map<string, VerificationCard>();
+
+export const disclosureReceipts = new Map<string, DisclosureReceipt>();
+
+export const trustSignalDisclosureRecords = new Map<string, TrustSignalDisclosureRecord>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

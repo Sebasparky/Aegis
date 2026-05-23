@@ -1,7 +1,161 @@
-# Payment/Card Step Handoff — Design
+# Payment/Card Step Handoff — Design + Test Harness
 
-> **Status: Design only. No implementation has begun.**
-> All API names, type names, schemas, and sequences below are **proposed** and subject to revision before implementation starts.
+> **Status: Payment Card Fill Handoff v1 is complete.**
+> Purchase Confirmation Handoff is not yet implemented.
+> See the Manual Test Instructions section below for end-to-end testing.
+
+---
+
+## Manual Test Instructions — Payment Card Fill Handoff v1
+
+### Prerequisites
+
+```bash
+# Terminal 1: API server
+cd apps/api && npm run dev    # port 4000
+
+# Terminal 2: Web app (approval UI)
+cd apps/web && npm run dev    # port 3000
+
+# Terminal 3: Mock store
+cd apps/mock-store && npm run dev   # port 3001
+```
+
+### Step 1 — Add a test payment method
+
+In the Aegis UI or via direct API call:
+
+```bash
+curl -s -X POST http://localhost:4000/api/payment-methods \
+  -H "Content-Type: application/json" \
+  -d '{
+    "label": "Visa Test Card",
+    "cardholder_name": "Jane Test",
+    "card_number": "4242424242424242",
+    "cvv": "123",
+    "exp_month": 12,
+    "exp_year": 2027,
+    "billing_zip": "12345"
+  }' | jq .
+```
+
+Note the `payment_method_id` from the response (e.g. `pm_...`).
+
+### Step 2 — Start a task browser session
+
+```bash
+curl -s -X POST http://localhost:4000/api/task-browser-sessions \
+  -H "Authorization: Bearer <your-token>" | jq .
+```
+
+Note the `browser_session_id`.
+
+### Step 3 — Agent navigates to mock Stripe checkout
+
+In the agent browser (via Playwright MCP or similar):
+```
+http://localhost:3001/stripe-checkout.html
+```
+
+Verify the page shows:
+- All 5 card input fields (empty)
+- "Pay $12.99" button
+- "Test checkout only — no real payment." banner
+
+### Step 4 — Request card fills for each field
+
+Call `request_payment_card_fill` (or POST directly) for each field. You can batch all fields or do them one at a time — they will share the same `authorization_id` if the domain/payment_method match.
+
+```bash
+# Example: request card_number fill
+curl -s -X POST http://localhost:4000/api/agent/v1/payment-card-fills \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "localhost",
+    "field": "card_number",
+    "page_url": "http://localhost:3001/stripe-checkout.html",
+    "reason": "fill card number for checkout",
+    "element_hint": { "selector_hint": "input[name=\"cardnumber\"]" },
+    "browser_session_id": "<browser_session_id>"
+  }' | jq .
+```
+
+Repeat for: `expiry_combined`, `cvv`, `cardholder_name`, `billing_zip`
+
+Field → selector mapping:
+| `field` value | `selector_hint` |
+|---|---|
+| `card_number` | `input[name="cardnumber"]` |
+| `expiry_combined` | `input[name="exp-date"]` |
+| `cvv` | `input[name="cvc"]` |
+| `cardholder_name` | `input[name="cardholder-name"]` |
+| `billing_zip` | `input[name="postal"]` |
+
+All requests will return `status: "pending_approval"`.
+
+### Step 5 — Approve in the Aegis UI
+
+Navigate to `http://localhost:3000/route-run-approvals`.
+
+A **"Payment card fill request"** card (amber accent) will appear showing:
+- Visa Test Card ···4242
+- Requested fields as pills (card_number/cvv in red, others neutral)
+- Warning: "This fills card details only. It does not authorize a purchase. A separate approval is required before any payment is submitted."
+
+Click **"Allow card fill for Visa Test Card ···4242"**.
+
+### Step 6 — Execute each fill
+
+```bash
+curl -s -X POST http://localhost:4000/api/agent/v1/payment-card-fills/<fill_request_id>/execute \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+```
+
+Repeat for each `fill_request_id`.
+
+### Step 7 — Verify the results
+
+**In the agent browser:** Inspect the checkout page. All five fields should be filled:
+- `input[name="cardnumber"]` → `4242 4242 4242 4242` (masked in DOM — `.value` returns `""`)
+- `input[name="exp-date"]` → `12/27`
+- `input[name="cvc"]` → `123` (masked in DOM — `.value` returns `""`)
+- `input[name="cardholder-name"]` → `Jane Test`
+- `input[name="postal"]` → `12345`
+
+**URL must still be:** `http://localhost:3001/stripe-checkout.html`
+(If it changed to `stripe-confirmation.html`, the Pay button was clicked — test failure.)
+
+**Sensitive receipts:**
+```bash
+curl -s "http://localhost:4000/api/internal/sensitive-receipts/recent?event_group=payment" | jq .
+```
+Should show `payment_card_fill_executed` events for each filled field.
+
+**Every execute response must contain:**
+```json
+{
+  "raw_values_revealed_to_agent": false,
+  "purchase_not_authorized": true
+}
+```
+
+### Step 8 — Verify the Pay button was NOT clicked
+
+The page URL must remain `stripe-checkout.html`. Navigating to `stripe-confirmation.html` is a failure condition.
+
+The `stripe-confirmation.html` page includes a prominent warning if reached during card fill testing.
+
+### Strict guard lines (do not cross in tests or production code)
+
+- Do NOT call `POST /api/agent/v1/purchase-confirmations` — returns 404, not implemented
+- Do NOT add logic to click `#pay-button` in `paymentCardFill.ts`
+- Do NOT submit the form via CDP `requestSubmit()`, keyboard `Enter`, or any click
+- Do NOT use the Stripe test card numbers with a real Stripe API
+
+---
 
 ---
 

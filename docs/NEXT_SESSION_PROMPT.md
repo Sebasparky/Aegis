@@ -5,6 +5,40 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## Verification System v1 Direction (2026-05-23)
+
+Architecture designed in `docs/VERIFICATION_ARCHITECTURE.md`. No implementation yet — types, routes, and UI are all pending. First increment is types + store Maps + signing helpers. The design is provider-agnostic: Antigen orchestrates verification via a `VerificationProvider` interface; v1 uses mock providers only (email via existing challenge relay, student, gov ID stubs). Core types: `VerificationCard` (signed EdDSA JWS, same pattern as `DelegationPassport`), `VerifiedClaim` (normalized — no raw documents), `DisclosureReceipt` (immutable audit of what was shared and to whom). Scoped disclosure uses the existing approval inbox. `raw_document_revealed_to_agent: false` is a literal on all agent-facing responses. Completed gov ID / email verification updates `DelegationPassport.human_subject.identity_level`. Sensitive Evidence Vault (encrypted raw document custody) is post-launch and out of scope for v1.
+
+---
+
+## Skills / Rails Checkpoint (2026-05-23)
+
+Full audit in `docs/SKILLS_RAILS_AUDIT.md`. Most of the Skills/Rails/Marketplace system is a working prototype:
+
+- Route recording, compilation, verification, 6-tier trust hierarchy ✓
+- Marketplace review queue → skill publication → install/uninstall ✓
+- `aegis_controlled` RouteRun lifecycle (create → approve → Playwright → receipt) ✓
+- Approval inbox, spending limits, step-up flow ✓
+- MCP tools: `discover_installed_skills`, `get_agent_runnable_workflow`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt`, `start_playwright_route_run` ✓
+- UI pages: /rails, /marketplace, /skill-library, /marketplace-review, /route-run-approvals ✓
+
+**Identified gap:** `agent_runnable` skill runs are orphaned. The run lifecycle endpoints (`start`, `complete`, `fail`) exist in `route-runs.ts` but have no MCP wrappers. Agent can discover a skill and get the recipe but cannot close the receipt loop. `aegis_controlled` flows work; `agent_runnable` flows do not generate receipts.
+
+**Recommended next milestone: Agent-Runnable Skill Run Lifecycle v1**
+
+Add three MCP tools:
+- `start_skill_run({ run_id })` → transitions `pending → running`
+- `complete_skill_run({ run_id, browser_session_id? })` → transitions `running → completed`, generates receipt
+- `fail_skill_run({ run_id, error, browser_session_id? })` → transitions `running → failed`, generates receipt
+
+Add `task_browser_session_id?: string` to `RouteRun` and `RouteRunReceipt` types.
+
+Files: `aegis-tool-server.mjs`, `routes/route-runs.ts`, `store/index.ts`, `packages/types/src/index.ts`.
+
+Do not rebuild: route recording, route verification, skills marketplace, existing MCP tools, approval flow, Playwright runtime, payment methods, credential step handoff, or local runtime browser endpoint.
+
+---
+
 ## ⚠️ DO NOT Rebuild Completed Increments
 
 The items below are **fully implemented and committed**. Do not re-implement, re-plan, or recreate any of them.

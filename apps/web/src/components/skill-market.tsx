@@ -200,19 +200,19 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
   const replayPosterAsset = replayAssets?.find(a => a.kind === "poster_frame");
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [videoVisible, setVideoVisible] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     if (replaying) {
+      setVideoVisible(false);
       video.currentTime = 0;
       video.play().catch(() => {});
-      // videoPlaying stays false until canplay/playing fires — poster remains visible
     } else {
+      setVideoVisible(false);
       video.pause();
       video.currentTime = 0;
-      setVideoPlaying(false);
     }
   }, [replaying]);
 
@@ -242,23 +242,33 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
       {/* Preview content: replay video > static screenshot > neutral fallback */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
         {replayVideoAsset ? (
-          <div className="route-replay-media">
-            {/* Video always mounted for preloading; poster stays on top until video is actually playing */}
+          <div
+            className="route-replay-media"
+            style={posterSrc ? {
+              backgroundImage: `url(${posterSrc})`,
+            } : undefined}
+          >
+            {/* Video opacity-0 until first frame confirmed painted; poster is the CSS background */}
             <video
               ref={videoRef}
-              className="route-replay-video"
+              className={`route-replay-video${videoVisible ? " route-replay-video--visible" : ""}`}
               src={`${BASE}${replayVideoAsset.url_path}`}
               muted
               playsInline
               preload="auto"
-              onCanPlay={() => { if (replaying) setVideoPlaying(true); }}
-              onPlaying={() => { if (replaying) setVideoPlaying(true); }}
+              onPlaying={() => {
+                if (!replaying) return;
+                requestAnimationFrame(() => {
+                  requestAnimationFrame(() => {
+                    if (videoRef.current && !videoRef.current.paused) {
+                      setVideoVisible(true);
+                    }
+                  });
+                });
+              }}
             />
-            {(!replaying || !videoPlaying) && posterSrc && (
-              <img className="route-replay-poster" src={posterSrc} alt="" />
-            )}
-            {(!replaying || !videoPlaying) && !posterSrc && (
-              <div style={{ position: "absolute", inset: 0 }}>
+            {!posterSrc && (
+              <div className={`route-replay-fallback-overlay${videoVisible ? " route-replay-fallback-overlay--hidden" : ""}`}>
                 <NeutralFallback name={name} domain={domain} steps={steps} />
               </div>
             )}

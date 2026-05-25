@@ -1273,19 +1273,33 @@ body {
 
 /* ── Route Replay Video / Poster ────────────────────────────────────────────── */
 
+/* Poster baked into CSS background — never a separate layer that can flash */
 .route-replay-media {
-  position: relative; flex: 1; overflow: hidden; background: #fff;
+  position: relative; flex: 1; overflow: hidden;
+  background-color: #fff;
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .route-replay-video {
   width: 100%; height: 100%;
   display: block; object-fit: contain; object-position: center;
-  background: #fff;
+  background: transparent;
+  opacity: 0; transition: opacity 120ms ease;
 }
-.route-replay-poster {
+.route-replay-video--visible { opacity: 1; }
+
+/* Fallback overlay when no posterSrc */
+.route-replay-fallback-overlay {
   position: absolute; inset: 0;
-  width: 100%; height: 100%;
-  display: block; object-fit: contain; object-position: center;
-  background: #fff; user-select: none; pointer-events: none;
+  display: flex; flex-direction: column;
+  opacity: 1; transition: opacity 120ms ease; z-index: 2;
+}
+.route-replay-fallback-overlay--hidden { opacity: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .route-replay-video,
+  .route-replay-fallback-overlay { transition: none; }
 }
 
 /* ── Route Preview (real captured screenshots) ──────────────────────────────── */

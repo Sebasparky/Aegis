@@ -32,6 +32,7 @@ import type {
   ProfileFieldKind,
   ProfileFieldRequest,
   ProfileFieldFillRequest,
+  ProfileMemoryRequest,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -68,6 +69,7 @@ import {
   purchaseConfirmationHandoffs,
   privateProfileMemory,
   profileFieldFillRequests,
+  profileMemoryRequests,
   encryptedSecretVault,
   challengeEmailResolutions,
   aegisWorkspaces,
@@ -4206,13 +4208,31 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         if (!found) missingFields.push(f.key!);
       }
       if (missingFields.length > 0) {
-        return reply.status(422).send({
-          ok: false,
-          error: {
-            code: "VALUE_NOT_FOUND",
-            message: `Antigen does not have stored values for: ${missingFields.join(", ")}. ` +
-              `Report to the user that Antigen does not have these values yet.`,
+        const MR_NOW = new Date().toISOString();
+        const memReqId = newId("pmreq");
+        const memReq: ProfileMemoryRequest = {
+          request_id: memReqId,
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          domain: body.domain,
+          page_url: body.page_url,
+          missing_fields: missingFields as ProfileFieldKind[],
+          reason: body.reason,
+          status: "pending_user",
+          raw_profile_value_revealed_to_agent: false,
+          created_at: MR_NOW,
+          expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        };
+        profileMemoryRequests.set(memReqId, memReq);
+        schedulePersist();
+        return reply.send({
+          ok: true,
+          data: {
+            status: "pending_user",
+            profile_memory_request_id: memReqId,
             missing_fields: missingFields,
+            next_action: "Tell the user: ‘Antigen needs some profile information to fill this form. Please complete the request in Antigen\\’s approvals page.’ Do not ask the user for these values in chat. After the user indicates completion, retry request_profile_field_fill.",
+            raw_profile_value_revealed_to_agent: false,
           },
         });
       }

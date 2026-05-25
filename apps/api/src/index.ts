@@ -50,6 +50,7 @@ import { secretFieldInjectionRoutes } from "./routes/secret-field-injections.js"
 import { paymentCardFillRoutes } from "./routes/payment-card-fills.js";
 import { purchaseConfirmationRoutes } from "./routes/purchase-confirmations.js";
 import { profileFieldFillRoutes } from "./routes/profile-field-fills.js";
+import { profileMemoryRequestRoutes } from "./routes/profile-memory-requests.js";
 import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
 import {
   expireInactiveTaskBrowserSessions,
@@ -156,6 +157,7 @@ async function main() {
   await server.register(paymentCardFillRoutes);
   await server.register(purchaseConfirmationRoutes);
   await server.register(profileFieldFillRoutes);
+  await server.register(profileMemoryRequestRoutes);
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);

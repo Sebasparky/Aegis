@@ -129,6 +129,7 @@ import {
   encryptedSecretVault,
   profileFieldFillRequests,
   privateProfileMemory,
+  profileMemoryRequests,
   MOCK_USER_ID,
 } from "../store/index.js";
 import type { PassWithToken } from "../store/index.js";
@@ -155,6 +156,7 @@ beforeEach(() => {
   encryptedSecretVault.clear();
   profileFieldFillRequests.clear();
   privateProfileMemory.clear();
+  profileMemoryRequests.clear();
   profileFillMock.success = true;
   profileFillMock.error = undefined;
 });
@@ -305,7 +307,7 @@ describe("POST /api/agent/v1/profile-field-fills", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("5. field not in memory → 422 VALUE_NOT_FOUND with missing_fields", async () => {
+  it("5. field not in memory → 200 pending_user with profile_memory_request_id", async () => {
     seedDelegation();
     // Seed only first_name, request email too
     seedProfileMemory(["first_name"]);
@@ -320,11 +322,13 @@ describe("POST /api/agent/v1/profile-field-fills", () => {
       reason: "Filling checkout form",
     });
 
-    expect(statusCode).toBe(422);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("VALUE_NOT_FOUND");
-    expect(body.error.missing_fields).toContain("email");
-    expect(body.error.missing_fields).not.toContain("first_name");
+    expect(statusCode).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("pending_user");
+    expect(body.data.profile_memory_request_id).toMatch(/^pmreq_/);
+    expect(body.data.missing_fields).toContain("email");
+    expect(body.data.missing_fields).not.toContain("first_name");
+    expect(body.data.raw_profile_value_revealed_to_agent).toBe(false);
   });
 
   it("6. domain mismatch → 400 DOMAIN_MISMATCH", async () => {

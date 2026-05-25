@@ -3952,20 +3952,27 @@ const TOOLS = [
     description:
       "Request Aegis to fill checkout contact and shipping fields (name, email, phone, address) " +
       "in the active browser via CDP — without the agent ever receiving raw values.\n\n" +
-      "DO NOT ask the user in chat for checkout name, email, phone, or address first. " +
-      "Ask Antigen to fill them here. If Antigen returns VALUE_NOT_FOUND, report to the user " +
-      "that Antigen does not have that value yet.\n\n" +
+      "DO NOT ask the user in chat for checkout name, email, phone, or address. " +
+      "Call this tool first. Antigen will ask the user if values are missing.\n\n" +
       "USE FOR: first_name, last_name, email, phone, shipping_address_line1, shipping_address_line2, " +
       "city, region, postal_code, country.\n\n" +
       "WHAT THIS IS NOT:\n" +
       "- Card number, CVV, expiry → use request_payment_card_fill\n" +
       "- Login credentials → use request_secret_field_injection\n" +
       "- Final order button → use request_purchase_confirmation\n\n" +
-      "FLOW:\n" +
+      "FLOW (values already stored):\n" +
       "1. Call request_profile_field_fill with all checkout fields at once (up to 10 per call).\n" +
       "2. Call execute_profile_field_fill with the returned fill_request_id.\n" +
       "3. Verify the fields are filled in the browser, then proceed. " +
       "You own all navigation and form submission decisions.\n\n" +
+      "FLOW (values missing — status: pending_user):\n" +
+      "1. Call request_profile_field_fill — if Antigen lacks values, it returns:\n" +
+      "   { status: 'pending_user', profile_memory_request_id, missing_fields, next_action }\n" +
+      "2. Tell the user: 'Antigen needs some profile information to fill this form. " +
+      "Please complete the request in Antigen\\'s approvals page.'\n" +
+      "3. Do NOT ask the user for the field values in chat.\n" +
+      "4. After the user indicates they have completed the request in Antigen, " +
+      "call request_profile_field_fill again with the same parameters.\n\n" +
       "RAW VALUES ARE NEVER RETURNED. Response includes masked summaries only.",
     inputSchema: {
       type: "object",

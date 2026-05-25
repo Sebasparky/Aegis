@@ -49,6 +49,10 @@ import {
   type PaymentCardFillAuthorizationView,
   type PaymentCardField,
   type PurchaseConfirmationAuthorizationView,
+  listProfileMemoryRequests,
+  submitProfileMemoryRequest,
+  cancelProfileMemoryRequest,
+  type ProfileMemoryRequestView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -1371,6 +1375,145 @@ function ActiveGrantsPanel({ grants }: { grants: SensitiveGrant[] }) {
   );
 }
 
+// ── Profile memory request card ───────────────────────────────────────────────
+
+const PROFILE_FIELD_LABELS: Record<string, string> = {
+  first_name: "First name",
+  last_name: "Last name",
+  email: "Email address",
+  phone: "Phone number",
+  shipping_address_line1: "Street address",
+  shipping_address_line2: "Address line 2 (optional)",
+  city: "City",
+  region: "State / Province",
+  postal_code: "Postal code",
+  country: "Country",
+};
+
+function profileFieldInputType(field: string): string {
+  if (field === "email") return "email";
+  if (field === "phone") return "tel";
+  return "text";
+}
+
+function PendingProfileMemoryRequestCard({
+  req,
+  onSaved,
+  onCancelled,
+}: {
+  req: ProfileMemoryRequestView;
+  onSaved: () => void;
+  onCancelled: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(
+    Object.fromEntries(req.missing_fields.map((f) => [f, ""])),
+  );
+  const [saving, setSaving] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  function setValue(field: string, val: string) {
+    setValues((prev) => ({ ...prev, [field]: val }));
+  }
+
+  const allFilled = req.missing_fields.every((f) => (values[f] ?? "").trim() !== "");
+
+  async function handleSave() {
+    if (saving || !allFilled) return;
+    setSaving(true);
+    try {
+      await submitProfileMemoryRequest(req.request_id, values, true);
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      await cancelProfileMemoryRequest(req.request_id);
+      onCancelled();
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  return (
+    <div className="apr-card apr-card--amber">
+      <div className="apr-card__head">
+        <div>
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
+            Profile information needed
+          </p>
+          <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", fontFamily: "monospace", margin: 0 }}>{req.domain}</p>
+        </div>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>Waiting</span>
+      </div>
+
+      <div className="apr-card__body">
+        <SectionCard label="Why Antigen needs this">
+          <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, lineHeight: 1.55 }}>{req.reason}</p>
+        </SectionCard>
+
+        <SectionCard label="Provide missing values">
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {req.missing_fields.map((field) => (
+              <div key={field}>
+                <label style={{ fontSize: 12, color: "var(--ink-3)", display: "block", marginBottom: 4 }}>
+                  {PROFILE_FIELD_LABELS[field] ?? field}
+                </label>
+                <input
+                  type={profileFieldInputType(field)}
+                  value={values[field] ?? ""}
+                  onChange={(e) => setValue(field, e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && allFilled) handleSave(); }}
+                  placeholder={PROFILE_FIELD_LABELS[field] ?? field}
+                  disabled={saving}
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    background: "var(--surface-1)", border: "1px solid var(--hairline)",
+                    borderRadius: "var(--r-2)", padding: "8px 12px",
+                    fontSize: 13, color: "var(--ink-1)",
+                    fontFamily: "inherit",
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+
+        <SectionCard label="Privacy">
+          <CheckList items={[
+            "Antigen encrypts these values with KMS — raw values are never returned to the agent.",
+            "Values are injected directly into the website form. The agent only receives masked summaries.",
+            "You can update stored profile values at any time.",
+          ]} />
+        </SectionCard>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            disabled={saving || cancelling || !allFilled}
+            onClick={handleSave}
+            className="a-btn a-btn--primary"
+          >
+            {saving ? "Saving…" : "Save to Antigen"}
+          </button>
+          <button
+            disabled={saving || cancelling}
+            onClick={handleCancel}
+            className="a-btn a-btn--ghost"
+          >
+            {cancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{req.request_id}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function RouteRunApprovalsPage() {
@@ -1382,6 +1525,7 @@ export default function RouteRunApprovalsPage() {
   const [cardFillAuths, setCardFillAuths] = useState<PaymentCardFillAuthorizationView[]>([]);
   const [purchaseConfirmations, setPurchaseConfirmations] = useState<PurchaseConfirmationAuthorizationView[]>([]);
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
+  const [profileMemReqs, setProfileMemReqs] = useState<ProfileMemoryRequestView[]>([]);
   const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1406,8 +1550,9 @@ export default function RouteRunApprovalsPage() {
       listLoginDiagnostics().catch(() => []),
       listPaymentCardFillAuthorizations("pending_approval").catch(() => []),
       listPurchaseConfirmationAuthorizations("pending_approval").catch(() => []),
+      listProfileMemoryRequests("pending_user").catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1419,6 +1564,7 @@ export default function RouteRunApprovalsPage() {
         setLoginDiagnostics(diags);
         setCardFillAuths(cardAuths);
         setPurchaseConfirmations(pconfs);
+        setProfileMemReqs(pmreqs);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1646,13 +1792,21 @@ export default function RouteRunApprovalsPage() {
     }
   }
 
+  function handleProfileMemReqSaved(id: string) {
+    setProfileMemReqs((prev) => prev.filter((r) => r.request_id !== id));
+  }
+
+  function handleProfileMemReqCancelled(id: string) {
+    setProfileMemReqs((prev) => prev.filter((r) => r.request_id !== id));
+  }
+
   function handleDismissDiagnostic(id: string) {
     setDismissedDiagnostics((prev) => new Set(prev).add(id));
   }
 
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length;
 
   return (
     <div className="page">
@@ -1953,6 +2107,26 @@ export default function RouteRunApprovalsPage() {
                       onComplete={() => handleCompleteChallenge(ch.challenge_id)}
                       onCancel={() => handleCancelChallenge(ch.challenge_id)}
                       emailResolverStatus={emailResolverStatus}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Profile information needed */}
+              {profileMemReqs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Profile information needed</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent needs profile values to fill a checkout form. Provide them here — Antigen stores and fills them without revealing raw values to the agent.
+                    </p>
+                  </div>
+                  {profileMemReqs.map((r) => (
+                    <PendingProfileMemoryRequestCard
+                      key={r.request_id}
+                      req={r}
+                      onSaved={() => handleProfileMemReqSaved(r.request_id)}
+                      onCancelled={() => handleProfileMemReqCancelled(r.request_id)}
                     />
                   ))}
                 </div>

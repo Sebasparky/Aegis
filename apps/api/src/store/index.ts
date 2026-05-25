@@ -44,6 +44,7 @@ import type {
   TrustSignalDisclosureRecord,
   PrivateProfileMemoryItem,
   ProfileFieldFillRequest,
+  ProfileMemoryRequest,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -313,6 +314,10 @@ export const privateProfileMemory = new Map<string, PrivateProfileMemoryItem>();
 
 // Per-request fill records. Ephemeral — expired on restart (CDP browser context is gone).
 export const profileFieldFillRequests = new Map<string, ProfileFieldFillRequest>();
+
+// Pending profile memory requests — created when profile-field-fill is missing values.
+// Persisted for UI continuity; pending_user requests are expired on restart.
+export const profileMemoryRequests = new Map<string, ProfileMemoryRequest>();
 
 // ─── Purchase Confirmation Handoff v1 ─────────────────────────────────────────
 // Separate from PaymentCardFillAuthorization — purchase_action_authorized starts false.

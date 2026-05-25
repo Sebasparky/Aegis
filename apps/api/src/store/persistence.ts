@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem, ProfileMemoryRequest } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -51,6 +51,7 @@ import {
   disclosureReceipts,
   trustSignalDisclosureRecords,
   privateProfileMemory,
+  profileMemoryRequests,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -610,6 +611,7 @@ export function persistStore(): void {
       trustSignalDisclosureRecords: Array.from(trustSignalDisclosureRecords.entries()),
       // verificationProviderSessions intentionally omitted — ephemeral; browser context gone on restart.
       privateProfileMemory: Array.from(privateProfileMemory.entries()),
+      profileMemoryRequests: Array.from(profileMemoryRequests.entries()),
       // profileFieldFillRequests intentionally omitted — ephemeral (CDP context gone on restart).
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
@@ -690,6 +692,13 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.trustSignalDisclosureRecords ?? [])) trustSignalDisclosureRecords.set(k, v as TrustSignalDisclosureRecord);
     for (const [k, v] of (data.privateProfileMemory ?? [])) privateProfileMemory.set(k, v as PrivateProfileMemoryItem);
     // profileFieldFillRequests: not persisted — ephemeral by design (CDP context gone on restart).
+
+    // Profile memory requests — pending_user requests are expired on restart (CDP context may be gone).
+    for (const [k, v] of (data.profileMemoryRequests ?? [])) {
+      const r = v as ProfileMemoryRequest;
+      if (r.status === "pending_user") r.status = "expired";
+      profileMemoryRequests.set(k, r);
+    }
     // verificationProviderSessions: not persisted — ephemeral by design.
 
     // Injection requests cannot survive restart — CDP browser context is gone.

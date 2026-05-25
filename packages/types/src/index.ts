@@ -2923,3 +2923,27 @@ export interface ProfileFieldFillResult {
   note: string;
   error?: string;
 }
+
+// ─── Profile Memory Request v1 ────────────────────────────────────────────────
+// Created when request_profile_field_fill is called but Antigen lacks the
+// requested values. Surfaces a card in /route-run-approvals for the user to
+// provide the missing values. Raw values are never stored inline or returned.
+
+export type ProfileMemoryRequestStatus = "pending_user" | "completed" | "expired" | "cancelled";
+
+/** A pending request for the user to supply missing profile field values. */
+export interface ProfileMemoryRequest {
+  request_id: string;           // "pmreq_..."
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  page_url: string;
+  missing_fields: ProfileFieldKind[];
+  reason: string;
+  status: ProfileMemoryRequestStatus;
+  /** Always the literal false — raw profile values are never returned to the agent. */
+  raw_profile_value_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  completed_at?: string;
+}

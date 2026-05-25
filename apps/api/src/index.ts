@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
-import { dirname, resolve } from "path";
+import { dirname, resolve, join } from "path";
+import { readFile } from "fs/promises";
 const __filename = fileURLToPath(import.meta.url);
 dotenv.config({ path: resolve(dirname(__filename), "../../../.env") });
 
@@ -47,6 +48,7 @@ import { agentApiRoutes } from "./routes/agent-api.js";
 import { authenticatedSessionRoutes } from "./routes/authenticated-sessions.js";
 import { secretFieldInjectionRoutes } from "./routes/secret-field-injections.js";
 import { paymentCardFillRoutes } from "./routes/payment-card-fills.js";
+import { purchaseConfirmationRoutes } from "./routes/purchase-confirmations.js";
 import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
 import { expireInactiveTaskBrowserSessions } from "./runtime/taskBrowserSessions.js";
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
@@ -54,6 +56,7 @@ import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
 import { sensitiveGrantRoutes } from "./routes/sensitive-grants.js";
 import { workspaceRoutes } from "./routes/workspaces.js";
+import { verificationRoutes } from "./routes/verifications.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -84,6 +87,25 @@ async function main() {
   server.get("/", async () => {
     return { ok: true, data: { name: "Antigen API", version: "0.1.0" } };
   });
+
+  server.get<{ Params: { filename: string } }>(
+    "/api/route-preview-assets/:filename",
+    async (req, reply) => {
+      const { filename } = req.params;
+      if (!/^[a-zA-Z0-9_-]+\.png$/.test(filename)) {
+        return reply.status(400).send({ ok: false, error: { code: "INVALID_FILENAME", message: "Invalid filename." } });
+      }
+      const previewDir = join(dirname(fileURLToPath(import.meta.url)), "../.data/route-previews");
+      try {
+        const buf = await readFile(join(previewDir, filename));
+        reply.header("Content-Type", "image/png");
+        reply.header("Cache-Control", "public, max-age=86400");
+        return reply.send(buf);
+      } catch {
+        return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Preview asset not found." } });
+      }
+    }
+  );
 
   await server.register(userRoutes);
   await server.register(collarRoutes);
@@ -123,12 +145,14 @@ async function main() {
   await server.register(authenticatedSessionRoutes);
   await server.register(secretFieldInjectionRoutes);
   await server.register(paymentCardFillRoutes);
+  await server.register(purchaseConfirmationRoutes);
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);
   await server.register(sensitiveGrantRoutes);
   await server.register(workspaceRoutes);
+  await server.register(verificationRoutes);
   await server.register(agentApiRoutes);
 
   if (process.env.NODE_ENV !== "production") {

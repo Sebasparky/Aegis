@@ -41,9 +41,10 @@ import type {
   AgentConnectorPlatform,
   ConnectorPolicyMode,
   ConnectorStatus,
+  RoutePreviewAsset,
 } from "@aegis/types";
 
-const BASE = "http://localhost:4000";
+export const BASE = "http://localhost:4000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -258,6 +259,8 @@ export const queryRoutes = (body: { domain: string; min_trust_tier?: string }) =
   });
 export const verifyRoute = (routeId: string) =>
   request<RouteVerificationReport>(`/api/routes/${routeId}/verify`, { method: "POST", body: JSON.stringify({}) });
+export const triggerPreviewCapture = (routeId: string) =>
+  request<{ captured: boolean; reason?: string; asset?: RoutePreviewAsset }>(`/api/routes/${routeId}/capture-preview`, { method: "POST", body: JSON.stringify({}) });
 export const patchRoute = (routeId: string, body: { workflow_name?: string; workflow_description?: string }) =>
   request<AegisRoute>(`/api/routes/${routeId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const submitRouteForReview = (routeId: string) =>
@@ -286,10 +289,11 @@ export type RouteRunWithSummary = RouteRun & {
   skill_summary: { skill_id: string; name: string; domain: string; risk_level?: string; execution_mode?: string; sensitivity_level?: string } | null;
   route_summary: { route_id: string; workflow_name: string; trust_tier: string; step_count: number; start_url?: string } | null;
 };
-export const listRouteRuns = (params?: { domain?: string; status?: string }) => {
+export const listRouteRuns = (params?: { domain?: string; status?: string; route_id?: string }) => {
   const entries: [string, string][] = [];
   if (params?.domain) entries.push(["domain", params.domain]);
   if (params?.status) entries.push(["status", params.status]);
+  if (params?.route_id) entries.push(["route_id", params.route_id]);
   const qs = entries.length ? "?" + new URLSearchParams(entries).toString() : "";
   return request<RouteRunWithSummary[]>(`/api/route-runs${qs}`);
 };

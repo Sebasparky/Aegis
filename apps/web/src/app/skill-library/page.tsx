@@ -3,97 +3,77 @@
 import { useEffect, useState } from "react";
 import type { InstalledSkill, Skill } from "@aegis/types";
 import { listInstalledSkills, uninstallSkill } from "../../lib/api";
+import { SkillPreviewPane, SkillDetailModal, trustBadgeVariant, trustBadgeLabel, riskPillColor, friendlyShortDate } from "@/components/skill-market";
 
-const TIER_LABEL: Record<string, string> = {
-  unverified_draft: "Draft",
-  community: "Community",
-  aegis_scanned: "Verified",
-  aegis_reviewed: "Reviewed",
-  run_verified: "Run Verified",
-  business_official: "Business Official",
-};
-
-const RISK_COLORS: Record<string, string> = {
-  low: "text-green-400",
-  medium: "text-yellow-400",
-  high: "text-orange-400",
-  critical: "text-red-400",
-};
-
-function friendlyDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+type PillColor = "green" | "amber" | "red" | "blue" | "graphite";
+function pillStyle(color: PillColor): React.CSSProperties {
+  const map: Record<PillColor, React.CSSProperties> = {
+    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
+    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
+    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"  },
+    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
+    graphite: { background: "var(--graphite-soft)", color: "var(--ink-3)",         border: "1px solid var(--hairline)"  },
+  };
+  return { ...map[color], fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, display: "inline-flex", alignItems: "center" };
 }
 
 type InstalledItem = InstalledSkill & { skill: Skill };
 
-function SkillLibraryCard({
-  item,
-  onUninstall,
-}: {
-  item: InstalledItem;
-  onUninstall: (installedSkillId: string) => void;
-}) {
-  const [acting, setActing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleUninstall() {
-    setActing(true);
-    setError(null);
-    try {
-      await uninstallSkill(item.skill.skill_id);
-      onUninstall(item.installed_skill_id);
-    } catch (err: any) {
-      setError(err.message ?? "Action failed.");
-      setActing(false);
-    }
-  }
-
+function InstalledSkillCard({ item, onClick }: { item: InstalledItem; onClick: () => void }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div className="p-5 space-y-3">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1 min-w-0">
-            <p className="text-sm font-semibold text-white truncate">{item.skill.name}</p>
-            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">
-              <span className="font-mono text-gray-400">{item.skill.domain}</span>
-              <span className={RISK_COLORS[item.skill.risk_level] ?? "text-gray-400"}>
-                {item.skill.risk_level} risk
-              </span>
-              <span className="text-gray-600">
-                {TIER_LABEL[item.skill.trust_tier] ?? item.skill.trust_tier}
-              </span>
-            </div>
+    <button className="skill-mcard" onClick={onClick} type="button">
+      <div className="skill-mcard__preview">
+        <SkillPreviewPane
+          domain={item.skill.domain}
+          name={item.skill.name}
+          steps={[]}
+          trustTier={item.skill.trust_tier}
+          executionMode={item.skill.execution_mode}
+        />
+        <div className="skill-mcard__overlay">
+          {item.skill.summary && (
+            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.5, flex: 1, overflow: "hidden" }}>
+              {item.skill.summary}
+            </p>
+          )}
+          <div style={{ flexShrink: 0 }}>
+            <span style={{ fontSize: 12, color: "var(--blue)", fontWeight: 500 }}>Click to view details →</span>
           </div>
-          <span className="shrink-0 text-xs text-gray-600">
-            Installed {friendlyDate(item.installed_at)}
-          </span>
-        </div>
-
-        {item.skill.summary && (
-          <p className="text-xs text-gray-500 leading-relaxed">{item.skill.summary}</p>
-        )}
-
-        {error && (
-          <p className="text-xs text-red-400 bg-red-950 border border-red-900 rounded px-3 py-2">{error}</p>
-        )}
-
-        <div>
-          <button
-            onClick={handleUninstall}
-            disabled={acting}
-            className="text-xs px-3 py-1.5 rounded-md border border-gray-700 text-gray-500 hover:text-red-400 hover:border-red-800 disabled:opacity-50 transition-colors"
-          >
-            {acting ? "…" : "Uninstall"}
-          </button>
         </div>
       </div>
-    </div>
+      <div className="skill-mcard__body">
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+          <span className="skill-badge skill-badge--installed">Installed</span>
+          <span className={`skill-badge skill-badge--${trustBadgeVariant(item.skill.trust_tier)}`}>
+            {trustBadgeLabel(item.skill.trust_tier)}
+          </span>
+        </div>
+        <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{item.skill.name}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
+          <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{item.skill.domain}</span>
+          {item.skill.risk_level && item.skill.risk_level !== "low" && (
+            <>
+              <span className="dot-sep">·</span>
+              <span style={pillStyle(riskPillColor(item.skill.risk_level))}>{item.skill.risk_level} risk</span>
+            </>
+          )}
+          <span className="dot-sep">·</span>
+          <span style={{ color: "var(--ink-4)" }}>Installed {friendlyShortDate(item.installed_at)}</span>
+        </div>
+        {item.skill.summary && (
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {item.skill.summary}
+          </p>
+        )}
+      </div>
+    </button>
   );
 }
 
 export default function SkillLibraryPage() {
   const [items, setItems] = useState<InstalledItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [modalItemId, setModalItemId] = useState<string | null>(null);
 
   useEffect(() => {
     listInstalledSkills().then(setItems).finally(() => setLoading(false));
@@ -101,36 +81,74 @@ export default function SkillLibraryPage() {
 
   function handleUninstall(installedSkillId: string) {
     setItems(prev => prev.filter(i => i.installed_skill_id !== installedSkillId));
+    setModalItemId(null);
   }
 
+  function handleInstallChange(skillId: string, installed: boolean) {
+    if (!installed) {
+      // Remove the item from the library on uninstall
+      setItems(prev => prev.filter(i => i.skill.skill_id !== skillId));
+      setModalItemId(null);
+    }
+  }
+
+  const selectedItem = modalItemId ? items.find(i => i.skill.skill_id === modalItemId) ?? null : null;
+
   return (
-    <div className="max-w-2xl space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold text-white">Skill Library</h1>
-        <p className="mt-2 text-gray-400 text-sm leading-relaxed">
-          Your installed skills. Agents operating under your delegations can discover and use these
-          skills when working on the matching domain.
+    <div className="page">
+      {selectedItem && (
+        <SkillDetailModal
+          routeId={selectedItem.skill.route_id}
+          onClose={() => setModalItemId(null)}
+          mode={{
+            type: "library",
+            skill: selectedItem.skill,
+            installedAt: selectedItem.installed_at,
+            onInstallChange: handleInstallChange,
+          }}
+        />
+      )}
+
+      {/* Hero */}
+      <div className="a-card" style={{ padding: "24px 28px 20px" }}>
+        <div className="a-eyebrow">Skill Library</div>
+        <h1 style={{ fontSize: 24, fontWeight: 600, color: "var(--ink-1)", margin: "6px 0 8px", letterSpacing: "-0.02em" }}>
+          Your Skill Library
+        </h1>
+        <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.6, maxWidth: 560 }}>
+          Installed skills available to your agents. Agents operating under your delegations can discover and use these
+          skills on the matching domain.
         </p>
+        {!loading && items.length > 0 && (
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "10px 0 0" }}>
+            {items.length} skill{items.length !== 1 ? "s" : ""} installed
+          </p>
+        )}
       </div>
 
       {loading ? (
-        <p className="text-gray-500 text-sm">Loading…</p>
+        <div className="skill-grid">
+          {[1, 2, 3].map(i => (
+            <div key={i} style={{ height: 260, borderRadius: "var(--r-3)", background: "var(--graphite-soft)", opacity: 0.35 }} />
+          ))}
+        </div>
       ) : items.length === 0 ? (
-        <div className="text-center py-14 text-gray-600 text-sm border border-dashed border-gray-800 rounded-xl space-y-1">
-          <p className="text-gray-500">No skills installed yet.</p>
-          <p className="text-gray-700 text-xs">
+        <div className="a-card" style={{ textAlign: "center", padding: "48px 24px" }}>
+          <p style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink-2)", margin: "0 0 6px" }}>No skills installed yet.</p>
+          <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
             Browse the{" "}
-            <a href="/marketplace" className="text-indigo-400 hover:underline">Marketplace</a>{" "}
-            to install verified skills.
+            <a href="/marketplace" style={{ color: "var(--blue)", textDecoration: "underline" }}>Marketplace</a>{" "}
+            to find and install verified skills.
           </p>
         </div>
       ) : (
-        <div className="space-y-4">
-          <p className="text-xs text-gray-600">
-            {items.length} skill{items.length !== 1 ? "s" : ""} installed
-          </p>
+        <div className="skill-grid">
           {items.map(item => (
-            <SkillLibraryCard key={item.installed_skill_id} item={item} onUninstall={handleUninstall} />
+            <InstalledSkillCard
+              key={item.installed_skill_id}
+              item={item}
+              onClick={() => setModalItemId(item.skill.skill_id)}
+            />
           ))}
         </div>
       )}

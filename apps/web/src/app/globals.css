@@ -969,6 +969,7 @@ body {
 .apr-card--amber { border-color: var(--amber-ring); }
 .apr-card--green { border-color: var(--green-ring); }
 .apr-card--blue  { border-color: var(--blue-ring); }
+.apr-card--red   { border-color: var(--red-ring); }
 
 .apr-card__head {
   display: flex; justify-content: space-between; align-items: flex-start;
@@ -1137,4 +1138,179 @@ body {
 .collar-section-label {
   font-size: 11px; font-weight: 600; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--ink-3); margin-bottom: 14px;
+}
+
+/* ── Skill Marketplace Grid ── */
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.skill-mcard {
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  overflow: hidden;
+  cursor: pointer;
+  position: relative;
+  transition: transform 0.18s cubic-bezier(.2,.7,.2,1), box-shadow 0.18s ease, border-color 0.18s;
+  box-shadow: var(--shadow-1);
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  width: 100%;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+.skill-mcard:hover {
+  transform: translateY(-2px) scale(1.005);
+  box-shadow: var(--shadow-3);
+  border-color: var(--hairline-2);
+}
+
+/* Preview thumbnail area */
+.skill-mcard__preview {
+  height: 176px;
+  background: linear-gradient(160deg, var(--bg-2) 0%, oklch(0.975 0.006 250) 100%);
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* Hover overlay — slides over preview on hover */
+.skill-mcard__overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.97);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.16s ease;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skill-mcard:hover .skill-mcard__overlay { opacity: 1; }
+
+/* Card body beneath the preview */
+.skill-mcard__body {
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 1;
+}
+
+/* Source / trust badges */
+.skill-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid transparent; flex-shrink: 0;
+}
+.skill-badge--private   { background: var(--graphite-soft); color: var(--ink-3);               border-color: var(--hairline); }
+.skill-badge--mkt       { background: var(--blue-soft);     color: oklch(0.45 0.09 240);        border-color: var(--blue-ring); }
+.skill-badge--installed { background: var(--green-soft);    color: oklch(0.42 0.09 150);        border-color: var(--green-ring); }
+.skill-badge--verified  { background: var(--green-soft);    color: oklch(0.42 0.09 150);        border-color: var(--green-ring); }
+.skill-badge--scanned   { background: var(--blue-soft);     color: oklch(0.45 0.09 240);        border-color: var(--blue-ring); }
+.skill-badge--pending   { background: var(--amber-soft);    color: oklch(0.45 0.12 75);         border-color: var(--amber-ring); }
+.skill-badge--draft     { background: var(--graphite-soft); color: var(--ink-4);                border-color: var(--hairline); }
+.skill-badge--sensitive { background: var(--amber-soft);    color: oklch(0.45 0.12 75);         border-color: var(--amber-ring); }
+
+/* Skill detail modal */
+.skill-modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(20,22,30,0.38);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
+  padding: 24px 16px;
+}
+.skill-modal {
+  background: var(--paper-solid);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-4);
+  box-shadow: var(--shadow-3);
+  width: 100%; max-width: 660px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+.skill-modal__header {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--paper-solid);
+  border-bottom: 1px solid var(--hairline);
+  padding: 18px 20px 16px;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+}
+.skill-modal__body {
+  padding: 20px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.skill-modal__section-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 10px;
+}
+.skill-modal__close {
+  width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-1); border: 1px solid var(--hairline);
+  background: transparent; color: var(--ink-3); cursor: pointer; font-size: 16px;
+  flex-shrink: 0;
+  transition: background 100ms, color 100ms;
+}
+.skill-modal__close:hover { background: var(--graphite-soft); color: var(--ink-1); }
+
+/* ── Route Preview (real captured screenshots) ──────────────────────────────── */
+
+.route-preview-frame {
+  flex: 1; overflow: hidden; display: flex;
+  align-items: flex-start; justify-content: center;
+  background: var(--bg-2);
+}
+.route-preview-image {
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: top;
+  display: block; user-select: none; pointer-events: none;
+}
+
+/* Neutral fallback — route-derived content, no fake website UI */
+.route-preview-fallback {
+  flex: 1; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px; overflow: hidden;
+}
+.route-preview-fallback__domain {
+  font-family: monospace; font-size: 9.5px; color: var(--ink-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.route-preview-fallback__name {
+  font-size: 11.5px; font-weight: 600; color: var(--ink-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.route-preview-step-marker {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; background: rgba(255,255,255,0.75);
+  border: 1px solid var(--hairline); border-radius: var(--r-1); overflow: hidden;
+}
+.route-preview-step-marker__num {
+  width: 15px; height: 15px; border-radius: 3px;
+  background: var(--graphite-soft); display: flex; align-items: center;
+  justify-content: center; font-size: 9px; color: var(--ink-3);
+  font-family: monospace; flex-shrink: 0;
+}
+.route-preview-step-marker__action {
+  font-size: 9.5px; color: oklch(0.45 0.09 240);
+  font-family: monospace; flex-shrink: 0;
+}
+.route-preview-step-marker__desc {
+  font-size: 10px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.route-preview-fallback__more {
+  font-size: 10px; color: var(--ink-4); padding-left: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-preview-image { transition: none; }
 }

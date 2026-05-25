@@ -1120,6 +1120,19 @@ export interface RouteStep {
   confidence_required: number;
 }
 
+export interface RoutePreviewAsset {
+  asset_id: string;
+  kind: "start_page" | "step_frame";
+  route_id: string;
+  step_id?: string;
+  url_path: string;
+  captured_at: string;
+  width?: number;
+  height?: number;
+  redaction_applied: boolean;
+  source: "verification_replay" | "manual_capture" | "dev_seed";
+}
+
 export interface AegisRoute {
   route_id: string;
   version: string;
@@ -1150,6 +1163,7 @@ export interface AegisRoute {
   sensitivity_level?: SensitivityLevel;
   url_match?: { hostname?: string; path_prefix?: string };
   start_url?: string;
+  preview_assets?: RoutePreviewAsset[];
 }
 
 export interface Skill {

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill } from "@aegis/types";
+import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, RoutePreviewAsset } from "@aegis/types";
 import { routes, newId, skills } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { compileRoute } from "../services/routeCompiler.js";
@@ -178,7 +178,56 @@ export async function routeRoutes(server: FastifyInstance) {
       routes.set(route.route_id, route);
       schedulePersist();
 
+      if (report.passed) {
+        import("../lib/routePreviewCapture.js")
+          .then(({ captureRouteStartPreview }) => captureRouteStartPreview(route))
+          .then((asset) => {
+            if (!asset) return;
+            if (!route.preview_assets) route.preview_assets = [];
+            route.preview_assets.push(asset);
+            route.preview_assets = route.preview_assets.filter(a => a.kind === "start_page").slice(-3);
+            routes.set(route.route_id, route);
+            schedulePersist();
+          })
+          .catch((err) => server.log.error(err, "Background preview capture failed"));
+      }
+
       return { ok: true, data: report };
+    }
+  );
+
+  /**
+   * POST /api/routes/:routeId/capture-preview
+   *
+   * Captures a screenshot of the route's start page as a preview asset.
+   * Returns captured: false when no capturable URL is available (e.g. localhost routes).
+   */
+  server.post<{ Params: { routeId: string } }>(
+    "/api/routes/:routeId/capture-preview",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      let asset: RoutePreviewAsset | null = null;
+      try {
+        const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+        asset = await captureRouteStartPreview(route);
+      } catch (err: any) {
+        server.log.error(err, "Preview capture error");
+        return sendError(reply, 500, "CAPTURE_ERROR", err?.message ?? "Capture failed.");
+      }
+
+      if (!asset) {
+        return reply.status(200).send({ ok: true, data: { captured: false, reason: "No capturable URL for this route." } });
+      }
+
+      if (!route.preview_assets) route.preview_assets = [];
+      route.preview_assets.push(asset);
+      route.preview_assets = route.preview_assets.filter(a => a.kind === "start_page").slice(-3);
+      routes.set(route.route_id, route);
+      schedulePersist();
+
+      return { ok: true, data: { captured: true, asset } };
     }
   );
 

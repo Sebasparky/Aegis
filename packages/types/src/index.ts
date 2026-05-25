@@ -1228,6 +1228,14 @@ export interface ExternalAgentSkillSummary {
   sensitivity_level?: SensitivityLevel;
   /** true when the calling delegation's active collar permits this skill's required_permissions. */
   execution_available?: boolean;
+  /** The underlying route_id — needed by get_agent_runnable_workflow to fetch the recipe. */
+  route_id?: string;
+  /** Origin of this skill entry in the discovery response. */
+  source?: "installed_skill" | "private_route";
+  /** true for private verified routes owned by the calling user — no marketplace install required. */
+  private_use_ready?: boolean;
+  /** false for private routes that have not been explicitly installed from the marketplace. */
+  installed?: boolean;
 }
 
 export interface ExternalAgentRunSummary {

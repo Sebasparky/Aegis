@@ -41,6 +41,7 @@ import type {
   AgentConnectorPlatform,
   ConnectorPolicyMode,
   ConnectorStatus,
+  VerificationType,
   RoutePreviewAsset,
 } from "@aegis/types";
 
@@ -1005,3 +1006,100 @@ export interface LoginDiagnosticView {
 
 export const listLoginDiagnostics = () =>
   request<LoginDiagnosticView[]>("/api/internal/login-diagnostics/recent");
+
+// ─── Verification Cards v1 ───────────────────────────────────────────────────
+// Safe view returned by list and revoke (toVerificationCardSummary in backend)
+export interface VerificationCardSummary {
+  card_id: string;
+  claim_types: VerificationType[];
+  assurance_level?: string;
+  disclosure_policy: string;
+  issued_at: string;
+  expires_at?: string;
+  revocation_status: "active" | "revoked";
+  jws_present: boolean;
+}
+
+// Detailed view returned by get and complete (toVerificationCardDetail in backend)
+// provider_reference_id intentionally omitted by the backend safe view
+export interface VerificationCardDetail {
+  card_id: string;
+  schema_version: string;
+  issuer: string;
+  claims: Array<{
+    claim_id: string;
+    claim_type: VerificationType;
+    claim_value: Record<string, string>;
+    assurance_level: string;
+    verified_at: string;
+    expires_at?: string;
+  }>;
+  disclosure_policy: string;
+  issued_at: string;
+  expires_at?: string;
+  revocation_status: "active" | "revoked";
+  limitations: {
+    raw_document_revealed_to_agent: false;
+    raw_document_revealed_to_website: false;
+    provider_result_only: true;
+    not_a_guarantee: true;
+  };
+  jws_present: boolean;
+}
+
+// Session response (fields directly, not nested; provider_session_id omitted by backend)
+export interface VerificationSessionView {
+  session_id: string;
+  verification_type: VerificationType;
+  provider_name: string;
+  status: string;
+  created_at?: string;
+  expires_at: string;
+  redirect_url?: string;
+}
+
+export const listVerificationTypes = () =>
+  request<{ providers: Array<{ name: string; supported_types: VerificationType[] }> }>(
+    "/api/verifications/types",
+  );
+
+export const createVerificationSession = (body: {
+  verification_type: VerificationType;
+  provider_name?: string;
+  mock_input?: unknown;
+}) =>
+  request<VerificationSessionView>("/api/verifications/sessions", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getVerificationSession = (sessionId: string) =>
+  request<VerificationSessionView>(`/api/verifications/sessions/${sessionId}`);
+
+export const completeVerificationSession = (sessionId: string, body?: { mock_input?: unknown }) =>
+  request<{ card: VerificationCardDetail }>(
+    `/api/verifications/sessions/${sessionId}/complete`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+
+export const listVerificationCards = () =>
+  request<{ cards: VerificationCardSummary[] }>("/api/verifications/cards");
+
+export const getVerificationCard = (cardId: string) =>
+  request<{ card: VerificationCardDetail }>(`/api/verifications/cards/${cardId}`);
+
+export const verifyVerificationCard = (cardId: string) =>
+  request<{
+    hash_valid: boolean;
+    signature_valid: boolean;
+    expired: boolean;
+    revoked: boolean;
+    jws_present: boolean;
+    error?: string;
+  }>(`/api/verifications/cards/${cardId}/verify`);
+
+export const revokeVerificationCard = (cardId: string) =>
+  request<{ card: VerificationCardSummary }>(
+    `/api/verifications/cards/${cardId}/revoke`,
+    { method: "POST" },
+  );

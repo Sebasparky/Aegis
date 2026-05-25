@@ -338,7 +338,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       delegation
     );
 
-    const result: ExternalAgentSkillSummary[] = visibleSkillIds
+    const installedResult: ExternalAgentSkillSummary[] = visibleSkillIds
       .map((skillId) => skills.get(skillId))
       .filter((s): s is NonNullable<typeof s> => s !== undefined)
       .filter((s) => !domain || s.domain === domain)
@@ -353,6 +353,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           : false;
         return {
           skill_id: s.skill_id,
+          route_id: s.route_id,
+          source: "installed_skill" as const,
+          installed: true,
           name: s.name,
           summary: s.summary,
           domain: s.domain,
@@ -365,7 +368,52 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         };
       });
 
-    return reply.send({ ok: true, data: result });
+    // Collect private verified routes owned by this user's delegation.
+    // A route qualifies if: owned by this user, verified (trust_tier !== unverified_draft),
+    // and not already covered by an installed skill (deduplicate by route_id).
+    const installedRouteIds = new Set(
+      visibleSkillIds
+        .map((id) => skills.get(id)?.route_id)
+        .filter((id): id is string => id !== undefined)
+    );
+    const userAegisId = `aid_${delegation.user_id}`;
+    const privateRoutes: ExternalAgentSkillSummary[] = [];
+
+    for (const route of routes.values()) {
+      if (route.creator_aegis_id !== userAegisId) continue;
+      if (route.trust_tier === "unverified_draft") continue;
+      if (installedRouteIds.has(route.route_id)) continue;
+      if (domain && route.domain !== domain) continue;
+
+      const requiredPerms = route.required_permissions ?? [];
+      const execution_available = collarResult.ok
+        ? requiredPerms.every(
+            (p) =>
+              !collarResult.collar.blocked_actions.includes(p as any) &&
+              (collarResult.collar.allowed_actions.includes(p as any) ||
+                collarResult.collar.approval_required_actions.includes(p as any))
+          )
+        : false;
+
+      privateRoutes.push({
+        skill_id: `private_route:${route.route_id}`,
+        route_id: route.route_id,
+        source: "private_route",
+        private_use_ready: true,
+        installed: false,
+        name: route.workflow_name,
+        summary: route.workflow_description,
+        domain: route.domain,
+        required_permissions: requiredPerms,
+        ...(route.risk_level ? { risk_level: route.risk_level } : {}),
+        ...(route.trust_tier ? { trust_tier: route.trust_tier } : {}),
+        ...(route.execution_mode ? { execution_mode: route.execution_mode } : {}),
+        ...(route.sensitivity_level ? { sensitivity_level: route.sensitivity_level } : {}),
+        execution_available,
+      });
+    }
+
+    return reply.send({ ok: true, data: [...installedResult, ...privateRoutes] });
   });
 
   /**

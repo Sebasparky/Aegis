@@ -29,6 +29,7 @@ const Icons = {
   settings:  (s = 16) => <Ic size={s}><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></Ic>,
   bell:      (s = 15) => <Ic size={s}><path d="M6 16V11a6 6 0 0112 0v5l1.5 2H4.5L6 16z"/><path d="M10 20a2 2 0 004 0"/></Ic>,
   connect:   (s = 16) => <Ic size={s}><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></Ic>,
+  identity:  (s = 16) => <Ic size={s}><circle cx="12" cy="8" r="3.5"/><path d="M5 19c0-3.5 3-6 7-6s7 2.5 7 6"/><path d="M17.5 5.5l1.5 1.5-1.5 1.5"/></Ic>,
 };
 
 // ── Nav config ─────────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/workspaces",          label: "Workspaces", icon: Icons.workspaces },
   { href: "/rails",               label: "Rails",      icon: Icons.rails      },
   { href: "/receipts",            label: "Receipts",   icon: Icons.receipts   },
+  { href: "/verify",              label: "Identity",   icon: Icons.identity   },
   { href: "/website-aegis-id",    label: "Websites",   icon: Icons.websites   },
   { href: "/aegis-id",            label: "Settings",   icon: Icons.settings   },
 ];
@@ -60,6 +62,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/workspaces":          "Workspaces",
   "/rails":               "Rails",
   "/receipts":            "Receipts",
+  "/verify":              "Identity",
   "/website-aegis-id":    "Websites",
   "/aegis-id":            "Settings",
 };

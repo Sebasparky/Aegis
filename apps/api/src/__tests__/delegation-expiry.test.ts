@@ -38,6 +38,18 @@ beforeEach(() => {
     del.updated_at = "2026-05-01T00:00:00.000Z";
   }
   passes.clear();
+  // Re-seed the pass for route-level auth tests (POST /api/skills/:skillId/runs now
+  // does a two-step token→pass→delegation lookup, so the pass must be present).
+  passes.set(IDS.TOKEN_ALL, {
+    id: IDS.TOKEN_ALL,
+    token: IDS.TOKEN_ALL,
+    user_id: IDS.USER,
+    agent_name: "agent_demo_001",
+    default_collar_id: IDS.COLLAR,
+    status: "active",
+    expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    created_at: "2026-05-01T00:00:00.000Z",
+  });
 });
 
 // ─── requireAgentToken — via POST /api/skills/:skillId/runs (route-runs.ts) ──

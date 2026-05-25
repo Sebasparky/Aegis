@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteRun, RouteRunReceipt, RouteRunStatus, AegisExecutionSurface, AuthorizationActionType, AuthorizationRiskTier, ApprovalManifest, ApprovalManifestLineItem, RunApprovalContext } from "@aegis/types";
-import { users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, userApprovalReceipts, MOCK_USER_ID, newId } from "../store/index.js";
+import { passes, users, skills, installedSkills, routes, routeRuns, agentDelegations, collars, aegisVaultPasses, encryptedSecretVault, routePassBindings, delegationPassports, actionAuthorizations, paymentMethods, spendingLimitStepUps, userApprovalReceipts, MOCK_USER_ID, newId } from "../store/index.js";
 import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 import { getReceiptRepository } from "../repositories/receiptRepository.js";
 import { getKmsProvider, type KmsContext } from "../lib/kms.js";
@@ -309,10 +309,16 @@ export async function routeRunRoutes(server: FastifyInstance) {
       return sendError(reply, 401, "AUTH_REQUIRED", "Authorization: Bearer <token> is required.");
     }
 
-    const delegation = Array.from(agentDelegations.values()).find(
-      (d) => d.user_id === MOCK_USER_ID && d.token_id === token
+    const pass = Array.from(passes.values()).find(
+      (p) => p.user_id === MOCK_USER_ID && p.token === token
     );
+    if (!pass) {
+      return sendError(reply, 401, "INVALID_TOKEN", "Token does not match any delegation.");
+    }
 
+    const delegation = Array.from(agentDelegations.values()).find(
+      (d) => d.user_id === MOCK_USER_ID && d.token_id === pass.id
+    );
     if (!delegation) {
       return sendError(reply, 401, "INVALID_TOKEN", "Token does not match any delegation.");
     }
@@ -331,6 +337,104 @@ export async function routeRunRoutes(server: FastifyInstance) {
 
     const agent_id = delegation.agent_name;
     const delegation_id = delegation.id;
+
+    // ── Private route path ───────────────────────────────────────────────────────
+    // Handles synthetic skill IDs of the form "private_route:{route_id}" returned
+    // by GET /api/agent/v1/skills for user-owned verified routes that have not been
+    // installed from the marketplace.
+    if (skillId.startsWith("private_route:")) {
+      const routeId = skillId.slice("private_route:".length);
+      const route = routes.get(routeId);
+      if (!route) return sendError(reply, 404, "ROUTE_NOT_FOUND", "Private route not found.");
+
+      const userAegisId = `aid_${delegation.user_id}`;
+      if (route.creator_aegis_id !== userAegisId) {
+        return sendError(reply, 403, "ACCESS_DENIED", "This route does not belong to your user account.");
+      }
+
+      if (route.trust_tier === "unverified_draft") {
+        return sendError(reply, 400, "ROUTE_NOT_VERIFIED", "Route must be verified before it can be run.");
+      }
+
+      if (!ALLOWED_DOMAINS.has(route.domain)) {
+        return sendError(
+          reply,
+          400,
+          "DOMAIN_NOT_SUPPORTED",
+          `RouteRun is not supported for domain "${route.domain}". Supported: ${[...ALLOWED_DOMAINS].join(", ")}.`
+        );
+      }
+
+      if (route.variables && route.variables.length > 0) {
+        const internalValuePolicyTypes = new Set(["pass_field", "secret_ref", "safe_literal"]);
+        const missingRequired: string[] = [];
+        for (const v of route.variables) {
+          const hasDefault = v.default_value !== undefined && v.default_value !== "";
+          const supplied = variables && v.name in variables;
+          const boundStep = route.steps.find((s) => s.step_id === v.step_id);
+          const isInternallyResolved = boundStep?.value_policy && internalValuePolicyTypes.has(boundStep.value_policy.type);
+          if (!hasDefault && !supplied && !isInternallyResolved) missingRequired.push(v.name);
+        }
+        if (missingRequired.length > 0) {
+          return sendError(reply, 400, "MISSING_VARIABLES", `Required variables not supplied: ${missingRequired.join(", ")}.`);
+        }
+      }
+
+      const collarResult = resolveEffectiveCollar(delegation, collars);
+      if (!collarResult.ok) return sendError(reply, collarResult.status, collarResult.code, collarResult.message);
+      const { collar, policy_mode } = collarResult;
+      const effectiveCollarId = policy_mode === "collar" ? collar.id : undefined;
+
+      const needsApproval: string[] = [];
+      const hardBlocked: string[] = [];
+      for (const perm of route.required_permissions ?? []) {
+        if (collar.blocked_actions.includes(perm as any)) {
+          hardBlocked.push(perm);
+        } else if (
+          !collar.allowed_actions.includes(perm as any) &&
+          !collar.approval_required_actions.includes(perm as any)
+        ) {
+          hardBlocked.push(perm);
+        } else if (collar.approval_required_actions.includes(perm as any)) {
+          needsApproval.push(perm);
+        }
+      }
+
+      if (hardBlocked.length > 0) {
+        return sendError(reply, 403, "COLLAR_BLOCKED", "This agent's collar does not allow this route.", `Blocked: ${hardBlocked.join(", ")}.`);
+      }
+
+      const run: RouteRun = {
+        run_id: newId("run"),
+        skill_id: skillId,
+        route_id: route.route_id,
+        installed_skill_id: skillId,
+        user_id: MOCK_USER_ID,
+        domain: route.domain,
+        status: needsApproval.length > 0 ? "pending_approval" : "pending",
+        created_at: new Date().toISOString(),
+        ...(needsApproval.length > 0 ? { approval_required_permissions: needsApproval } : {}),
+        ...(agent_id ? { agent_id } : {}),
+        ...(variables && Object.keys(variables).length > 0 ? { variables } : {}),
+        ...(delegation_id ? { delegation_id } : {}),
+        ...(effectiveCollarId ? { collar_id: effectiveCollarId } : {}),
+      };
+      routeRuns.set(run.run_id, run);
+      schedulePersist();
+      if (needsApproval.length > 0) {
+        return reply.send({
+          ok: true,
+          data: {
+            run,
+            approval_required: true,
+            approval_required_permissions: needsApproval,
+            next_action: "wait_for_user_approval",
+          },
+        });
+      }
+      return reply.send({ ok: true, data: { run, approval_required: false, next_action: "poll_run_status" } });
+    }
+    // ── End private route path ───────────────────────────────────────────────────
 
     const skill = skills.get(skillId);
     if (!skill) return sendError(reply, 404, "SKILL_NOT_FOUND", "Skill not found.");
@@ -507,14 +611,15 @@ export async function routeRunRoutes(server: FastifyInstance) {
    * List route runs. Optional filters: ?domain= and ?status=
    * Each result is joined with a skill and route summary.
    */
-  server.get<{ Querystring: { domain?: string; status?: string } }>(
+  server.get<{ Querystring: { domain?: string; status?: string; route_id?: string } }>(
     "/api/route-runs",
     async (req) => {
-      const { domain, status } = req.query;
+      const { domain, status, route_id } = req.query;
       let list = Array.from(routeRuns.values()).filter((r) => r.user_id === MOCK_USER_ID);
 
       if (domain) list = list.filter((r) => r.domain === domain);
       if (status) list = list.filter((r) => r.status === status);
+      if (route_id) list = list.filter((r) => r.route_id === route_id);
 
       const result = list
         .sort((a, b) => b.created_at.localeCompare(a.created_at))

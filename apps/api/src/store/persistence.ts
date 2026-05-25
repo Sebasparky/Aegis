@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -46,6 +46,7 @@ import {
   sensitiveGrants,
   paymentCardFillAuthorizations,
   paymentCardFillRequests,
+  purchaseConfirmationAuthorizations,
   verificationCards,
   disclosureReceipts,
   trustSignalDisclosureRecords,
@@ -552,6 +553,8 @@ export function persistStore(): void {
       sensitiveGrants: Array.from(sensitiveGrants.entries()),
       paymentCardFillAuthorizations: Array.from(paymentCardFillAuthorizations.entries()),
       paymentCardFillRequests: Array.from(paymentCardFillRequests.entries()),
+      purchaseConfirmationAuthorizations: Array.from(purchaseConfirmationAuthorizations.entries()),
+      // purchaseConfirmationHandoffs intentionally omitted — ephemeral audit records.
       verificationCards: Array.from(verificationCards.entries()),
       disclosureReceipts: Array.from(disclosureReceipts.entries()),
       trustSignalDisclosureRecords: Array.from(trustSignalDisclosureRecords.entries()),
@@ -706,6 +709,15 @@ export async function loadStore(): Promise<void> {
         req.status = "expired";
       }
       paymentCardFillRequests.set(k, req);
+    }
+
+    // Purchase confirmation authorizations cannot survive restart — CDP browser context is gone.
+    for (const [k, v] of (data.purchaseConfirmationAuthorizations ?? [])) {
+      const auth = v as PurchaseConfirmationAuthorization;
+      if (auth.status === "pending_approval" || auth.status === "approved") {
+        auth.status = "expired";
+      }
+      purchaseConfirmationAuthorizations.set(k, auth);
     }
 
     // Load encrypted vault blobs (ciphertext only — never plaintext).

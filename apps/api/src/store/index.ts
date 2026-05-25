@@ -36,6 +36,8 @@ import type {
   PaymentCardFillAuthorization,
   PaymentCardFillRequest,
   PaymentCardField,
+  PurchaseConfirmationAuthorization,
+  PurchaseConfirmationHandoffRecord,
   VerificationProviderSession,
   VerificationCard,
   DisclosureReceipt,
@@ -300,6 +302,14 @@ export interface PaymentCardFillHandoffRecord {
   completed_at: string;
 }
 export const paymentCardFillHandoffs = new Map<string, PaymentCardFillHandoffRecord>();
+
+// ─── Purchase Confirmation Handoff v1 ─────────────────────────────────────────
+// Separate from PaymentCardFillAuthorization — purchase_action_authorized starts false.
+// Ephemeral — expired on restart (CDP browser context is gone).
+export const purchaseConfirmationAuthorizations = new Map<string, PurchaseConfirmationAuthorization>();
+
+// Audit records for completed purchase confirmation handoffs. Never stores card values or KMS material.
+export const purchaseConfirmationHandoffs = new Map<string, PurchaseConfirmationHandoffRecord>();
 
 // ─── Aegis Workspaces v0 ──────────────────────────────────────────────────────
 

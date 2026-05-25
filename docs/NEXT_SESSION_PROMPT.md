@@ -501,6 +501,21 @@ Everything below is implemented and working.
 - Tests: `apps/api/src/__tests__/verification-card-signing.test.ts` — hash stability, revocation hash invariant, mutation detection, signing dev-mode (no key), privacy literal assertions, forbidden-field scanning
 - Do not rebuild unless explicitly requested. Next: mock provider + card issuance, then `/verify` UI, then scoped disclosure API.
 
+### Verification Mock Provider + Card Issuance v1
+**Completed 2026-05-23.** Mock verification provider sessions and signed VerificationCard issuance. No real providers, no UI, no disclosure API, no trust-signal API.
+
+- `VerificationProvider` interface and `ProviderClaimResult` type in `apps/api/src/lib/verificationProviders.ts`
+- Three mock providers: `mock_email` (email_ownership, assurance: provider_verified, stores email_domain only), `mock_student` (student_status, assurance: provider_verified, default institution: University of Michigan), `mock_gov_id` (government_id, assurance: document_verified, stores country_code + id_type as Tier 2 metadata only — never raw ID, DOB, legal name, SSN, biometric, or document number)
+- `apps/api/src/routes/verifications.ts` — 8 routes under `/api/verifications/`: `GET /types`, `POST /sessions`, `GET /sessions/:sessionId`, `POST /sessions/:sessionId/complete`, `GET /cards`, `GET /cards/:cardId`, `GET /cards/:cardId/verify`, `POST /cards/:cardId/revoke`
+- `sessionMockInputs: Map<string, unknown>` — module-level ephemeral side-map; stores mock_input from session creation; deleted after complete; never persisted
+- `toVerificationCardSummary` / `toVerificationCardDetail` — safe views that omit `provider_reference_id` from claims and `provider_session_id` from session responses
+- `schedulePersist()` called only after card mutations (complete, revoke) — not after session creation
+- `verificationProviderSessions` remain ephemeral and are not persisted; `verificationCards` are persisted
+- `disclosureReceipts` and `trustSignalDisclosureRecords` are untouched by this increment
+- country_code and id_type on government_id claims are Tier 2 user-facing card details only — they do not feed into Tier 1 trust-signal disclosure
+- 25 tests in `apps/api/src/__tests__/verification-routes.test.ts` — covers happy paths, error states (expired/completed session), privacy invariants (no forbidden raw field keys, no provider_reference_id/provider_session_id in responses), persistence invariants (schedulePersist not called on session create), and disclosureReceipts unchanged invariant
+- Do not rebuild unless explicitly requested. Next: `/verify` UI, then scoped claim disclosure API, then trust-signal API.
+
 ### Demo tooling
 - `npm run seed:demo` — resets store to 4 clean routes, backs up old store
 - `docs/DEMO_WALKTHROUGH.md` — 5–7 minute presenter script

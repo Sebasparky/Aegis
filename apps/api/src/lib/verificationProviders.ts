@@ -11,10 +11,18 @@ export interface ProviderClaimResult {
   expires_at?: string;
 }
 
+export interface VerificationProviderInput {
+  email?: string;
+}
+
 export interface VerificationProvider {
   name: string;
   supported_types: VerificationType[];
-  initiate(session: VerificationProviderSession): Promise<{
+  requires_code_step?: true;
+  initiate(
+    session: VerificationProviderSession,
+    input?: VerificationProviderInput
+  ): Promise<{
     provider_session_id?: string;
     redirect_url?: string;
   }>;
@@ -124,12 +132,31 @@ const mockGovIdProvider: VerificationProvider = {
   },
 };
 
+// ─── Local Email Provider ─────────────────────────────────────────────────────
+// Dev OTP-based email ownership verification. Does not send real email.
+// OTP generation, hashing, and validation are handled by the route layer.
+// local_email is listed after the mock providers so findProviderForType("email_ownership")
+// still returns mock_email when no provider_name is specified (preserves existing tests).
+
+const localEmailProvider: VerificationProvider = {
+  name: "local_email",
+  supported_types: ["email_ownership"],
+  requires_code_step: true,
+  async initiate(_session, _input) {
+    return { provider_session_id: `local_email_${Date.now()}` };
+  },
+  async complete(_session, _mockInput) {
+    throw new Error("local_email: card issuance is handled by the submit-code route; complete() must not be called");
+  },
+};
+
 // ─── Registry ────────────────────────────────────────────────────────────────
 
 export const PROVIDERS: VerificationProvider[] = [
   mockEmailProvider,
   mockStudentProvider,
   mockGovIdProvider,
+  localEmailProvider,
 ];
 
 export function findProvider(

@@ -9,6 +9,8 @@ import {
   revokeVerificationCard,
   createVerificationSession,
   completeVerificationSession,
+  createEmailVerificationSession,
+  submitVerificationCode,
 } from "@/lib/api";
 import type {
   VerificationCardSummary,
@@ -134,6 +136,7 @@ type VerificationGroup = {
   latestRevokedCard?: VerificationCardSummary;
   latestExpiredCard?: VerificationCardSummary;
   mockProvider?: string;
+  realProvider?: string;
   state: "active" | "revoked" | "expired" | "not_verified" | "coming_soon";
   repeatable: boolean;
 };
@@ -173,11 +176,16 @@ function buildVerificationGroups(
     );
     const mockProvider = mockProviderEntry?.name;
 
+    const realProviderEntry = providers.find(
+      (p) => !p.name.startsWith("mock_") && p.supported_types.includes(def.type),
+    );
+    const realProvider = realProviderEntry?.name;
+
     let state: VerificationGroup["state"];
     if (activeCards.length > 0) state = "active";
     else if (expiredCards.length > 0) state = "expired";
     else if (revokedCards.length > 0) state = "revoked";
-    else if (mockProvider) state = "not_verified";
+    else if (mockProvider || realProvider) state = "not_verified";
     else state = "coming_soon";
 
     const repeatable = REPEATABLE_VERIFICATION_TYPES.includes(def.type);
@@ -192,6 +200,7 @@ function buildVerificationGroups(
       latestRevokedCard,
       latestExpiredCard,
       mockProvider,
+      realProvider,
       state,
       repeatable,
     };
@@ -225,6 +234,13 @@ function addAnotherLabel(type: VerificationType): string {
   };
   return labels[type] ?? "Add another";
 }
+
+// ─── OTP flow state ───────────────────────────────────────────────────────────
+
+type OtpFlowState =
+  | { phase: "idle" }
+  | { phase: "email_input"; type: VerificationType; providerName: string }
+  | { phase: "otp_input"; sessionId: string };
 
 // ─── Other types ─────────────────────────────────────────────────────────────
 
@@ -599,6 +615,180 @@ function MockVerifyForm({
   );
 }
 
+// ─── EmailOtpModal ────────────────────────────────────────────────────────────
+
+function EmailOtpModal({
+  phase,
+  emailInput,
+  otpInput,
+  onEmailChange,
+  onOtpChange,
+  onSubmitEmail,
+  onSubmitOtp,
+  onCancel,
+  submitting,
+  error,
+}: {
+  phase: "email_input" | "otp_input";
+  emailInput: string;
+  otpInput: string;
+  onEmailChange: (v: string) => void;
+  onOtpChange: (v: string) => void;
+  onSubmitEmail: () => void;
+  onSubmitOtp: () => void;
+  onCancel: () => void;
+  submitting: boolean;
+  error: string | null;
+}) {
+  const inputStyle = {
+    width: "100%",
+    padding: "7px 10px",
+    border: "1px solid var(--hairline)",
+    borderRadius: "var(--r-1)",
+    fontSize: 13,
+    background: "var(--paper)",
+    color: "var(--ink-1)",
+    boxSizing: "border-box" as const,
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        style={{
+          background: "var(--paper)",
+          border: "1px solid var(--hairline)",
+          borderRadius: "var(--r-2)",
+          padding: 24,
+          width: "100%",
+          maxWidth: 420,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+        }}
+      >
+        {phase === "email_input" ? (
+          <>
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: "var(--ink-1)" }}>
+              Verify email ownership
+            </div>
+            <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px", lineHeight: 1.5 }}>
+              Enter your email address. A 6-digit one-time code will be generated for verification.
+            </p>
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 11, color: "var(--ink-3)", display: "block", marginBottom: 4 }}>
+                Email address
+              </label>
+              <input
+                type="email"
+                style={inputStyle}
+                placeholder="you@example.com"
+                value={emailInput}
+                onChange={(e) => onEmailChange(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !submitting) onSubmitEmail(); }}
+                autoFocus
+              />
+            </div>
+            <div
+              style={{
+                padding: "8px 10px",
+                background: "var(--amber-soft)",
+                borderRadius: "var(--r-1)",
+                fontSize: 11,
+                color: "oklch(0.45 0.12 75)",
+                marginBottom: 14,
+              }}
+            >
+              In dev, the code appears in the API console. No real email is sent.
+            </div>
+            {error && (
+              <div style={{ marginBottom: 10, color: "var(--red)", fontSize: 12 }}>{error}</div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ fontSize: 13 }}
+                onClick={onSubmitEmail}
+                disabled={submitting || !emailInput.trim()}
+              >
+                {submitting ? "Sending…" : "Send code"}
+              </button>
+              <button
+                className="a-btn a-btn--ghost"
+                style={{ fontSize: 13 }}
+                onClick={onCancel}
+                disabled={submitting}
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: "var(--ink-1)" }}>
+              Enter verification code
+            </div>
+            <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px", lineHeight: 1.5 }}>
+              Enter the 6-digit code from the API console.
+            </p>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 11, color: "var(--ink-3)", display: "block", marginBottom: 4 }}>
+                6-digit code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                style={{
+                  ...inputStyle,
+                  fontSize: 22,
+                  fontFamily: "monospace",
+                  letterSpacing: "0.25em",
+                  textAlign: "center",
+                }}
+                placeholder="000000"
+                value={otpInput}
+                onChange={(e) => onOtpChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onKeyDown={(e) => { if (e.key === "Enter" && !submitting) onSubmitOtp(); }}
+                autoFocus
+              />
+            </div>
+            {error && (
+              <div style={{ marginBottom: 10, color: "var(--red)", fontSize: 12 }}>{error}</div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ fontSize: 13 }}
+                onClick={onSubmitOtp}
+                disabled={submitting || otpInput.length !== 6}
+              >
+                {submitting ? "Verifying…" : "Verify"}
+              </button>
+              <button
+                className="a-btn a-btn--ghost"
+                style={{ fontSize: 13 }}
+                onClick={onCancel}
+                disabled={submitting}
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── GroupCard (Current Verifications — one per active VerificationType) ──────
 
 function GroupCard({
@@ -883,6 +1073,7 @@ function CapabilityCard({
   mockVerifying,
   mockForm,
   onStartMock,
+  onStartReal,
   onChangeMockForm,
   onSubmitMock,
   onCancelMock,
@@ -893,13 +1084,14 @@ function CapabilityCard({
   mockVerifying: boolean;
   mockForm: MockForm;
   onStartMock: () => void;
+  onStartReal: () => void;
   onChangeMockForm: (f: MockForm) => void;
   onSubmitMock: () => void;
   onCancelMock: () => void;
   submitting: boolean;
   submitError: string | null;
 }) {
-  const { def, state, mockProvider } = group;
+  const { def, state, mockProvider, realProvider } = group;
   const canReverify = (state === "revoked" || state === "expired") && !!mockProvider;
 
   const statusBadge =
@@ -969,7 +1161,12 @@ function CapabilityCard({
 
       <div style={{ fontSize: 11, color: "var(--ink-4)" }}>
         Assurance: {def.assuranceLabel}
-        {mockProvider && (
+        {realProvider && (
+          <span style={{ marginLeft: 8, color: "oklch(0.42 0.09 150)", fontStyle: "italic" }}>
+            · local dev provider
+          </span>
+        )}
+        {!realProvider && mockProvider && (
           <span style={{ marginLeft: 8, color: "var(--amber)", fontStyle: "italic" }}>
             · mock provider
           </span>
@@ -1001,7 +1198,12 @@ function CapabilityCard({
               Coming soon
             </button>
           )}
-          {state === "not_verified" && (
+          {state === "not_verified" && realProvider && (
+            <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={onStartReal}>
+              Verify email
+            </button>
+          )}
+          {state === "not_verified" && !realProvider && (
             <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={onStartMock}>
               Mock verify
             </button>
@@ -1139,6 +1341,10 @@ export default function VerifyPage() {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [expandedGroupType, setExpandedGroupType] = useState<VerificationType | null>(null);
+  const [otpFlow, setOtpFlow] = useState<OtpFlowState>({ phase: "idle" });
+  const [emailInput, setEmailInput] = useState("");
+  const [otpInput, setOtpInput] = useState("");
+  const [otpError, setOtpError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([listVerificationCards(), listVerificationTypes()])
@@ -1220,6 +1426,48 @@ export default function VerifyPage() {
     }
   };
 
+  const handleStartRealVerify = (type: VerificationType, providerName: string) => {
+    setOtpFlow({ phase: "email_input", type, providerName });
+    setEmailInput("");
+    setOtpError(null);
+  };
+
+  const handleSubmitEmail = async () => {
+    if (otpFlow.phase !== "email_input") return;
+    setSubmitting(true);
+    setOtpError(null);
+    try {
+      const session = await createEmailVerificationSession({
+        verification_type: otpFlow.type as "email_ownership",
+        provider_name: otpFlow.providerName as "local_email",
+        email: emailInput,
+      });
+      setOtpFlow({ phase: "otp_input", sessionId: session.session_id });
+      setOtpInput("");
+    } catch (e) {
+      setOtpError(e instanceof Error ? e.message : "Failed to start verification.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSubmitOtp = async () => {
+    if (otpFlow.phase !== "otp_input") return;
+    setSubmitting(true);
+    setOtpError(null);
+    try {
+      await submitVerificationCode(otpFlow.sessionId, otpInput);
+      setOtpFlow({ phase: "idle" });
+      setOtpInput("");
+      setEmailInput("");
+      await refreshCards();
+    } catch (e) {
+      setOtpError(e instanceof Error ? e.message : "Invalid code — please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   // ── Derived groups ────────────────────────────────────────────────────────
   const groups = buildVerificationGroups(cards, providers);
   const activeGroups = groups.filter((g) => g.activeCards.length > 0);
@@ -1256,6 +1504,26 @@ export default function VerifyPage() {
 
   return (
     <div className="page">
+      {otpFlow.phase !== "idle" && (
+        <EmailOtpModal
+          phase={otpFlow.phase === "email_input" ? "email_input" : "otp_input"}
+          emailInput={emailInput}
+          otpInput={otpInput}
+          onEmailChange={setEmailInput}
+          onOtpChange={setOtpInput}
+          onSubmitEmail={handleSubmitEmail}
+          onSubmitOtp={handleSubmitOtp}
+          onCancel={() => {
+            setOtpFlow({ phase: "idle" });
+            setEmailInput("");
+            setOtpInput("");
+            setOtpError(null);
+          }}
+          submitting={submitting}
+          error={otpError}
+        />
+      )}
+
       {/* ── Hero ── */}
       <div
         className="a-card"
@@ -1505,6 +1773,9 @@ export default function VerifyPage() {
                       setMockVerifyingType(group.type);
                       setMockForm({});
                       setSubmitError(null);
+                    }}
+                    onStartReal={() => {
+                      if (group.realProvider) handleStartRealVerify(group.type, group.realProvider);
                     }}
                     onChangeMockForm={setMockForm}
                     onSubmitMock={() => {

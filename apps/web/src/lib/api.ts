@@ -1056,6 +1056,7 @@ export interface VerificationSessionView {
   created_at?: string;
   expires_at: string;
   redirect_url?: string;
+  requires_code_step?: boolean; // present and true for local_email provider sessions
 }
 
 export const listVerificationTypes = () =>
@@ -1101,5 +1102,21 @@ export const verifyVerificationCard = (cardId: string) =>
 export const revokeVerificationCard = (cardId: string) =>
   request<{ card: VerificationCardSummary }>(
     `/api/verifications/cards/${cardId}/revoke`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const createEmailVerificationSession = (body: {
+  verification_type: "email_ownership";
+  provider_name: "local_email";
+  email: string;
+}) =>
+  request<VerificationSessionView>("/api/verifications/sessions", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const submitVerificationCode = (sessionId: string, code: string) =>
+  request<{ card: VerificationCardDetail }>(
+    `/api/verifications/sessions/${sessionId}/submit-code`,
+    { method: "POST", body: JSON.stringify({ code }) },
   );

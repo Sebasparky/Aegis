@@ -13,7 +13,7 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { verificationCards, verificationProviderSessions, disclosureReceipts } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
-import { verificationRoutes } from "../routes/verifications.js";
+import { verificationRoutes, sessionOtpRecords } from "../routes/verifications.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -70,6 +70,7 @@ beforeEach(() => {
   verificationCards.clear();
   verificationProviderSessions.clear();
   disclosureReceipts.clear();
+  sessionOtpRecords.clear();
   vi.clearAllMocks();
 });
 
@@ -423,5 +424,280 @@ describe("Persistence invariants", () => {
       url: `/api/verifications/cards/${cards[0].card_id}/revoke`,
     });
     expect(disclosureReceipts.size).toBe(0);
+  });
+});
+
+// ─── local_email provider tests ───────────────────────────────────────────────
+
+async function createEmailSession(email: string) {
+  const res = await server.inject({
+    method: "POST",
+    url: "/api/verifications/sessions",
+    payload: { verification_type: "email_ownership", provider_name: "local_email", email },
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+async function submitCode(sessionId: string, code: string) {
+  const res = await server.inject({
+    method: "POST",
+    url: `/api/verifications/sessions/${sessionId}/submit-code`,
+    payload: { code },
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+function captureOtp(sessionId: string): string | undefined {
+  // Reads from mock.calls that were captured BEFORE this call — spy must be set up first.
+  const consoleSpy = vi.mocked(console.log);
+  const match = consoleSpy.mock.calls
+    .flat()
+    .find((arg) => typeof arg === "string" && arg.includes(`session=${sessionId}`));
+  return typeof match === "string" ? match.match(/otp=(\d{6})/)?.[1] : undefined;
+}
+
+describe("POST /api/verifications/sessions — local_email provider", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("returns 201 with status in_progress and requires_code_step: true for a valid email", async () => {
+    const { res, data } = await createEmailSession("user@umich.edu");
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    expect(data.data.status).toBe("in_progress");
+    expect(data.data.requires_code_step).toBe(true);
+    expect(data.data.provider_name).toBe("local_email");
+  });
+
+  it("returns 400 EMAIL_REQUIRED when email is missing", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/verifications/sessions",
+      payload: { verification_type: "email_ownership", provider_name: "local_email" },
+    });
+    const data = JSON.parse(res.body);
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("EMAIL_REQUIRED");
+  });
+
+  it("returns 400 EMAIL_REQUIRED when email has no @ symbol", async () => {
+    const { res, data } = await createEmailSession("notanemail");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("EMAIL_REQUIRED");
+  });
+
+  it("returns 400 EMAIL_INVALID when domain has no dot", async () => {
+    const { res, data } = await createEmailSession("user@localhost");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("EMAIL_INVALID");
+  });
+
+  it("does not return provider_session_id in the response", async () => {
+    const { res } = await createEmailSession("user@umich.edu");
+    expect(res.body).not.toMatch(FORBIDDEN_KEY_PATTERN("provider_session_id"));
+  });
+
+  it("does not include the OTP or raw email in the response body", async () => {
+    const { res } = await createEmailSession("user@umich.edu");
+    expect(res.body).not.toMatch(/"otp"\s*:/);
+    expect(res.body).not.toMatch(/"code"\s*:/);
+    expect(res.body).not.toMatch(/user@umich\.edu/); // full email never returned
+  });
+
+  it("logs the OTP to the console in dev mode", async () => {
+    const { data } = await createEmailSession("user@umich.edu");
+    const sessionId = data.data.session_id;
+    const consoleSpy = vi.mocked(console.log);
+    const logged = consoleSpy.mock.calls.flat().some(
+      (arg) =>
+        typeof arg === "string" &&
+        arg.includes("[local_email OTP]") &&
+        arg.includes(`session=${sessionId}`),
+    );
+    expect(logged).toBe(true);
+  });
+
+  it("stores only the domain suffix, not the full email", async () => {
+    const { data } = await createEmailSession("someuser@example.org");
+    const sessionId = data.data.session_id;
+    // The OTP record should exist (hash stored)
+    expect(sessionOtpRecords.has(sessionId)).toBe(true);
+    // The stored hash should be 64 hex chars (SHA-256), not a 6-digit number
+    const record = sessionOtpRecords.get(sessionId)!;
+    expect(record.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.hash).not.toMatch(/^\d{6}$/);
+  });
+});
+
+describe("POST /api/verifications/sessions/:sessionId/submit-code", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("returns 404 for an unknown session", async () => {
+    const { res, data } = await submitCode("vps_unknown", "123456");
+    expect(res.statusCode).toBe(404);
+    expect(data.error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("returns 400 SESSION_EXPIRED when session is past expiry", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const session = verificationProviderSessions.get(sessionId)!;
+    session.expires_at = new Date(Date.now() - 1000).toISOString();
+
+    const { res, data } = await submitCode(sessionId, "123456");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("SESSION_EXPIRED");
+  });
+
+  it("returns 409 SESSION_NOT_AWAITING_CODE when session is not in_progress", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const session = verificationProviderSessions.get(sessionId)!;
+    session.status = "completed";
+
+    const { res, data } = await submitCode(sessionId, "123456");
+    expect(res.statusCode).toBe(409);
+    expect(data.error.code).toBe("SESSION_NOT_AWAITING_CODE");
+  });
+
+  it("returns 400 CODE_NOT_SUPPORTED when called on a mock_email session", async () => {
+    const { data: created } = await createSession("email_ownership"); // uses mock_email
+    const sessionId = created.data.session_id;
+    const { res, data } = await submitCode(sessionId, "123456");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("CODE_NOT_SUPPORTED");
+  });
+
+  it("returns 400 OTP_EXPIRED when the OTP record has passed its expiry", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+
+    const record = sessionOtpRecords.get(sessionId)!;
+    record.expires_at = new Date(Date.now() - 1000).toISOString();
+
+    const { res, data } = await submitCode(sessionId, "123456");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("OTP_EXPIRED");
+    expect(sessionOtpRecords.has(sessionId)).toBe(false); // cleaned up
+  });
+
+  it("returns 400 INVALID_CODE on wrong OTP with attempts_remaining", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const { res, data } = await submitCode(created.data.session_id, "000000");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("INVALID_CODE");
+    expect(data.error.attempts_remaining).toBe(4);
+  });
+
+  it("returns 429 TOO_MANY_ATTEMPTS after 5 consecutive wrong codes", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    for (let i = 0; i < 5; i++) {
+      await submitCode(sessionId, "000000");
+    }
+    const { res, data } = await submitCode(sessionId, "000000");
+    expect(res.statusCode).toBe(429);
+    expect(data.error.code).toBe("TOO_MANY_ATTEMPTS");
+  });
+
+  it("issues a signed card with email_domain claim on correct OTP", async () => {
+    const { data: created } = await createEmailSession("student@umich.edu");
+    const sessionId = created.data.session_id;
+
+    const otp = captureOtp(sessionId);
+    expect(otp).toBeDefined();
+
+    const { res, data } = await submitCode(sessionId, otp!);
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    const card = data.data.card;
+    expect(card.claims).toHaveLength(1);
+    expect(card.claims[0].claim_type).toBe("email_ownership");
+    expect(card.claims[0].claim_value.email_domain).toBe("umich.edu");
+    expect(card.claims[0].assurance_level).toBe("provider_verified");
+  });
+
+  it("card claim does not contain the full email address or username prefix", async () => {
+    const { data: created } = await createEmailSession("student@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    const { res } = await submitCode(sessionId, otp!);
+    expect(res.body).not.toContain("student@umich.edu");
+    expect(res.body).not.toContain('"student"'); // username prefix must not appear
+  });
+
+  it("session status becomes completed after correct OTP", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    await submitCode(sessionId, otp!);
+    const session = verificationProviderSessions.get(sessionId)!;
+    expect(session.status).toBe("completed");
+  });
+
+  it("OTP record is deleted after successful submission", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    expect(sessionOtpRecords.has(sessionId)).toBe(true);
+    await submitCode(sessionId, otp!);
+    expect(sessionOtpRecords.has(sessionId)).toBe(false);
+  });
+
+  it("schedulePersist is called after successful OTP submission", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    expect(schedulePersist).not.toHaveBeenCalled();
+    await submitCode(sessionId, otp!);
+    expect(schedulePersist).toHaveBeenCalled();
+  });
+
+  it("schedulePersist is NOT called after a wrong OTP submission", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    await submitCode(created.data.session_id, "000000");
+    expect(schedulePersist).not.toHaveBeenCalled();
+  });
+
+  it("card response does not include forbidden fields", async () => {
+    const { data: created } = await createEmailSession("user@test.com");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    const { res } = await submitCode(sessionId, otp!);
+    for (const field of [...FORBIDDEN_FIELDS, "provider_reference_id", "provider_session_id", "otp", "code"]) {
+      expect(res.body, `"${field}" must not appear as a JSON key`).not.toMatch(
+        FORBIDDEN_KEY_PATTERN(field),
+      );
+    }
+  });
+});
+
+describe("POST /complete guard for local_email provider", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("returns 400 CODE_STEP_REQUIRED when calling /complete on a local_email session", async () => {
+    const { data: created } = await createEmailSession("user@umich.edu");
+    const { res, data } = await completeSession(created.data.session_id);
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("CODE_STEP_REQUIRED");
+  });
+
+  it("mock_email /complete still works unchanged", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "user@umich.edu" },
+    });
+    const { res, data } = await completeSession(created.data.session_id);
+    expect(res.statusCode).toBe(201);
+    expect(data.data.card.claims[0].claim_type).toBe("email_ownership");
   });
 });

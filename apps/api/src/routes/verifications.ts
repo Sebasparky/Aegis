@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual, randomInt } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { VerificationCard, VerificationType, VerificationProviderSession } from "@aegis/types";
 import {
@@ -34,6 +35,18 @@ const SESSION_TERMINAL_STATUSES = new Set<string>([
 // Ephemeral side-map — not exported, not persisted, reset on server restart.
 // Stores mock_input submitted at session creation so complete() can use it.
 const sessionMockInputs = new Map<string, unknown>();
+
+// ─── OTP state for local_email provider ─────────────────────────────────────
+// Exported for test access only — never persisted, never returned in API responses.
+
+interface OtpRecord {
+  hash: string;        // SHA-256 hex of the raw OTP code — never the raw code itself
+  expires_at: string;  // 10-min TTL, shorter than the 30-min session expiry
+  attempt_count: number;
+}
+
+export const sessionOtpRecords = new Map<string, OtpRecord>();
+const sessionEmailDomains = new Map<string, string>(); // domain suffix only, never full email
 
 // ─── Safe views ──────────────────────────────────────────────────────────────
 
@@ -89,9 +102,9 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
   });
 
   server.post<{
-    Body: { verification_type: VerificationType; provider_name?: string; mock_input?: unknown };
+    Body: { verification_type: VerificationType; provider_name?: string; mock_input?: unknown; email?: string };
   }>("/api/verifications/sessions", async (req, reply) => {
-    const { verification_type, provider_name, mock_input } = req.body ?? {};
+    const { verification_type, provider_name, mock_input, email } = req.body ?? {};
 
     if (!verification_type || !KNOWN_VERIFICATION_TYPES.has(verification_type as string)) {
       return reply.status(400).send({
@@ -128,7 +141,33 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
       expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
     };
 
-    const { provider_session_id, redirect_url } = await provider.initiate(session);
+    if (provider.requires_code_step) {
+      const rawEmail = typeof email === "string" ? email.trim() : "";
+      if (!rawEmail || !rawEmail.includes("@")) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "EMAIL_REQUIRED", message: "A valid email address is required for this provider." },
+        });
+      }
+      const domain = rawEmail.split("@")[1] ?? "";
+      if (!domain || !domain.includes(".")) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "EMAIL_INVALID", message: "Email domain is invalid." },
+        });
+      }
+      const otp = String(randomInt(100000, 1000000));
+      const hash = createHash("sha256").update(otp, "utf8").digest("hex");
+      const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      sessionOtpRecords.set(session.session_id, { hash, expires_at: otpExpiry, attempt_count: 0 });
+      sessionEmailDomains.set(session.session_id, domain.toLowerCase());
+      if (process.env.NODE_ENV !== "production") {
+        console.log(`[local_email OTP] session=${session.session_id} otp=${otp}`);
+      }
+      session.status = "in_progress";
+    }
+
+    const { provider_session_id, redirect_url } = await provider.initiate(session, email ? { email } : undefined);
     if (provider_session_id) {
       session.provider_session_id = provider_session_id;
     }
@@ -145,6 +184,7 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
         verification_type: session.verification_type,
         provider_name: session.provider_name,
         status: session.status,
+        ...(provider.requires_code_step ? { requires_code_step: true } : {}),
         ...(redirect_url !== undefined ? { redirect_url } : {}),
         expires_at: session.expires_at,
         // provider_session_id intentionally omitted
@@ -213,6 +253,16 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
         });
       }
 
+      if (provider.requires_code_step === true) {
+        return reply.status(400).send({
+          ok: false,
+          error: {
+            code: "CODE_STEP_REQUIRED",
+            message: "This session requires a code step. Call /submit-code instead.",
+          },
+        });
+      }
+
       const mockInput = req.body?.mock_input ?? sessionMockInputs.get(session.session_id);
       const result = await provider.complete(session, mockInput);
 
@@ -248,6 +298,137 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
       schedulePersist();
 
       session.status = "completed";
+      sessionMockInputs.delete(session.session_id);
+
+      return reply.status(201).send({
+        ok: true,
+        data: { card: toVerificationCardDetail(card) },
+      });
+    }
+  );
+
+  server.post<{ Params: { sessionId: string }; Body: { code: string } }>(
+    "/api/verifications/sessions/:sessionId/submit-code",
+    async (req, reply) => {
+      const session = verificationProviderSessions.get(req.params.sessionId);
+      if (!session || session.user_id !== MOCK_USER_ID) {
+        return reply.status(404).send({
+          ok: false,
+          error: { code: "SESSION_NOT_FOUND", message: "Session not found." },
+        });
+      }
+
+      if (new Date() > new Date(session.expires_at)) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "SESSION_EXPIRED", message: "Verification session has expired." },
+        });
+      }
+
+      const provider = findProvider(session.provider_name, session.verification_type);
+      if (!provider?.requires_code_step) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "CODE_NOT_SUPPORTED", message: "This session does not require a code step." },
+        });
+      }
+
+      if (session.status !== "in_progress") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "SESSION_NOT_AWAITING_CODE", message: `Session is ${session.status}, not awaiting a code.` },
+        });
+      }
+
+      const otpRecord = sessionOtpRecords.get(session.session_id);
+      if (!otpRecord) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "OTP_NOT_FOUND", message: "OTP record not found for this session." },
+        });
+      }
+
+      if (new Date() > new Date(otpRecord.expires_at)) {
+        sessionOtpRecords.delete(session.session_id);
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "OTP_EXPIRED", message: "The code has expired. Please start a new verification." },
+        });
+      }
+
+      if (otpRecord.attempt_count >= 5) {
+        return reply.status(429).send({
+          ok: false,
+          error: { code: "TOO_MANY_ATTEMPTS", message: "Too many incorrect attempts. Please start a new verification." },
+        });
+      }
+
+      const code = String(req.body?.code ?? "");
+      const computedHash = createHash("sha256").update(code, "utf8").digest("hex");
+      const storedBuf = Buffer.from(otpRecord.hash, "hex");
+      const computedBuf = Buffer.from(computedHash, "hex");
+
+      otpRecord.attempt_count += 1;
+
+      const codeMatches =
+        storedBuf.length === computedBuf.length && timingSafeEqual(storedBuf, computedBuf);
+
+      if (!codeMatches) {
+        return reply.status(400).send({
+          ok: false,
+          error: {
+            code: "INVALID_CODE",
+            message: "The code you entered is incorrect.",
+            attempts_remaining: 5 - otpRecord.attempt_count,
+          },
+        });
+      }
+
+      // Code validated — build and sign the VerificationCard directly
+      const email_domain = sessionEmailDomains.get(session.session_id) ?? "";
+      const expires_at = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+      const cardId = newId("vc");
+      const now = new Date().toISOString();
+
+      const claims = [
+        {
+          claim_id: newId("vc_claim"),
+          card_id: cardId,
+          claim_type: "email_ownership" as const,
+          claim_value: { kind: "email_ownership" as const, email_domain },
+          assurance_level: "provider_verified" as const,
+          verified_at: now,
+          expires_at,
+        },
+      ];
+
+      const cardFields = {
+        card_id: cardId,
+        schema_version: "1.0" as const,
+        issuer: "aegis" as const,
+        user_id: MOCK_USER_ID,
+        claims,
+        disclosure_policy: "user_approval_required" as const,
+        issued_at: now,
+        expires_at,
+        revocation_status: "active" as const,
+        limitations: {
+          raw_document_revealed_to_agent: false as const,
+          raw_document_revealed_to_website: false as const,
+          provider_result_only: true as const,
+          not_a_guarantee: true as const,
+        },
+      };
+
+      const card = await buildSignedVerificationCard(cardFields);
+      verificationCards.set(card.card_id, card);
+      schedulePersist();
+
+      session.status = "completed";
+
+      // Cleanup ephemeral OTP data immediately after use
+      sessionOtpRecords.delete(session.session_id);
+      sessionEmailDomains.delete(session.session_id);
       sessionMockInputs.delete(session.session_id);
 
       return reply.status(201).send({

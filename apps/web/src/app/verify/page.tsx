@@ -808,6 +808,7 @@ function GroupCard({
   onRevokeCard,
   onToggleCardDetail,
   onStartMock,
+  onStartReal,
   onChangeMockForm,
   onSubmitMock,
   onCancelMock,
@@ -829,12 +830,13 @@ function GroupCard({
   onRevokeCard: (cardId: string) => void;
   onToggleCardDetail: (cardId: string) => void;
   onStartMock: () => void;
+  onStartReal: () => void;
   onChangeMockForm: (f: MockForm) => void;
   onSubmitMock: () => void;
   onCancelMock: () => void;
   onToggleGroupExpanded: () => void;
 }) {
-  const { def, activeCards, bestActiveCard, repeatable, mockProvider } = group;
+  const { def, activeCards, bestActiveCard, repeatable, mockProvider, realProvider } = group;
   const isSingle = activeCards.length === 1;
 
   return (
@@ -1051,11 +1053,11 @@ function GroupCard({
               {groupExpanded ? "Collapse" : `View all ${activeCards.length}`}
             </button>
           )}
-          {repeatable && mockProvider && !mockVerifying && (
+          {repeatable && (mockProvider || realProvider) && !mockVerifying && (
             <button
               className="a-btn a-btn--ghost"
               style={{ fontSize: 11 }}
-              onClick={onStartMock}
+              onClick={realProvider ? onStartReal : onStartMock}
             >
               {addAnotherLabel(group.type)}
             </button>
@@ -1092,7 +1094,7 @@ function CapabilityCard({
   submitError: string | null;
 }) {
   const { def, state, mockProvider, realProvider } = group;
-  const canReverify = (state === "revoked" || state === "expired") && !!mockProvider;
+  const canReverify = (state === "revoked" || state === "expired") && (!!mockProvider || !!realProvider);
 
   const statusBadge =
     state === "expired" ? (
@@ -1189,7 +1191,7 @@ function CapabilityCard({
       {!mockVerifying && (
         <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
           {canReverify && (
-            <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={onStartMock}>
+            <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={realProvider ? onStartReal : onStartMock}>
               Re-verify
             </button>
           )}
@@ -1679,6 +1681,9 @@ export default function VerifyPage() {
                     setMockVerifyingType(group.type);
                     setMockForm({});
                     setSubmitError(null);
+                  }}
+                  onStartReal={() => {
+                    if (group.realProvider) handleStartRealVerify(group.type, group.realProvider);
                   }}
                   onChangeMockForm={setMockForm}
                   onSubmitMock={() => {

@@ -97,13 +97,16 @@ async function main() {
     "/api/route-preview-assets/:filename",
     async (req, reply) => {
       const { filename } = req.params;
-      if (!/^[a-zA-Z0-9_-]+\.png$/.test(filename)) {
+      if (!/^[a-zA-Z0-9_-]+\.(png|webm|mp4)$/.test(filename)) {
         return reply.status(400).send({ ok: false, error: { code: "INVALID_FILENAME", message: "Invalid filename." } });
       }
+      const contentType = filename.endsWith(".webm") ? "video/webm"
+        : filename.endsWith(".mp4") ? "video/mp4"
+        : "image/png";
       const previewDir = join(dirname(fileURLToPath(import.meta.url)), "../.data/route-previews");
       try {
         const buf = await readFile(join(previewDir, filename));
-        reply.header("Content-Type", "image/png");
+        reply.header("Content-Type", contentType);
         reply.header("Cache-Control", "public, max-age=86400");
         return reply.send(buf);
       } catch {

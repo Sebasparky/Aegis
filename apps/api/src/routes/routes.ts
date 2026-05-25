@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, RoutePreviewAsset } from "@aegis/types";
+import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, RoutePreviewAsset, RouteReplayAsset } from "@aegis/types";
 import { routes, newId, skills } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { compileRoute } from "../services/routeCompiler.js";
@@ -228,6 +228,65 @@ export async function routeRoutes(server: FastifyInstance) {
       schedulePersist();
 
       return { ok: true, data: { captured: true, asset } };
+    }
+  );
+
+  /**
+   * POST /api/routes/:routeId/capture-replay-preview
+   *
+   * Runs a controlled Playwright capture and saves a replay video + poster frame.
+   * Only executes safe steps (safe_literal fills, non-sensitive clicks).
+   * Returns captured: false when no capturable URL is available or capture fails.
+   */
+  server.post<{ Params: { routeId: string } }>(
+    "/api/routes/:routeId/capture-replay-preview",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      let assets: RouteReplayAsset[] | null = null;
+      try {
+        const { captureRouteReplay } = await import("../lib/routePreviewCapture.js");
+        assets = await captureRouteReplay(route);
+      } catch (err: any) {
+        server.log.error(err, "Replay capture error");
+        return sendError(reply, 500, "CAPTURE_ERROR", err?.message ?? "Replay capture failed.");
+      }
+
+      if (!assets || assets.length === 0) {
+        return reply.status(200).send({ ok: true, data: { captured: false, reason: "No capturable URL for this route." } });
+      }
+
+      // Merge assets: replace existing poster_frame and replay_video assets.
+      if (!route.replay_assets) route.replay_assets = [];
+      const incoming = new Set(assets.map(a => a.kind));
+      route.replay_assets = route.replay_assets.filter(a => !incoming.has(a.kind));
+      route.replay_assets.push(...assets);
+      routes.set(route.route_id, route);
+      schedulePersist();
+
+      const videoAsset = assets.find(a => a.kind === "replay_video");
+      return {
+        ok: true,
+        data: {
+          captured: true,
+          replay_safety: assets[0].replay_safety,
+          stop_reason: assets[0].stop_reason,
+          assets: assets.map(a => ({
+            asset_id: a.asset_id,
+            kind: a.kind,
+            url_path: a.url_path,
+            poster_url_path: a.poster_url_path,
+            replay_safety: a.replay_safety,
+            stop_reason: a.stop_reason,
+            captured_at: a.captured_at,
+            width: a.width,
+            height: a.height,
+            redaction_applied: a.redaction_applied,
+            source: a.source,
+          })),
+        },
+      };
     }
   );
 

@@ -1134,6 +1134,25 @@ export interface RoutePreviewAsset {
   source: "verification_replay" | "manual_capture" | "dev_seed";
 }
 
+export interface RouteReplayAsset {
+  asset_id: string;
+  route_id: string;
+  route_hash: string;
+  kind: "replay_video" | "poster_frame";
+  url_path: string;
+  poster_url_path?: string;
+  captured_at: string;
+  duration_ms?: number;
+  width?: number;
+  height?: number;
+  redaction_applied: boolean;
+  source: "verification_replay" | "manual_capture" | "dev_seed";
+  replay_safety: "full" | "partial" | "static_only";
+  stop_reason?: string;
+  invalidated_at?: string;
+  failure_reason?: string;
+}
+
 export interface AegisRoute {
   route_id: string;
   version: string;
@@ -1165,6 +1184,7 @@ export interface AegisRoute {
   url_match?: { hostname?: string; path_prefix?: string };
   start_url?: string;
   preview_assets?: RoutePreviewAsset[];
+  replay_assets?: RouteReplayAsset[];
 }
 
 export interface Skill {

@@ -58,6 +58,7 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
           trustTier={route.trust_tier}
           executionMode={route.execution_mode}
           previewAssets={route.preview_assets}
+          replayAssets={route.replay_assets}
           enableReplay={true}
           replaying={hovered}
         />

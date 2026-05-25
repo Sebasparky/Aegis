@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { AegisRoute, InstalledSkill, RoutePreviewAsset, RouteStep, RouteVerificationReport, Skill, StepVerificationResult } from "@aegis/types";
+import type { AegisRoute, InstalledSkill, RoutePreviewAsset, RouteReplayAsset, RouteStep, RouteVerificationReport, Skill, StepVerificationResult } from "@aegis/types";
 import { BASE } from "../lib/api";
 import {
   getRoute, listRouteRuns, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
@@ -182,19 +182,42 @@ function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: 
 
 // ─── SkillPreviewPane ─────────────────────────────────────────────────────────
 
-export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets, enableReplay, replaying }: {
+export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets, replayAssets, enableReplay, replaying }: {
   domain: string;
   name: string;
   steps: PreviewStep[];
   trustTier: string;
   executionMode?: string;
   previewAssets?: RoutePreviewAsset[];
+  replayAssets?: RouteReplayAsset[];
   enableReplay?: boolean;
   replaying?: boolean;
 }) {
   const isLocal = domain === "localhost" || domain === "127.0.0.1";
   const dotColor = isLocal ? "oklch(0.62 0.09 150)" : "oklch(0.62 0.09 240)";
   const startPageAsset = previewAssets?.find(a => a.kind === "start_page");
+  const replayVideoAsset = replayAssets?.find(a => a.kind === "replay_video");
+  const replayPosterAsset = replayAssets?.find(a => a.kind === "poster_frame");
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (replaying) {
+      video.currentTime = 0;
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+      video.currentTime = 0;
+    }
+  }, [replaying]);
+
+  const posterSrc = replayPosterAsset
+    ? `${BASE}${replayPosterAsset.url_path}`
+    : startPageAsset
+    ? `${BASE}${startPageAsset.url_path}`
+    : undefined;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "linear-gradient(160deg, #fff 0%, var(--bg-2) 100%)" }}>
@@ -213,14 +236,28 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
         </div>
       </div>
 
-      {/* Real screenshot or neutral fallback + optional step replay overlay */}
+      {/* Preview content: replay video > static screenshot > neutral fallback */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
-        {startPageAsset
-          ? <RealRoutePreview asset={startPageAsset} />
-          : <NeutralFallback name={name} domain={domain} steps={steps} />
-        }
-        {enableReplay && (
-          <StepReplayOverlay steps={steps} playing={replaying ?? false} />
+        {replayVideoAsset ? (
+          <video
+            ref={videoRef}
+            src={`${BASE}${replayVideoAsset.url_path}`}
+            poster={posterSrc}
+            muted
+            playsInline
+            preload="metadata"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : startPageAsset ? (
+          <>
+            <RealRoutePreview asset={startPageAsset} />
+            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} />}
+          </>
+        ) : (
+          <>
+            <NeutralFallback name={name} domain={domain} steps={steps} />
+            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} />}
+          </>
         )}
       </div>
 

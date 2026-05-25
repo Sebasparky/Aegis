@@ -272,7 +272,11 @@ function assuranceBadgeClass(level?: string) {
 }
 
 function buildMockInput(type: VerificationType, form: MockForm): Record<string, string> {
-  if (type === "email_ownership") return { email_domain: form.email_domain ?? "example.com" };
+  if (type === "email_ownership") {
+    const raw = form.email_domain ?? "example.com";
+    const email_domain = raw.includes("@") ? (raw.split("@")[1] ?? raw) : raw;
+    return { email_domain };
+  }
   if (type === "student_status")
     return {
       institution_name: form.institution_name ?? "University of Michigan",
@@ -332,6 +336,11 @@ function StatBox({ label, value, color }: { label: string; value: number; color:
   );
 }
 
+function normalizeClaimValue(key: string, value: string): string {
+  if (key === "email_domain" && value.includes("@")) return value.split("@")[1] ?? value;
+  return value;
+}
+
 function ClaimValueDisplay({ value }: { value: Record<string, string> }) {
   const entries = Object.entries(value).filter(([k]) => k !== "kind");
   return (
@@ -341,7 +350,7 @@ function ClaimValueDisplay({ value }: { value: Record<string, string> }) {
           <span style={{ color: "var(--ink-4)", minWidth: 120, textTransform: "capitalize" }}>
             {k.replace(/_/g, " ")}
           </span>
-          <span style={{ color: "var(--ink-1)", fontWeight: 500 }}>{String(v)}</span>
+          <span style={{ color: "var(--ink-1)", fontWeight: 500 }}>{normalizeClaimValue(k, String(v))}</span>
         </div>
       ))}
     </div>
@@ -1602,9 +1611,10 @@ export default function VerifyPage() {
             color: "oklch(0.45 0.12 75)",
           }}
         >
-          <strong>Local development only:</strong> Mock providers are active. No real provider
-          verification happens yet. Mock-verified cards are signed locally and work the same as
-          real cards structurally.
+          <strong>Local development only:</strong> Mock providers and local OTP email
+          verification are active. Email OTP codes are printed to the API console — no real
+          email is sent yet. All cards are signed locally and work the same as real cards
+          structurally.
         </div>
       )}
 

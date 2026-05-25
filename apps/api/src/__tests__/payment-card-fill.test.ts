@@ -501,6 +501,26 @@ describe("POST /api/internal/payment-card-fill-authorizations/:id/approve", () =
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it("is idempotent — re-approving an already-approved authorization returns 200", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+      domain: DOMAIN, field: "card_number",
+      page_url: `https://${DOMAIN}/pay`, reason: "fill",
+    });
+    const { authorization_id } = createRes.json().data;
+
+    await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+    const res2 = await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+
+    expect(res2.statusCode).toBe(200);
+    const body = res2.json();
+    expect(body.data.status).toBe("approved");
+    expect(body.data.raw_values_revealed_to_agent).toBe(false);
+    expect(body.data.purchase_not_authorized).toBe(true);
+    assertNoRawCardData(body);
+  });
 });
 
 describe("POST /api/internal/payment-card-fill-authorizations/:id/deny", () => {
@@ -838,26 +858,31 @@ describe("Sensitive receipt timeline — payment_card_fill_executed", () => {
   });
 });
 
-// ─── Tests: Purchase confirmation is NOT implemented ──────────────────────────
+// ─── Tests: Card fill authorization cannot execute purchase ───────────────────
 
-describe("Purchase confirmation endpoints are not implemented", () => {
-  it("POST /api/agent/v1/purchase-confirmations returns 404", async () => {
+describe("Card fill authorization cannot authorize purchase execution", () => {
+  it("POST .../execute with pca_... ID returns 403 CARD_FILL_AUTH_NOT_SUFFICIENT", async () => {
     seedDelegation();
-    const res = await agentPost("/api/agent/v1/purchase-confirmations", {
-      domain: DOMAIN, amount_usd: 99.99, reason: "buy something",
+    const res = await agentPost("/api/agent/v1/purchase-confirmations/pca_fake_auth/execute", {});
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.payload);
+    expect(body.error.code).toBe("CARD_FILL_AUTH_NOT_SUFFICIENT");
+  });
+
+  it("GET /api/agent/v1/purchase-confirmations/pconf_fake returns 404 for unknown ID", async () => {
+    seedDelegation();
+    const res = await agentGet("/api/agent/v1/purchase-confirmations/pconf_fake_unknown");
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("purchase_not_authorized: true is on all card fill responses", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+      domain: DOMAIN, field: "cardholder_name",
+      page_url: `https://${DOMAIN}/checkout`, reason: "test",
     });
-    expect(res.statusCode).toBe(404);
-  });
-
-  it("GET /api/agent/v1/purchase-confirmations/:id returns 404", async () => {
-    seedDelegation();
-    const res = await agentGet("/api/agent/v1/purchase-confirmations/pconf_fake");
-    expect(res.statusCode).toBe(404);
-  });
-
-  it("POST /api/agent/v1/purchase-confirmations/:id/execute returns 404", async () => {
-    seedDelegation();
-    const res = await agentPost("/api/agent/v1/purchase-confirmations/pconf_fake/execute", {});
-    expect(res.statusCode).toBe(404);
+    const body = JSON.parse(createRes.payload);
+    expect(body.data.purchase_not_authorized).toBe(true);
   });
 });

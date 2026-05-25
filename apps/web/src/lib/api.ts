@@ -51,7 +51,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   const json = await res.json();
-  if (!json.ok) throw new Error(json.error?.message ?? "API error");
+  if (!json.ok) throw new Error(json.error?.message ?? json.message ?? "API error");
   return json.data as T;
 }
 
@@ -468,14 +468,57 @@ export const listPaymentCardFillAuthorizations = (status?: string) =>
   );
 
 export const approvePaymentCardFillAuthorization = (id: string) =>
-  request<{ authorization_id: string; status: string }>(
+  request<{ authorization_id: string; status: string; raw_values_revealed_to_agent: false; purchase_not_authorized: true }>(
     `/api/internal/payment-card-fill-authorizations/${id}/approve`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify({}) },
   );
 
 export const denyPaymentCardFillAuthorization = (id: string) =>
   request<{ authorization_id: string; status: string }>(
     `/api/internal/payment-card-fill-authorizations/${id}/deny`,
+    { method: "POST" },
+  );
+
+// ─── Purchase Confirmation Authorizations ──────────────────────────────────────
+
+export interface PurchaseConfirmationAuthorizationView {
+  purchase_confirmation_id: string;
+  domain: string;
+  page_url: string;
+  merchant: string;
+  amount?: number;
+  currency: string;
+  amount_unknown: boolean;
+  item_summary: string;
+  payment_method_label: string;
+  payment_method_last4: string;
+  button_text: string;
+  card_fill_authorization_id?: string;
+  status: string;
+  risk_level: "high" | "critical";
+  raw_values_revealed_to_agent: false;
+  purchase_action_authorized: boolean;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+  // payment_method_id intentionally absent — never returned by server
+}
+
+export const listPurchaseConfirmationAuthorizations = (status?: string) =>
+  request<PurchaseConfirmationAuthorizationView[]>(
+    `/api/internal/purchase-confirmation-authorizations${status ? `?status=${status}` : ""}`,
+  );
+
+export const approvePurchaseConfirmationAuthorization = (id: string) =>
+  request<{ purchase_confirmation_id: string; status: string; purchase_action_authorized: boolean }>(
+    `/api/internal/purchase-confirmation-authorizations/${id}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const denyPurchaseConfirmationAuthorization = (id: string) =>
+  request<{ purchase_confirmation_id: string; status: string }>(
+    `/api/internal/purchase-confirmation-authorizations/${id}/deny`,
     { method: "POST" },
   );
 
@@ -848,7 +891,7 @@ export async function listSensitiveReceiptTimeline(params?: {
   authorization_id?: string;
   challenge_id?: string;
   since?: "today" | "24h" | "7d" | "all";
-  event_group?: "all" | "browser" | "credential" | "challenge" | "email";
+  event_group?: "all" | "browser" | "credential" | "challenge" | "email" | "payment";
   limit?: number;
 }): Promise<{ items: SensitiveActionTimelineItem[] }> {
   const url = new URL(`${BASE}/api/internal/sensitive-receipts/recent`);

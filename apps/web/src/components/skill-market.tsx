@@ -239,15 +239,36 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
       {/* Preview content: replay video > static screenshot > neutral fallback */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
         {replayVideoAsset ? (
-          <video
-            ref={videoRef}
-            src={`${BASE}${replayVideoAsset.url_path}`}
-            poster={posterSrc}
-            muted
-            playsInline
-            preload="metadata"
-            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-          />
+          <>
+            {/* Video stays mounted for preloading; poster overlay prevents blank frame when paused */}
+            <video
+              ref={videoRef}
+              src={`${BASE}${replayVideoAsset.url_path}`}
+              muted
+              playsInline
+              preload="metadata"
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            />
+            {!replaying && posterSrc && (
+              <img
+                src={posterSrc}
+                alt=""
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                }}
+              />
+            )}
+            {!replaying && !posterSrc && (
+              <div style={{ position: "absolute", inset: 0 }}>
+                <NeutralFallback name={name} domain={domain} steps={steps} />
+              </div>
+            )}
+          </>
         ) : startPageAsset ? (
           <>
             <RealRoutePreview asset={startPageAsset} />

@@ -1177,6 +1177,15 @@ body {
   overflow: hidden;
   flex-shrink: 0;
 }
+/* Taller preview for private Rails cards — inspectable replay */
+.skill-mcard__preview--lg {
+  height: 340px;
+}
+
+/* Rails tab grid — wider columns so replay is legible */
+.skill-grid--rails {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
 
 /* Hover overlay — slides over preview on hover */
 .skill-mcard__overlay {

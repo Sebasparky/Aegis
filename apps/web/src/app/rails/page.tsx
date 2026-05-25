@@ -50,7 +50,7 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
       onMouseLeave={() => setHovered(false)}
     >
       {/* Preview thumbnail */}
-      <div className="skill-mcard__preview">
+      <div className="skill-mcard__preview skill-mcard__preview--lg">
         <SkillPreviewPane
           domain={route.domain}
           name={route.workflow_name}
@@ -407,9 +407,9 @@ export default function RailsPage() {
 
           {/* Route grid */}
           {loading ? (
-            <div className="skill-grid">
+            <div className="skill-grid skill-grid--rails">
               {[1, 2, 3].map(i => (
-                <div key={i} style={{ height: 260, borderRadius: "var(--r-3)", background: "var(--graphite-soft)", opacity: 0.35 }} />
+                <div key={i} style={{ height: 360, borderRadius: "var(--r-3)", background: "var(--graphite-soft)", opacity: 0.35 }} />
               ))}
             </div>
           ) : routes.length === 0 ? (
@@ -420,7 +420,7 @@ export default function RailsPage() {
               </p>
             </div>
           ) : (
-            <div className="skill-grid">
+            <div className="skill-grid skill-grid--rails">
               {routes.map(route => (
                 <PrivateRailCard
                   key={route.route_id}

@@ -117,20 +117,34 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
     const posterBuf = await page.screenshot({ type: "png", fullPage: false });
 
     // Execute safe steps only.
+    let lastFilledLocator: import("playwright").Locator | null = null;
     for (const step of safeSteps) {
       try {
         if (step.action === "fill" && step.value_policy?.type === "safe_literal" && step.value_policy.value !== undefined) {
           const locator = await resolveLocatorForReplay(page, step.target);
           if (locator) {
             await locator.fill(step.value_policy.value);
+            lastFilledLocator = locator;
             await page.waitForTimeout(400);
           }
         } else if (step.action === "click") {
+          const prevUrl = page.url();
           const locator = await resolveLocatorForReplay(page, step.target);
           if (locator) {
             await locator.click();
             await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
             await page.waitForTimeout(800);
+          }
+          // If click didn't navigate and a safe fill preceded it, press Enter in the filled input.
+          // This handles search forms where the submit button locator resolves to the wrong element.
+          if (page.url() === prevUrl && lastFilledLocator) {
+            try {
+              await lastFilledLocator.press("Enter");
+              await page.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+              await page.waitForTimeout(800);
+            } catch (enterErr) {
+              console.warn(`[routeReplayCapture] Enter fallback failed for step ${step.step_id}:`, enterErr);
+            }
           }
         }
       } catch (stepErr) {
@@ -140,7 +154,18 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
     }
 
     // Allow final page state to settle before closing.
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(800);
+
+    // For route_demo_wikipedia_001, verify the replay reached the Michigan article.
+    let expectedDestinationMissed = false;
+    if (route.route_id === "route_demo_wikipedia_001") {
+      const finalUrl = page.url();
+      const finalTitle = await page.title().catch(() => "");
+      if (!finalUrl.includes("Michigan") && !finalTitle.includes("Michigan")) {
+        console.warn(`[routeReplayCapture] Wikipedia replay did not reach Michigan article. URL: ${finalUrl}`);
+        expectedDestinationMissed = true;
+      }
+    }
 
     // Closing the page finalizes the video recording.
     await page.close();
@@ -150,6 +175,10 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
       try { videoSrcPath = await videoFile.path(); } catch { /* no video produced */ }
     }
     await context.close();
+
+    // Destination check failed — discard assets rather than returning misleading "full" replay.
+    // Return early before writing any files so PREVIEW_DIR stays clean; finally() cleans tmpVideoDir.
+    if (expectedDestinationMissed) return null;
 
     // Save poster PNG.
     const posterFilename = `${route.route_id}-poster-${ts}.png`;

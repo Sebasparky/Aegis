@@ -303,6 +303,26 @@ describe("POST /api/routes/:routeId/capture-replay-preview", () => {
     expect(route).toBeDefined();
     expect(route?.route_id).toBe(IDS.ROUTE_WIKI);
   });
+
+  it("returns captured: false with a non-empty reason when navigation fails (e.g. Michigan not reached)", async () => {
+    const { captureRouteReplay } = await import("../lib/routePreviewCapture.js");
+    // Simulate destination-check failure: captureRouteReplay returns null
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/routes/${IDS.ROUTE_WIKI}/capture-replay-preview`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.ok).toBe(true);
+    expect(body.data.captured).toBe(false);
+    expect(typeof body.data.reason).toBe("string");
+    expect(body.data.reason.length).toBeGreaterThan(0);
+    // Route must not be mutated (no stale replay_assets)
+    const route = routes.get(IDS.ROUTE_WIKI);
+    expect(route?.replay_assets ?? []).toHaveLength(0);
+  });
 });
 
 // ─── Static asset filename validation — video extensions ─────────────────────

@@ -754,6 +754,42 @@ export const cancelSecurityChallenge = (challengeId: string) =>
     { method: "POST", body: JSON.stringify({}) },
   );
 
+// ─── Profile Memory Requests v1 ──────────────────────────────────────────────
+
+export interface ProfileMemoryRequestView {
+  request_id: string;
+  domain: string;
+  page_url: string;
+  missing_fields: string[];
+  reason: string;
+  status: string;
+  raw_profile_value_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  completed_at?: string;
+}
+
+export const listProfileMemoryRequests = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<ProfileMemoryRequestView[]>(`/api/internal/profile-memory-requests${qs}`);
+};
+
+export const submitProfileMemoryRequest = (
+  requestId: string,
+  values: Record<string, string>,
+  save_for_future: boolean,
+) =>
+  request<{ request_id: string; status: string; fields_stored: string[] }>(
+    `/api/internal/profile-memory-requests/${requestId}/submit`,
+    { method: "POST", body: JSON.stringify({ values, save_for_future }) },
+  );
+
+export const cancelProfileMemoryRequest = (requestId: string) =>
+  request<{ request_id: string; status: string }>(
+    `/api/internal/profile-memory-requests/${requestId}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
 // ─── Connected Email Challenge Resolver v1 ────────────────────────────────────
 
 export interface EmailResolverStatusView {
@@ -1056,7 +1092,9 @@ export interface VerificationSessionView {
   created_at?: string;
   expires_at: string;
   redirect_url?: string;
-  requires_code_step?: boolean; // present and true for local_email provider sessions
+  requires_code_step?: boolean;
+  delivery_channel?: "email";
+  delivery_mode?: "email" | "dev_console";
 }
 
 export const listVerificationTypes = () =>
@@ -1107,7 +1145,7 @@ export const revokeVerificationCard = (cardId: string) =>
 
 export const createEmailVerificationSession = (body: {
   verification_type: "email_ownership";
-  provider_name: "local_email";
+  provider_name: "email_otp" | "local_email";
   email: string;
 }) =>
   request<VerificationSessionView>("/api/verifications/sessions", {

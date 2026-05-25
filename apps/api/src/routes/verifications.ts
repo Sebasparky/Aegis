@@ -13,6 +13,7 @@ import {
   verifyStoredVerificationCard,
 } from "../lib/verificationCardSigning.js";
 import { PROVIDERS, findProvider, findProviderForType } from "../lib/verificationProviders.js";
+import { sendVerificationOtpEmail } from "../lib/emailDelivery.js";
 
 const KNOWN_VERIFICATION_TYPES = new Set<string>([
   "email_ownership",
@@ -47,6 +48,40 @@ interface OtpRecord {
 
 export const sessionOtpRecords = new Map<string, OtpRecord>();
 const sessionEmailDomains = new Map<string, string>(); // domain suffix only, never full email
+
+// ─── Rate limiting for email_otp provider ────────────────────────────────────
+// In-memory only; resets on restart. Keyed by normalized email (lowercase).
+// Exported for test access only — never returned in API responses.
+
+interface OtpRateLimitRecord {
+  send_timestamps: number[]; // epoch ms, trimmed to OTP_WINDOW_MS
+  last_send_at: number;      // epoch ms of most recent send
+}
+
+export const emailOtpRateLimits = new Map<string, OtpRateLimitRecord>();
+
+const OTP_MAX_SENDS_PER_WINDOW = 3;
+const OTP_WINDOW_MS = 15 * 60 * 1000;    // 15 minutes
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
+
+function checkOtpRateLimit(normalizedEmail: string): "ok" | "rate_limited" | "resend_too_soon" {
+  const now = Date.now();
+  const rec = emailOtpRateLimits.get(normalizedEmail);
+  if (!rec) return "ok";
+  if (now - rec.last_send_at < OTP_RESEND_COOLDOWN_MS) return "resend_too_soon";
+  const recentSends = rec.send_timestamps.filter((t) => now - t < OTP_WINDOW_MS);
+  if (recentSends.length >= OTP_MAX_SENDS_PER_WINDOW) return "rate_limited";
+  return "ok";
+}
+
+function recordOtpSend(normalizedEmail: string): void {
+  const now = Date.now();
+  const rec = emailOtpRateLimits.get(normalizedEmail) ?? { send_timestamps: [], last_send_at: 0 };
+  rec.send_timestamps = rec.send_timestamps.filter((t) => now - t < OTP_WINDOW_MS);
+  rec.send_timestamps.push(now);
+  rec.last_send_at = now;
+  emailOtpRateLimits.set(normalizedEmail, rec);
+}
 
 // ─── Safe views ──────────────────────────────────────────────────────────────
 
@@ -141,6 +176,8 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
       expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
     };
 
+    let sessionDeliveryMode: "email" | "dev_console" | undefined;
+
     if (provider.requires_code_step) {
       const rawEmail = typeof email === "string" ? email.trim() : "";
       if (!rawEmail || !rawEmail.includes("@")) {
@@ -156,14 +193,48 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
           error: { code: "EMAIL_INVALID", message: "Email domain is invalid." },
         });
       }
-      const otp = String(randomInt(100000, 1000000));
-      const hash = createHash("sha256").update(otp, "utf8").digest("hex");
-      const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-      sessionOtpRecords.set(session.session_id, { hash, expires_at: otpExpiry, attempt_count: 0 });
-      sessionEmailDomains.set(session.session_id, domain.toLowerCase());
-      if (process.env.NODE_ENV !== "production") {
-        console.log(`[local_email OTP] session=${session.session_id} otp=${otp}`);
+
+      if (provider.name === "email_otp") {
+        const normalizedEmail = rawEmail.toLowerCase();
+        const limitCheck = checkOtpRateLimit(normalizedEmail);
+        if (limitCheck === "rate_limited") {
+          return reply.status(429).send({
+            ok: false,
+            error: { code: "OTP_RATE_LIMITED", message: "Too many verification emails sent. Please wait before trying again." },
+          });
+        }
+        if (limitCheck === "resend_too_soon") {
+          return reply.status(429).send({
+            ok: false,
+            error: { code: "OTP_RESEND_TOO_SOON", message: "Please wait 60 seconds before requesting another code." },
+          });
+        }
+
+        const otp = String(randomInt(100000, 1000000));
+        const hash = createHash("sha256").update(otp, "utf8").digest("hex");
+        const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        sessionOtpRecords.set(session.session_id, { hash, expires_at: otpExpiry, attempt_count: 0 });
+        sessionEmailDomains.set(session.session_id, domain.toLowerCase());
+
+        const delivery = await sendVerificationOtpEmail({
+          to_email: normalizedEmail,
+          otp,
+          session_id: session.session_id,
+        });
+        recordOtpSend(normalizedEmail);
+        sessionDeliveryMode = delivery.delivery_mode;
+      } else {
+        // local_email: dev console only, no real delivery
+        const otp = String(randomInt(100000, 1000000));
+        const hash = createHash("sha256").update(otp, "utf8").digest("hex");
+        const otpExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        sessionOtpRecords.set(session.session_id, { hash, expires_at: otpExpiry, attempt_count: 0 });
+        sessionEmailDomains.set(session.session_id, domain.toLowerCase());
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[local_email OTP] session=${session.session_id} otp=${otp}`);
+        }
       }
+
       session.status = "in_progress";
     }
 
@@ -185,6 +256,7 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
         provider_name: session.provider_name,
         status: session.status,
         ...(provider.requires_code_step ? { requires_code_step: true } : {}),
+        ...(sessionDeliveryMode !== undefined ? { delivery_channel: "email", delivery_mode: sessionDeliveryMode } : {}),
         ...(redirect_url !== undefined ? { redirect_url } : {}),
         expires_at: session.expires_at,
         // provider_session_id intentionally omitted

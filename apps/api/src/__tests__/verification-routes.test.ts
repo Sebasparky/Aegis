@@ -13,7 +13,7 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { verificationCards, verificationProviderSessions, disclosureReceipts } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
-import { verificationRoutes, sessionOtpRecords } from "../routes/verifications.js";
+import { verificationRoutes, sessionOtpRecords, emailOtpRateLimits } from "../routes/verifications.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -71,6 +71,7 @@ beforeEach(() => {
   verificationProviderSessions.clear();
   disclosureReceipts.clear();
   sessionOtpRecords.clear();
+  emailOtpRateLimits.clear();
   vi.clearAllMocks();
 });
 
@@ -712,5 +713,181 @@ describe("POST /complete guard for local_email provider", () => {
     const { res, data } = await completeSession(created.data.session_id);
     expect(res.statusCode).toBe(201);
     expect(data.data.card.claims[0].claim_type).toBe("email_ownership");
+  });
+});
+
+// ─── email_otp provider tests ─────────────────────────────────────────────────
+
+async function createEmailOtpSession(email: string) {
+  const res = await server.inject({
+    method: "POST",
+    url: "/api/verifications/sessions",
+    payload: { verification_type: "email_ownership", provider_name: "email_otp", email },
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+describe("email_otp provider — GET /api/verifications/types", () => {
+  it("email_otp appears in the provider list with email_ownership support", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/verifications/types" });
+    const body = JSON.parse(res.body);
+    const providers = body.data.providers as Array<{ name: string; supported_types: string[] }>;
+    const names = providers.map((p) => p.name);
+    expect(names).toContain("email_otp");
+    const provider = providers.find((p) => p.name === "email_otp");
+    expect(provider?.supported_types).toContain("email_ownership");
+  });
+
+  it("mock_email remains the default provider for email_ownership (first non-named request)", async () => {
+    const { data } = await createSession("email_ownership"); // no provider_name
+    expect(data.data.provider_name).toBe("mock_email");
+  });
+});
+
+describe("email_otp provider — session creation", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("returns 201 with status in_progress and requires_code_step: true", async () => {
+    const { res, data } = await createEmailOtpSession("user@umich.edu");
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    expect(data.data.status).toBe("in_progress");
+    expect(data.data.requires_code_step).toBe(true);
+    expect(data.data.provider_name).toBe("email_otp");
+  });
+
+  it("returns delivery_mode and delivery_channel in response", async () => {
+    const { data } = await createEmailOtpSession("user@umich.edu");
+    expect(["email", "dev_console"]).toContain(data.data.delivery_mode);
+    expect(data.data.delivery_channel).toBe("email");
+  });
+
+  it("falls back to dev_console delivery_mode when RESEND_API_KEY is not set", async () => {
+    // Test environment has no RESEND_API_KEY
+    const { data } = await createEmailOtpSession("user@umich.edu");
+    expect(data.data.delivery_mode).toBe("dev_console");
+  });
+
+  it("logs OTP to console in dev_console mode", async () => {
+    const { data } = await createEmailOtpSession("user@umich.edu");
+    const sessionId = data.data.session_id;
+    const consoleSpy = vi.mocked(console.log);
+    const logged = consoleSpy.mock.calls
+      .flat()
+      .some((arg) => typeof arg === "string" && arg.includes(`session=${sessionId}`));
+    expect(logged).toBe(true);
+  });
+
+  it("response does not contain OTP, full email, username, or @ symbol", async () => {
+    const { res } = await createEmailOtpSession("user@umich.edu");
+    expect(res.body).not.toMatch(/"otp"\s*:/);
+    expect(res.body).not.toMatch(/"code"\s*:/);
+    expect(res.body).not.toContain("user@umich.edu");
+    expect(res.body).not.toContain('"user"');
+    expect(res.body).not.toContain("@");
+  });
+
+  it("does not return provider_session_id in the response", async () => {
+    const { res } = await createEmailOtpSession("user@umich.edu");
+    expect(res.body).not.toMatch(FORBIDDEN_KEY_PATTERN("provider_session_id"));
+  });
+
+  it("returns 400 EMAIL_REQUIRED when email is missing", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/verifications/sessions",
+      payload: { verification_type: "email_ownership", provider_name: "email_otp" },
+    });
+    const data = JSON.parse(res.body);
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("EMAIL_REQUIRED");
+  });
+
+  it("returns 400 EMAIL_INVALID when domain has no dot", async () => {
+    const { res, data } = await createEmailOtpSession("user@localhost");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("EMAIL_INVALID");
+  });
+});
+
+describe("email_otp provider — rate limiting", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("blocks rapid resend with OTP_RESEND_TOO_SOON", async () => {
+    await createEmailOtpSession("user@umich.edu");
+    // 2nd request immediately — within 60s cooldown
+    const { res, data } = await createEmailOtpSession("user@umich.edu");
+    expect(res.statusCode).toBe(429);
+    expect(data.error.code).toBe("OTP_RESEND_TOO_SOON");
+  });
+
+  it("rate limited after 3 sends within 15 minutes", async () => {
+    const email = "ratelimit@test.com";
+    // Send 3 times, advancing last_send_at each time to bypass the 60s cooldown
+    for (let i = 0; i < 3; i++) {
+      await createEmailOtpSession(email);
+      const rec = emailOtpRateLimits.get(email);
+      if (rec) rec.last_send_at = Date.now() - 61_000;
+    }
+    // 4th send — should be rate limited (3 sends in window, cooldown bypassed)
+    const { res, data } = await createEmailOtpSession(email);
+    expect(res.statusCode).toBe(429);
+    expect(data.error.code).toBe("OTP_RATE_LIMITED");
+  });
+});
+
+describe("email_otp provider — submit-code", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("correct OTP issues a signed card with email_domain only (no @ in response)", async () => {
+    const { data: created } = await createEmailOtpSession("student@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+    expect(otp).toBeDefined();
+
+    const { res, data } = await submitCode(sessionId, otp!);
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    const card = data.data.card;
+    expect(card.claims).toHaveLength(1);
+    expect(card.claims[0].claim_type).toBe("email_ownership");
+    expect(card.claims[0].claim_value.email_domain).toBe("umich.edu");
+    expect(card.claims[0].assurance_level).toBe("provider_verified");
+    expect(res.body).not.toContain("@");
+    expect(res.body).not.toContain("student");
+  });
+
+  it("card response does not include forbidden fields", async () => {
+    const { data: created } = await createEmailOtpSession("user@test.com");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    const { res } = await submitCode(sessionId, otp!);
+    for (const field of [...FORBIDDEN_FIELDS, "provider_reference_id", "provider_session_id", "otp", "code"]) {
+      expect(res.body, `"${field}" must not appear`).not.toMatch(FORBIDDEN_KEY_PATTERN(field));
+    }
+  });
+
+  it("returns 400 CODE_STEP_REQUIRED when calling /complete on an email_otp session", async () => {
+    const { data: created } = await createEmailOtpSession("user@umich.edu");
+    const { res, data } = await completeSession(created.data.session_id);
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("CODE_STEP_REQUIRED");
+  });
+
+  it("OTP record is deleted after successful submission", async () => {
+    const { data: created } = await createEmailOtpSession("user@umich.edu");
+    const sessionId = created.data.session_id;
+    const otp = captureOtp(sessionId);
+
+    expect(sessionOtpRecords.has(sessionId)).toBe(true);
+    await submitCode(sessionId, otp!);
+    expect(sessionOtpRecords.has(sessionId)).toBe(false);
   });
 });

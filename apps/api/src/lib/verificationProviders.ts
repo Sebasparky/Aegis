@@ -132,6 +132,23 @@ const mockGovIdProvider: VerificationProvider = {
   },
 };
 
+// ─── Email OTP Provider ───────────────────────────────────────────────────────
+// Real email delivery via Resend (or dev_console fallback).
+// OTP generation, hashing, delivery, and validation are handled by the route layer.
+// Listed after mock providers so findProviderForType("email_ownership") still returns mock_email.
+
+const emailOtpProvider: VerificationProvider = {
+  name: "email_otp",
+  supported_types: ["email_ownership"],
+  requires_code_step: true,
+  async initiate(_session, _input) {
+    return {};
+  },
+  async complete(_session, _mockInput) {
+    throw new Error("email_otp: card issuance is handled by the submit-code route; complete() must not be called");
+  },
+};
+
 // ─── Local Email Provider ─────────────────────────────────────────────────────
 // Dev OTP-based email ownership verification. Does not send real email.
 // OTP generation, hashing, and validation are handled by the route layer.
@@ -156,6 +173,7 @@ export const PROVIDERS: VerificationProvider[] = [
   mockEmailProvider,
   mockStudentProvider,
   mockGovIdProvider,
+  emailOtpProvider,
   localEmailProvider,
 ];
 

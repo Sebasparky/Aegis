@@ -240,7 +240,7 @@ function addAnotherLabel(type: VerificationType): string {
 type OtpFlowState =
   | { phase: "idle" }
   | { phase: "email_input"; type: VerificationType; providerName: string }
-  | { phase: "otp_input"; sessionId: string };
+  | { phase: "otp_input"; sessionId: string; deliveryMode?: "email" | "dev_console" };
 
 // ─── Other types ─────────────────────────────────────────────────────────────
 
@@ -637,6 +637,7 @@ function EmailOtpModal({
   onCancel,
   submitting,
   error,
+  deliveryMode,
 }: {
   phase: "email_input" | "otp_input";
   emailInput: string;
@@ -648,6 +649,7 @@ function EmailOtpModal({
   onCancel: () => void;
   submitting: boolean;
   error: string | null;
+  deliveryMode?: "email" | "dev_console";
 }) {
   const inputStyle = {
     width: "100%",
@@ -690,7 +692,7 @@ function EmailOtpModal({
               Verify email ownership
             </div>
             <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px", lineHeight: 1.5 }}>
-              Enter your email address. A 6-digit one-time code will be generated for verification.
+              Enter your email address. A 6-digit one-time code will be sent for verification.
             </p>
             <div style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 11, color: "var(--ink-3)", display: "block", marginBottom: 4 }}>
@@ -705,18 +707,6 @@ function EmailOtpModal({
                 onKeyDown={(e) => { if (e.key === "Enter" && !submitting) onSubmitEmail(); }}
                 autoFocus
               />
-            </div>
-            <div
-              style={{
-                padding: "8px 10px",
-                background: "var(--amber-soft)",
-                borderRadius: "var(--r-1)",
-                fontSize: 11,
-                color: "oklch(0.45 0.12 75)",
-                marginBottom: 14,
-              }}
-            >
-              In dev, the code appears in the API console. No real email is sent.
             </div>
             {error && (
               <div style={{ marginBottom: 10, color: "var(--red)", fontSize: 12 }}>{error}</div>
@@ -746,7 +736,9 @@ function EmailOtpModal({
               Enter verification code
             </div>
             <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px", lineHeight: 1.5 }}>
-              Enter the 6-digit code from the API console.
+              {deliveryMode === "email"
+                ? "Check your email for a 6-digit code."
+                : "Development mode: the code was printed in the API console."}
             </p>
             <div style={{ marginBottom: 14 }}>
               <label style={{ fontSize: 11, color: "var(--ink-3)", display: "block", marginBottom: 4 }}>
@@ -1448,12 +1440,17 @@ export default function VerifyPage() {
     setSubmitting(true);
     setOtpError(null);
     try {
+      const providerName = otpFlow.providerName as "email_otp" | "local_email";
       const session = await createEmailVerificationSession({
         verification_type: otpFlow.type as "email_ownership",
-        provider_name: otpFlow.providerName as "local_email",
+        provider_name: providerName,
         email: emailInput,
       });
-      setOtpFlow({ phase: "otp_input", sessionId: session.session_id });
+      setOtpFlow({
+        phase: "otp_input",
+        sessionId: session.session_id,
+        deliveryMode: session.delivery_mode,
+      });
       setOtpInput("");
     } catch (e) {
       setOtpError(e instanceof Error ? e.message : "Failed to start verification.");
@@ -1532,6 +1529,7 @@ export default function VerifyPage() {
           }}
           submitting={submitting}
           error={otpError}
+          deliveryMode={otpFlow.phase === "otp_input" ? otpFlow.deliveryMode : undefined}
         />
       )}
 

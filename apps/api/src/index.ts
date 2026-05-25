@@ -50,7 +50,11 @@ import { secretFieldInjectionRoutes } from "./routes/secret-field-injections.js"
 import { paymentCardFillRoutes } from "./routes/payment-card-fills.js";
 import { purchaseConfirmationRoutes } from "./routes/purchase-confirmations.js";
 import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
-import { expireInactiveTaskBrowserSessions } from "./runtime/taskBrowserSessions.js";
+import {
+  expireInactiveTaskBrowserSessions,
+  cleanupOrphanedBrowserProcesses,
+  closeAllTaskBrowserSessions,
+} from "./runtime/taskBrowserSessions.js";
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
@@ -62,6 +66,7 @@ import { devRoutes } from "./routes/dev.js";
 async function main() {
   await loadStore();
   expireInactiveTaskBrowserSessions();
+  await cleanupOrphanedBrowserProcesses();
 
   // Validate Supabase credentials at startup when supabase persistence is enabled.
   if (process.env.AEGIS_PERSISTENCE_PROVIDER === "supabase") {
@@ -161,6 +166,17 @@ async function main() {
 
   await server.listen({ port: 4000, host: "0.0.0.0" });
   console.log("Antigen API running on http://localhost:4000");
+
+  let isShuttingDown = false;
+  const shutdown = async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log("[shutdown] Closing all task browser sessions...");
+    await closeAllTaskBrowserSessions();
+    await server.close();
+  };
+  process.on("SIGTERM", () => { shutdown().catch(console.error); });
+  process.on("SIGINT", () => { shutdown().catch(console.error); });
 }
 
 main().catch((err) => {

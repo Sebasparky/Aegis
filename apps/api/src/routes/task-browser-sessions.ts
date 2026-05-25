@@ -6,6 +6,7 @@ import {
   getTaskBrowserSession,
   closeTaskBrowserSession,
   getPortStatusForDiagnostics,
+  cleanupOrphanedBrowserProcesses,
   type CreateTaskBrowserResult,
 } from "../runtime/taskBrowserSessions.js";
 import { requireAgentToken } from "./agent-api.js";
@@ -157,6 +158,23 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
   server.get("/api/internal/task-browser-port-status", async (_req, reply) => {
     const status = await getPortStatusForDiagnostics();
     return reply.send({ ok: true, data: status });
+  });
+
+  // POST /api/internal/runtime-browser-sessions/cleanup-orphans
+  // Dev/internal only — finds and kills untracked Aegis Chrome processes holding managed CDP ports.
+  // Never kills processes that do not carry the aegis-agent-browser profile marker.
+  server.post("/api/internal/runtime-browser-sessions/cleanup-orphans", async (_req, reply) => {
+    const result = await cleanupOrphanedBrowserProcesses();
+    return reply.send({
+      ok: true,
+      data: {
+        ...result,
+        message:
+          result.orphans_killed > 0
+            ? `Killed ${result.orphans_killed} orphaned Aegis browser process(es). ${result.ports_freed} port(s) now available.`
+            : "No orphaned Aegis browser processes found.",
+      },
+    });
   });
 
   // GET /api/internal/login-diagnostics/recent — recent login failure diagnostics for the current user.

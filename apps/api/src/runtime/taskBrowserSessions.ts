@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, execSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir, tmpdir } from "os";
@@ -207,6 +207,110 @@ export async function getPortStatusForDiagnostics(): Promise<{
   };
 }
 
+// ─── Orphan process detection ─────────────────────────────────────────────────
+
+/**
+ * Parses `ps -eo pid,args` output and returns PIDs whose command line contains
+ * the Aegis ephemeral-profile marker. Exported so tests can verify parsing logic
+ * without invoking `ps` itself.
+ */
+export function parseAegisOrphanPids(psOutput: string): number[] {
+  const pids: number[] = [];
+  for (const line of psOutput.split("\n")) {
+    if (line.includes("aegis-agent-browser")) {
+      const pid = parseInt(line.trim().split(/\s+/)[0], 10);
+      if (!isNaN(pid) && pid > 0) pids.push(pid);
+    }
+  }
+  return pids;
+}
+
+function findAegisOrphanPids(): number[] {
+  try {
+    const output = execSync("ps -eo pid,args", { timeout: 3000, encoding: "utf8" });
+    return parseAegisOrphanPids(output);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Finds and kills Chrome processes that carry the Aegis ephemeral-profile marker
+ * (`--user-data-dir=…/aegis-agent-browser-…`) but are no longer tracked by this
+ * process instance. Safe to call at startup (when Maps are empty) and before
+ * allocating a new port.
+ *
+ * Never touches processes whose PID is already in `taskBrowserProcesses`.
+ * Never touches Chrome processes that do not have the Aegis profile marker.
+ */
+export async function cleanupOrphanedBrowserProcesses(): Promise<{
+  orphans_found: number;
+  orphans_killed: number;
+  ports_freed: number;
+}> {
+  const allAegisPids = findAegisOrphanPids();
+
+  const trackedPids = new Set(
+    [...taskBrowserProcesses.values()].map((p) => p.pid).filter((pid): pid is number => pid != null),
+  );
+  const untrackedPids = allAegisPids.filter((pid) => !trackedPids.has(pid));
+
+  let killed = 0;
+  for (const pid of untrackedPids) {
+    try {
+      process.kill(pid, "SIGTERM");
+      killed++;
+    } catch {
+      // Process may have already exited — ignore.
+    }
+  }
+
+  if (killed > 0) {
+    await new Promise<void>((r) => setTimeout(r, 1000));
+  }
+
+  const availableCount = (
+    await Promise.all(ALL_CDP_PORTS.map(async (p) => ((await isPortInUse(p)) ? 0 : 1)))
+  ).reduce((a: number, b: number) => a + b, 0);
+
+  console.log(
+    `[TaskBrowser] Orphan cleanup: found=${untrackedPids.length} killed=${killed} ports_available=${availableCount}`,
+  );
+  return { orphans_found: untrackedPids.length, orphans_killed: killed, ports_freed: availableCount };
+}
+
+/**
+ * Gracefully closes every tracked task browser session. Called on API shutdown.
+ * Idempotent — safe to call multiple times (subsequent calls skip already-closed sessions).
+ */
+export async function closeAllTaskBrowserSessions(): Promise<void> {
+  const ids = [...taskBrowserSessions.keys()];
+  await Promise.allSettled(
+    ids.map(async (id) => {
+      const session = taskBrowserSessions.get(id);
+      if (!session || session.status === "closed" || session.status === "expired") return;
+      const proc = taskBrowserProcesses.get(id);
+      closingTaskBrowserSessions.add(id);
+      try {
+        if (proc) {
+          try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+          await waitForProcessExit(proc, 2000);
+          if (proc.exitCode === null) {
+            try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+          }
+        }
+        taskBrowserProcesses.delete(id);
+        safeCleanupDir(session.user_data_dir);
+        session.status = "expired";
+        session.closed_at = new Date().toISOString();
+        taskBrowserSessions.set(id, session);
+      } finally {
+        closingTaskBrowserSessions.delete(id);
+      }
+    }),
+  );
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export interface CreateTaskBrowserOptions {
@@ -403,19 +507,38 @@ export async function createTaskBrowserSession(
     return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
-  // Case D: all ports exhausted — include safe diagnostic metadata in the error.
+  // Case D: all ports exhausted — attempt orphan cleanup once before giving up.
+  console.warn("[TaskBrowser] All ports exhausted — attempting orphan cleanup before NO_PORTS_AVAILABLE");
+  await cleanupOrphanedBrowserProcesses();
+
+  const retryPort = await findAvailablePortWithRecycle(ALL_CDP_PORTS);
+  if (retryPort !== null) {
+    const session = await launchChrome(opts, retryPort);
+    const altSelected = retryPort !== DEFAULT_CDP_PORT;
+    return {
+      session,
+      ...(altSelected ? { port_auto_selected: true as const, requires_browser_reconnect: true as const } : {}),
+      user_message: "Started a fresh Antigen task browser session after orphan cleanup.",
+      mode,
+    };
+  }
+
+  // Still no port available — return a clear error with a remediation hint.
   const portRange = `9222–${ALTERNATE_CDP_PORTS[ALTERNATE_CDP_PORTS.length - 1]}`;
   const trackedOccupied = ALL_CDP_PORTS
     .map((p) => ({ port: p, session: findSessionByPort(p) }))
     .filter((x) => x.session)
     .map((x) => ({ session_id: x.session!.browser_session_id, status: x.session!.status, port: x.port }));
 
-  console.error(`[TaskBrowser] All ports ${portRange} occupied — cannot start task browser session`, {
+  console.error(`[TaskBrowser] All ports ${portRange} still occupied after orphan cleanup`, {
     tracked_occupied: trackedOccupied.length,
     total_sessions: taskBrowserSessions.size,
   });
   throw Object.assign(
-    new Error(`Antigen could not start a secure browser session — all ports ${portRange} are occupied. Close any open task browser sessions and retry.`),
+    new Error(
+      `Antigen could not start a secure browser session — all ports ${portRange} are occupied and orphan cleanup did not free any. ` +
+        `Call POST /api/internal/runtime-browser-sessions/cleanup-orphans or restart the API.`,
+    ),
     {
       code: "NO_PORTS_AVAILABLE",
       occupied_port_range: portRange,
@@ -528,8 +651,6 @@ export async function closeTaskBrowserSession(id: string, userId: string): Promi
   }
 }
 
-// TODO(v2): add closeAllTaskBrowserSessions() for cleanup on API shutdown
-// Currently, ephemeral Chrome processes are cleaned up via the "exit" handler on each child process.
 
 export function expireInactiveTaskBrowserSessions(): void {
   const now = new Date();
@@ -548,4 +669,15 @@ export function expireInactiveTaskBrowserSessions(): void {
       }
     }
   }
+}
+
+/** Test-only helper — insert a ChildProcess into the private tracking map.
+ *  Never reference from agent-facing code or API responses. */
+export function _testOnlyInsertTrackedProcess(sessionId: string, proc: ChildProcess): void {
+  taskBrowserProcesses.set(sessionId, proc);
+}
+
+/** Test-only helper — clear the private process tracking map between tests. */
+export function _testOnlyClearTrackedProcesses(): void {
+  taskBrowserProcesses.clear();
 }

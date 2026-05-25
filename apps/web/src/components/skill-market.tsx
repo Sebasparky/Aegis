@@ -200,6 +200,7 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
   const replayPosterAsset = replayAssets?.find(a => a.kind === "poster_frame");
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [videoPlaying, setVideoPlaying] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -207,9 +208,11 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
     if (replaying) {
       video.currentTime = 0;
       video.play().catch(() => {});
+      // videoPlaying stays false until canplay/playing fires — poster remains visible
     } else {
       video.pause();
       video.currentTime = 0;
+      setVideoPlaying(false);
     }
   }, [replaying]);
 
@@ -239,36 +242,27 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
       {/* Preview content: replay video > static screenshot > neutral fallback */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
         {replayVideoAsset ? (
-          <>
-            {/* Video stays mounted for preloading; poster overlay prevents blank frame when paused */}
+          <div className="route-replay-media">
+            {/* Video always mounted for preloading; poster stays on top until video is actually playing */}
             <video
               ref={videoRef}
+              className="route-replay-video"
               src={`${BASE}${replayVideoAsset.url_path}`}
               muted
               playsInline
-              preload="metadata"
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              preload="auto"
+              onCanPlay={() => { if (replaying) setVideoPlaying(true); }}
+              onPlaying={() => { if (replaying) setVideoPlaying(true); }}
             />
-            {!replaying && posterSrc && (
-              <img
-                src={posterSrc}
-                alt=""
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
-                }}
-              />
+            {(!replaying || !videoPlaying) && posterSrc && (
+              <img className="route-replay-poster" src={posterSrc} alt="" />
             )}
-            {!replaying && !posterSrc && (
+            {(!replaying || !videoPlaying) && !posterSrc && (
               <div style={{ position: "absolute", inset: 0 }}>
                 <NeutralFallback name={name} domain={domain} steps={steps} />
               </div>
             )}
-          </>
+          </div>
         ) : startPageAsset ? (
           <>
             <RealRoutePreview asset={startPageAsset} />

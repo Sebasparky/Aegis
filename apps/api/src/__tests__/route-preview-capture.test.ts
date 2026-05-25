@@ -13,13 +13,14 @@ vi.mock("../runtime/taskBrowserSessions.js", async (importOriginal) => {
   return { ...actual, createTaskBrowserSession: vi.fn(), getTaskBrowserSessionForReuse: vi.fn() };
 });
 
-// Mock captureRouteStartPreview so endpoint tests don't require a real browser.
-// Use importOriginal to preserve resolveStartUrl (pure logic, no playwright).
+// Mock captureRouteStartPreview and captureRouteReplay so endpoint tests don't require a real browser.
+// Use importOriginal to preserve resolveStartUrl and classifyStepSafety (pure logic, no playwright).
 vi.mock("../lib/routePreviewCapture.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/routePreviewCapture.js")>();
   return {
     ...actual,
     captureRouteStartPreview: vi.fn(),
+    captureRouteReplay: vi.fn(),
     PREVIEW_DIR: "/tmp/fake-previews",
   };
 });

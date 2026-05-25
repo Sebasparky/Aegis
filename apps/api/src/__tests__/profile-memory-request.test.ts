@@ -648,3 +648,158 @@ describe("POST /api/internal/profile-memory-requests/:id/cancel", () => {
     expect(res.statusCode).toBe(409);
   });
 });
+
+describe("GET /api/agent/v1/profile-memory-requests/:id", () => {
+  function createRequest(reqId: string, status: string = "pending_user", extra: Record<string, unknown> = {}) {
+    profileMemoryRequests.set(reqId, {
+      request_id: reqId,
+      user_id: MOCK_USER_ID,
+      delegation_id: DELEGATION_ID,
+      domain: TEST_DOMAIN,
+      page_url: TEST_PAGE_URL,
+      missing_fields: ["postal_code"],
+      reason: "Checkout form",
+      status: status as "pending_user" | "completed" | "expired" | "cancelled",
+      raw_profile_value_revealed_to_agent: false,
+      created_at: NOW,
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      ...extra,
+    });
+  }
+
+  it("returns pending_user status with metadata", async () => {
+    seedDelegation();
+    const reqId = "pmreq_get_001";
+    createRequest(reqId);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.payload);
+    expect(body.ok).toBe(true);
+    expect(body.data.profile_memory_request_id).toBe(reqId);
+    expect(body.data.status).toBe("pending_user");
+    expect(body.data.domain).toBe(TEST_DOMAIN);
+    expect(body.data.missing_fields).toContain("postal_code");
+    expect(body.data.raw_profile_value_revealed_to_agent).toBe(false);
+    expect(body.data.next_action).toBeDefined();
+  });
+
+  it("returns completed status after submit", async () => {
+    seedDelegation();
+    const reqId = "pmreq_get_completed";
+    const completedAt = new Date().toISOString();
+    createRequest(reqId, "completed", { completed_at: completedAt });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.payload);
+    expect(body.data.status).toBe("completed");
+    expect(body.data.completed_at).toBeDefined();
+    expect(body.data.next_action).toMatch(/retry request_profile_field_fill/i);
+  });
+
+  it("never returns raw profile values even after completion", async () => {
+    seedDelegation();
+    const reqId = "pmreq_get_no_raw";
+    createRequest(reqId, "completed");
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+
+    const bodyStr = res.payload;
+    expect(bodyStr).not.toContain("ppvault://");
+    expect(bodyStr).not.toContain("90210");
+    expect(bodyStr).not.toContain("secret_ref");
+    const body = JSON.parse(bodyStr);
+    expect(body.data.raw_profile_value_revealed_to_agent).toBe(false);
+  });
+
+  it("lazy-expires a past-due pending_user request", async () => {
+    seedDelegation();
+    const reqId = "pmreq_get_lazy_expire";
+    profileMemoryRequests.set(reqId, {
+      request_id: reqId,
+      user_id: MOCK_USER_ID,
+      delegation_id: DELEGATION_ID,
+      domain: TEST_DOMAIN,
+      page_url: TEST_PAGE_URL,
+      missing_fields: ["postal_code"],
+      reason: "Test",
+      status: "pending_user",
+      raw_profile_value_revealed_to_agent: false,
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.payload);
+    expect(body.data.status).toBe("expired");
+    expect(profileMemoryRequests.get(reqId)?.status).toBe("expired");
+  });
+
+  it("returns 404 for unknown request id", async () => {
+    seedDelegation();
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/agent/v1/profile-memory-requests/pmreq_not_real",
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 403 when delegation does not own the request", async () => {
+    seedDelegation();
+    const reqId = "pmreq_get_wrong_delg";
+    profileMemoryRequests.set(reqId, {
+      request_id: reqId,
+      user_id: MOCK_USER_ID,
+      delegation_id: "delg_other_agent",
+      domain: TEST_DOMAIN,
+      page_url: TEST_PAGE_URL,
+      missing_fields: ["postal_code"],
+      reason: "Other agent",
+      status: "pending_user",
+      raw_profile_value_revealed_to_agent: false,
+      created_at: NOW,
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns 401 without auth token", async () => {
+    const reqId = "pmreq_get_noauth";
+    createRequest(reqId);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});

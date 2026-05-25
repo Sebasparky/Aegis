@@ -135,6 +135,7 @@ import {
 import type { PassWithToken } from "../store/index.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { profileFieldFillRoutes } from "../routes/profile-field-fills.js";
+import { getKmsProvider } from "../lib/kms.js";
 
 // ─── Test server ──────────────────────────────────────────────────────────────
 
@@ -545,5 +546,103 @@ describe("GET /api/internal/profile-memory/items", () => {
     expect(str).not.toContain("value_ref");
     // Raw values never returned
     expect(str).not.toContain("mock-ciphertext-b64");
+  });
+});
+
+describe("KMS decrypt context — uses item.provenance.domain_at_creation", () => {
+  it("decrypts with the stored domain_at_creation, not hardcoded aegisdemo.local", async () => {
+    seedDelegation();
+
+    // Seed a memory item whose provenance says it was created at ikea.com
+    const memory_id = "ppm_postal_code_kms_test";
+    encryptedSecretVault.set(memory_id, mockEncryptedBlob);
+    privateProfileMemory.set(memory_id, {
+      memory_id,
+      user_id: MOCK_USER_ID,
+      field_kind: "postal_code",
+      value_ref: `ppvault://${memory_id}/value`,
+      data_class: 2,
+      sensitivity: "private",
+      default_disclosure_mode: "fill_only",
+      agent_visible_allowed: false,
+      provenance: { source: "user_provided", domain_at_creation: "www.ikea.com" },
+      created_at: NOW,
+      updated_at: NOW,
+      user_editable: true,
+      uses: [],
+    });
+
+    // Use a stable spy so we can inspect the context
+    const stableDecrypt = vi.fn().mockResolvedValue("90210");
+    vi.mocked(getKmsProvider).mockReturnValueOnce({
+      provider: "local_dev",
+      encryptSecret: vi.fn().mockResolvedValue(mockEncryptedBlob),
+      decryptSecret: stableDecrypt,
+    });
+
+    const { body: reqBody } = await agentPost("/api/agent/v1/profile-field-fills", {
+      domain: "www.ikea.com",
+      page_url: "https://www.ikea.com/checkout/",
+      requested_fields: [{ key: "postal_code" }],
+      reason: "IKEA checkout form",
+    });
+
+    expect(reqBody.data.fill_request_id).toMatch(/^pffr_/);
+
+    await agentPost(`/api/agent/v1/profile-field-fills/${reqBody.data.fill_request_id}/execute`, {});
+
+    // decrypt must have been called with domain_at_creation, not "aegisdemo.local"
+    expect(stableDecrypt).toHaveBeenCalledWith(
+      mockEncryptedBlob,
+      expect.objectContaining({ domain: "www.ikea.com" }),
+    );
+    expect(stableDecrypt).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ domain: "aegisdemo.local" }),
+    );
+  });
+
+  it("seeded demo items decrypt with aegisdemo.local (provenance is preserved)", async () => {
+    seedDelegation();
+
+    // Seed a memory item with aegisdemo.local provenance (matches seed data)
+    const memory_id = "ppm_email_kms_demo";
+    encryptedSecretVault.set(memory_id, mockEncryptedBlob);
+    privateProfileMemory.set(memory_id, {
+      memory_id,
+      user_id: MOCK_USER_ID,
+      field_kind: "email",
+      value_ref: `ppvault://${memory_id}/value`,
+      data_class: 2,
+      sensitivity: "private",
+      default_disclosure_mode: "fill_only",
+      agent_visible_allowed: false,
+      provenance: { source: "seeded", domain_at_creation: "aegisdemo.local" },
+      created_at: NOW,
+      updated_at: NOW,
+      user_editable: true,
+      uses: [],
+    });
+
+    const stableDecrypt = vi.fn().mockResolvedValue("alex@aegisdemo.local");
+    vi.mocked(getKmsProvider).mockReturnValueOnce({
+      provider: "local_dev",
+      encryptSecret: vi.fn().mockResolvedValue(mockEncryptedBlob),
+      decryptSecret: stableDecrypt,
+    });
+
+    const { body: reqBody } = await agentPost("/api/agent/v1/profile-field-fills", {
+      domain: "aegisdemo.local",
+      page_url: "https://aegisdemo.local/checkout/",
+      requested_fields: [{ key: "email" }],
+      reason: "Demo checkout",
+    });
+
+    await agentPost(`/api/agent/v1/profile-field-fills/${reqBody.data.fill_request_id}/execute`, {});
+
+    expect(stableDecrypt).toHaveBeenCalledWith(
+      mockEncryptedBlob,
+      expect.objectContaining({ domain: "aegisdemo.local" }),
+    );
   });
 });

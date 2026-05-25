@@ -4231,7 +4231,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             status: "pending_user",
             profile_memory_request_id: memReqId,
             missing_fields: missingFields,
-            next_action: "Tell the user: ‘Antigen needs some profile information to fill this form. Please complete the request in Antigen\\’s approvals page.’ Do not ask the user for these values in chat. After the user indicates completion, retry request_profile_field_fill.",
+            next_action: "Call wait_for_profile_memory_request with this profile_memory_request_id. Do not ask the user for values in chat. When wait returns status ‘completed’, retry request_profile_field_fill with the same parameters.",
             raw_profile_value_revealed_to_agent: false,
           },
         });
@@ -4275,6 +4275,52 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           field_count: requestedFields.length,
           raw_profile_value_revealed_to_agent: false,
           raw_profile_values_revealed_to_agent: false,
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/profile-memory-requests/:id — poll status of a pending profile memory request
+  server.get(
+    "/api/agent/v1/profile-memory-requests/:id",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { id } = req.params as { id: string };
+      const r = profileMemoryRequests.get(id);
+      if (!r || r.user_id !== MOCK_USER_ID) {
+        return sendError(reply, 404, "NOT_FOUND", "Profile memory request not found.");
+      }
+      if (r.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This profile memory request does not belong to your delegation.");
+      }
+
+      // Lazy expiry
+      if (r.status === "pending_user" && new Date(r.expires_at) <= new Date()) {
+        r.status = "expired";
+        profileMemoryRequests.set(id, r);
+        schedulePersist();
+      }
+
+      const nextActionByStatus: Record<string, string> = {
+        pending_user: "Still waiting for user to fill values in Antigen's approvals page. Continue polling.",
+        completed: "User has submitted all missing values. Retry request_profile_field_fill with the same parameters.",
+        expired: "Request expired. Create a new request by calling request_profile_field_fill again.",
+        cancelled: "Request was cancelled. Confirm with the user before retrying.",
+      };
+
+      return reply.send({
+        ok: true,
+        data: {
+          profile_memory_request_id: r.request_id,
+          status: r.status,
+          domain: r.domain,
+          missing_fields: r.missing_fields,
+          expires_at: r.expires_at,
+          ...(r.completed_at ? { completed_at: r.completed_at } : {}),
+          raw_profile_value_revealed_to_agent: false as const,
+          next_action: nextActionByStatus[r.status] ?? "Unknown status.",
         },
       });
     },
@@ -4326,7 +4372,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           const plain = await kms.decryptSecret(blob, {
             user_id: MOCK_USER_ID,
             pass_id: item.memory_id,
-            domain: "aegisdemo.local",
+            domain: item.provenance.domain_at_creation,
             purpose: "profile_field",
           });
           resolvedValues.set(fieldReq.key, plain);

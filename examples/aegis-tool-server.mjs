@@ -2180,6 +2180,33 @@ async function waitForPurchaseConfirmationAuthorization({
   return { error: "TIMEOUT", message: "Timed out waiting for purchase confirmation authorization." };
 }
 
+async function waitForProfileMemoryRequest({
+  profile_memory_request_id,
+  timeout_ms = 300000,
+  poll_interval_ms = 3000,
+} = {}) {
+  if (!profile_memory_request_id) return { error: "VALIDATION_ERROR", message: "profile_memory_request_id is required." };
+
+  const TERMINAL = new Set(["completed", "expired", "cancelled"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/profile-memory-requests/${encodeURIComponent(profile_memory_request_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll profile memory request." };
+    }
+    const data = res.data;
+    if (TERMINAL.has(data.status)) return data;
+    await new Promise((r) => setTimeout(r, poll_interval_ms));
+  }
+  return { error: "TIMEOUT", message: "Timed out waiting for profile memory request completion." };
+}
+
 async function executePurchaseConfirmationHandoff({
   purchase_confirmation_id, browser_session_id, external_cdp_url,
 } = {}) {
@@ -3907,6 +3934,35 @@ const TOOLS = [
     },
   },
   {
+    name: "wait_for_profile_memory_request",
+    description:
+      "Poll until the user fills all missing profile values for a pending profile memory request.\n\n" +
+      "Call this immediately after request_profile_field_fill returns status: 'pending_user'.\n" +
+      "Do NOT ask the user for values in chat — the user acts in Antigen's approvals page.\n\n" +
+      "Terminal statuses: completed, expired, cancelled.\n" +
+      "On 'completed': retry request_profile_field_fill with the same parameters.\n" +
+      "On 'expired' or 'cancelled': report that profile fill could not be completed.\n\n" +
+      "RAW PROFILE VALUES ARE NEVER RETURNED — response contains status and next_action only.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_memory_request_id"],
+      properties: {
+        profile_memory_request_id: {
+          type: "string",
+          description: "The profile_memory_request_id returned by request_profile_field_fill.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Max polling duration in milliseconds. Default: 300000 (5 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Polling interval in milliseconds. Default: 3000.",
+        },
+      },
+    },
+  },
+  {
     name: "execute_purchase_confirmation_handoff",
     description:
       "Click the approved payment button — Antigen locates it, validates it against the policy allowlist/blocklist, clicks it once, and records a receipt.\n\n" +
@@ -3968,11 +4024,10 @@ const TOOLS = [
       "FLOW (values missing — status: pending_user):\n" +
       "1. Call request_profile_field_fill — if Antigen lacks values, it returns:\n" +
       "   { status: 'pending_user', profile_memory_request_id, missing_fields, next_action }\n" +
-      "2. Tell the user: 'Antigen needs some profile information to fill this form. " +
-      "Please complete the request in Antigen\\'s approvals page.'\n" +
-      "3. Do NOT ask the user for the field values in chat.\n" +
-      "4. After the user indicates they have completed the request in Antigen, " +
-      "call request_profile_field_fill again with the same parameters.\n\n" +
+      "2. Immediately call wait_for_profile_memory_request with the returned profile_memory_request_id.\n" +
+      "3. Do NOT ask the user for field values in chat. Do NOT wait for the user to say 'go'.\n" +
+      "4. When wait returns status 'completed', call request_profile_field_fill again with the same parameters.\n" +
+      "5. If wait returns 'expired' or 'cancelled', report that profile fill could not be completed.\n\n" +
       "RAW VALUES ARE NEVER RETURNED. Response includes masked summaries only.",
     inputSchema: {
       type: "object",
@@ -4618,6 +4673,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "execute_purchase_confirmation_handoff":
       result = await executePurchaseConfirmationHandoff(a);
+      break;
+    case "wait_for_profile_memory_request":
+      result = await waitForProfileMemoryRequest(a);
       break;
     case "request_profile_field_fill":
       result = await requestProfileFieldFill(a);

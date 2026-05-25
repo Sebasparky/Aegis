@@ -167,7 +167,7 @@ async function getAgentRunnableWorkflow({ skill_id }) {
   if (!skill) {
     return {
       error: "SKILL_NOT_FOUND",
-      message: `Skill "${skill_id}" was not found among installed skills visible to this delegation.`,
+      message: `Skill "${skill_id}" was not found among installed or private-route skills visible to this delegation.`,
     };
   }
 
@@ -2121,6 +2121,85 @@ async function executePaymentCardFillHandoff({ fill_request_id } = {}) {
   return res.data;
 }
 
+// ─── Purchase Confirmation handlers ──────────────────────────────────────────
+
+async function requestPurchaseConfirmation({
+  domain, page_url, merchant, amount, currency, amount_unknown,
+  item_summary, payment_method_label, payment_method_last4,
+  button_text, button_selector_hint, card_fill_authorization_id, reason,
+} = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!merchant) return { error: "VALIDATION_ERROR", message: "merchant is required." };
+  if (!item_summary) return { error: "VALIDATION_ERROR", message: "item_summary is required." };
+  if (!payment_method_label) return { error: "VALIDATION_ERROR", message: "payment_method_label is required." };
+  if (!payment_method_last4) return { error: "VALIDATION_ERROR", message: "payment_method_last4 is required." };
+  if (!button_text) return { error: "VALIDATION_ERROR", message: "button_text is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/purchase-confirmations", {
+      domain, page_url, merchant, amount, currency, amount_unknown,
+      item_summary, payment_method_label, payment_method_last4,
+      button_text, button_selector_hint, card_fill_authorization_id, reason,
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create purchase confirmation request." };
+  }
+  return res.data;
+}
+
+async function waitForPurchaseConfirmationAuthorization({
+  purchase_confirmation_id,
+  timeout_ms = 300000,
+  poll_interval_ms = 3000,
+} = {}) {
+  if (!purchase_confirmation_id) return { error: "VALIDATION_ERROR", message: "purchase_confirmation_id is required." };
+
+  const TERMINAL = new Set(["approved", "denied", "expired", "revoked", "fulfilled"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/purchase-confirmations/${encodeURIComponent(purchase_confirmation_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll purchase confirmation authorization." };
+    }
+    const data = res.data;
+    if (TERMINAL.has(data.status)) return data;
+    await new Promise((r) => setTimeout(r, poll_interval_ms));
+  }
+  return { error: "TIMEOUT", message: "Timed out waiting for purchase confirmation authorization." };
+}
+
+async function executePurchaseConfirmationHandoff({
+  purchase_confirmation_id, browser_session_id, external_cdp_url,
+} = {}) {
+  if (!purchase_confirmation_id) return { error: "VALIDATION_ERROR", message: "purchase_confirmation_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/purchase-confirmations/${encodeURIComponent(purchase_confirmation_id)}/execute`, {
+      ...(browser_session_id ? { browser_session_id } : {}),
+      ...(external_cdp_url ? { external_cdp_url } : {}),
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Purchase confirmation handoff failed." };
+  }
+  return res.data;
+}
+
 // ─── Workspace handlers ───────────────────────────────────────────────────────
 
 async function getWorkspaceManifest({ workspace_id } = {}) {
@@ -3078,7 +3157,13 @@ const TOOLS = [
       "Call this once at task start. If a ready runtime already exists for this delegation it is returned immediately (reused_existing=true). " +
       "Otherwise Aegis provisions a fresh ephemeral Chrome session with no-save policy enforced. " +
       "When port_auto_selected=true, reconnect your browser adapter to the returned cdp_url before navigating.\n\n" +
-      "Pass the returned browser_runtime_id as browser_session_id in request_secret_field_injection calls. " +
+      "Pass the returned browser_runtime_id as browser_session_id in:\n" +
+      "- request_secret_field_injection (credential fields)\n" +
+      "- request_payment_card_fill (each card field fill request)\n" +
+      "- request_purchase_confirmation (the purchase authorization request)\n" +
+      "- execute_purchase_confirmation_handoff (the button click)\n\n" +
+      "Missing browser_session_id in any payment tool call causes Aegis to fall back to the static AEGIS_PLAYWRIGHT_CDP_URL env var. " +
+      "If that port differs from the active runtime, CDP targets the wrong page and fails with 'element not found' even when selectors are correct.\n\n" +
       "Do NOT use navigate_task_browser_session / observe_task_browser_session / click_element_in_task_browser_session if your agent has @playwright/mcp — those are compatibility tools for agents with no browser tooling.",
     inputSchema: {
       type: "object",
@@ -3527,20 +3612,25 @@ const TOOLS = [
       "CRITICAL PRODUCT BOUNDARY:\n" +
       "- This approval covers card FIELD FILL only.\n" +
       "- It does NOT authorize a purchase, charge, subscription, or any payment action.\n" +
-      "- A separate (not yet implemented) purchase confirmation approval is required before any payment is submitted.\n" +
+      "- A separate purchase confirmation approval (request_purchase_confirmation) is required before any payment is submitted.\n" +
       "- The agent owns all navigation and form submission decisions. Antigen only fills the requested fields.\n\n" +
       "SECURITY:\n" +
       "- card_number and CVV are resolved server-side via KMS and injected via CDP. The agent never receives them.\n" +
       "- card_number and CVV fields are masked in the DOM after fill (agent cannot read them back).\n" +
       "- Non-secret fields (expiry, cardholder_name, billing_zip) are filled without KMS.\n\n" +
+      "RUNTIME BINDING:\n" +
+      "Always pass browser_session_id from get_runtime_browser_endpoint. Missing browser_session_id causes Aegis to fall back to the\n" +
+      "static CDP env var — if that port does not match your active runtime, execute_payment_card_fill_handoff will fail with\n" +
+      "'element not found' even when your selectors are correct. This is the most common cause of card fill failures.\n\n" +
       "FLOW:\n" +
-      "1. Navigate to the checkout page in your browser.\n" +
-      "2. Call request_payment_card_fill for each field you need (card_number, cvv, expiry_combined, etc.).\n" +
+      "0. Call get_runtime_browser_endpoint to get browser_runtime_id. Navigate to the checkout page in that runtime.\n" +
+      "1. Call request_payment_card_fill for each field you need (card_number, cvv, expiry_combined, etc.).\n" +
+      "   - Pass browser_session_id: browser_runtime_id on every call.\n" +
       "   - If status='approved': call execute_payment_card_fill_handoff immediately.\n" +
       "   - If status='pending_approval': tell the user to approve at /route-run-approvals under 'Payment card requests'.\n" +
       "     Then call wait_for_payment_card_fill_authorization with the returned authorization_id.\n" +
-      "3. Once approved, call execute_payment_card_fill_handoff for each fill_request_id.\n" +
-      "4. After all fields are filled, YOU decide whether to submit the form — Aegis does not submit for you.\n\n" +
+      "2. Once approved, call execute_payment_card_fill_handoff for each fill_request_id.\n" +
+      "3. After all fields are filled, YOU decide whether to submit the form — Aegis does not submit for you.\n\n" +
       "FIELD NAMES: card_number, cvv, expiry_month, expiry_year, expiry_combined (MM/YY), cardholder_name, billing_zip\n\n" +
       "SELECTOR SAFETY: selector_hint must target the INPUT field only. Never use selectors for button, submit, form, a[href], or [role=button].\n\n" +
       "PAYMENT METHOD: omit payment_method_id to use the default payment method.",
@@ -3584,11 +3674,11 @@ const TOOLS = [
         },
         browser_session_id: {
           type: "string",
-          description: "Aegis-managed task browser session ID from start_task_browser_session. Mutually exclusive with external_cdp_url.",
+          description: "Preferred: browser_runtime_id from get_runtime_browser_endpoint. Mutually exclusive with external_cdp_url. Missing this is the most common cause of CDP_FILL_FAILED.",
         },
         external_cdp_url: {
           type: "string",
-          description: "CDP base URL for an agent-owned browser, e.g. 'http://localhost:9222'. Mutually exclusive with browser_session_id.",
+          description: "CDP base URL for an agent-owned browser, e.g. 'http://localhost:9222'. Mutually exclusive with browser_session_id. Not recommended — use get_runtime_browser_endpoint instead.",
         },
       },
     },
@@ -3626,6 +3716,11 @@ const TOOLS = [
     name: "execute_payment_card_fill_handoff",
     description:
       "Execute an approved payment card fill — Aegis resolves the field value from KMS and injects it via CDP.\n\n" +
+      "RUNTIME BINDING:\n" +
+      "Aegis uses the browser_session_id stored on the fill request (passed at request_payment_card_fill time) to target the correct\n" +
+      "runtime page. If browser_session_id was missing when the fill was requested, execute will fail with 'element not found'\n" +
+      "even when selectors are correct. To fix: create a new fill request via request_payment_card_fill with browser_session_id\n" +
+      "from get_runtime_browser_endpoint — do not re-execute the old fill request.\n\n" +
       "CRITICAL:\n" +
       "- Raw card values (card_number, CVV) are NEVER returned to the agent.\n" +
       "- card_number and CVV are masked in the DOM after fill.\n" +
@@ -3644,6 +3739,163 @@ const TOOLS = [
         fill_request_id: {
           type: "string",
           description: "The fill_request_id returned by request_payment_card_fill.",
+        },
+      },
+    },
+  },
+  // ─── Purchase Confirmation Handoff v1 ────────────────────────────────────────
+  {
+    name: "request_purchase_confirmation",
+    description:
+      "Request a separate user approval to submit a final payment action (clicking the Pay/Place Order button).\n\n" +
+      "CRITICAL PRODUCT BOUNDARY:\n" +
+      "- This is SEPARATE from request_payment_card_fill. Card fill does NOT authorize purchase submission.\n" +
+      "- You MUST obtain a PurchaseConfirmationAuthorization (pconf_...) before any payment button is clicked.\n" +
+      "- Do NOT pass a PaymentCardFillAuthorization ID (pca_...) to execute_purchase_confirmation_handoff — it will be rejected with 403.\n" +
+      "- Never click the payment button yourself. Antigen clicks it only after the user approves this separate request.\n\n" +
+      "RUNTIME BINDING:\n" +
+      "Pass browser_session_id: browser_runtime_id from get_runtime_browser_endpoint. Aegis stores this on the authorization and uses it\n" +
+      "at execute_purchase_confirmation_handoff time to locate the correct runtime page. Missing browser_session_id causes the button\n" +
+      "click to fail with 'no page found for domain' or target the wrong browser entirely.\n\n" +
+      "FLOW:\n" +
+      "0. Call get_runtime_browser_endpoint to get browser_runtime_id (same session used for card fills).\n" +
+      "1. Fill all card fields (via request_payment_card_fill + execute_payment_card_fill_handoff).\n" +
+      "2. Call request_purchase_confirmation with payment details, exact button text, and browser_session_id: browser_runtime_id.\n" +
+      "3. If status='pending_approval': tell the user to approve at /route-run-approvals under 'Purchase confirmations'.\n" +
+      "   Then call wait_for_purchase_confirmation_authorization with the returned purchase_confirmation_id.\n" +
+      "4. Once approved, call execute_purchase_confirmation_handoff.\n\n" +
+      "SECURITY:\n" +
+      "- Antigen clicks exactly one button after explicit user approval.\n" +
+      "- No card values, CVV, refs, ciphertext, cookies, storage, or KMS material are returned.\n" +
+      "- No 3DS, challenge solving, or multi-step checkout automation.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "page_url", "merchant", "item_summary", "payment_method_label", "payment_method_last4", "button_text", "reason"],
+      properties: {
+        domain: {
+          type: "string",
+          description: "The checkout domain, e.g. 'localhost'. Must match the page_url hostname.",
+        },
+        page_url: {
+          type: "string",
+          description: "Full URL of the checkout page, e.g. 'http://localhost:3001/stripe-checkout'.",
+        },
+        merchant: {
+          type: "string",
+          description: "Merchant or store name shown to the user for approval, e.g. 'Mock Store'.",
+        },
+        amount: {
+          type: "number",
+          description: "Purchase amount as a number, e.g. 12.99. Omit if unknown.",
+        },
+        currency: {
+          type: "string",
+          description: "Currency code, e.g. 'USD'. Defaults to 'USD' if omitted.",
+        },
+        amount_unknown: {
+          type: "boolean",
+          description: "Set to true if you could not determine the amount. The UI will show a strong warning.",
+        },
+        item_summary: {
+          type: "string",
+          description: "Short description of what is being purchased, shown to the user for approval.",
+        },
+        payment_method_label: {
+          type: "string",
+          description: "Display label of the card being charged, e.g. 'Visa'.",
+        },
+        payment_method_last4: {
+          type: "string",
+          description: "Last 4 digits of the card being charged, e.g. '4242'.",
+        },
+        button_text: {
+          type: "string",
+          description: "Exact text of the button that will be clicked, e.g. 'Pay $12.99' or 'Place order'. Must be a final-action payment button.",
+        },
+        button_selector_hint: {
+          type: "string",
+          description: "Optional CSS selector to locate the button. Provide if the button text is ambiguous.",
+        },
+        card_fill_authorization_id: {
+          type: "string",
+          description: "Optional. The pca_... card fill authorization ID from request_payment_card_fill, for audit trail linkage only. Do NOT pass this as the authorization ID to execute.",
+        },
+        reason: {
+          type: "string",
+          description: "One sentence explaining why this purchase is being submitted, shown in the audit trail.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Preferred: browser_runtime_id from get_runtime_browser_endpoint. Stored on the authorization and used by execute_purchase_confirmation_handoff to target the correct runtime page. Missing this is the most common cause of button-click failures.",
+        },
+      },
+    },
+  },
+  {
+    name: "wait_for_purchase_confirmation_authorization",
+    description:
+      "Poll until the user approves or denies a pending purchase confirmation authorization.\n\n" +
+      "Use after request_purchase_confirmation returns status='pending_approval'.\n" +
+      "Tell the user: \"Please approve the purchase confirmation at /route-run-approvals under 'Purchase confirmations'.\"\n" +
+      "Do NOT ask the user to confirm in chat.\n\n" +
+      "Terminal statuses: approved, denied, expired, revoked, fulfilled.\n" +
+      "On 'approved': call execute_purchase_confirmation_handoff immediately.\n" +
+      "On 'denied' or 'expired': do not submit payment without a new user approval.",
+    inputSchema: {
+      type: "object",
+      required: ["purchase_confirmation_id"],
+      properties: {
+        purchase_confirmation_id: {
+          type: "string",
+          description: "The purchase_confirmation_id returned by request_purchase_confirmation.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Max polling duration in milliseconds. Default: 300000 (5 minutes).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Polling interval in milliseconds. Default: 3000.",
+        },
+      },
+    },
+  },
+  {
+    name: "execute_purchase_confirmation_handoff",
+    description:
+      "Click the approved payment button — Antigen locates it, validates it against the policy allowlist/blocklist, clicks it once, and records a receipt.\n\n" +
+      "RUNTIME BINDING:\n" +
+      "Aegis uses the browser_session_id stored on the PurchaseConfirmationAuthorization (set at request_purchase_confirmation time)\n" +
+      "to connect to the correct runtime page. You do NOT need to re-pass browser_session_id here — it is already stored.\n" +
+      "If the authorization was created without browser_session_id, Aegis falls back to AEGIS_PLAYWRIGHT_CDP_URL;\n" +
+      "if that port is wrong, this call will fail with 'no page found for domain'. Fix by re-requesting confirmation with browser_session_id.\n\n" +
+      "CRITICAL:\n" +
+      "- Only call after wait_for_purchase_confirmation_authorization returns status='approved'.\n" +
+      "- Do NOT pass a pca_... (PaymentCardFillAuthorization) ID — it will be rejected with 403 CARD_FILL_AUTH_NOT_SUFFICIENT.\n" +
+      "- Antigen clicks exactly one button. No form fill, no retries, no 3DS solving, no multi-step flows.\n" +
+      "- Raw card values, CVV, card refs, ciphertext, cookies, storage, CDP URL, and KMS material are never returned.\n" +
+      "- Antigen disconnects from the browser after the click — it does not close the runtime.\n\n" +
+      "Outcome values:\n" +
+      "- 'submitted': payment was submitted (page navigated to confirmation).\n" +
+      "- 'failed': payment was declined or an error occurred.\n" +
+      "- 'manual_step_required': button was clicked but no clear signal — verify in browser.\n" +
+      "- 'blocked_policy': button text is on the destructive/non-payment blocklist.\n" +
+      "- 'blocked_merchant_mismatch': current page domain does not match the approved domain.",
+    inputSchema: {
+      type: "object",
+      required: ["purchase_confirmation_id"],
+      properties: {
+        purchase_confirmation_id: {
+          type: "string",
+          description: "The purchase_confirmation_id returned by request_purchase_confirmation (pconf_... prefix). Do NOT pass a pca_... card fill authorization ID.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional override. Normally not needed — Aegis uses the browser_session_id stored on the authorization at request_purchase_confirmation time. Only pass here if you need to override the stored session.",
+        },
+        external_cdp_url: {
+          type: "string",
+          description: "CDP base URL for an agent-owned browser. Only needed if neither the authorization nor start_task_browser_session provided a session. Mutually exclusive with browser_session_id.",
         },
       },
     },
@@ -4197,6 +4449,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "execute_payment_card_fill_handoff":
       result = await executePaymentCardFillHandoff(a);
+      break;
+    case "request_purchase_confirmation":
+      result = await requestPurchaseConfirmation(a);
+      break;
+    case "wait_for_purchase_confirmation_authorization":
+      result = await waitForPurchaseConfirmationAuthorization(a);
+      break;
+    case "execute_purchase_confirmation_handoff":
+      result = await executePurchaseConfirmationHandoff(a);
       break;
     case "report_security_challenge":
       result = await reportSecurityChallenge(a);

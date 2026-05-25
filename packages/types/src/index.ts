@@ -607,9 +607,10 @@ export type UserApprovalDecision = "approved" | "denied";
 export type UserApprovalSource =
   | "approval_request"
   | "route_run_rejection"
-  | "credential_authorization"        // credential injection approve path
-  | "challenge_code_submission"       // security challenge code submit path
-  | "payment_card_fill_authorization"; // payment card fill approve path
+  | "credential_authorization"              // credential injection approve path
+  | "challenge_code_submission"             // security challenge code submit path
+  | "payment_card_fill_authorization"       // payment card fill approve path
+  | "purchase_confirmation_authorization";  // purchase confirmation approve path
 export type UserApprovalOutcome = "pending" | "completed" | "failed" | "not_applicable";
 
 /**
@@ -2385,6 +2386,79 @@ export interface PaymentCardFillResult {
   error?: string;
 }
 
+// ─── Purchase Confirmation Handoff v1 ─────────────────────────────────────────
+// Separate approval and execution for final payment submission.
+// Never reuses PaymentCardFillAuthorization — that covers field fill only.
+
+export type PurchaseConfirmationAuthorizationStatus =
+  | "pending_approval"
+  | "approved"
+  | "fulfilled"
+  | "denied"
+  | "expired"
+  | "revoked";
+
+export type PurchaseConfirmationOutcome =
+  | "submitted"
+  | "failed"
+  | "blocked_merchant_mismatch"
+  | "blocked_policy"
+  | "manual_step_required";
+
+/** One separate user approval covering final payment button click. Distinct from PaymentCardFillAuthorization. */
+export interface PurchaseConfirmationAuthorization {
+  purchase_confirmation_id: string;   // "pconf_..."
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  page_url: string;
+  merchant: string;
+  amount?: number;
+  currency: string;
+  /** true when the agent could not determine the amount — UI must show a strong warning. */
+  amount_unknown: boolean;
+  item_summary: string;
+  payment_method_label: string;
+  payment_method_last4: string;
+  /** The exact button text that will be clicked when approved. */
+  button_text: string;
+  button_selector_hint?: string;
+  /** Optional back-reference to the preceding card fill approval, for audit trail. */
+  card_fill_authorization_id?: string;
+  reason: string;
+  status: PurchaseConfirmationAuthorizationStatus;
+  risk_level: "high" | "critical";
+  /** Always the literal false — raw card values are never involved in this flow. */
+  raw_values_revealed_to_agent: false;
+  /** false until the user explicitly approves; true only after approval. */
+  purchase_action_authorized: boolean;
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  fulfilled_at?: string;
+}
+
+/** Audit record for a completed purchase confirmation handoff. Never stores card values or KMS material. */
+export interface PurchaseConfirmationHandoffRecord {
+  handoff_id: string;                    // "pchoff_..."
+  purchase_confirmation_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  merchant: string;
+  amount?: number;
+  currency: string;
+  item_summary: string;
+  payment_method_label: string;
+  payment_method_last4: string;
+  button_text: string;
+  outcome: PurchaseConfirmationOutcome;
+  card_fill_authorization_id?: string;
+  /** Always the literal false. */
+  raw_values_revealed_to_agent: false;
+  completed_at: string;
+}
+
 // ─── Sensitive Action Receipt Timeline v1 ──────────────────────────────────────
 
 export type SensitiveActionEventType =
@@ -2400,7 +2474,9 @@ export type SensitiveActionEventType =
   | "challenge_email_resolution_requested"
   | "challenge_email_code_found"
   | "challenge_email_code_injected"
-  | "payment_card_fill_executed";
+  | "payment_card_fill_executed"
+  | "purchase_confirmation_submitted"
+  | "purchase_confirmation_failed";
 
 export interface SensitiveActionTimelineItem {
   item_id: string;
@@ -2414,6 +2490,7 @@ export interface SensitiveActionTimelineItem {
   authorization_id?: string;
   challenge_id?: string;
   resolution_id?: string;
+  purchase_confirmation_id?: string;
 }
 
 // ─── Aegis Workspaces v0 ────────────────────────────────────────────────────

@@ -31,6 +31,9 @@ import {
   listPaymentCardFillAuthorizations,
   approvePaymentCardFillAuthorization,
   denyPaymentCardFillAuthorization,
+  listPurchaseConfirmationAuthorizations,
+  approvePurchaseConfirmationAuthorization,
+  denyPurchaseConfirmationAuthorization,
   type RouteRunWithSummary,
   type CredentialSessionView,
   type RunApprovalContext,
@@ -45,6 +48,7 @@ import {
   type LoginDiagnosticView,
   type PaymentCardFillAuthorizationView,
   type PaymentCardField,
+  type PurchaseConfirmationAuthorizationView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -827,6 +831,126 @@ function PendingCardFillAuthCard({
   );
 }
 
+// ── Purchase confirmation card ─────────────────────────────────────────────────
+
+function PurchaseConfirmationApprovalCard({
+  auth, onApprove, onDeny,
+}: {
+  auth: PurchaseConfirmationAuthorizationView;
+  onApprove: () => Promise<void>;
+  onDeny: () => Promise<void>;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [denying, setDenying] = useState(false);
+  const [approved, setApproved] = useState(false);
+
+  const amountDisplay = auth.amount_unknown
+    ? null
+    : auth.amount != null
+    ? `${auth.currency} ${auth.amount.toFixed(2)}`
+    : null;
+
+  return (
+    <div className="apr-card apr-card--red">
+      <div className="apr-card__head">
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: 0 }}>Purchase confirmation</p>
+            <span style={{ background: "var(--red-soft)", color: "oklch(0.45 0.13 25)", border: "1px solid var(--red-ring)", fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
+              CRITICAL
+            </span>
+          </div>
+          <p style={{ fontSize: 11.5, color: "oklch(0.45 0.13 25)", fontFamily: "monospace", margin: 0 }}>{auth.domain}</p>
+        </div>
+        <span className="a-status a-status--red" style={{ flexShrink: 0 }}>Waiting</span>
+      </div>
+
+      <div className="apr-card__body">
+
+        {/* Amount — large and prominent */}
+        <div style={{ background: auth.amount_unknown ? "var(--red-soft)" : "oklch(0.97 0.02 150)", border: `1px solid ${auth.amount_unknown ? "var(--red-ring)" : "oklch(0.88 0.03 150)"}`, borderRadius: 10, padding: "16px 20px", marginBottom: 4 }}>
+          {auth.amount_unknown ? (
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 700, color: "oklch(0.45 0.13 25)", textTransform: "uppercase", letterSpacing: 0.4, margin: "0 0 4px" }}>⚠ Amount unknown</p>
+              <p style={{ fontSize: 14, color: "oklch(0.45 0.13 25)", margin: 0, lineHeight: 1.5 }}>
+                The agent could not determine the purchase amount. Verify the cart total in your browser before approving.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 600, color: "oklch(0.42 0.09 150)", textTransform: "uppercase", letterSpacing: 0.4, margin: "0 0 4px" }}>Total</p>
+              <p style={{ fontSize: 32, fontWeight: 700, color: "var(--ink-1)", margin: 0, lineHeight: 1 }}>{amountDisplay}</p>
+            </div>
+          )}
+        </div>
+
+        <SectionCard label="Merchant">
+          <p style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>{auth.merchant}</p>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>{auth.item_summary}</p>
+        </SectionCard>
+
+        <SectionCard label="Payment method">
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
+            {auth.payment_method_label} ···{auth.payment_method_last4}
+          </p>
+        </SectionCard>
+
+        <SectionCard label="Button that will be clicked">
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: 6, padding: "6px 14px" }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "oklch(0.45 0.13 25)", fontFamily: "monospace" }}>{auth.button_text}</span>
+          </div>
+          <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: "6px 0 0" }}>Antigen will click exactly this button. No other buttons will be clicked.</p>
+        </SectionCard>
+
+        <SectionCard label="Warning">
+          <div style={{ background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: 8, padding: "10px 14px" }}>
+            <p style={{ fontSize: 12.5, color: "oklch(0.45 0.13 25)", fontWeight: 700, margin: "0 0 4px" }}>
+              Approving this may complete a purchase, payment, or subscription.
+            </p>
+            <p style={{ fontSize: 12, color: "oklch(0.45 0.10 25)", margin: 0, lineHeight: 1.55 }}>
+              This is separate from the card fill approval. Approving this authorizes the final payment submission action.
+            </p>
+          </div>
+        </SectionCard>
+
+        {auth.card_fill_authorization_id && (
+          <SectionCard label="Linked to card fill">
+            <p style={{ fontSize: 12, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{auth.card_fill_authorization_id}</p>
+          </SectionCard>
+        )}
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            disabled={approving || denying || approved}
+            onClick={async () => {
+              setApproving(true);
+              try {
+                await onApprove();
+                setApproved(true);
+              } finally {
+                setApproving(false);
+              }
+            }}
+            className="a-btn a-btn--danger"
+            style={{ opacity: approved ? 0.7 : 1 }}
+          >
+            {approved ? "Approved" : approving ? "Approving…" : "Approve payment submission"}
+          </button>
+          <button
+            disabled={approving || denying || approved}
+            onClick={async () => { setDenying(true); try { await onDeny(); } finally { setDenying(false); } }}
+            className="a-btn a-btn--ghost"
+          >
+            {denying ? "Denying…" : "Deny"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{auth.purchase_confirmation_id}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Challenge card ─────────────────────────────────────────────────────────────
 
 function PendingChallengeCard({
@@ -1256,6 +1380,7 @@ export default function RouteRunApprovalsPage() {
   const [injections, setInjections] = useState<SecretFieldInjectionView[]>([]);
   const [credAuths, setCredAuths] = useState<CredentialUseAuthorizationView[]>([]);
   const [cardFillAuths, setCardFillAuths] = useState<PaymentCardFillAuthorizationView[]>([]);
+  const [purchaseConfirmations, setPurchaseConfirmations] = useState<PurchaseConfirmationAuthorizationView[]>([]);
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
   const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1280,8 +1405,9 @@ export default function RouteRunApprovalsPage() {
       listSensitiveGrants({ status: "active" }).catch(() => []),
       listLoginDiagnostics().catch(() => []),
       listPaymentCardFillAuthorizations("pending_approval").catch(() => []),
+      listPurchaseConfirmationAuthorizations("pending_approval").catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1292,6 +1418,7 @@ export default function RouteRunApprovalsPage() {
         setActiveGrants(grants);
         setLoginDiagnostics(diags);
         setCardFillAuths(cardAuths);
+        setPurchaseConfirmations(pconfs);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1441,7 +1568,11 @@ export default function RouteRunApprovalsPage() {
       setCardFillAuths((prev) => prev.filter((a) => a.authorization_id !== id));
       setLastDecision({ action: "approved", note: "Card fill approved. A SensitiveGrant is now active. This does NOT authorize a purchase." });
     } catch (err: any) {
-      setActionError(err.message ?? "Failed to approve card fill authorization.");
+      if (err.message?.includes("INVALID_STATUS")) {
+        setCardFillAuths((prev) => prev.filter((a) => a.authorization_id !== id));
+      } else {
+        setActionError(err.message ?? "Failed to approve card fill authorization.");
+      }
     }
   }
 
@@ -1453,6 +1584,33 @@ export default function RouteRunApprovalsPage() {
       setLastDecision({ action: "denied", note: "Card fill denied." });
     } catch (err: any) {
       setActionError(err.message ?? "Failed to deny card fill authorization.");
+    }
+  }
+
+  async function handleApprovePurchaseConfirmation(id: string) {
+    setActionError(null);
+    try {
+      await approvePurchaseConfirmationAuthorization(id);
+      setPurchaseConfirmations((prev) => prev.filter((a) => a.purchase_confirmation_id !== id));
+      setLastDecision({ action: "approved", note: "Purchase confirmation approved. Antigen will click the payment button." });
+    } catch (err: any) {
+      // If already approved (idempotent), just remove from list
+      if (err.message?.includes("INVALID_STATUS")) {
+        setPurchaseConfirmations((prev) => prev.filter((a) => a.purchase_confirmation_id !== id));
+      } else {
+        setActionError(err.message ?? "Failed to approve purchase confirmation.");
+      }
+    }
+  }
+
+  async function handleDenyPurchaseConfirmation(id: string) {
+    setActionError(null);
+    try {
+      await denyPurchaseConfirmationAuthorization(id);
+      setPurchaseConfirmations((prev) => prev.filter((a) => a.purchase_confirmation_id !== id));
+      setLastDecision({ action: "denied", note: "Purchase confirmation denied." });
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to deny purchase confirmation.");
     }
   }
 
@@ -1494,7 +1652,7 @@ export default function RouteRunApprovalsPage() {
 
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + challenges.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length;
 
   return (
     <div className="page">
@@ -1733,6 +1891,26 @@ export default function RouteRunApprovalsPage() {
                       auth={auth}
                       onApprove={() => handleApproveCardFillAuth(auth.authorization_id)}
                       onDeny={() => handleDenyCardFillAuth(auth.authorization_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Purchase confirmations */}
+              {purchaseConfirmations.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.13 25)", marginBottom: 4 }}>Purchase confirmations</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent is ready to submit payment. This is a separate approval from the card fill — approving this authorizes the final payment button click.
+                    </p>
+                  </div>
+                  {purchaseConfirmations.map((auth) => (
+                    <PurchaseConfirmationApprovalCard
+                      key={auth.purchase_confirmation_id}
+                      auth={auth}
+                      onApprove={() => handleApprovePurchaseConfirmation(auth.purchase_confirmation_id)}
+                      onDeny={() => handleDenyPurchaseConfirmation(auth.purchase_confirmation_id)}
                     />
                   ))}
                 </div>

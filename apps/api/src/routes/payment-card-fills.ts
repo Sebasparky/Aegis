@@ -111,6 +111,17 @@ export async function paymentCardFillRoutes(server: FastifyInstance): Promise<vo
       const auth = paymentCardFillAuthorizations.get(req.params.id);
       if (!auth) return sendError(reply, 404, "NOT_FOUND", "Authorization not found.");
       if (auth.user_id !== MOCK_USER_ID) return sendError(reply, 403, "FORBIDDEN", "Forbidden.");
+      if (auth.status === "approved") {
+        return reply.send({
+          ok: true,
+          data: {
+            authorization_id: auth.authorization_id,
+            status: auth.status,
+            raw_values_revealed_to_agent: false as const,
+            purchase_not_authorized: true as const,
+          },
+        });
+      }
       if (auth.status !== "pending_approval") {
         return sendError(reply, 400, "INVALID_STATUS", `Cannot approve authorization with status '${auth.status}'.`);
       }

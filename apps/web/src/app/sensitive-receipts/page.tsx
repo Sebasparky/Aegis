@@ -5,7 +5,7 @@ import type { SensitiveActionTimelineItem, SensitiveActionEventType } from "@aeg
 import { listSensitiveReceiptTimeline } from "@/lib/api";
 
 type SinceOption = "24h" | "today" | "7d" | "all";
-type GroupOption = "all" | "browser" | "credential" | "challenge" | "email";
+type GroupOption = "all" | "browser" | "credential" | "challenge" | "email" | "payment";
 
 const SINCE_LABELS: Record<SinceOption, string> = {
   "24h": "Last 24h",
@@ -20,6 +20,7 @@ const GROUP_LABELS: Record<GroupOption, string> = {
   credential: "Credentials",
   challenge: "Challenges",
   email: "Email resolver",
+  payment: "Payments",
 };
 
 const EVENT_STYLES: Record<
@@ -85,6 +86,21 @@ const EVENT_STYLES: Record<
     dot: "bg-cyan-500",
     badge: "bg-cyan-950 text-cyan-200 border-cyan-800",
     label: "Email code injected",
+  },
+  payment_card_fill_executed: {
+    dot: "bg-amber-400",
+    badge: "bg-amber-950 text-amber-300 border-amber-800",
+    label: "Card field filled",
+  },
+  purchase_confirmation_submitted: {
+    dot: "bg-red-400",
+    badge: "bg-red-950 text-red-300 border-red-800",
+    label: "Purchase submitted",
+  },
+  purchase_confirmation_failed: {
+    dot: "bg-rose-500",
+    badge: "bg-rose-950 text-rose-300 border-rose-800",
+    label: "Purchase failed",
   },
 };
 

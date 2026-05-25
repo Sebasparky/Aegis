@@ -8,6 +8,7 @@ import {
   challengeEmailResolutions,
   credentialStepHandoffs,
   paymentCardFillHandoffs,
+  purchaseConfirmationHandoffs,
 } from "../store/index.js";
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
@@ -59,7 +60,7 @@ const EVENT_GROUP_TYPES: Record<string, SensitiveActionEventType[]> = {
     "challenge_email_code_found",
     "challenge_email_code_injected",
   ],
-  payment: ["payment_card_fill_executed"],
+  payment: ["payment_card_fill_executed", "purchase_confirmation_submitted", "purchase_confirmation_failed"],
 };
 
 // ─── Route ────────────────────────────────────────────────────────────────────
@@ -392,6 +393,42 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
             "purchase_not_authorized: true — this is card field fill only, not a purchase authorization",
           ],
           authorization_id: rec.authorization_id,
+        });
+      }
+    }
+
+    // ── Purchase confirmation handoffs ────────────────────────────────────────
+    if (!bsFilter && !chFilter) {
+      for (const rec of purchaseConfirmationHandoffs.values()) {
+        if (rec.user_id !== MOCK_USER_ID) continue;
+
+        const eventType = rec.outcome === "submitted"
+          ? "purchase_confirmation_submitted" as const
+          : "purchase_confirmation_failed" as const;
+
+        const amountStr = rec.amount != null ? ` ${rec.currency}${rec.amount}` : " (amount unknown)";
+        items.push({
+          item_id: `purchase_confirmation_${rec.outcome}:${rec.handoff_id}:${rec.completed_at}`,
+          event_type: eventType,
+          timestamp: rec.completed_at,
+          domain: rec.domain,
+          description: `Purchase ${rec.outcome} on ${rec.domain} — ${rec.merchant}${amountStr} via ${rec.payment_method_label} ···${rec.payment_method_last4}`,
+          metadata: {
+            handoff_id: rec.handoff_id,
+            merchant: rec.merchant,
+            outcome: rec.outcome,
+            button_text: rec.button_text,
+            payment_method_label: rec.payment_method_label,
+            last4: rec.payment_method_last4,
+            raw_values_revealed_to_agent: false,
+          },
+          privacy_guarantees: [
+            "Raw card values were not returned to the agent",
+            "raw_values_revealed_to_agent: false enforced as TypeScript literal",
+            "No card number, CVV, card refs, ciphertext, cookies, storage, CDP URL, or KMS material in this record",
+            "Purchase confirmation is a separate approval from card field fill",
+          ],
+          purchase_confirmation_id: rec.purchase_confirmation_id,
         });
       }
     }

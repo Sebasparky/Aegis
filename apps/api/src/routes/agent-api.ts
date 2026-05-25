@@ -27,6 +27,8 @@ import type {
   PaymentCardFillAuthorization,
   PaymentCardFillRequest,
   PaymentCardField,
+  PurchaseConfirmationAuthorization,
+  PurchaseConfirmationHandoffRecord,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -38,6 +40,7 @@ import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowser
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
+import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
 import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
 import {
   agentDelegations,
@@ -57,6 +60,8 @@ import {
   paymentCardFillRequests,
   paymentCardFillHandoffs,
   type PaymentCardFillHandoffRecord,
+  purchaseConfirmationAuthorizations,
+  purchaseConfirmationHandoffs,
   challengeEmailResolutions,
   aegisWorkspaces,
   workspaceTasks,
@@ -3733,7 +3738,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       schedulePersist();
 
       if (!fillResult.success) {
-        return sendError(reply, 500, "CDP_FILL_FAILED", fillResult.error ?? "CDP fill failed");
+        const rawMsg = fillResult.error ?? "CDP fill failed";
+        const hint = rawMsg.toLowerCase().includes("element not found") || rawMsg.toLowerCase().includes("not found")
+          ? `${rawMsg}. Verify the browser_session_id in the fill request targets the runtime page that has the checkout form open.`
+          : rawMsg;
+        return sendError(reply, 500, "CDP_FILL_FAILED", hint);
       }
 
       // Response NEVER includes resolvedValue, payment_method_id, card_number_ref, cvv_ref
@@ -3751,6 +3760,281 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_values_revealed_to_agent: false,
           purchase_not_authorized: true,
           note: "Antigen injected the card field value directly via CDP. Raw values were never returned to the agent. This does NOT authorize a purchase.",
+        },
+      });
+    },
+  );
+
+  // ─── Purchase Confirmation Handoff v1 ─────────────────────────────────────────
+  // Separate approval and execution path for final payment submission.
+  // PaymentCardFillAuthorization never authorizes purchase submission.
+
+  // POST /api/agent/v1/purchase-confirmations — create a pending purchase confirmation authorization
+  server.post(
+    "/api/agent/v1/purchase-confirmations",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = (req.body ?? {}) as {
+        domain?: string;
+        page_url?: string;
+        merchant?: string;
+        amount?: number;
+        currency?: string;
+        amount_unknown?: boolean;
+        item_summary?: string;
+        payment_method_label?: string;
+        payment_method_last4?: string;
+        button_text?: string;
+        button_selector_hint?: string;
+        card_fill_authorization_id?: string;
+        reason?: string;
+      };
+
+      const { domain, page_url, merchant, amount, currency, amount_unknown, item_summary,
+              payment_method_label, payment_method_last4, button_text, button_selector_hint,
+              card_fill_authorization_id, reason } = body;
+
+      if (!domain || typeof domain !== "string") {
+        return sendError(reply, 400, "MISSING_DOMAIN", "domain is required.");
+      }
+      if (!page_url || typeof page_url !== "string") {
+        return sendError(reply, 400, "MISSING_PAGE_URL", "page_url is required.");
+      }
+      if (!merchant || typeof merchant !== "string") {
+        return sendError(reply, 400, "MISSING_MERCHANT", "merchant is required.");
+      }
+      if (!item_summary || typeof item_summary !== "string") {
+        return sendError(reply, 400, "MISSING_ITEM_SUMMARY", "item_summary is required.");
+      }
+      if (!payment_method_label || typeof payment_method_label !== "string") {
+        return sendError(reply, 400, "MISSING_PAYMENT_METHOD_LABEL", "payment_method_label is required.");
+      }
+      if (!payment_method_last4 || typeof payment_method_last4 !== "string") {
+        return sendError(reply, 400, "MISSING_PAYMENT_METHOD_LAST4", "payment_method_last4 is required.");
+      }
+      if (!button_text || typeof button_text !== "string") {
+        return sendError(reply, 400, "MISSING_BUTTON_TEXT", "button_text is required.");
+      }
+      if (!reason || typeof reason !== "string") {
+        return sendError(reply, 400, "MISSING_REASON", "reason is required.");
+      }
+
+      // Validate domain matches page_url hostname
+      try {
+        const hostname = new URL(page_url).hostname;
+        if (hostname !== domain && !hostname.endsWith(`.${domain}`)) {
+          return sendError(reply, 400, "DOMAIN_MISMATCH", `page_url hostname "${hostname}" does not match domain "${domain}".`);
+        }
+      } catch {
+        return sendError(reply, 400, "INVALID_PAGE_URL", "page_url is not a valid URL.");
+      }
+
+      const now = new Date().toISOString();
+      const pconfId = newId("pconf");
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      const auth: PurchaseConfirmationAuthorization = {
+        purchase_confirmation_id: pconfId,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain,
+        page_url,
+        merchant,
+        amount: typeof amount === "number" ? amount : undefined,
+        currency: currency ?? "USD",
+        amount_unknown: amount_unknown === true || (amount === undefined || amount === null),
+        item_summary,
+        payment_method_label,
+        payment_method_last4,
+        button_text,
+        button_selector_hint,
+        card_fill_authorization_id,
+        reason,
+        status: "pending_approval",
+        risk_level: "critical",
+        raw_values_revealed_to_agent: false,
+        purchase_action_authorized: false,
+        created_at: now,
+        expires_at: expiresAt,
+      };
+
+      purchaseConfirmationAuthorizations.set(pconfId, auth);
+      schedulePersist();
+
+      return reply.status(201).send({
+        ok: true,
+        data: {
+          purchase_confirmation_id: pconfId,
+          status: "pending_approval",
+          domain,
+          merchant,
+          amount: auth.amount,
+          currency: auth.currency,
+          amount_unknown: auth.amount_unknown,
+          button_text,
+          raw_values_revealed_to_agent: false,
+          purchase_action_authorized: false,
+          expires_at: expiresAt,
+          next_action: "Request pending. Tell the user to approve at /route-run-approvals under 'Purchase confirmations'.",
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/purchase-confirmations/:id — poll status
+  server.get<{ Params: { id: string } }>(
+    "/api/agent/v1/purchase-confirmations/:id",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const auth = purchaseConfirmationAuthorizations.get(req.params.id);
+      if (!auth) return sendError(reply, 404, "NOT_FOUND", "Purchase confirmation authorization not found.");
+      if (auth.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "Forbidden.");
+
+      // Lazy expiry
+      if (auth.status === "pending_approval" && new Date(auth.expires_at) < new Date()) {
+        auth.status = "expired";
+        purchaseConfirmationAuthorizations.set(auth.purchase_confirmation_id, auth);
+        schedulePersist();
+      }
+
+      const TERMINAL = new Set(["fulfilled", "denied", "expired", "revoked"]);
+      const nextAction = auth.status === "approved"
+        ? "Authorization approved. Call execute_purchase_confirmation_handoff to complete the purchase."
+        : auth.status === "pending_approval"
+        ? "Waiting for user approval at /route-run-approvals under 'Purchase confirmations'."
+        : TERMINAL.has(auth.status)
+        ? `Authorization is ${auth.status}. Do not attempt purchase without a new approval.`
+        : undefined;
+
+      return reply.send({
+        ok: true,
+        data: {
+          purchase_confirmation_id: auth.purchase_confirmation_id,
+          status: auth.status,
+          domain: auth.domain,
+          merchant: auth.merchant,
+          amount: auth.amount,
+          currency: auth.currency,
+          amount_unknown: auth.amount_unknown,
+          button_text: auth.button_text,
+          raw_values_revealed_to_agent: false,
+          purchase_action_authorized: auth.purchase_action_authorized,
+          expires_at: auth.expires_at,
+          approved_at: auth.approved_at,
+          fulfilled_at: auth.fulfilled_at,
+          next_action: nextAction,
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/purchase-confirmations/:id/execute — click the approved payment button
+  server.post<{ Params: { id: string } }>(
+    "/api/agent/v1/purchase-confirmations/:id/execute",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      // Reject card fill authorization IDs — they do not authorize purchase submission
+      if (req.params.id.startsWith("pca_")) {
+        return sendError(
+          reply, 403, "CARD_FILL_AUTH_NOT_SUFFICIENT",
+          "A PaymentCardFillAuthorization (pca_...) cannot authorize purchase submission. " +
+          "Call request_purchase_confirmation to create a separate PurchaseConfirmationAuthorization.",
+        );
+      }
+
+      const auth = purchaseConfirmationAuthorizations.get(req.params.id);
+      if (!auth) return sendError(reply, 404, "NOT_FOUND", "Purchase confirmation authorization not found.");
+      if (auth.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "Forbidden.");
+
+      if (auth.status === "pending_approval") {
+        return sendError(reply, 400, "PENDING_APPROVAL", "Authorization is still pending user approval.");
+      }
+      if (auth.status !== "approved") {
+        return sendError(reply, 400, "INVALID_STATUS", `Cannot execute purchase confirmation with status '${auth.status}'. Authorization must be 'approved'.`);
+      }
+      if (!auth.purchase_action_authorized) {
+        return sendError(reply, 403, "PURCHASE_NOT_AUTHORIZED", "purchase_action_authorized is false. User approval is required.");
+      }
+      if (new Date(auth.expires_at) < new Date()) {
+        auth.status = "expired";
+        purchaseConfirmationAuthorizations.set(auth.purchase_confirmation_id, auth);
+        schedulePersist();
+        return sendError(reply, 400, "EXPIRED", "Authorization has expired.");
+      }
+
+      // Resolve CDP URL
+      const body = (req.body ?? {}) as { browser_session_id?: string; external_cdp_url?: string };
+      let cdpUrl = process.env.AEGIS_PLAYWRIGHT_CDP_URL ?? "http://localhost:9222";
+      if (body.browser_session_id) {
+        const { taskBrowserSessions } = await import("../runtime/taskBrowserSessions.js");
+        const session = taskBrowserSessions.get(body.browser_session_id);
+        if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Task browser session not found.");
+        if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "Forbidden.");
+        cdpUrl = session.cdp_url;
+      } else if (body.external_cdp_url) {
+        cdpUrl = body.external_cdp_url;
+      }
+
+      const result = await executePurchaseConfirmation({
+        domain: auth.domain,
+        page_url: auth.page_url,
+        button_text: auth.button_text,
+        button_selector_hint: auth.button_selector_hint,
+        cdpUrl,
+      });
+
+      const completedAt = new Date().toISOString();
+
+      // Record audit trail — never includes card number, CVV, refs, ciphertext, cookies, storage, KMS material
+      const handoff: PurchaseConfirmationHandoffRecord = {
+        handoff_id: newId("pchoff"),
+        purchase_confirmation_id: auth.purchase_confirmation_id,
+        user_id: auth.user_id,
+        delegation_id: auth.delegation_id,
+        domain: auth.domain,
+        merchant: auth.merchant,
+        amount: auth.amount,
+        currency: auth.currency,
+        item_summary: auth.item_summary,
+        payment_method_label: auth.payment_method_label,
+        payment_method_last4: auth.payment_method_last4,
+        button_text: auth.button_text,
+        outcome: result.outcome,
+        card_fill_authorization_id: auth.card_fill_authorization_id,
+        raw_values_revealed_to_agent: false,
+        completed_at: completedAt,
+      };
+      purchaseConfirmationHandoffs.set(handoff.handoff_id, handoff);
+
+      if (result.outcome === "submitted") {
+        auth.status = "fulfilled";
+        auth.fulfilled_at = completedAt;
+      }
+      purchaseConfirmationAuthorizations.set(auth.purchase_confirmation_id, auth);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          purchase_confirmation_id: auth.purchase_confirmation_id,
+          handoff_id: handoff.handoff_id,
+          outcome: result.outcome,
+          domain: auth.domain,
+          merchant: auth.merchant,
+          amount: auth.amount,
+          currency: auth.currency,
+          button_text: auth.button_text,
+          current_url: result.current_url,
+          page_title: result.page_title,
+          raw_values_revealed_to_agent: false,
+          blocked_reason: result.blocked_reason,
+          note: "Purchase confirmation handoff completed. This receipt contains no card values, CVV, card refs, ciphertext, cookies, storage, or KMS material.",
         },
       });
     },

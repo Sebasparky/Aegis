@@ -5,6 +5,22 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## Two-Approval Payment Smoke Test Checkpoint (2026-05-25)
+
+Full end-to-end smoke test passed with these IDs: card fill auth `pca_9d6b8da0b503`, purchase confirmation auth `pconf_7e523579327b`, purchase handoff `pchoff_8c03eace9499`.
+
+**Critical invariant confirmed:** Always bind payment handoffs to the active runtime `browser_session_id` from `get_runtime_browser_endpoint`.
+
+- Missing `browser_session_id` on `request_payment_card_fill` was the initial failure cause — CDP targeted the wrong port and returned `element not found` even with correct selectors.
+- Fix: call `get_runtime_browser_endpoint`, pass `browser_runtime_id` as `browser_session_id` in `request_payment_card_fill`, `request_purchase_confirmation`, and (if needed) `execute_purchase_confirmation_handoff`.
+- `purchase_not_authorized: true` on all card fill responses — verified.
+- `raw_values_revealed_to_agent: false` throughout — verified.
+- Card fills stayed on `/stripe-checkout`; purchase confirmation navigated to `/stripe-confirmation` only after separate user approval — verified.
+
+See `docs/PAYMENT_CARD_STEP_HANDOFF.md` for updated smoke test instructions and the new **Runtime Binding Requirement** section.
+
+---
+
 ## Verification System v1 Direction (2026-05-23)
 
 Architecture designed in `docs/VERIFICATION_ARCHITECTURE.md`. No implementation yet — types, routes, and UI are all pending. First increment is types + store Maps + signing helpers. The design is provider-agnostic: Antigen orchestrates verification via a `VerificationProvider` interface; v1 uses mock providers only (email via existing challenge relay, student, gov ID stubs). Core types: `VerificationCard` (signed EdDSA JWS, same pattern as `DelegationPassport`), `VerifiedClaim` (normalized — no raw documents), `DisclosureReceipt` (immutable audit of what was shared and to whom). Scoped disclosure uses the existing approval inbox. `raw_document_revealed_to_agent: false` is a literal on all agent-facing responses. Completed gov ID / email verification updates `DelegationPassport.human_subject.identity_level`. Sensitive Evidence Vault (encrypted raw document custody) is post-launch and out of scope for v1.
@@ -106,6 +122,8 @@ The items below are **fully implemented and committed**. Do not re-implement, re
 > **Also: do NOT rebuild Workspace UI v1. It is complete. Do not re-implement `apps/web/src/app/workspaces/page.tsx` (workspace list), `apps/web/src/app/workspaces/[id]/page.tsx` (workspace detail — task board, artifact panel, participants panel), or the owner-facing routes in `apps/api/src/routes/workspaces.ts`. File artifact upload and download are NOT yet implemented — that is Workspace Artifact Uploads v1.**
 
 > **Also: do NOT rebuild Security Challenge Expiry / Stale Approval Cleanup v1. It is complete. Do not re-implement lazy expiry in `GET /api/internal/security-challenges` (marks pending_user/code_submitted challenges expired, filters terminal statuses by default, supports `?include_terminal=true`), lazy expiry in `GET /api/internal/challenge-email-resolutions` (marks non-terminal resolutions expired when their linked challenge has expired), the `isExpired` setTimeout in `PendingChallengeCard`, the expired card early return, the auto-refresh `useEffect` on `challenges.length`, or the `isEmailTypeChallenge` generalization. Gmail button copy reads "Aegis only searches for this live verification request after you approve." Gmail resolution remains user-initiated (click = approval). Do not remove `TERMINAL_STATUSES` set from `security-challenges.ts`.**
+
+> **Also: do NOT rebuild Payment Card Fill Handoff v1 or Purchase Confirmation Handoff v1. Both are complete. Do not re-implement `paymentCardFill.ts`, `purchaseConfirmationHandoff.ts`, `purchaseConfirmationRoutes`, `purchaseConfirmationAuthorizations` Map, `purchaseConfirmationHandoffs` Map, the three agent API endpoints (`POST /api/agent/v1/purchase-confirmations`, `GET /:id`, `POST /:id/execute`), the three internal endpoints (`GET/POST /api/internal/purchase-confirmation-authorizations`), the three MCP tools (`request_purchase_confirmation`, `wait_for_purchase_confirmation_authorization`, `execute_purchase_confirmation_handoff`), or `PurchaseConfirmationApprovalCard` in the approvals UI. Core invariants: `PaymentCardFillAuthorization` NEVER authorizes purchase submission. `execute` with a `pca_...` ID returns `403 CARD_FILL_AUTH_NOT_SUFFICIENT`. `purchase_action_authorized` starts `false`; only set `true` on approve. `manual_step_required` outcome never marks `fulfilled`. `safeDisconnect()` only, never `browser.close()`. "checkout" is NOT in the v1 allowlist. Approve is idempotent: already-approved returns 200. `raw_values_revealed_to_agent: false` is a TypeScript literal on all authorization and handoff records. Both events (`purchase_confirmation_submitted`, `purchase_confirmation_failed`) appear under `event_group=payment` in the sensitive receipt timeline. 25 new tests cover all boundary cases; 830 total tests pass.**
 
 > **Also: do NOT rebuild the Local Runtime Browser Endpoint, antigen-browser adapter, or Credential Step Handoff v1. All are complete. `POST /api/agent/v1/runtime/browser-endpoint` provisions or reuses an ephemeral runtime browser for a delegation. `examples/antigen-browser-adapter.mjs` resolves the dynamic CDP port at startup and spawns `@playwright/mcp` — no static port config required. `execute_credential_step_handoff` is the preferred tool for password login submit: it fills the protected field and clicks the approved submit button atomically inside a single CDP session before returning control to the agent. Proven for `password_submit` step type in a real GitHub login smoke test (tbsess_751b7d77e99e, csh_20e4559a9c3e, status: navigated). JS masking is defense-in-depth only — not the primary security boundary. Credential Step Handoff v1 covers login credential submit; it is not the approval model for payments, purchases, or other sensitive actions.**
 

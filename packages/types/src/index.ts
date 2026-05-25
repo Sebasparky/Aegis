@@ -2812,3 +2812,114 @@ export interface TrustSignalDisclosureRecord {
     not_a_guarantee: true;
   };
 }
+
+// ─── Private Profile Memory v1 ────────────────────────────────────────────────
+// Checkout and contact autofill only. Class 1 secrets are out of scope — those stay
+// in Secret Vault (credentials) and payment card fill (card numbers, CVV).
+// Raw profile values are never returned to agents. Fill-only by default for all v1 fields.
+
+/** The 10 checkout/contact field kinds supported in v1. Class 1 fields are rejected at request time. */
+export type ProfileFieldKind =
+  | "first_name"
+  | "last_name"
+  | "email"
+  | "phone"
+  | "shipping_address_line1"
+  | "shipping_address_line2"
+  | "city"
+  | "region"
+  | "postal_code"
+  | "country";
+
+export type ProfileDisclosureMode =
+  | "fill_only"
+  | "masked_summary"
+  | "agent_visible"
+  | "approval_required"
+  | "unavailable";
+
+/** A single stored profile value. value_ref points to KMS-encrypted blob — raw value never stored inline. */
+export interface PrivateProfileMemoryItem {
+  memory_id: string;            // "ppm_..."
+  user_id: string;
+  field_kind: ProfileFieldKind;
+  /** "ppvault://{memory_id}/value" — points to encryptedSecretVault key = memory_id. Raw value never here. */
+  value_ref: string;
+  data_class: 2 | 3 | 4;
+  sensitivity: "private" | "low_risk" | "public";
+  default_disclosure_mode: ProfileDisclosureMode;
+  /** Even when true, agent_visible requires explicit policy — never auto in v1. */
+  agent_visible_allowed: boolean;
+  provenance: {
+    source: "user_provided" | "imported" | "seeded";
+    domain_at_creation: string;
+    workflow_context?: string;
+  };
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string;
+  /** Always the literal true — users can always edit or delete stored profile values. */
+  user_editable: true;
+  uses: Array<{
+    used_at: string;
+    domain: string;
+    disclosure_mode_applied: ProfileDisclosureMode;
+    agent_visible: boolean;
+  }>;
+}
+
+/** One field within a profile fill request — selector hints for CDP targeting. */
+export interface ProfileFieldRequest {
+  key: ProfileFieldKind;
+  selector_hint?: string;
+  label?: string;
+  placeholder?: string;
+  reason?: string;
+}
+
+/** A multi-field profile fill request covering all requested checkout fields for one domain. */
+export interface ProfileFieldFillRequest {
+  fill_request_id: string;      // "pffr_..."
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  page_url: string;
+  browser_session_id?: string;
+  requested_fields: ProfileFieldRequest[];
+  reason: string;
+  status: "pending" | "executing" | "filled" | "partial" | "failed" | "expired";
+  /** Always the literal false — raw profile values are never returned to the agent. */
+  raw_profile_value_revealed_to_agent: false;
+  /** Always the literal false — raw profile values are never returned to the agent. */
+  raw_profile_values_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+  filled_at?: string;
+  error?: string;
+}
+
+/** Per-field result within a profile fill response. Masked summary only — no raw value. */
+export interface ProfileFieldFillEntry {
+  key: ProfileFieldKind;
+  field_filled: boolean;
+  status: "filled" | "failed" | "not_found";
+  /** e.g. "*** Main St, Ann Arbor, MI 4***" — computed by Antigen, never the raw value. */
+  masked_summary?: string;
+  /** Always the literal false — raw profile values are never returned to the agent. */
+  raw_profile_value_revealed_to_agent: false;
+  error?: string;
+}
+
+/** Root result from the execute endpoint. Masked summaries only — no raw profile values anywhere. */
+export interface ProfileFieldFillResult {
+  fill_request_id: string;
+  domain: string;
+  filled_fields: ProfileFieldFillEntry[];
+  all_filled: boolean;
+  /** Always the literal false — on each field entry. */
+  raw_profile_value_revealed_to_agent: false;
+  /** Always the literal false — on root response object. */
+  raw_profile_values_revealed_to_agent: false;
+  note: string;
+  error?: string;
+}

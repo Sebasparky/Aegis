@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -50,6 +50,7 @@ import {
   verificationCards,
   disclosureReceipts,
   trustSignalDisclosureRecords,
+  privateProfileMemory,
 } from "./index.js";
 import type { User, PassWithToken, ReputationEvent, DomainTrustRecord, CredentialUseSession, CredentialFillRequest, WorkspaceAuditEvent } from "./index.js";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
@@ -367,6 +368,55 @@ export async function seedDefaultData(): Promise<void> {
       // Server continues in degraded state — demo login will fail with SECRET_NOT_AVAILABLE
     }
   }
+
+  await seedProfileMemory();
+}
+
+async function seedProfileMemory(): Promise<void> {
+  const NOW = new Date().toISOString();
+  const kms = getKmsProvider();
+
+  const FIELDS: Array<{ id: string; kind: PrivateProfileMemoryItem["field_kind"]; value: string }> = [
+    { id: "ppm_first_name_001",    kind: "first_name",             value: "Alex" },
+    { id: "ppm_last_name_001",     kind: "last_name",              value: "Demo" },
+    { id: "ppm_email_001",         kind: "email",                  value: "alex@aegisdemo.local" },
+    { id: "ppm_phone_001",         kind: "phone",                  value: "15551234567" },
+    { id: "ppm_addr_line1_001",    kind: "shipping_address_line1", value: "123 Main St" },
+    { id: "ppm_city_001",          kind: "city",                   value: "Ann Arbor" },
+    { id: "ppm_region_001",        kind: "region",                 value: "MI" },
+    { id: "ppm_postal_code_001",   kind: "postal_code",            value: "48104" },
+    { id: "ppm_country_001",       kind: "country",                value: "US" },
+  ];
+
+  for (const { id, kind, value } of FIELDS) {
+    if (privateProfileMemory.has(id)) continue;
+    try {
+      const blob = await kms.encryptSecret(value, {
+        user_id: "user_001",
+        pass_id: id,
+        domain: "aegisdemo.local",
+        purpose: "profile_field",
+      });
+      encryptedSecretVault.set(id, blob);
+      privateProfileMemory.set(id, {
+        memory_id: id,
+        user_id: "user_001",
+        field_kind: kind,
+        value_ref: `ppvault://${id}/value`,
+        data_class: 2,
+        sensitivity: "private",
+        default_disclosure_mode: "fill_only",
+        agent_visible_allowed: false,
+        provenance: { source: "seeded", domain_at_creation: "aegisdemo.local" },
+        created_at: NOW,
+        updated_at: NOW,
+        user_editable: true,
+        uses: [],
+      });
+    } catch (err) {
+      console.error(`[persistence] Failed to seed profile field ${id} — KMS may not be configured:`, err);
+    }
+  }
 }
 
 function ensureWebsiteTrustSeeds(now?: string): void {
@@ -559,6 +609,8 @@ export function persistStore(): void {
       disclosureReceipts: Array.from(disclosureReceipts.entries()),
       trustSignalDisclosureRecords: Array.from(trustSignalDisclosureRecords.entries()),
       // verificationProviderSessions intentionally omitted — ephemeral; browser context gone on restart.
+      privateProfileMemory: Array.from(privateProfileMemory.entries()),
+      // profileFieldFillRequests intentionally omitted — ephemeral (CDP context gone on restart).
       // Encrypted blobs only — plaintext is never persisted.
       encryptedSecretVaultEntries: Array.from(encryptedSecretVault.entries()),
       // devSecretVaultEntries intentionally omitted — plaintext no longer persisted.
@@ -636,6 +688,8 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.verificationCards ?? [])) verificationCards.set(k, v as VerificationCard);
     for (const [k, v] of (data.disclosureReceipts ?? [])) disclosureReceipts.set(k, v as DisclosureReceipt);
     for (const [k, v] of (data.trustSignalDisclosureRecords ?? [])) trustSignalDisclosureRecords.set(k, v as TrustSignalDisclosureRecord);
+    for (const [k, v] of (data.privateProfileMemory ?? [])) privateProfileMemory.set(k, v as PrivateProfileMemoryItem);
+    // profileFieldFillRequests: not persisted — ephemeral by design (CDP context gone on restart).
     // verificationProviderSessions: not persisted — ephemeral by design.
 
     // Injection requests cannot survive restart — CDP browser context is gone.
@@ -801,6 +855,7 @@ export async function resetStoreForDemo(): Promise<void> {
   websiteTrustProfiles.clear();
   websiteViolationReceipts.clear();
   sensitiveGrants.clear();
+  privateProfileMemory.clear();
 
   try {
     if (existsSync(DATA_FILE)) unlinkSync(DATA_FILE);

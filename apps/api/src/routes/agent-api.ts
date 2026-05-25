@@ -29,6 +29,9 @@ import type {
   PaymentCardField,
   PurchaseConfirmationAuthorization,
   PurchaseConfirmationHandoffRecord,
+  ProfileFieldKind,
+  ProfileFieldRequest,
+  ProfileFieldFillRequest,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -40,6 +43,7 @@ import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowser
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
+import { executeProfileFieldFillViaCDP, validateProfileFillSelector } from "../runtime/profileFieldFill.js";
 import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
 import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
 import {
@@ -62,6 +66,9 @@ import {
   type PaymentCardFillHandoffRecord,
   purchaseConfirmationAuthorizations,
   purchaseConfirmationHandoffs,
+  privateProfileMemory,
+  profileFieldFillRequests,
+  encryptedSecretVault,
   challengeEmailResolutions,
   aegisWorkspaces,
   workspaceTasks,
@@ -4083,6 +4090,292 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_values_revealed_to_agent: false,
           blocked_reason: result.blocked_reason,
           note: "Purchase confirmation handoff completed. This receipt contains no card values, CVV, card refs, ciphertext, cookies, storage, or KMS material.",
+        },
+      });
+    },
+  );
+
+  // ─── Private Profile Memory v1 ───────────────────────────────────────────────
+
+  // Class 1 secrets that must be rejected at request time — they belong to other handoff systems.
+  const CLASS_1_PROFILE_FIELD_KINDS = new Set([
+    "card_number", "cvv", "password", "ssn", "pin",
+    "bank_account", "routing_number", "one_time_code",
+  ]);
+
+  const VALID_PROFILE_FIELD_KINDS = new Set<ProfileFieldKind>([
+    "first_name", "last_name", "email", "phone",
+    "shipping_address_line1", "shipping_address_line2",
+    "city", "region", "postal_code", "country",
+  ]);
+
+  // POST /api/agent/v1/profile-field-fills — create a profile field fill request
+  server.post(
+    "/api/agent/v1/profile-field-fills",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const body = req.body as {
+        domain?: string;
+        page_url?: string;
+        requested_fields?: Array<{
+          key?: string;
+          selector_hint?: string;
+          label?: string;
+          placeholder?: string;
+          reason?: string;
+        }>;
+        reason?: string;
+        browser_session_id?: string;
+      };
+
+      if (!body.domain || typeof body.domain !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "domain is required.");
+      }
+      if (!body.page_url || typeof body.page_url !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "page_url is required.");
+      }
+      if (!body.reason || typeof body.reason !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "reason is required.");
+      }
+      if (!Array.isArray(body.requested_fields) || body.requested_fields.length === 0) {
+        return sendError(reply, 400, "VALIDATION_ERROR", "requested_fields must be a non-empty array.");
+      }
+      if (body.requested_fields.length > 10) {
+        return sendError(reply, 400, "VALIDATION_ERROR", "requested_fields may not exceed 10 items per call.");
+      }
+
+      // Domain must match page_url hostname
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(body.page_url).hostname;
+      } catch {
+        return sendError(reply, 400, "INVALID_URL", "page_url is not a valid URL.");
+      }
+      if (pageHostname !== body.domain && !pageHostname.endsWith(`.${body.domain}`)) {
+        return sendError(
+          reply, 400, "DOMAIN_MISMATCH",
+          `page_url hostname '${pageHostname}' does not match domain '${body.domain}'.`,
+        );
+      }
+
+      // Validate each requested field
+      for (const f of body.requested_fields) {
+        if (!f.key || typeof f.key !== "string") {
+          return sendError(reply, 400, "VALIDATION_ERROR", "Each requested_fields item must have a key.");
+        }
+        if (CLASS_1_PROFILE_FIELD_KINDS.has(f.key)) {
+          return sendError(
+            reply, 400, "CLASS_1_OUT_OF_SCOPE",
+            `'${f.key}' is a Class 1 secret and cannot be filled via profile fill. ` +
+            `Use request_secret_field_injection for credentials or request_payment_card_fill for card fields.`,
+          );
+        }
+        if (!VALID_PROFILE_FIELD_KINDS.has(f.key as ProfileFieldKind)) {
+          return sendError(
+            reply, 400, "VALIDATION_ERROR",
+            `'${f.key}' is not a supported profile field kind. ` +
+            `Valid kinds: ${[...VALID_PROFILE_FIELD_KINDS].join(", ")}.`,
+          );
+        }
+        if (f.selector_hint) {
+          const selectorCheck = validateProfileFillSelector(f.selector_hint);
+          if (!selectorCheck.valid) {
+            return sendError(reply, 400, "DANGEROUS_SELECTOR", selectorCheck.reason ?? "Selector targets a prohibited element.");
+          }
+        }
+      }
+
+      // Validate browser_session_id if provided
+      let resolvedBrowserSessionId: string | undefined;
+      if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
+        const bs = getTaskBrowserSession(body.browser_session_id.trim(), MOCK_USER_ID);
+        if (!bs) return sendError(reply, 404, "TASK_BROWSER_SESSION_NOT_FOUND", "Task browser session not found.");
+        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "Session does not belong to your delegation.");
+        if (bs.status !== "ready") return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready'.`);
+        resolvedBrowserSessionId = bs.browser_session_id;
+      }
+
+      // Check all requested fields exist in memory for this user
+      const missingFields: string[] = [];
+      for (const f of body.requested_fields) {
+        const found = Array.from(privateProfileMemory.values()).find(
+          (m) => m.field_kind === (f.key as ProfileFieldKind) && m.user_id === MOCK_USER_ID,
+        );
+        if (!found) missingFields.push(f.key!);
+      }
+      if (missingFields.length > 0) {
+        return reply.status(422).send({
+          ok: false,
+          error: {
+            code: "VALUE_NOT_FOUND",
+            message: `Antigen does not have stored values for: ${missingFields.join(", ")}. ` +
+              `Report to the user that Antigen does not have these values yet.`,
+            missing_fields: missingFields,
+          },
+        });
+      }
+
+      const NOW = new Date().toISOString();
+      const fillRequestId = newId("pffr");
+      const requestedFields: ProfileFieldRequest[] = body.requested_fields.map((f) => ({
+        key: f.key as ProfileFieldKind,
+        ...(f.selector_hint ? { selector_hint: f.selector_hint } : {}),
+        ...(f.label ? { label: f.label } : {}),
+        ...(f.placeholder ? { placeholder: f.placeholder } : {}),
+        ...(f.reason ? { reason: f.reason } : {}),
+      }));
+
+      const fillRequest: ProfileFieldFillRequest = {
+        fill_request_id: fillRequestId,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain: body.domain,
+        page_url: body.page_url,
+        ...(resolvedBrowserSessionId ? { browser_session_id: resolvedBrowserSessionId } : {}),
+        requested_fields: requestedFields,
+        reason: body.reason,
+        status: "pending",
+        raw_profile_value_revealed_to_agent: false,
+        raw_profile_values_revealed_to_agent: false,
+        created_at: NOW,
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      };
+
+      profileFieldFillRequests.set(fillRequestId, fillRequest);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          fill_request_id: fillRequestId,
+          domain: body.domain,
+          status: "pending",
+          field_count: requestedFields.length,
+          raw_profile_value_revealed_to_agent: false,
+          raw_profile_values_revealed_to_agent: false,
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/profile-field-fills/:fillRequestId/execute — execute CDP fill for all fields
+  server.post(
+    "/api/agent/v1/profile-field-fills/:fillRequestId/execute",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { fillRequestId } = req.params as { fillRequestId: string };
+      const fillRequest = profileFieldFillRequests.get(fillRequestId);
+      if (!fillRequest) {
+        return sendError(reply, 404, "FILL_REQUEST_NOT_FOUND", `No profile fill request found with id '${fillRequestId}'.`);
+      }
+      if (fillRequest.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This fill request does not belong to your delegation.");
+      }
+      if (fillRequest.status !== "pending") {
+        return sendError(reply, 400, "FILL_ALREADY_EXECUTED", `Fill request status is '${fillRequest.status}'; only 'pending' requests can be executed.`);
+      }
+      if (new Date(fillRequest.expires_at) < new Date()) {
+        fillRequest.status = "expired";
+        profileFieldFillRequests.set(fillRequestId, fillRequest);
+        schedulePersist();
+        return sendError(reply, 400, "FILL_EXPIRED", "This fill request has expired. Create a new one.");
+      }
+
+      fillRequest.status = "executing";
+      profileFieldFillRequests.set(fillRequestId, fillRequest);
+
+      // Resolve all field values via KMS
+      const resolvedValues = new Map<ProfileFieldKind, string>();
+      const kms = getKmsProvider();
+      try {
+        for (const fieldReq of fillRequest.requested_fields) {
+          const item = Array.from(privateProfileMemory.values()).find(
+            (m) => m.field_kind === fieldReq.key && m.user_id === MOCK_USER_ID,
+          );
+          if (!item) {
+            return sendError(reply, 500, "VALUE_MISSING_AT_EXECUTE", `Stored value for '${fieldReq.key}' could not be found at execute time.`);
+          }
+          const blob = encryptedSecretVault.get(item.memory_id);
+          if (!blob) {
+            return sendError(reply, 500, "VALUE_MISSING_AT_EXECUTE", `Encrypted blob for '${fieldReq.key}' could not be found at execute time.`);
+          }
+          const plain = await kms.decryptSecret(blob, {
+            user_id: MOCK_USER_ID,
+            pass_id: item.memory_id,
+            domain: "aegisdemo.local",
+            purpose: "profile_field",
+          });
+          resolvedValues.set(fieldReq.key, plain);
+        }
+      } catch {
+        resolvedValues.clear();
+        fillRequest.status = "failed";
+        fillRequest.error = "KMS decryption failed.";
+        profileFieldFillRequests.set(fillRequestId, fillRequest);
+        schedulePersist();
+        return sendError(reply, 500, "KMS_DECRYPT_FAILED", "Failed to decrypt one or more profile field values. No values were revealed.");
+      }
+
+      // Determine CDP URL: browser_session_id → TaskBrowserSession.cdp_url, else env var
+      let cdpUrl: string | undefined;
+      if (fillRequest.browser_session_id) {
+        const bs = getTaskBrowserSession(fillRequest.browser_session_id, MOCK_USER_ID);
+        if (bs?.status === "ready") cdpUrl = bs.cdp_url;
+      }
+      if (!cdpUrl) cdpUrl = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+
+      // Execute CDP fills
+      const entries = await executeProfileFieldFillViaCDP(fillRequest, resolvedValues, cdpUrl);
+      // Discard resolved plaintext values immediately
+      resolvedValues.clear();
+
+      const NOW = new Date().toISOString();
+
+      // Update last_used_at and uses on each memory item
+      for (const entry of entries) {
+        if (entry.status === "filled") {
+          const item = Array.from(privateProfileMemory.values()).find(
+            (m) => m.field_kind === entry.key && m.user_id === MOCK_USER_ID,
+          );
+          if (item) {
+            item.last_used_at = NOW;
+            item.uses.push({
+              used_at: NOW,
+              domain: fillRequest.domain,
+              disclosure_mode_applied: "fill_only",
+              agent_visible: false,
+            });
+            privateProfileMemory.set(item.memory_id, item);
+          }
+        }
+      }
+
+      // Determine final status
+      const filledCount = entries.filter((e) => e.status === "filled").length;
+      let finalStatus: ProfileFieldFillRequest["status"];
+      if (filledCount === entries.length) finalStatus = "filled";
+      else if (filledCount > 0) finalStatus = "partial";
+      else finalStatus = "failed";
+
+      fillRequest.status = finalStatus;
+      fillRequest.filled_at = NOW;
+      profileFieldFillRequests.set(fillRequestId, fillRequest);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          fill_request_id: fillRequestId,
+          domain: fillRequest.domain,
+          filled_fields: entries,
+          all_filled: filledCount === entries.length,
+          raw_profile_value_revealed_to_agent: false,
+          raw_profile_values_revealed_to_agent: false,
+          note: "Antigen injected profile field values directly via CDP. Raw values were never returned to the agent.",
         },
       });
     },

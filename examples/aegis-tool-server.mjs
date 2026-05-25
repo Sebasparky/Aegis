@@ -2200,6 +2200,52 @@ async function executePurchaseConfirmationHandoff({
   return res.data;
 }
 
+// ─── Profile Field Fill v1 handlers ──────────────────────────────────────────
+
+async function requestProfileFieldFill({ domain, page_url, requested_fields, reason, browser_session_id } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!Array.isArray(requested_fields) || requested_fields.length === 0) {
+    return { error: "VALIDATION_ERROR", message: "requested_fields is required and must be a non-empty array." };
+  }
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/profile-field-fills", {
+      domain,
+      page_url,
+      requested_fields,
+      reason,
+      ...(browser_session_id ? { browser_session_id } : {}),
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create profile field fill request.", ...(res.error?.missing_fields ? { missing_fields: res.error.missing_fields } : {}) };
+  }
+  return res.data;
+}
+
+async function executeProfileFieldFill({ fill_request_id, browser_session_id, external_cdp_url } = {}) {
+  if (!fill_request_id) return { error: "VALIDATION_ERROR", message: "fill_request_id is required." };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/profile-field-fills/${encodeURIComponent(fill_request_id)}/execute`, {
+      ...(browser_session_id ? { browser_session_id } : {}),
+      ...(external_cdp_url ? { external_cdp_url } : {}),
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Profile field fill execution failed." };
+  }
+  return res.data;
+}
+
 // ─── Workspace handlers ───────────────────────────────────────────────────────
 
 async function getWorkspaceManifest({ workspace_id } = {}) {
@@ -3900,6 +3946,113 @@ const TOOLS = [
       },
     },
   },
+  // ─── Private Profile Memory v1 ─────────────────────────────────────────────
+  {
+    name: "request_profile_field_fill",
+    description:
+      "Request Aegis to fill checkout contact and shipping fields (name, email, phone, address) " +
+      "in the active browser via CDP — without the agent ever receiving raw values.\n\n" +
+      "DO NOT ask the user in chat for checkout name, email, phone, or address first. " +
+      "Ask Antigen to fill them here. If Antigen returns VALUE_NOT_FOUND, report to the user " +
+      "that Antigen does not have that value yet.\n\n" +
+      "USE FOR: first_name, last_name, email, phone, shipping_address_line1, shipping_address_line2, " +
+      "city, region, postal_code, country.\n\n" +
+      "WHAT THIS IS NOT:\n" +
+      "- Card number, CVV, expiry → use request_payment_card_fill\n" +
+      "- Login credentials → use request_secret_field_injection\n" +
+      "- Final order button → use request_purchase_confirmation\n\n" +
+      "FLOW:\n" +
+      "1. Call request_profile_field_fill with all checkout fields at once (up to 10 per call).\n" +
+      "2. Call execute_profile_field_fill with the returned fill_request_id.\n" +
+      "3. Verify the fields are filled in the browser, then proceed. " +
+      "You own all navigation and form submission decisions.\n\n" +
+      "RAW VALUES ARE NEVER RETURNED. Response includes masked summaries only.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "page_url", "requested_fields", "reason"],
+      properties: {
+        domain: {
+          type: "string",
+          description: "The checkout domain, e.g. 'ikea.com'. Must match the page_url hostname.",
+        },
+        page_url: {
+          type: "string",
+          description: "Full URL of the page containing the form fields.",
+        },
+        requested_fields: {
+          type: "array",
+          description: "List of profile fields to fill. Up to 10 per call.",
+          items: {
+            type: "object",
+            required: ["key"],
+            properties: {
+              key: {
+                type: "string",
+                enum: [
+                  "first_name", "last_name", "email", "phone",
+                  "shipping_address_line1", "shipping_address_line2",
+                  "city", "region", "postal_code", "country",
+                ],
+                description: "Which profile field to fill.",
+              },
+              selector_hint: {
+                type: "string",
+                description: "CSS selector targeting only the INPUT element. Must not target button, submit, form, or a[href].",
+              },
+              label: {
+                type: "string",
+                description: "Visible label text of the field.",
+              },
+              placeholder: {
+                type: "string",
+                description: "Placeholder text of the input.",
+              },
+              reason: {
+                type: "string",
+                description: "Optional per-field reason.",
+              },
+            },
+          },
+        },
+        reason: {
+          type: "string",
+          description: "One sentence explaining why these fields are being filled. Shown in the audit trail.",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "browser_runtime_id from get_runtime_browser_endpoint or start_task_browser_session.",
+        },
+      },
+    },
+  },
+  {
+    name: "execute_profile_field_fill",
+    description:
+      "Execute a profile field fill — Antigen resolves values from encrypted vault and fills fields via CDP.\n\n" +
+      "Call after request_profile_field_fill returns a fill_request_id.\n" +
+      "Antigen fills all requested fields in a single CDP session.\n" +
+      "RAW VALUES ARE NEVER RETURNED. Response contains masked summaries only.\n" +
+      "DOM field values are left intact so checkout pages can read and submit them normally.\n" +
+      "This does NOT submit any form or authorize any purchase.",
+    inputSchema: {
+      type: "object",
+      required: ["fill_request_id"],
+      properties: {
+        fill_request_id: {
+          type: "string",
+          description: "The fill_request_id returned by request_profile_field_fill (pffr_... prefix).",
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional override. Normally not needed — uses the session stored on the fill request.",
+        },
+        external_cdp_url: {
+          type: "string",
+          description: "CDP base URL override for agent-owned browsers.",
+        },
+      },
+    },
+  },
   {
     name: "report_security_challenge",
     description:
@@ -4458,6 +4611,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "execute_purchase_confirmation_handoff":
       result = await executePurchaseConfirmationHandoff(a);
+      break;
+    case "request_profile_field_fill":
+      result = await requestProfileFieldFill(a);
+      break;
+    case "execute_profile_field_fill":
+      result = await executeProfileFieldFill(a);
       break;
     case "report_security_challenge":
       result = await reportSecurityChallenge(a);

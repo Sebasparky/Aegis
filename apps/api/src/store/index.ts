@@ -42,6 +42,8 @@ import type {
   VerificationCard,
   DisclosureReceipt,
   TrustSignalDisclosureRecord,
+  PrivateProfileMemoryItem,
+  ProfileFieldFillRequest,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -302,6 +304,15 @@ export interface PaymentCardFillHandoffRecord {
   completed_at: string;
 }
 export const paymentCardFillHandoffs = new Map<string, PaymentCardFillHandoffRecord>();
+
+// ─── Private Profile Memory v1 ────────────────────────────────────────────────
+// KMS-encrypted checkout/contact profile fields. value_ref = "ppvault://{memory_id}/value".
+// encryptedSecretVault key = memory_id directly.
+// Raw values never stored inline; never returned in any agent-facing response.
+export const privateProfileMemory = new Map<string, PrivateProfileMemoryItem>();
+
+// Per-request fill records. Ephemeral — expired on restart (CDP browser context is gone).
+export const profileFieldFillRequests = new Map<string, ProfileFieldFillRequest>();
 
 // ─── Purchase Confirmation Handoff v1 ─────────────────────────────────────────
 // Separate from PaymentCardFillAuthorization — purchase_action_authorized starts false.

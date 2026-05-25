@@ -1,8 +1,32 @@
 # Payment/Card Step Handoff — Design + Test Harness
 
-> **Status: Payment Card Fill Handoff v1 is complete.**
-> Purchase Confirmation Handoff is not yet implemented.
-> See the Manual Test Instructions section below for end-to-end testing.
+> **Status: Payment Card Fill Handoff v1 is complete. Purchase Confirmation Handoff v1 is complete.**
+> Both halves of the two-phase payment boundary are implemented and tested (830 tests passing as of 2026-05-23).
+> See the Manual Test Instructions sections below for end-to-end testing of each phase.
+
+---
+
+## Runtime Binding Requirement
+
+> **Critical for any smoke test or agent flow:** Always call `get_runtime_browser_endpoint` before requesting payment card fills or purchase confirmations. Pass the returned `browser_runtime_id` as `browser_session_id` in every payment tool call.
+
+Without `browser_session_id`, Aegis falls back to the static `AEGIS_PLAYWRIGHT_CDP_URL` env var. If that port does not match the active runtime (or is unset), CDP injects into the wrong page or fails with `CDP_FILL_FAILED: element not found` — even when your selectors are correct.
+
+| If you see... | First check... |
+|---|---|
+| `CDP_FILL_FAILED: element not found` | Was `browser_session_id` passed? Does it match the runtime that has the checkout page open? |
+| `CDP_FILL_FAILED: no page found for domain` | Is the agent browser actually on the checkout page before calling execute? |
+| Fills succeed but purchase execute fails | Pass the same `browser_session_id` to `request_purchase_confirmation` as well. |
+
+**Step 0 for every smoke test:**
+```bash
+# 1. Get the runtime browser endpoint (provisions or reuses the Aegis runtime Chrome)
+curl -s -X POST http://localhost:4000/api/agent/v1/runtime/browser-endpoint \
+  -H "Authorization: Bearer <your-token>" | jq .
+# Note: browser_runtime_id (e.g. tbsess_...) — use as browser_session_id in all payment tools
+```
+
+Or via MCP: call `get_runtime_browser_endpoint` and note `browser_runtime_id`.
 
 ---
 
@@ -20,6 +44,15 @@ cd apps/web && npm run dev    # port 3000
 # Terminal 3: Mock store
 cd apps/mock-store && npm run dev   # port 3001
 ```
+
+### Step 0 — Get the runtime browser endpoint
+
+```bash
+curl -s -X POST http://localhost:4000/api/agent/v1/runtime/browser-endpoint \
+  -H "Authorization: Bearer <your-token>" | jq .
+```
+
+Note the `browser_runtime_id` (e.g. `tbsess_...`). Use this as `browser_session_id` in all subsequent payment card fill and purchase confirmation requests.
 
 ### Step 1 — Add a test payment method
 
@@ -41,14 +74,9 @@ curl -s -X POST http://localhost:4000/api/payment-methods \
 
 Note the `payment_method_id` from the response (e.g. `pm_...`).
 
-### Step 2 — Start a task browser session
+### Step 2 — (Already done in Step 0) Runtime browser session
 
-```bash
-curl -s -X POST http://localhost:4000/api/task-browser-sessions \
-  -H "Authorization: Bearer <your-token>" | jq .
-```
-
-Note the `browser_session_id`.
+The `browser_runtime_id` returned in Step 0 is the session ID. You do not need a separate `start_task_browser_session` call. If you are not using the MCP tool server, Step 0 covers this.
 
 ### Step 3 — Agent navigates to mock Stripe checkout
 
@@ -66,6 +94,8 @@ Verify the page shows:
 
 Call `request_payment_card_fill` (or POST directly) for each field. You can batch all fields or do them one at a time — they will share the same `authorization_id` if the domain/payment_method match.
 
+**Always pass `browser_session_id: <browser_runtime_id>` (from Step 0).** Missing this causes CDP to target the wrong port and fails with `element not found` even when selectors are correct.
+
 ```bash
 # Example: request card_number fill
 curl -s -X POST http://localhost:4000/api/agent/v1/payment-card-fills \
@@ -77,7 +107,7 @@ curl -s -X POST http://localhost:4000/api/agent/v1/payment-card-fills \
     "page_url": "http://localhost:3001/stripe-checkout.html",
     "reason": "fill card number for checkout",
     "element_hint": { "selector_hint": "input[name=\"cardnumber\"]" },
-    "browser_session_id": "<browser_session_id>"
+    "browser_session_id": "<browser_runtime_id>"
   }' | jq .
 ```
 
@@ -148,14 +178,123 @@ The page URL must remain `stripe-checkout.html`. Navigating to `stripe-confirmat
 
 The `stripe-confirmation.html` page includes a prominent warning if reached during card fill testing.
 
+### Step 9 — (Optional) Proceed to Purchase Confirmation
+
+After all card fields are filled, the agent may proceed to the second approval phase. See **Manual Test Instructions — Purchase Confirmation Handoff v1** below for the full end-to-end sequence.
+
 ### Strict guard lines (do not cross in tests or production code)
 
-- Do NOT call `POST /api/agent/v1/purchase-confirmations` — returns 404, not implemented
-- Do NOT add logic to click `#pay-button` in `paymentCardFill.ts`
-- Do NOT submit the form via CDP `requestSubmit()`, keyboard `Enter`, or any click
+- Do NOT add logic to click `#pay-button` in `paymentCardFill.ts` — card fill never clicks
+- Do NOT submit the form via CDP `requestSubmit()`, keyboard `Enter`, or any click during card fill
 - Do NOT use the Stripe test card numbers with a real Stripe API
+- Do NOT pass a `PaymentCardFillAuthorization` ID (`pca_...`) to the purchase confirmation execute endpoint — it returns `403 CARD_FILL_AUTH_NOT_SUFFICIENT`
 
 ---
+
+## Manual Test Instructions — Purchase Confirmation Handoff v1
+
+### Prerequisites
+
+Same as card fill: API server (port 4000), web app (port 3000), mock store (port 3001), runtime browser session from Step 0 of the card fill test, card fields already filled.
+
+### Step 0 — Ensure you have the runtime browser_session_id
+
+If continuing from the card fill test, you already have `browser_runtime_id` from that Step 0. Otherwise call `get_runtime_browser_endpoint` again — it will return the existing session (`reused_existing: true`).
+
+### Step 1 — Request purchase confirmation
+
+Pass `browser_session_id: <browser_runtime_id>` so Aegis targets the correct runtime page at execute time.
+
+```bash
+curl -s -X POST http://localhost:4000/api/agent/v1/purchase-confirmations \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "localhost",
+    "page_url": "http://localhost:3001/stripe-checkout.html",
+    "merchant": "Mock Store",
+    "amount": 12.99,
+    "currency": "USD",
+    "item_summary": "Test item",
+    "payment_method_label": "Visa Test Card",
+    "payment_method_last4": "4242",
+    "button_text": "Pay $12.99",
+    "browser_session_id": "<browser_runtime_id>",
+    "reason": "completing test purchase"
+  }' | jq .
+```
+
+Note the `purchase_confirmation_id` (e.g. `pconf_...`).
+
+Response will include `status: "pending_approval"` and `purchase_action_authorized: false`.
+
+### Step 2 — Approve in the Aegis UI
+
+Navigate to `http://localhost:3000/route-run-approvals` and scroll to the **Purchase confirmations** section.
+
+A **"Purchase Confirmation"** card (red/critical accent) will appear showing:
+- Merchant: Mock Store
+- Amount: **$12.99 USD** in large bold text
+- Item: Test item
+- Payment method: Visa Test Card ···4242
+- Button to click: `Pay $12.99`
+- Warning banner: "Approving this may complete a purchase, payment, or subscription."
+
+Click **"Approve payment submission"**.
+
+### Step 3 — Poll until approved
+
+```bash
+curl -s "http://localhost:4000/api/agent/v1/purchase-confirmations/<purchase_confirmation_id>" \
+  -H "Authorization: Bearer <your-token>" | jq .status
+```
+
+Should return `"approved"` once the user approves.
+
+### Step 4 — Execute the purchase confirmation
+
+```bash
+curl -s -X POST "http://localhost:4000/api/agent/v1/purchase-confirmations/<purchase_confirmation_id>/execute" \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+```
+
+Expected response:
+```json
+{
+  "purchase_confirmation_id": "pconf_...",
+  "outcome": "submitted",
+  "raw_values_revealed_to_agent": false
+}
+```
+
+### Step 5 — Verify results
+
+**In the agent browser:** The URL should now be `http://localhost:3001/stripe-confirmation.html`.
+
+**Sensitive receipts:**
+```bash
+curl -s "http://localhost:4000/api/internal/sensitive-receipts/recent?event_group=payment" | jq .
+```
+
+Should show both `payment_card_fill_executed` events and a `purchase_confirmation_submitted` event.
+
+**Verify the two-approval boundary:**
+```bash
+# Attempting to execute a card fill auth ID at the purchase endpoint must return 403
+curl -s -X POST "http://localhost:4000/api/agent/v1/purchase-confirmations/pca_fake/execute" \
+  -H "Authorization: Bearer <your-token>" | jq .error
+# → "CARD_FILL_AUTH_NOT_SUFFICIENT"
+```
+
+### Strict guard lines (purchase confirmation)
+
+- Do NOT call `execute` without a `status: "approved"` authorization — returns 400
+- Do NOT pass a `pca_...` (card fill authorization) ID to the purchase execute endpoint — returns 403
+- `manual_step_required` outcome is NOT marked as `submitted` — authorization stays `pending_approval`/`approved`
+- `safeDisconnect()` is used, never `browser.close()` — the agent's browser session remains intact
+- Receipt contains no card number, CVV, PAN, ciphertext, cookies, storage, or KMS material
 
 ---
 

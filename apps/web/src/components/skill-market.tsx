@@ -127,19 +127,70 @@ function NeutralFallback({ name, domain, steps }: { name: string; domain: string
       {steps.length === 0 && (
         <div className="route-preview-fallback__more" style={{ fontStyle: "italic" }}>No steps recorded</div>
       )}
+      <div className="route-preview-fallback__caption">No captured start page yet.</div>
+    </div>
+  );
+}
+
+// ─── StepReplayOverlay ────────────────────────────────────────────────────────
+
+function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: boolean }) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  const reducedMotion = useRef(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!playing) { setActiveIdx(0); return; }
+    setActiveIdx(0);
+    if (reducedMotion.current || steps.length <= 1) return;
+    const id = setInterval(() => setActiveIdx(prev => (prev + 1) % steps.length), 1600);
+    return () => clearInterval(id);
+  }, [playing, steps.length]);
+
+  const cls = `step-replay-overlay${playing ? " step-replay-overlay--playing" : ""}`;
+
+  if (steps.length === 0) {
+    return (
+      <div className={cls}>
+        <span className="step-replay-overlay__empty">No recorded steps yet.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls}>
+      <p className="step-replay-overlay__header">Route replay</p>
+      {steps.map((step, i) => {
+        const isActive = reducedMotion.current || i === activeIdx;
+        return (
+          <div key={step.order} className={`step-replay-overlay__row${isActive ? " step-replay-overlay__row--active" : ""}`}>
+            <span className="step-replay-overlay__dot" aria-hidden="true" />
+            <span className="step-replay-overlay__num">{step.order}</span>
+            <span className="step-replay-overlay__action">{step.action}</span>
+            <span className="step-replay-overlay__desc">{stepDescription(step)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 // ─── SkillPreviewPane ─────────────────────────────────────────────────────────
 
-export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets }: {
+export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets, enableReplay, replaying }: {
   domain: string;
   name: string;
   steps: PreviewStep[];
   trustTier: string;
   executionMode?: string;
   previewAssets?: RoutePreviewAsset[];
+  enableReplay?: boolean;
+  replaying?: boolean;
 }) {
   const isLocal = domain === "localhost" || domain === "127.0.0.1";
   const dotColor = isLocal ? "oklch(0.62 0.09 150)" : "oklch(0.62 0.09 240)";
@@ -162,12 +213,15 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
         </div>
       </div>
 
-      {/* Real screenshot or neutral fallback */}
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      {/* Real screenshot or neutral fallback + optional step replay overlay */}
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
         {startPageAsset
           ? <RealRoutePreview asset={startPageAsset} />
           : <NeutralFallback name={name} domain={domain} steps={steps} />
         }
+        {enableReplay && (
+          <StepReplayOverlay steps={steps} playing={replaying ?? false} />
+        )}
       </div>
 
       {/* Trust strip */}

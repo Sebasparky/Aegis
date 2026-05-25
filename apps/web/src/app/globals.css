@@ -1171,7 +1171,7 @@ body {
 
 /* Preview thumbnail area */
 .skill-mcard__preview {
-  height: 176px;
+  height: 240px;
   background: linear-gradient(160deg, var(--bg-2) 0%, oklch(0.975 0.006 250) 100%);
   position: relative;
   overflow: hidden;
@@ -1196,10 +1196,10 @@ body {
 
 /* Card body beneath the preview */
 .skill-mcard__body {
-  padding: 14px 16px 16px;
+  padding: 10px 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
   flex: 1;
 }
 
@@ -1267,11 +1267,11 @@ body {
 .route-preview-frame {
   flex: 1; overflow: hidden; display: flex;
   align-items: flex-start; justify-content: center;
-  background: var(--bg-2);
+  background: #fff;
 }
 .route-preview-image {
   width: 100%; height: 100%;
-  object-fit: cover; object-position: top;
+  object-fit: contain; object-position: top center; background: #fff;
   display: block; user-select: none; pointer-events: none;
 }
 
@@ -1310,7 +1310,74 @@ body {
 .route-preview-fallback__more {
   font-size: 10px; color: var(--ink-4); padding-left: 4px;
 }
+.route-preview-fallback__caption {
+  font-size: 9.5px; color: var(--ink-4); font-style: italic; margin-top: auto;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .route-preview-image { transition: none; }
+}
+
+/* ── StepReplayOverlay ──────────────────────────────────────────────────────── */
+
+.step-replay-overlay {
+  position: absolute; inset: 0;
+  background: rgba(14, 16, 24, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  opacity: 0; transition: opacity 0.2s ease;
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 5px; padding: 10px 12px; pointer-events: none;
+}
+.step-replay-overlay--playing { opacity: 1; }
+
+.step-replay-overlay__header {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase; color: rgba(255,255,255,0.32);
+  margin: 0 0 4px;
+}
+.step-replay-overlay__empty {
+  font-size: 11px; color: rgba(255,255,255,0.45);
+  font-style: italic; text-align: center;
+}
+.step-replay-overlay__row {
+  display: flex; align-items: center; gap: 6px;
+  opacity: 0.35; transition: opacity 0.25s ease, background 0.25s ease;
+  border-radius: var(--r-1); padding: 3px 6px;
+}
+.step-replay-overlay__row--active {
+  opacity: 1; background: rgba(255,255,255,0.07);
+}
+.step-replay-overlay__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: oklch(0.62 0.14 240); flex-shrink: 0;
+  opacity: 0;
+}
+.step-replay-overlay__row--active .step-replay-overlay__dot {
+  opacity: 1; animation: replay-dot-pulse 1.6s ease-in-out infinite;
+}
+.step-replay-overlay__num {
+  width: 16px; height: 16px; border-radius: 3px;
+  background: rgba(255,255,255,0.12);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; color: rgba(255,255,255,0.55); font-family: monospace; flex-shrink: 0;
+}
+.step-replay-overlay__action {
+  font-size: 9.5px; color: oklch(0.68 0.14 240);
+  font-family: monospace; flex-shrink: 0;
+}
+.step-replay-overlay__desc {
+  font-size: 10.5px; color: rgba(255,255,255,0.82);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+
+@keyframes replay-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-replay-overlay { transition: none; }
+  .step-replay-overlay__row { transition: none; }
+  .step-replay-overlay__dot { animation: none; }
 }

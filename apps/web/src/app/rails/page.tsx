@@ -36,22 +36,19 @@ function HeaderStat({ value, label }: { value: string | number; label: string })
   );
 }
 
-function stepDescription(step: { description?: string; action: string; intent: string }): string {
-  if (step.description?.trim()) return step.description;
-  return `${step.action} — ${step.intent.replace(/_/g, " ")}`;
-}
-
 // ─── PrivateRailCard ──────────────────────────────────────────────────────────
 
 function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () => void }) {
-  const ghostBtn: React.CSSProperties = {
-    fontSize: 12, fontWeight: 500, padding: "5px 11px", borderRadius: "var(--r-1)",
-    background: "var(--blue-soft)", border: "1px solid var(--blue-ring)",
-    color: "oklch(0.45 0.09 240)", cursor: "pointer",
-  };
+  const [hovered, setHovered] = useState(false);
 
   return (
-    <button className="skill-mcard" onClick={onClick} type="button">
+    <button
+      className="skill-mcard"
+      onClick={onClick}
+      type="button"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       {/* Preview thumbnail */}
       <div className="skill-mcard__preview">
         <SkillPreviewPane
@@ -61,49 +58,22 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
           trustTier={route.trust_tier}
           executionMode={route.execution_mode}
           previewAssets={route.preview_assets}
+          enableReplay={true}
+          replaying={hovered}
         />
-        {/* Hover overlay */}
-        <div className="skill-mcard__overlay">
-          <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--ink-3)", margin: 0, flexShrink: 0 }}>Workflow</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 5, flex: 1, overflow: "hidden" }}>
-            {route.steps.slice(0, 3).map((step) => (
-              <div key={step.step_id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, color: "var(--ink-2)" }}>
-                <span style={{ flexShrink: 0, width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--graphite-soft)", borderRadius: 4, fontSize: 10, fontFamily: "monospace", color: "var(--ink-3)" }}>
-                  {step.order}
-                </span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: "18px" }}>
-                  {stepDescription(step)}
-                </span>
-              </div>
-            ))}
-            {route.steps.length > 3 && (
-              <span style={{ fontSize: 11, color: "var(--ink-4)", paddingLeft: 24 }}>+{route.steps.length - 3} more</span>
-            )}
-          </div>
-          <div style={{ flexShrink: 0 }}>
-            <span style={ghostBtn}>Preview workflow →</span>
-          </div>
-        </div>
       </div>
 
-      {/* Card body */}
+      {/* Card body — title + domain + compact trust/risk row */}
       <div className="skill-mcard__body">
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-          <span className="skill-badge skill-badge--private">Private Rail</span>
-          <span className={`skill-badge skill-badge--${trustBadgeVariant(route.trust_tier)}`}>
-            {trustBadgeLabel(route.trust_tier)}
-          </span>
-          {route.sensitivity_level === "sensitive" && (
-            <span className="skill-badge skill-badge--sensitive">Sensitive</span>
-          )}
-        </div>
         <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>
           {route.workflow_name}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
           <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{route.domain}</span>
           <span className="dot-sep">·</span>
-          <span style={{ color: "var(--ink-3)" }}>{route.steps.length} step{route.steps.length !== 1 ? "s" : ""}</span>
+          <span className={`skill-badge skill-badge--${trustBadgeVariant(route.trust_tier)}`}>
+            {trustBadgeLabel(route.trust_tier)}
+          </span>
           {route.risk_level !== "low" && (
             <>
               <span className="dot-sep">·</span>

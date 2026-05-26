@@ -192,6 +192,25 @@ export async function skillRoutes(server: FastifyInstance) {
   );
 
   /**
+   * POST /api/skills/:skillId/unlist
+   *
+   * Hides a skill from marketplace browse by setting listing_status to unlisted.
+   * Does not delete the skill, its published snapshots, or any installed copies.
+   */
+  server.post<{ Params: { skillId: string } }>(
+    "/api/skills/:skillId/unlist",
+    async (req, reply) => {
+      const skill = skills.get(req.params.skillId);
+      if (!skill) return sendError(reply, 404, "NOT_FOUND", "Skill not found.");
+
+      skill.listing_status = "unlisted";
+      skills.set(skill.skill_id, skill);
+      schedulePersist();
+      return { ok: true, data: skill };
+    }
+  );
+
+  /**
    * GET /api/installed-skills
    *
    * List all enabled installed skills for the demo user, each joined with

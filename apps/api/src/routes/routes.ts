@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, PublishedSkillVersion, RoutePreviewAsset, RouteReplayAsset } from "@aegis/types";
+import type { AegisRoute, RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, PublishedSkillVersion, RoutePreviewAsset, RouteReplayAsset } from "@aegis/types";
 import { routes, newId, skills, publishedSkillVersions } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { compileRoute } from "../services/routeCompiler.js";
@@ -7,6 +7,55 @@ import { verifyRouteWithPlaywright } from "../services/routeVerifier.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
+}
+
+function createSkillSnapshot(route: AegisRoute): { skill: Skill; version: PublishedSkillVersion } {
+  const now = new Date().toISOString();
+  const existingSkill = Array.from(skills.values()).find((s) => s.route_id === route.route_id);
+  const skill: Skill = existingSkill ?? {
+    skill_id: newId("skill"),
+    route_id: route.route_id,
+    name: route.workflow_name,
+    summary: route.workflow_description ?? "",
+    domain: route.domain,
+    risk_level: route.risk_level,
+    trust_tier: route.trust_tier,
+    required_permissions: route.required_permissions,
+    forbidden_actions: route.forbidden_actions,
+    approval_gates: route.approval_gates,
+    created_at: now,
+    published_at: now,
+    listing_status: "active",
+  };
+  skill.listing_status = "active";
+  skills.set(skill.skill_id, skill);
+
+  const version: PublishedSkillVersion = {
+    version_id: newId("psv"),
+    skill_id: skill.skill_id,
+    route_id: route.route_id,
+    snapshot_at: now,
+    workflow_name: route.workflow_name,
+    workflow_description: route.workflow_description ?? "",
+    domain: route.domain,
+    trust_tier: route.trust_tier,
+    risk_level: route.risk_level,
+    required_permissions: route.required_permissions,
+    forbidden_actions: route.forbidden_actions,
+    allowed_actions: route.allowed_actions,
+    approval_gates: route.approval_gates,
+    steps: route.steps,
+    variables: route.variables,
+    execution_mode: route.execution_mode,
+    sensitivity_level: route.sensitivity_level,
+    url_match: route.url_match,
+    start_url: route.start_url,
+    preview_assets: route.preview_assets,
+    replay_assets: route.replay_assets,
+    verification_report: route.verification_report,
+  };
+  publishedSkillVersions.set(version.version_id, version);
+  return { skill, version };
 }
 
 // Trust tier sort order for query endpoint (higher = more trusted)
@@ -351,59 +400,58 @@ export async function routeRoutes(server: FastifyInstance) {
       routes.set(route.route_id, route);
 
       if (decision === "approved") {
-        const now = new Date().toISOString();
-        const existingSkill = Array.from(skills.values()).find(
-          (s) => s.route_id === route.route_id
-        );
-        const skill: Skill = existingSkill ?? {
-          skill_id: newId("skill"),
-          route_id: route.route_id,
-          name: route.workflow_name,
-          summary: route.workflow_description ?? "",
-          domain: route.domain,
-          risk_level: route.risk_level,
-          trust_tier: route.trust_tier,
-          required_permissions: route.required_permissions,
-          forbidden_actions: route.forbidden_actions,
-          approval_gates: route.approval_gates,
-          created_at: now,
-          published_at: now,
-          listing_status: 'active',
-        };
-        // Re-list if it was previously unlisted (e.g., route was deleted then re-approved).
-        skill.listing_status = 'active';
-        skills.set(skill.skill_id, skill);
-
-        // Create an immutable snapshot of the route at this publish moment.
-        const version: PublishedSkillVersion = {
-          version_id: newId("psv"),
-          skill_id: skill.skill_id,
-          route_id: route.route_id,
-          snapshot_at: now,
-          workflow_name: route.workflow_name,
-          workflow_description: route.workflow_description ?? "",
-          domain: route.domain,
-          trust_tier: route.trust_tier,
-          risk_level: route.risk_level,
-          required_permissions: route.required_permissions,
-          forbidden_actions: route.forbidden_actions,
-          allowed_actions: route.allowed_actions,
-          approval_gates: route.approval_gates,
-          steps: route.steps,
-          variables: route.variables,
-          execution_mode: route.execution_mode,
-          sensitivity_level: route.sensitivity_level,
-          url_match: route.url_match,
-          start_url: route.start_url,
-          preview_assets: route.preview_assets,
-          replay_assets: route.replay_assets,
-          verification_report: route.verification_report,
-        };
-        publishedSkillVersions.set(version.version_id, version);
+        createSkillSnapshot(route);
       }
 
       schedulePersist();
       return { ok: true, data: route };
+    }
+  );
+
+  /**
+   * POST /api/routes/:routeId/publish
+   *
+   * Directly publishes a verified private route to the marketplace.
+   * Creates a Skill + PublishedSkillVersion snapshot in one step without
+   * requiring the submit-review → admin-review round-trip.
+   * Requires trust_tier aegis_scanned or higher.
+   */
+  server.post<{ Params: { routeId: string } }>(
+    "/api/routes/:routeId/publish",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      if (TRUST_TIER_RANK[route.trust_tier] < TRUST_TIER_RANK["aegis_scanned"]) {
+        return sendError(reply, 422, "ROUTE_NOT_VERIFIED", "Verify this route before publishing it to the marketplace.");
+      }
+
+      const { skill } = createSkillSnapshot(route);
+      route.marketplace_status = "approved";
+      routes.set(route.route_id, route);
+      schedulePersist();
+
+      return { ok: true, data: { route, skill_id: skill.skill_id } };
+    }
+  );
+
+  /**
+   * GET /api/routes/:routeId/skill
+   *
+   * Returns the marketplace Skill linked to this route, if one exists.
+   * Returns the Skill regardless of listing_status so the modal can show
+   * current state (active / unlisted) without a separate endpoint.
+   */
+  server.get<{ Params: { routeId: string } }>(
+    "/api/routes/:routeId/skill",
+    async (req, reply) => {
+      const route = routes.get(req.params.routeId);
+      if (!route) return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+
+      const linked = Array.from(skills.values()).find((s) => s.route_id === req.params.routeId);
+      if (!linked) return sendError(reply, 404, "NO_LINKED_SKILL", "No marketplace skill linked to this route.");
+
+      return { ok: true, data: linked };
     }
   );
 

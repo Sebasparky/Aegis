@@ -315,6 +315,187 @@ describe("GET /api/skills — marketplace browse filtering", () => {
   });
 });
 
+// ─── POST /api/routes/:routeId/publish — direct publish ──────────────────────
+
+describe("POST /api/routes/:routeId/publish", () => {
+  it("returns 422 for an unverified (draft) route", async () => {
+    const route = makeApprovedRoute({ trust_tier: "unverified_draft", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/routes/${route.route_id}/publish`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(422);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe("ROUTE_NOT_VERIFIED");
+  });
+
+  it("creates Skill + PublishedSkillVersion for a verified route", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/routes/${route.route_id}/publish`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.ok).toBe(true);
+    expect(body.data.skill_id).toBeTruthy();
+    expect(body.data.route.marketplace_status).toBe("approved");
+
+    const skill = skills.get(body.data.skill_id);
+    expect(skill).toBeDefined();
+    expect(skill!.listing_status).toBe("active");
+    expect(skill!.route_id).toBe(route.route_id);
+
+    const snapshot = Array.from(publishedSkillVersions.values()).find(v => v.skill_id === skill!.skill_id);
+    expect(snapshot).toBeDefined();
+    expect(snapshot!.workflow_name).toBe(route.workflow_name);
+  });
+
+  it("re-lists a previously unlisted skill when republishing", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+
+    // First publish
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    // Unlist it
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+    expect(skills.get(skill.skill_id)!.listing_status).toBe("unlisted");
+
+    // Re-publish
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    expect(skills.get(skill.skill_id)!.listing_status).toBe("active");
+  });
+
+  it("returns 404 for unknown route", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/routes/route_does_not_exist/publish",
+      payload: {},
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+// ─── GET /api/routes/:routeId/skill ───────────────────────────────────────────
+
+describe("GET /api/routes/:routeId/skill", () => {
+  it("returns 404 before the route is published", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/routes/${route.route_id}/skill`,
+    });
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body).error.code).toBe("NO_LINKED_SKILL");
+  });
+
+  it("returns the linked Skill after publish", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+
+    const publishRes = await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const publishedSkillId = JSON.parse(publishRes.body).data.skill_id;
+
+    const res = await server.inject({ method: "GET", url: `/api/routes/${route.route_id}/skill` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.skill_id).toBe(publishedSkillId);
+    expect(body.data.listing_status).toBe("active");
+  });
+
+  it("returns the Skill even after it is unlisted", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const res = await server.inject({ method: "GET", url: `/api/routes/${route.route_id}/skill` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.listing_status).toBe("unlisted");
+  });
+});
+
+// ─── POST /api/skills/:skillId/unlist ────────────────────────────────────────
+
+describe("POST /api/skills/:skillId/unlist", () => {
+  async function publishRoute(trust_tier: string = "aegis_scanned") {
+    const route = makeApprovedRoute({ trust_tier: trust_tier as any, marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    return Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+  }
+
+  it("sets listing_status to unlisted", async () => {
+    const skill = await publishRoute();
+    const res = await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.listing_status).toBe("unlisted");
+    expect(skills.get(skill.skill_id)!.listing_status).toBe("unlisted");
+  });
+
+  it("unlisted skill disappears from marketplace browse", async () => {
+    const skill = await publishRoute();
+
+    // Confirm it appears in browse before unlist
+    const before = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(JSON.parse(before.body).data.some((s: any) => s.skill_id === skill.skill_id)).toBe(true);
+
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const after = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(JSON.parse(after.body).data.some((s: any) => s.skill_id === skill.skill_id)).toBe(false);
+  });
+
+  it("installed unlisted skill still appears with ?installed=true", async () => {
+    const skill = await publishRoute();
+    // Install it
+    installedSkills.set("inskill_unlist_test", {
+      installed_skill_id: "inskill_unlist_test",
+      skill_id: skill.skill_id,
+      user_id: MOCK_USER_ID,
+      installed_at: NOW,
+      enabled: true,
+    });
+    // Unlist
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills?installed=true" });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.some((s: any) => s.skill_id === skill.skill_id)).toBe(true);
+  });
+
+  it("returns 404 for unknown skill_id", async () => {
+    const res = await server.inject({ method: "POST", url: "/api/skills/skill_does_not_exist/unlist", payload: {} });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+// ─── Publish then marketplace browse ─────────────────────────────────────────
+
+describe("After publish — marketplace browse includes the new skill", () => {
+  it("GET /api/skills includes the published skill", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    const publishRes = await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skillId = JSON.parse(publishRes.body).data.skill_id;
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.some((s: any) => s.skill_id === skillId)).toBe(true);
+  });
+});
+
 // ─── Backward compatibility ───────────────────────────────────────────────────
 
 describe("GET /api/skills — backward compat: skill without listing_status", () => {

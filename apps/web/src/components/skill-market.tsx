@@ -5,7 +5,7 @@ import type { AegisRoute, InstalledSkill, RoutePreviewAsset, RouteReplayAsset, R
 import { BASE } from "../lib/api";
 import {
   getRoute, getSkill, listRouteRuns, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
-  installSkill, uninstallSkill,
+  installSkill, uninstallSkill, publishRoute, getSkillByRoute, unlistSkill,
 } from "../lib/api";
 import type { RouteRunWithSummary, SkillWithInstalled } from "../lib/api";
 
@@ -367,6 +367,10 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [linkedSkill, setLinkedSkill] = useState<Skill | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [unlisting, setUnlisting] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   // Install state (marketplace/library)
   const [installed, setInstalled] = useState(
@@ -425,6 +429,12 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
       .catch(err => { setRouteError(err.message ?? "Could not load skill."); setLoadingRoute(false); });
   }, [skillId, mode.type]);
 
+  // For private_rail: fetch linked marketplace skill to derive publish state.
+  useEffect(() => {
+    if (mode.type !== "private_rail" || !routeId) return;
+    getSkillByRoute(routeId).then(setLinkedSkill);
+  }, [routeId, mode.type]);
+
   // Fetch recent runs using snapshot route_id (works even after source route is deleted).
   useEffect(() => {
     const rid = snapshotRouteId;
@@ -473,6 +483,29 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
     } finally { setSubmitting(false); }
   }
 
+  async function handlePublish() {
+    if (!routeId) return;
+    setPublishing(true); setPublishError(null);
+    try {
+      const result = await publishRoute(routeId);
+      setLocalMktStatus("approved");
+      setLinkedSkill(await getSkillByRoute(routeId));
+      void result;
+    } catch (err: any) {
+      setPublishError(err.message ?? "Publish failed.");
+    } finally { setPublishing(false); }
+  }
+
+  async function handleUnlist() {
+    if (!linkedSkill) return;
+    setUnlisting(true);
+    try {
+      const updated = await unlistSkill(linkedSkill.skill_id);
+      setLinkedSkill(updated);
+    } catch { /* leave state unchanged */ }
+    finally { setUnlisting(false); }
+  }
+
   async function handleDelete() {
     if (mode.type !== "private_rail" || !routeId) return;
     setDeleting(true);
@@ -511,6 +544,13 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
   const sourceBadgeVariant = mode.type === "private_rail" ? "private" : mode.type === "marketplace" ? "mkt" : "installed";
   const displayName = mode.type === "private_rail" ? localName : (mode.type === "marketplace" ? mode.skill.name : mode.skill.name);
 
+  // Derived marketplace state for private_rail mode
+  const marketplaceState: "not_published" | "listed" | "unlisted" =
+    !linkedSkill ? "not_published" :
+    linkedSkill.listing_status === "active" ? "listed" : "unlisted";
+  const isVerified = isRouteVerified(localTier);
+  const busy = verifying || deleting || submitting || publishing || unlisting;
+
   return (
     <>
       {showRename && mode.type === "private_rail" && (
@@ -519,55 +559,87 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
       <div className="skill-modal-backdrop" onClick={handleBackdrop}>
         <div className="skill-modal" role="dialog" aria-modal="true">
 
-          {/* Header */}
+          {/* ── Header ── */}
           <div className="skill-modal__header">
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <span className={`skill-badge skill-badge--${sourceBadgeVariant}`}>{sourceBadge}</span>
                 {effectiveTier && (
                   <span className={`skill-badge skill-badge--${trustBadgeVariant(effectiveTier)}`}>{trustBadgeLabel(effectiveTier)}</span>
                 )}
-                {isUnlisted && (
+                {mode.type === "private_rail" && route && (
+                  <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
+                )}
+                {mode.type === "private_rail" && marketplaceState === "listed" && (
+                  <span style={{ ...pillStyle("green") }}>Listed</span>
+                )}
+                {mode.type === "private_rail" && marketplaceState === "unlisted" && (
+                  <span style={{ ...pillStyle("graphite") }}>Unlisted</span>
+                )}
+                {isUnlisted && mode.type !== "private_rail" && (
                   <span className="skill-badge skill-badge--graphite" title="The creator removed this skill from the marketplace. Your installed copy still works.">Removed from marketplace</span>
                 )}
               </div>
               <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink-1)", margin: 0, lineHeight: 1.3 }}>{displayName}</h2>
-              <p style={{ fontSize: 11.5, fontFamily: "monospace", color: "var(--ink-4)", margin: 0 }}>{routeId}</p>
+              {mode.type === "private_rail" && route && (
+                <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>{route.domain}</p>
+              )}
             </div>
             <button className="skill-modal__close" onClick={onClose} aria-label="Close">×</button>
           </div>
 
-          {/* Body */}
+          {/* ── Body ── */}
           <div className="skill-modal__body">
 
-            {/* Domain + execution info */}
-            {route && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <p style={sectionLabel}>Route details</p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 12 }}>
-                  <div style={{ background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "5px 10px" }}>
-                    <span style={{ color: "var(--ink-4)", marginRight: 5 }}>Domain</span>
-                    <span style={{ fontFamily: "monospace", color: "var(--ink-1)", fontWeight: 500 }}>{route.domain}</span>
+            {/* Hero action row — private_rail only */}
+            {mode.type === "private_rail" && (
+              <div style={{ display: "flex", gap: 16, alignItems: "flex-start", padding: "14px 16px", background: "rgba(255,255,255,0.55)", border: "1px solid var(--hairline)", borderRadius: "var(--r-2)" }}>
+                {/* Preview thumbnail placeholder */}
+                <div style={{ flexShrink: 0, width: 56, height: 42, borderRadius: "var(--r-1)", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, color: "var(--ink-4)" }}>
+                  {route?.replay_assets?.length ? "▶" : "⬡"}
+                </div>
+                {/* Actions */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                    {/* Primary action */}
+                    {marketplaceState === "listed" ? (
+                      <a href="/marketplace" className="a-btn a-btn--primary" style={{ fontSize: 13, textDecoration: "none" }}>
+                        View Marketplace Listing
+                      </a>
+                    ) : isVerified && (marketplaceState === "not_published" || marketplaceState === "unlisted") ? (
+                      <button onClick={handlePublish} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
+                        {publishing ? "Publishing…" : marketplaceState === "unlisted" ? "Re-publish to Marketplace" : "Publish to Marketplace"}
+                      </button>
+                    ) : (
+                      <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
+                        {verifying ? "Verifying…" : "Verify Route"}
+                      </button>
+                    )}
+                    {/* Secondary: Rename */}
+                    <button onClick={() => setShowRename(true)} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                      Rename
+                    </button>
+                    {/* Secondary: Unlist (only if listed) */}
+                    {marketplaceState === "listed" && (
+                      <button onClick={handleUnlist} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                        {unlisting ? "Unlisting…" : "Unlist"}
+                      </button>
+                    )}
+                    {/* Secondary: Verify if already verified (re-verify) */}
+                    {isVerified && marketplaceState !== "not_published" && (
+                      <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                        {verifying ? "Verifying…" : "Re-verify"}
+                      </button>
+                    )}
+                    {/* Danger: Delete */}
+                    <button onClick={handleDelete} disabled={busy} style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 500, padding: "6px 12px", borderRadius: "var(--r-1)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", color: "oklch(0.45 0.13 25)", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.5 : 1 }}>
+                      {deleting ? "Deleting…" : "Delete"}
+                    </button>
                   </div>
-                  {route.start_url && (
-                    <div style={{ background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "5px 10px" }}>
-                      <span style={{ color: "var(--ink-4)", marginRight: 5 }}>Start URL</span>
-                      <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{route.start_url}</span>
-                    </div>
-                  )}
-                  <div style={{ background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "5px 10px" }}>
-                    <span style={{ color: "var(--ink-4)", marginRight: 5 }}>Mode</span>
-                    <span style={{ color: "var(--ink-2)", fontWeight: 500 }}>{route.execution_mode?.replace(/_/g, " ")}</span>
-                  </div>
-                  <div style={{ background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "5px 10px" }}>
-                    <span style={{ color: "var(--ink-4)", marginRight: 5 }}>Risk</span>
-                    <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level}</span>
-                  </div>
-                  {route.sensitivity_level === "sensitive" && (
-                    <div style={{ background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-1)", padding: "5px 10px" }}>
-                      <span style={{ color: "oklch(0.45 0.12 75)", fontWeight: 500 }}>Sensitive workflow</span>
-                    </div>
-                  )}
+                  {/* Error messages */}
+                  {verifyError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>Verification error: {verifyError}</p>}
+                  {publishError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{publishError}</p>}
+                  {submitError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{submitError}</p>}
                 </div>
               </div>
             )}
@@ -581,7 +653,19 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
               </div>
             )}
 
-            {/* Steps */}
+            {/* 1. What this skill does */}
+            {mode.type === "private_rail" && (
+              <div>
+                <p style={sectionLabel}>What this skill does</p>
+                {route?.workflow_description ? (
+                  <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, lineHeight: 1.6 }}>{route.workflow_description}</p>
+                ) : (
+                  <p style={{ fontSize: 13, color: "var(--ink-4)", margin: 0, fontStyle: "italic" }}>No description provided.</p>
+                )}
+              </div>
+            )}
+
+            {/* 2. Workflow steps */}
             {route && route.steps.length > 0 && (
               <div>
                 <p style={sectionLabel}>Workflow steps</p>
@@ -604,35 +688,82 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
               </div>
             )}
 
-            {/* Forbidden actions */}
-            {route && route.forbidden_actions.length > 0 && (
+            {/* 3. Permissions */}
+            {route && (route.required_permissions.length > 0 || route.forbidden_actions.length > 0) && (
               <div>
-                <p style={sectionLabel}>Will not do</p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {route.forbidden_actions.map(a => (
-                    <span key={a} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-1)", padding: "3px 10px" }}>
-                      <span style={{ fontSize: 11 }}>✗</span>{friendlyAction(a)}
-                    </span>
-                  ))}
+                <p style={sectionLabel}>Permissions</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {route.required_permissions.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {route.required_permissions.map(p => (
+                        <span key={p} style={{ fontSize: 12, color: "var(--ink-2)", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "3px 10px" }}>
+                          {friendlyAction(p)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {route.forbidden_actions.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {route.forbidden_actions.map(a => (
+                        <span key={a} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-1)", padding: "3px 10px" }}>
+                          <span style={{ fontSize: 11 }}>✗</span>{friendlyAction(a)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
-            {/* Required permissions */}
-            {route && route.required_permissions.length > 0 && (
+            {/* 4. Verification (private rail) */}
+            {mode.type === "private_rail" && (
               <div>
-                <p style={sectionLabel}>Required permissions</p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {route.required_permissions.map(p => (
-                    <span key={p} style={{ fontSize: 12, color: "var(--ink-2)", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", padding: "3px 10px" }}>
-                      {friendlyAction(p)}
-                    </span>
-                  ))}
-                </div>
+                <p style={sectionLabel}>Verification</p>
+                {verifyReport ? (
+                  <div style={{ borderRadius: "var(--r-2)", padding: "10px 14px", ...(verifyReport.passed ? { color: "oklch(0.42 0.09 150)", background: "var(--green-soft)", border: "1px solid var(--green-ring)" } : { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }) }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 4px" }}>
+                      {verifyReport.passed ? "Passed" : "Failed"} — {verifyReport.step_results.filter(r => r.passed).length}/{verifyReport.step_results.length} steps
+                    </p>
+                    {!verifyReport.passed && verifyReport.step_results.find(r => !r.passed)?.error && (
+                      <p style={{ fontSize: 12, margin: 0, opacity: 0.85 }}>{verifyReport.step_results.find(r => !r.passed)!.error}</p>
+                    )}
+                    {verifyReport.completed_at && (
+                      <p style={{ fontSize: 11, margin: "4px 0 0", opacity: 0.7 }}>Last verified {friendlyShortDate(verifyReport.completed_at)}</p>
+                    )}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>
+                    {isVerified ? "Previously verified — click Re-verify to run again." : "Not yet verified. Click Verify Route to check this route."}
+                  </p>
+                )}
               </div>
             )}
 
-            {/* Skill summary */}
+            {/* 5. Marketplace status (private rail) */}
+            {mode.type === "private_rail" && (
+              <div>
+                <p style={sectionLabel}>Marketplace</p>
+                {marketplaceState === "listed" && linkedSkill && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--green-soft)", border: "1px solid var(--green-ring)", borderRadius: "var(--r-2)" }}>
+                    <span style={{ fontSize: 13, color: "oklch(0.42 0.09 150)", fontWeight: 600 }}>Published and listed</span>
+                    <span style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", marginLeft: "auto" }}>{linkedSkill.skill_id}</span>
+                  </div>
+                )}
+                {marketplaceState === "unlisted" && linkedSkill && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-2)" }}>
+                    <span style={{ fontSize: 13, color: "var(--ink-3)", fontWeight: 600 }}>Unlisted — hidden from browse</span>
+                    <span style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", marginLeft: "auto" }}>{linkedSkill.skill_id}</span>
+                  </div>
+                )}
+                {marketplaceState === "not_published" && (
+                  <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>
+                    {isVerified ? "Verified and ready to publish." : "Verify this route to make it eligible for the marketplace."}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Skill summary — marketplace / library modes */}
             {(mode.type === "marketplace" || mode.type === "library") && (
               <>
                 {mode.skill.summary && (
@@ -660,75 +791,21 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
               </>
             )}
 
-            {/* Verification result (private rail) */}
-            {mode.type === "private_rail" && verifyReport && (
-              <div>
-                <p style={sectionLabel}>Verification result</p>
-                <div style={{ fontSize: 12.5, borderRadius: "var(--r-2)", padding: "8px 12px", marginBottom: 6, ...(verifyReport.passed ? { color: "oklch(0.42 0.09 150)", background: "var(--green-soft)", border: "1px solid var(--green-ring)" } : { color: "oklch(0.45 0.13 25)", background: "var(--red-soft)", border: "1px solid var(--red-ring)" }) }}>
-                  {verifyReport.passed
-                    ? `Verified — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`
-                    : `Failed — ${verifyReport.step_results.filter(r => r.passed).length}/${verifyReport.step_results.length} steps passed`}
-                </div>
-              </div>
-            )}
-            {verifyError && (
-              <div style={{ fontSize: 12, padding: "8px 12px", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-2)", color: "oklch(0.45 0.13 25)" }}>
-                Verification error: {verifyError}
-              </div>
-            )}
-            {submitError && (
-              <div style={{ fontSize: 12, padding: "8px 12px", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-2)", color: "oklch(0.45 0.13 25)" }}>
-                {submitError}
-              </div>
-            )}
-
-            {/* Management actions (private rail) */}
-            {mode.type === "private_rail" && (
-              <div>
-                <p style={sectionLabel}>Manage</p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                  <button onClick={handleVerify} disabled={verifying || deleting} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: (verifying || deleting) ? 0.5 : 1 }}>
-                    {verifying ? "Verifying…" : "Verify"}
-                  </button>
-                  <button onClick={() => setShowRename(true)} disabled={verifying || deleting} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: (verifying || deleting) ? 0.5 : 1 }}>
-                    Rename
-                  </button>
-                  {localMktStatus === "approved" ? (
-                    <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Marketplace approved</span>
-                  ) : localMktStatus === "rejected" ? (
-                    <span style={{ ...pillStyle("red"), fontSize: 12 }}>Rejected</span>
-                  ) : localMktStatus === "pending_review" ? (
-                    <span style={{ ...pillStyle("amber"), fontSize: 12 }}>Pending review</span>
-                  ) : isRouteVerified(localTier) ? (
-                    <button onClick={handleSubmitForReview} disabled={submitting || deleting || verifying} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: (submitting || deleting || verifying) ? 0.5 : 1 }}>
-                      {submitting ? "Submitting…" : "Submit for Review"}
-                    </button>
-                  ) : (
-                    <button disabled title="Verify first." className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: 0.35, cursor: "not-allowed" }}>Submit for Review</button>
-                  )}
-                  <button onClick={handleDelete} disabled={deleting || verifying} style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 500, padding: "6px 12px", borderRadius: "var(--r-1)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", color: "oklch(0.45 0.13 25)", cursor: (deleting || verifying) ? "not-allowed" : "pointer", opacity: (deleting || verifying) ? 0.5 : 1 }}>
-                    {deleting ? "Deleting…" : "Delete"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Recent runs */}
+            {/* 6. Recent runs (lower priority) */}
             <div>
-              <p style={sectionLabel}>Recent runs</p>
+              <p style={{ ...sectionLabel, opacity: 0.7 }}>Recent runs</p>
               {loadingRuns ? (
                 <div style={{ height: 40, background: "var(--graphite-soft)", borderRadius: "var(--r-2)", opacity: 0.4 }} />
               ) : runs.length === 0 ? (
-                <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>No runs recorded yet for this route.</p>
+                <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>No runs recorded yet.</p>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                   {runs.slice(0, 8).map(run => (
-                    <div key={run.run_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: "rgba(255,255,255,0.6)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", fontSize: 12 }}>
-                      <span style={{ fontFamily: "monospace", color: "var(--ink-4)", fontSize: 11, flexShrink: 0 }}>{run.run_id.slice(0, 18)}…</span>
+                    <div key={run.run_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", background: "rgba(255,255,255,0.5)", border: "1px solid var(--hairline)", borderRadius: "var(--r-1)", fontSize: 11.5 }}>
                       <span className={`a-status a-status--${RUN_STATUS_VARIANT[run.status] ?? "graphite"}`}>
                         <span className="a-status__dot" />{run.status}
                       </span>
-                      <span style={{ color: "var(--ink-4)", fontSize: 11.5, marginLeft: "auto", flexShrink: 0 }}>
+                      <span style={{ color: "var(--ink-4)", marginLeft: "auto", flexShrink: 0 }}>
                         {friendlyShortDate(run.completed_at ?? run.created_at)}
                       </span>
                     </div>
@@ -736,6 +813,11 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
                 </div>
               )}
             </div>
+
+            {/* Footer metadata */}
+            {routeId && (
+              <p style={{ fontSize: 10.5, fontFamily: "monospace", color: "var(--ink-5, var(--ink-4))", margin: 0, paddingTop: 4 }}>{routeId}</p>
+            )}
 
           </div>
         </div>

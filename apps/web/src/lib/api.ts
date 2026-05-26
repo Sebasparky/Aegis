@@ -269,6 +269,17 @@ export const submitRouteForReview = (routeId: string) =>
   request<AegisRoute>(`/api/routes/${routeId}/submit-review`, { method: "POST", body: JSON.stringify({}) });
 export const reviewRoute = (routeId: string, decision: "approved" | "rejected", review_note?: string) =>
   request<AegisRoute>(`/api/routes/${routeId}/review`, { method: "POST", body: JSON.stringify({ decision, review_note }) });
+export const publishRoute = (routeId: string) =>
+  request<{ route: AegisRoute; skill_id: string }>(`/api/routes/${routeId}/publish`, { method: "POST", body: JSON.stringify({}) });
+export const getSkillByRoute = async (routeId: string): Promise<Skill | null> => {
+  try {
+    return await request<Skill>(`/api/routes/${routeId}/skill`);
+  } catch {
+    return null;
+  }
+};
+export const unlistSkill = (skillId: string) =>
+  request<Skill>(`/api/skills/${skillId}/unlist`, { method: "POST", body: JSON.stringify({}) });
 
 // Skills Marketplace
 export type SkillWithInstalled = Skill & { installed: boolean };

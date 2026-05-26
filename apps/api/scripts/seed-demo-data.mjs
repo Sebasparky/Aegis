@@ -800,7 +800,9 @@ const skills = [
       created_at: "2026-04-30T12:00:00.000Z",
       published_at: "2026-04-30T12:00:00.000Z",
       execution_mode: "agent_runnable",
-      sensitivity_level: "routine"
+      sensitivity_level: "routine",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
     }
   ],
   [
@@ -819,7 +821,9 @@ const skills = [
       created_at: "2026-04-30T12:10:00.000Z",
       published_at: "2026-04-30T12:10:00.000Z",
       execution_mode: "aegis_controlled",
-      sensitivity_level: "sensitive"
+      sensitivity_level: "sensitive",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
     }
   ],
   [
@@ -838,7 +842,9 @@ const skills = [
       created_at: "2026-04-30T12:20:00.000Z",
       published_at: "2026-04-30T12:20:00.000Z",
       execution_mode: "aegis_controlled",
-      sensitivity_level: "sensitive"
+      sensitivity_level: "sensitive",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
     }
   ],
   [
@@ -857,7 +863,9 @@ const skills = [
       created_at: "2026-04-30T11:30:00.000Z",
       published_at: "2026-04-30T11:30:00.000Z",
       execution_mode: "aegis_controlled",
-      sensitivity_level: "sensitive"
+      sensitivity_level: "sensitive",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
     }
   ],
   [
@@ -876,7 +884,9 @@ const skills = [
       created_at: "2026-04-30T13:30:00.000Z",
       published_at: "2026-04-30T13:30:00.000Z",
       execution_mode: "aegis_controlled",
-      sensitivity_level: "sensitive"
+      sensitivity_level: "sensitive",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
     }
   ],
   [
@@ -895,7 +905,37 @@ const skills = [
       created_at: "2026-05-03T10:30:00.000Z",
       published_at: "2026-05-03T10:30:00.000Z",
       execution_mode: "aegis_controlled",
-      sensitivity_level: "sensitive"
+      sensitivity_level: "sensitive",
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001"
+    }
+  ]
+];
+
+const publishedSkillVersions = [
+  [
+    "psv_demo_wikipedia_001",
+    {
+      version_id: "psv_demo_wikipedia_001",
+      skill_id: "skill_demo_wikipedia_001",
+      route_id: "route_demo_wikipedia_001",
+      snapshot_at: "2026-04-30T12:00:00.000Z",
+      workflow_name: "Wikipedia Search",
+      workflow_description: "Search Wikipedia for any topic. Fills the search box and submits. Verified against live Wikipedia.",
+      domain: "en.wikipedia.org",
+      trust_tier: "aegis_scanned",
+      risk_level: "low",
+      required_permissions: ["browse"],
+      forbidden_actions: [],
+      allowed_actions: ["browse", "search"],
+      approval_gates: [],
+      steps: WIKIPEDIA_STEPS,
+      execution_mode: "agent_runnable",
+      sensitivity_level: "routine",
+      verification_report: {
+        ...WIKIPEDIA_VERIFICATION_BASE,
+        route_id: "route_demo_wikipedia_001"
+      }
     }
   ]
 ];
@@ -1249,6 +1289,7 @@ const store = {
   ],
   routes,
   skills,
+  publishedSkillVersions,
   installedSkills,
   aegisVaultPasses: [["pass_vault_demo_login_001", DEMO_VAULT_PASS]],
   paymentMethods: [["pay_method_demo_001", DEMO_PAYMENT_METHOD]],

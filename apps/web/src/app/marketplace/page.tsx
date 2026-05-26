@@ -2,74 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { listSkills, getSkill, type SkillWithInstalled } from "../../lib/api";
-import { SkillPreviewPane, SkillDetailModal, isRouteVerified, riskPillColor } from "@/components/skill-market";
-
-function MarketplaceBrowseCard({ skill, onClick }: { skill: SkillWithInstalled; onClick: () => void }) {
-  return (
-    <button className="skill-mcard" onClick={onClick} type="button">
-      <div className="skill-mcard__preview">
-        <SkillPreviewPane
-          domain={skill.domain}
-          name={skill.name}
-          steps={[]}
-          trustTier={skill.trust_tier}
-          executionMode={skill.execution_mode}
-          showTrustStrip={false}
-        />
-        <div className="skill-mcard__overlay">
-          {skill.summary && (
-            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.5, flex: 1, overflow: "hidden" }}>
-              {skill.summary}
-            </p>
-          )}
-          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
-            {skill.created_by_you ? (
-              <span style={{ color: "var(--blue)" }}>View your listing →</span>
-            ) : skill.installed ? (
-              <span style={{ color: "oklch(0.42 0.09 150)" }}>✓ In library</span>
-            ) : (
-              <span style={{ color: "var(--blue)" }}>Install →</span>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="skill-mcard__body">
-        <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{skill.name}</div>
-        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{skill.domain}</div>
-        {skill.summary && (
-          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-            {skill.summary}
-          </p>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
-          <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
-            {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
-          </span>
-          {skill.risk_level && skill.risk_level !== "low" && (
-            <>
-              <span>·</span>
-              <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
-                {skill.risk_level} risk
-              </span>
-            </>
-          )}
-          {skill.created_by_you && (
-            <>
-              <span>·</span>
-              <span>Created by you</span>
-            </>
-          )}
-          {!skill.created_by_you && skill.installed && (
-            <>
-              <span>·</span>
-              <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
-            </>
-          )}
-        </div>
-      </div>
-    </button>
-  );
-}
+import { MarketplaceSkillCard, SkillDetailModal, riskPillColor } from "@/components/skill-market";
 
 export default function MarketplacePage() {
   const [skills, setSkills] = useState<SkillWithInstalled[]>([]);
@@ -182,7 +115,7 @@ export default function MarketplacePage() {
       ) : (
         <div className="skill-grid">
           {skills.map(skill => (
-            <MarketplaceBrowseCard
+            <MarketplaceSkillCard
               key={skill.skill_id}
               skill={skill}
               onClick={() => setModalSkillId(skill.skill_id)}

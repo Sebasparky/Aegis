@@ -92,6 +92,105 @@ const RUN_STATUS_VARIANT: Record<string, string> = {
   pending_approval: "amber", failed: "red", blocked: "red",
 };
 
+// ─── Shared Skill Card View Model ────────────────────────────────────────────
+
+export interface SkillCardView {
+  primaryActionLabel: string;
+  primaryActionColor: "blue" | "green";
+  statusLine: string;
+  createdByYou: boolean;
+  installed: boolean;
+}
+
+export function buildSkillCardView(skill: SkillWithInstalled): SkillCardView {
+  const verified = isRouteVerified(skill.trust_tier);
+  const verText = verified ? "✓ Verified" : "Needs verification";
+  const ownerText = skill.created_by_you ? "· Created by you" : "";
+  const libText = !skill.created_by_you && skill.installed ? "· In library" : "";
+  const statusLine = `${verText} ${ownerText} ${libText}`.trim();
+
+  let primaryActionLabel: string;
+  let primaryActionColor: "blue" | "green";
+  if (skill.created_by_you) {
+    primaryActionLabel = "View your listing →";
+    primaryActionColor = "blue";
+  } else if (skill.installed) {
+    primaryActionLabel = "✓ In library";
+    primaryActionColor = "green";
+  } else {
+    primaryActionLabel = "Install →";
+    primaryActionColor = "blue";
+  }
+
+  return { primaryActionLabel, primaryActionColor, statusLine, createdByYou: skill.created_by_you, installed: skill.installed };
+}
+
+// ─── MarketplaceSkillCard — shared card for /marketplace and /rails tabs ─────
+
+export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInstalled; onClick: () => void }) {
+  const view = buildSkillCardView(skill);
+  return (
+    <button className="skill-mcard" onClick={onClick} type="button">
+      <div className="skill-mcard__preview">
+        <SkillPreviewPane
+          domain={skill.domain}
+          name={skill.name}
+          steps={[]}
+          trustTier={skill.trust_tier}
+          executionMode={skill.execution_mode}
+          showTrustStrip={false}
+        />
+        <div className="skill-mcard__overlay">
+          {skill.summary && (
+            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.5, flex: 1, overflow: "hidden" }}>
+              {skill.summary}
+            </p>
+          )}
+          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
+            <span style={{ color: view.primaryActionColor === "green" ? "oklch(0.42 0.09 150)" : "var(--blue)" }}>
+              {view.primaryActionLabel}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="skill-mcard__body">
+        <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{skill.name}</div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{skill.domain}</div>
+        {skill.summary && (
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {skill.summary}
+          </p>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+          <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+            {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
+          </span>
+          {skill.risk_level && skill.risk_level !== "low" && (
+            <>
+              <span>·</span>
+              <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                {skill.risk_level} risk
+              </span>
+            </>
+          )}
+          {skill.created_by_you && (
+            <>
+              <span>·</span>
+              <span>Created by you</span>
+            </>
+          )}
+          {!skill.created_by_you && skill.installed && (
+            <>
+              <span>·</span>
+              <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
+            </>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
 // ─── Route Preview Components ─────────────────────────────────────────────────
 
 interface PreviewStep { order: number; action: string; intent: string; description?: string; }
@@ -542,7 +641,9 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink }: 
   }
 
   const sectionLabel: React.CSSProperties = { fontSize: 10.5, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--ink-3)", margin: "0 0 10px" };
-  const effectiveTier = mode.type === "private_rail" ? localTier : (route?.trust_tier ?? "");
+  // Fall back to the skill record's own trust_tier so status shows correctly before the snapshot loads.
+  const skillTier = mode.type !== "private_rail" ? mode.skill.trust_tier : "";
+  const effectiveTier = mode.type === "private_rail" ? localTier : (route?.trust_tier ?? skillTier);
   const displayName = mode.type === "private_rail" ? localName : (mode.type === "marketplace" ? mode.skill.name : mode.skill.name);
   const displayDomain = mode.type === "private_rail" ? (route?.domain ?? "") : (mode.type === "marketplace" ? mode.skill.domain : mode.skill.domain);
 

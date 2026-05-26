@@ -640,3 +640,105 @@ describe("Unlisted skill — direct access for created_by_you or installed", () 
     expect(found.installed).toBe(true);
   });
 });
+
+// ─── Skill detail — creator ownership + snapshot consistency ─────────────────
+
+describe("GET /api/skills/:skillId — creator_aegis_id + snapshot semantics", () => {
+  function makePublishedSkill(overrides: Partial<Skill> = {}): Skill {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: "approved" });
+    routes.set(route.route_id, route);
+    const skill: Skill = {
+      skill_id: newId("skill"),
+      route_id: route.route_id,
+      name: "Test Skill",
+      summary: "A test skill.",
+      domain: route.domain,
+      risk_level: "low",
+      trust_tier: "aegis_scanned",
+      required_permissions: ["browse"],
+      forbidden_actions: [],
+      approval_gates: [],
+      created_at: NOW,
+      published_at: NOW,
+      listing_status: "active",
+      creator_aegis_id: "aid_user_001",
+      ...overrides,
+    };
+    skills.set(skill.skill_id, skill);
+    return skill;
+  }
+
+  it("returns created_by_you: true for a creator-owned listed skill", async () => {
+    const skill = makePublishedSkill();
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.created_by_you).toBe(true);
+    expect(body.data.listing_status).toBe("active");
+    expect(typeof body.data.installed).toBe("boolean");
+  });
+
+  it("returns snapshot when a PublishedSkillVersion exists", async () => {
+    const skill = makePublishedSkill();
+    const snapshot = {
+      version_id: newId("psv"),
+      skill_id: skill.skill_id,
+      route_id: skill.route_id,
+      snapshot_at: NOW,
+      workflow_name: skill.name,
+      workflow_description: skill.summary,
+      domain: skill.domain,
+      trust_tier: "aegis_scanned" as const,
+      risk_level: "low" as const,
+      required_permissions: ["browse"] as any,
+      forbidden_actions: [] as any,
+      allowed_actions: ["browse"] as any,
+      approval_gates: [],
+      steps: [],
+    };
+    publishedSkillVersions.set(snapshot.version_id, snapshot);
+
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.snapshot).not.toBeNull();
+    expect(body.data.snapshot.version_id).toBe(snapshot.version_id);
+    expect(body.data.snapshot.trust_tier).toBe("aegis_scanned");
+  });
+
+  it("returns 200 for an unlisted creator-owned skill when accessed directly", async () => {
+    const skill = makePublishedSkill({ listing_status: "unlisted" });
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.listing_status).toBe("unlisted");
+    expect(body.data.created_by_you).toBe(true);
+  });
+
+  it("excludes unlisted skill from GET /api/skills browse", async () => {
+    const skill = makePublishedSkill({ listing_status: "unlisted" });
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const found = body.data.find((s: any) => s.skill_id === skill.skill_id);
+    expect(found).toBeUndefined();
+  });
+
+  it("includes unlisted installed skill in GET /api/skills?installed=true", async () => {
+    const skill = makePublishedSkill({ listing_status: "unlisted" });
+    installedSkills.set(newId("inskill"), {
+      installed_skill_id: newId("inskill"),
+      skill_id: skill.skill_id,
+      user_id: MOCK_USER_ID,
+      installed_at: NOW,
+      enabled: true,
+    });
+    const res = await server.inject({ method: "GET", url: "/api/skills?installed=true" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const found = body.data.find((s: any) => s.skill_id === skill.skill_id);
+    expect(found).toBeDefined();
+    expect(found.installed).toBe(true);
+    expect(found.listing_status).toBe("unlisted");
+  });
+});

@@ -48,6 +48,7 @@ import type {
   ProfileFieldFillRequest,
   ProfileMemoryRequest,
   AccountCreationRequest,
+  AccountCreationStepRequest,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -377,6 +378,10 @@ export const trustSignalDisclosureRecords = new Map<string, TrustSignalDisclosur
 // Ephemeral — browser context is gone on restart. pending_user requests
 // implicitly expire because this map starts empty after restart.
 export const accountCreationRequests = new Map<string, AccountCreationRequest>();
+
+// ─── Account Creation v2 — Step requests ─────────────────────────────────────
+// Ephemeral — short-lived, linked to an approved AccountCreationRequest.
+export const accountCreationStepRequests = new Map<string, AccountCreationStepRequest>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

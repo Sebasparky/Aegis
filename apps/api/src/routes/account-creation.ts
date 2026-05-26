@@ -1,10 +1,12 @@
 import { randomBytes } from "crypto";
 import type { FastifyInstance } from "fastify";
-import type { AccountCreationRequest, AccountCreationApproval } from "@aegis/types";
+import type { AccountCreationRequest, AccountCreationApproval, ProfileFieldFillRequest, ProfileFieldKind } from "@aegis/types";
 import {
   accountCreationRequests,
+  accountCreationStepRequests,
   aegisVaultPasses,
   privateProfileMemory,
+  profileFieldFillRequests,
   encryptedSecretVault,
   MOCK_USER_ID,
   newId,
@@ -36,6 +38,35 @@ function safeView(r: AccountCreationRequest) {
     denied_at: r.denied_at,
     error: r.error,
     // vault_pass_id intentionally omitted — internal only
+  };
+}
+
+function safeStepView(step: import("@aegis/types").AccountCreationStepRequest) {
+  return {
+    step_request_id: step.step_request_id,
+    account_creation_request_id: step.account_creation_request_id,
+    domain: step.domain,
+    page_url: step.page_url,
+    requested_fields: step.requested_fields,
+    status: step.status,
+    created_at: step.created_at,
+    expires_at: step.expires_at,
+    resolved_at: step.resolved_at,
+    error: step.error,
+    raw_email_revealed_to_agent: false as const,
+    raw_username_revealed_to_agent: false as const,
+    raw_password_revealed_to_agent: false as const,
+    otp_revealed_to_agent: false as const,
+    // profile_fill_request_id and pass_id exposed only after resolution
+    ...(step.status === "resolved" && step.profile_fill_request_id
+      ? { profile_fill_request_id: step.profile_fill_request_id }
+      : {}),
+    ...(step.status === "resolved" && step.pass_id
+      ? { pass_id: step.pass_id }
+      : {}),
+    ...(step.email_verification_request_id
+      ? { email_verification_request_id: step.email_verification_request_id }
+      : {}),
   };
 }
 
@@ -267,6 +298,118 @@ export async function accountCreationRoutes(server: FastifyInstance): Promise<vo
       return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Account creation request not found." } });
     }
     return reply.send({ ok: true, data: safeView(r) });
+  });
+
+  // GET /api/internal/account-creation-step-requests
+  // Returns step requests for display in the Antigen approval UI.
+  // Optional ?account_creation_request_id= to filter by parent request.
+  server.get("/api/internal/account-creation-step-requests", async (req, reply) => {
+    const { account_creation_request_id } = req.query as { account_creation_request_id?: string };
+    const now = new Date();
+
+    const results = [];
+    for (const step of accountCreationStepRequests.values()) {
+      if (step.user_id !== MOCK_USER_ID) continue;
+      if (account_creation_request_id && step.account_creation_request_id !== account_creation_request_id) continue;
+
+      // Lazy expiry for pending_user steps
+      if (step.status === "pending_user" && new Date(step.expires_at) <= now) {
+        step.status = "failed";
+        step.error = "STEP_EXPIRED";
+        accountCreationStepRequests.set(step.step_request_id, step);
+      }
+
+      results.push(safeStepView(step));
+    }
+
+    return reply.send({ ok: true, data: results });
+  });
+
+  // POST /api/internal/account-creation-step-requests/:id/submit-email
+  // User provides an email address when the account_email step returned pending_user.
+  server.post("/api/internal/account-creation-step-requests/:id/submit-email", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { email, save_as_default } = req.body as { email?: string; save_as_default?: boolean };
+
+    if (!email || typeof email !== "string" || !email.includes("@") || !email.includes(".")) {
+      return reply.status(422).send({ ok: false, error: { code: "INVALID_EMAIL_FORMAT", message: "A valid email address is required." } });
+    }
+
+    const step = accountCreationStepRequests.get(id);
+    if (!step || step.user_id !== MOCK_USER_ID) {
+      return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Step request not found." } });
+    }
+    if (step.status !== "pending_user") {
+      return reply.status(409).send({ ok: false, error: { code: "STEP_NOT_PENDING", message: `Step status is '${step.status}'; only pending_user steps can be submitted.` } });
+    }
+    if (new Date(step.expires_at) <= new Date()) {
+      step.status = "failed";
+      step.error = "STEP_EXPIRED";
+      accountCreationStepRequests.set(id, step);
+      schedulePersist();
+      return reply.status(410).send({ ok: false, error: { code: "STEP_EXPIRED", message: "Step request has expired." } });
+    }
+
+    // Optionally save email as account_creation_email preference (same path as approve endpoint)
+    if (save_as_default) {
+      try {
+        const kms = getKmsProvider();
+        const memId = newId("ppm");
+        const blob = await kms.encryptSecret(email, {
+          user_id: MOCK_USER_ID,
+          pass_id: memId,
+          domain: "aegis.preferences",
+          purpose: "profile_field",
+        });
+        encryptedSecretVault.set(memId, blob);
+        privateProfileMemory.set(memId, {
+          memory_id: memId,
+          user_id: MOCK_USER_ID,
+          field_kind: "account_creation_email",
+          value_ref: `ppvault://${memId}/value`,
+          data_class: 2,
+          sensitivity: "private",
+          default_disclosure_mode: "fill_only",
+          agent_visible_allowed: false,
+          provenance: { source: "user_provided", domain_at_creation: "aegis.preferences" },
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          user_editable: true,
+          uses: [],
+        });
+      } catch {
+        // Non-fatal — proceed without saving preference
+      }
+    }
+
+    // Create a ProfileFieldFillRequest so the agent can fill the email field via CDP
+    const fillRequestId = newId("pffr");
+    const pffr: ProfileFieldFillRequest = {
+      fill_request_id: fillRequestId,
+      user_id: MOCK_USER_ID,
+      delegation_id: step.delegation_id,
+      domain: step.domain,
+      page_url: step.page_url,
+      requested_fields: [{
+        key: "account_creation_email" as ProfileFieldKind,
+        reason: "Account creation email field fill (user-provided)",
+      }],
+      reason: "Account creation email provided by user",
+      status: "pending",
+      raw_profile_value_revealed_to_agent: false,
+      raw_profile_values_revealed_to_agent: false,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+    profileFieldFillRequests.set(fillRequestId, pffr);
+
+    step.status = "resolved";
+    step.profile_fill_request_id = fillRequestId;
+    step.resolved_at = new Date().toISOString();
+    accountCreationStepRequests.set(id, step);
+    schedulePersist();
+
+    return reply.send({ ok: true, data: { ...safeStepView(step), profile_fill_request_id: fillRequestId } });
   });
 }
 

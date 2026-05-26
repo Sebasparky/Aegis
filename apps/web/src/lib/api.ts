@@ -1292,3 +1292,39 @@ export const denyAccountCreationRequest = (requestId: string) =>
     `/api/internal/account-creation-requests/${requestId}/deny`,
     { method: "POST", body: JSON.stringify({}) },
   );
+
+export interface AccountCreationStepRequestView {
+  step_request_id: string;
+  account_creation_request_id: string;
+  domain: string;
+  page_url: string;
+  requested_fields: string[];
+  status: string;
+  created_at: string;
+  expires_at: string;
+  resolved_at?: string;
+  error?: string;
+  profile_fill_request_id?: string;
+  pass_id?: string;
+  email_verification_request_id?: string;
+  raw_email_revealed_to_agent: false;
+  raw_username_revealed_to_agent: false;
+  raw_password_revealed_to_agent: false;
+  otp_revealed_to_agent: false;
+}
+
+export const listAccountCreationStepRequests = (accountCreationRequestId?: string) => {
+  const qs = accountCreationRequestId
+    ? `?account_creation_request_id=${encodeURIComponent(accountCreationRequestId)}`
+    : "";
+  return request<AccountCreationStepRequestView[]>(`/api/internal/account-creation-step-requests${qs}`);
+};
+
+export const submitStepEmail = (
+  stepRequestId: string,
+  body: { email: string; save_as_default?: boolean },
+) =>
+  request<AccountCreationStepRequestView>(
+    `/api/internal/account-creation-step-requests/${stepRequestId}/submit-email`,
+    { method: "POST", body: JSON.stringify(body) },
+  );

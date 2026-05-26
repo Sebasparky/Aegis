@@ -58,6 +58,9 @@ import {
   denyAccountCreationRequest,
   type AccountCreationRequestView,
   type AccountCreationApproveBody,
+  listAccountCreationStepRequests,
+  submitStepEmail,
+  type AccountCreationStepRequestView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -1738,6 +1741,105 @@ function PendingAccountCreationCard({
   );
 }
 
+function AccountCreationStepCard({
+  step,
+  onResolved,
+}: {
+  step: AccountCreationStepRequestView;
+  onResolved: () => void;
+}) {
+  const [emailInput, setEmailInput] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isPendingEmail = step.status === "pending_user" &&
+    (step.requested_fields.includes("account_email") || step.requested_fields.includes("username"));
+  const isPendingOtp = step.status === "pending_external" &&
+    step.requested_fields.includes("email_otp");
+
+  async function handleSubmitEmail() {
+    if (!emailInput.includes("@") || !emailInput.includes(".")) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await submitStepEmail(step.step_request_id, { email: emailInput, save_as_default: saveAsDefault });
+      onResolved();
+    } catch (e) {
+      setError((e as Error).message ?? "Failed to submit email.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={{ border: "1px solid var(--border-1)", borderRadius: 8, padding: 16, background: "var(--surface-1)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent-blue)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Account Setup Step
+          </span>
+          <p style={{ margin: "4px 0 0", fontWeight: 600 }}>{step.domain}</p>
+        </div>
+        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 12, background: "var(--surface-2)", color: "var(--ink-3)" }}>
+          {step.status}
+        </span>
+      </div>
+
+      <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 12px" }}>
+        Field needed: <strong>{step.requested_fields.join(", ")}</strong>
+      </p>
+
+      {isPendingEmail && (
+        <div>
+          <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 8px" }}>
+            The agent needs an email address for this signup. Provide one below.
+          </p>
+          <input
+            type="email"
+            placeholder="you@example.com"
+            value={emailInput}
+            onChange={(e) => setEmailInput(e.target.value)}
+            style={{ width: "100%", padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border-2)", background: "var(--surface-2)", color: "var(--ink-1)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-3)", marginBottom: 12, cursor: "pointer" }}>
+            <input type="checkbox" checked={saveAsDefault} onChange={(e) => setSaveAsDefault(e.target.checked)} />
+            Save as default account creation email
+          </label>
+          {error && <p style={{ fontSize: 12, color: "var(--red)", margin: "0 0 8px" }}>{error}</p>}
+          <button
+            onClick={handleSubmitEmail}
+            disabled={submitting || !emailInput}
+            style={{ padding: "8px 16px", borderRadius: 6, background: "var(--accent-blue)", color: "#fff", border: "none", cursor: submitting ? "wait" : "pointer", fontWeight: 600, fontSize: 13, opacity: submitting ? 0.7 : 1 }}
+          >
+            {submitting ? "Saving…" : "Provide Email"}
+          </button>
+        </div>
+      )}
+
+      {isPendingOtp && (
+        <div>
+          <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 8px" }}>
+            Waiting for email verification code. Enter the code sent to your email in the security challenge card below.
+          </p>
+          {step.email_verification_request_id && (
+            <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>
+              Challenge ID: {step.email_verification_request_id}
+            </p>
+          )}
+        </div>
+      )}
+
+      <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: "12px 0 0" }}>
+        {step.step_request_id}
+      </p>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function RouteRunApprovalsPage() {
@@ -1751,6 +1853,7 @@ export default function RouteRunApprovalsPage() {
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
   const [profileMemReqs, setProfileMemReqs] = useState<ProfileMemoryRequestView[]>([]);
   const [accountCreationReqs, setAccountCreationReqs] = useState<AccountCreationRequestView[]>([]);
+  const [accountCreationStepReqs, setAccountCreationStepReqs] = useState<AccountCreationStepRequestView[]>([]);
   const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1777,8 +1880,9 @@ export default function RouteRunApprovalsPage() {
       listPurchaseConfirmationAuthorizations("pending_approval").catch(() => []),
       listProfileMemoryRequests("pending_user").catch(() => []),
       listAccountCreationRequests("pending_user").catch(() => []),
+      listAccountCreationStepRequests().catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs, acreqs]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs, acreqs, acStepReqs]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1792,6 +1896,7 @@ export default function RouteRunApprovalsPage() {
         setPurchaseConfirmations(pconfs);
         setProfileMemReqs(pmreqs);
         setAccountCreationReqs(acreqs);
+        setAccountCreationStepReqs((acStepReqs as AccountCreationStepRequestView[]).filter(s => s.status === "pending_user" || s.status === "pending_external"));
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -2041,7 +2146,7 @@ export default function RouteRunApprovalsPage() {
 
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length + accountCreationReqs.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length + accountCreationReqs.length + accountCreationStepReqs.length;
 
   return (
     <div className="page">
@@ -2382,6 +2487,25 @@ export default function RouteRunApprovalsPage() {
                       req={r}
                       onApproved={() => handleAccountCreationApproved(r.request_id)}
                       onDenied={() => handleAccountCreationDenied(r.request_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Account creation step requests (v2) */}
+              {accountCreationStepReqs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Account setup step needed</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent is progressing through a signup form and needs a sensitive value. Provide it here — Antigen fills it privately without revealing it to the agent.
+                    </p>
+                  </div>
+                  {accountCreationStepReqs.map((s) => (
+                    <AccountCreationStepCard
+                      key={s.step_request_id}
+                      step={s}
+                      onResolved={() => setAccountCreationStepReqs(prev => prev.filter(r => r.step_request_id !== s.step_request_id))}
                     />
                   ))}
                 </div>

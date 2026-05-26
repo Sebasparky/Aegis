@@ -2472,7 +2472,7 @@ async function getAccountAccessResolution({ request_id } = {}) {
   };
 }
 
-async function completeAccountCreationHandoff({ request_id, outcome } = {}) {
+async function completeAccountCreationHandoff({ request_id, outcome, access_method } = {}) {
   if (!request_id || typeof request_id !== "string" || !request_id.trim())
     return { error: "VALIDATION_ERROR", message: "request_id is required." };
 
@@ -2482,7 +2482,10 @@ async function completeAccountCreationHandoff({ request_id, outcome } = {}) {
 
   let res;
   try {
-    res = await request("POST", `/api/agent/v1/account-access-resolutions/${encodeURIComponent(request_id.trim())}/complete`, { outcome });
+    res = await request("POST", `/api/agent/v1/account-access-resolutions/${encodeURIComponent(request_id.trim())}/complete`, {
+      outcome,
+      ...(access_method ? { access_method } : {}),
+    });
   } catch (err) {
     return { error: "NETWORK_ERROR", message: err.message };
   }
@@ -2497,8 +2500,57 @@ async function completeAccountCreationHandoff({ request_id, outcome } = {}) {
     domain: d.domain,
     raw_password_revealed_to_agent: false,
     otp_revealed_to_agent: false,
+    ...(d.access_method ? { access_method: d.access_method } : {}),
     ...(d.completed_at ? { completed_at: d.completed_at } : {}),
     ...(d.error ? { error: d.error } : {}),
+  };
+}
+
+async function requestAccountCreationStep({ account_creation_request_id, domain, page_url, requested_fields, element_hints, browser_session_id, reason } = {}) {
+  if (!account_creation_request_id || typeof account_creation_request_id !== "string")
+    return { error: "VALIDATION_ERROR", message: "account_creation_request_id is required." };
+  if (!domain || typeof domain !== "string")
+    return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!page_url || typeof page_url !== "string")
+    return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!Array.isArray(requested_fields) || requested_fields.length === 0)
+    return { error: "VALIDATION_ERROR", message: "requested_fields must be a non-empty array." };
+  if (!reason || typeof reason !== "string")
+    return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/account-creation-steps", {
+      account_creation_request_id,
+      domain,
+      page_url,
+      requested_fields,
+      ...(element_hints ? { element_hints } : {}),
+      ...(browser_session_id ? { browser_session_id } : {}),
+      reason,
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request account creation step." };
+  }
+
+  const d = res.data;
+  return {
+    step_request_id: d.step_request_id,
+    account_creation_request_id: d.account_creation_request_id,
+    status: d.status,
+    resolved_fields: d.resolved_fields,
+    next_action: d.next_action,
+    ...(d.profile_fill_request_id ? { profile_fill_request_id: d.profile_fill_request_id } : {}),
+    ...(d.pass_id ? { pass_id: d.pass_id } : {}),
+    ...(d.email_verification_request_id ? { email_verification_request_id: d.email_verification_request_id } : {}),
+    ...(d.error ? { error: d.error } : {}),
+    raw_email_revealed_to_agent: false,
+    raw_username_revealed_to_agent: false,
+    raw_password_revealed_to_agent: false,
+    otp_revealed_to_agent: false,
   };
 }
 
@@ -4673,6 +4725,8 @@ const TOOLS = [
       "Use 'authenticated' if the agent is now logged in. " +
       "Use 'signup_failed' if the form submission failed (e.g. email already taken, validation error). " +
       "Use 'email_verification_pending' if the site sent a verification email before allowing login. " +
+      "Optionally pass access_method if known (e.g. 'login_password', 'passwordless_email_otp'); " +
+      "Antigen infers 'login_password' when a vault credential was generated, 'passwordless_email_otp' when email was verified without a password. " +
       "This closes the audit loop and records the final outcome.",
     inputSchema: {
       type: "object",
@@ -4686,8 +4740,75 @@ const TOOLS = [
           enum: ["authenticated", "signup_failed", "email_verification_pending"],
           description: "The outcome of the signup attempt.",
         },
+        access_method: {
+          type: "string",
+          enum: ["login_password", "passwordless_email_otp", "magic_link", "phone_otp", "sso", "unknown"],
+          description: "Optional. The access method that worked. Antigen infers from vault state if omitted.",
+        },
       },
       required: ["request_id", "outcome"],
+    },
+  },
+  {
+    name: "request_account_creation_step",
+    description:
+      "Use after request_account_access_resolution has created or found an AccountCreationRequest and the " +
+      "current signup page is asking for a sensitive value such as email, username, password, or email OTP. " +
+      "Call this once per sensitive page field — do not ask the user for the value in chat. " +
+      "Antigen resolves the step privately (via CDP fill, vault, or challenge relay) and returns a next_action " +
+      "telling the agent what to do: execute_profile_field_fill (email was queued for CDP fill), " +
+      "request_secret_field_injection (password pass_id is ready), wait_for_email_otp (OTP challenge created — " +
+      "use wait_for_security_challenge then inject_security_challenge_code with the returned " +
+      "email_verification_request_id), wait_for_user (email not on file — user must provide via Antigen UI), " +
+      "or retry (step not supported). Raw email, username, password, and OTP are never returned to the agent.",
+    inputSchema: {
+      type: "object",
+      required: ["account_creation_request_id", "domain", "page_url", "requested_fields", "reason"],
+      properties: {
+        account_creation_request_id: {
+          type: "string",
+          description: "The account_creation_request_id from request_account_access_resolution.",
+        },
+        domain: {
+          type: "string",
+          description: "Normalized domain, e.g. 'ikea.com'.",
+        },
+        page_url: {
+          type: "string",
+          description: "Full URL of the current signup/login page.",
+        },
+        requested_fields: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["account_email", "username", "password", "email_otp", "magic_link", "phone_otp", "unknown"],
+          },
+          minItems: 1,
+          description: "Which sensitive field the current page is asking for. One field per call.",
+        },
+        element_hints: {
+          type: "array",
+          description: "Optional selector/label hints to help CDP fill target the correct field.",
+          items: {
+            type: "object",
+            required: ["field_kind"],
+            properties: {
+              field_kind: { type: "string" },
+              selector_hint: { type: "string", description: "CSS selector for the input element." },
+              label_hint: { type: "string", description: "Visible label text near the field." },
+              placeholder_hint: { type: "string", description: "Placeholder text in the input." },
+            },
+          },
+        },
+        browser_session_id: {
+          type: "string",
+          description: "Optional. Task browser session ID from start_task_browser_session for CDP routing.",
+        },
+        reason: {
+          type: "string",
+          description: "Why the agent is requesting this step.",
+        },
+      },
     },
   },
 ];
@@ -4929,6 +5050,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "complete_account_creation_handoff":
       result = await completeAccountCreationHandoff(a);
+      break;
+    case "request_account_creation_step":
+      result = await requestAccountCreationStep(a);
       break;
     default:
       return {

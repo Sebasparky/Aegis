@@ -3119,6 +3119,11 @@ export interface AccountCreationRequest {
   completed_at?: string;
   denied_at?: string;
   error?: string;
+  // v2 metadata — populated by step requests and completion
+  access_method?: AccountAccessMethod;
+  username_kind?: "email" | "custom_username";
+  credential_material_created?: boolean;
+  email_verified?: boolean;
 }
 
 /** Agent-safe result shape — no vault_pass_id, no raw password, no email values. */
@@ -3144,4 +3149,84 @@ export interface AccountCreationApproval {
   password_strategy: AccountPasswordStrategy;
   email?: string;                        // inline email provided by user when none is saved
   save_as_default_account_email?: boolean;
+}
+
+// ─── Account Creation v2 — Stepwise Sensitive-Field Handoff ───────────────────
+// After an AccountCreationRequest is approved, the agent controls navigation
+// and calls request_account_creation_step for each sensitive page field.
+// Antigen resolves the value privately (CDP fill / challenge relay / vault) and
+// returns a next_action — the agent never sees raw email, username, password, or OTP.
+
+export type AccountCreationStepKind =
+  | "account_email"
+  | "username"
+  | "password"
+  | "email_otp"
+  | "magic_link"
+  | "phone_otp"
+  | "unknown";
+
+export type AccountAccessMethod =
+  | "login_password"
+  | "passwordless_email_otp"
+  | "magic_link"
+  | "phone_otp"
+  | "sso"
+  | "unknown";
+
+export type AccountCreationStepStatus =
+  | "resolved"
+  | "pending_user"
+  | "pending_external"
+  | "filled"
+  | "failed"
+  | "skipped";
+
+/** In-store record for a single sensitive step within an account creation flow. */
+export interface AccountCreationStepRequest {
+  step_request_id: string;              // "acrstep_..."
+  account_creation_request_id: string;
+  user_id: string;
+  delegation_id: string;
+  domain: string;
+  page_url: string;
+  requested_fields: AccountCreationStepKind[];
+  status: AccountCreationStepStatus;
+  created_at: string;
+  expires_at: string;                   // 10-minute TTL
+  resolved_at?: string;
+  error?: string;
+
+  raw_email_revealed_to_agent: false;
+  raw_username_revealed_to_agent: false;
+  raw_password_revealed_to_agent: false;
+  otp_revealed_to_agent: false;
+
+  pass_id?: string;
+  profile_fill_request_id?: string;
+  email_verification_request_id?: string;
+}
+
+/** Agent-safe result returned from the step endpoint. */
+export interface AccountCreationStepResult {
+  step_request_id: string;
+  account_creation_request_id: string;
+  status: AccountCreationStepStatus;
+  resolved_fields: AccountCreationStepKind[];
+  next_action:
+    | "agent_continue"
+    | "request_secret_field_injection"
+    | "execute_profile_field_fill"
+    | "wait_for_user"
+    | "wait_for_email_otp"
+    | "retry"
+    | "complete_account_creation_handoff";
+  pass_id?: string;
+  profile_fill_request_id?: string;
+  email_verification_request_id?: string;
+
+  raw_email_revealed_to_agent: false;
+  raw_username_revealed_to_agent: false;
+  raw_password_revealed_to_agent: false;
+  otp_revealed_to_agent: false;
 }

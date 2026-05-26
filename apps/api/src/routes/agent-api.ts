@@ -1,4 +1,5 @@
 import { existsSync, createReadStream } from "fs";
+import { randomBytes } from "crypto";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type {
   AgentDelegation,
@@ -34,6 +35,9 @@ import type {
   ProfileFieldFillRequest,
   ProfileMemoryRequest,
   AccountCreationRequest,
+  AccountCreationStepRequest,
+  AccountCreationStepKind,
+  AccountAccessMethod,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -73,6 +77,7 @@ import {
   profileMemoryRequests,
   encryptedSecretVault,
   accountCreationRequests,
+  accountCreationStepRequests,
   challengeEmailResolutions,
   aegisWorkspaces,
   workspaceTasks,
@@ -99,6 +104,7 @@ import { runObservationDryRun } from "../runtime/observationDryRun.js";
 import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 import { classifyLoginOutcome, storeDiagnostic } from "../lib/loginDiagnostics.js";
 import { normalizeAccountDomain, accountCreationNextAction, accountCreationPassIdForAgent } from "./account-creation.js";
+import { createAndStoreVaultPass } from "./vault-passes.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -4621,10 +4627,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
   // POST /api/agent/v1/account-access-resolutions/:requestId/complete
   // Called by the agent after the signup form has been submitted and the outcome is known.
-  // Only valid when status is credential_generated.
+  // Only valid when status is credential_generated. Accepts optional access_method for v2 flows.
   server.post<{
     Params: { requestId: string };
-    Body: { outcome?: "authenticated" | "signup_failed" | "email_verification_pending" };
+    Body: { outcome?: "authenticated" | "signup_failed" | "email_verification_pending"; access_method?: AccountAccessMethod };
   }>(
     "/api/agent/v1/account-access-resolutions/:requestId/complete",
     async (req, reply) => {
@@ -4632,7 +4638,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (!delegation) return;
 
       const { requestId } = req.params;
-      const { outcome } = req.body ?? {};
+      const { outcome, access_method } = req.body ?? {};
 
       const VALID_OUTCOMES = ["authenticated", "signup_failed", "email_verification_pending"];
       if (!outcome || !VALID_OUTCOMES.includes(outcome)) {
@@ -4660,6 +4666,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (outcome === "authenticated") {
         r.status = "completed";
         r.completed_at = now;
+        // Infer access_method for v2 flows. Agent can provide it explicitly; otherwise infer from vault state.
+        if (access_method) {
+          r.access_method = access_method;
+        } else if (r.vault_pass_id) {
+          r.access_method = "login_password";
+        } else if (r.email_verified) {
+          r.access_method = "passwordless_email_otp";
+        } else {
+          r.access_method = "unknown";
+        }
       } else {
         r.status = "failed";
         r.error = outcome === "signup_failed"
@@ -4677,10 +4693,311 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           domain: r.domain,
           raw_password_revealed_to_agent: false,
           otp_revealed_to_agent: false,
+          ...(r.access_method ? { access_method: r.access_method } : {}),
           ...(r.completed_at ? { completed_at: r.completed_at } : {}),
           ...(r.error ? { error: r.error } : {}),
         },
       });
+    },
+  );
+
+  // POST /api/agent/v1/account-creation-steps
+  // v2: After an AccountCreationRequest is approved, the agent calls this once per
+  // sensitive page field (email, password, email_otp, etc.). Antigen resolves each
+  // field privately and returns a next_action. Raw secrets are never returned.
+  server.post<{
+    Body: {
+      account_creation_request_id?: string;
+      browser_session_id?: string;
+      domain?: string;
+      page_url?: string;
+      requested_fields?: AccountCreationStepKind[];
+      element_hints?: Array<{
+        field_kind: AccountCreationStepKind;
+        selector_hint?: string;
+        label_hint?: string;
+        placeholder_hint?: string;
+      }>;
+      reason?: string;
+    };
+  }>(
+    "/api/agent/v1/account-creation-steps",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { account_creation_request_id, browser_session_id, page_url, requested_fields, element_hints, reason } = req.body ?? {};
+      const rawDomain = req.body?.domain;
+
+      if (!account_creation_request_id || typeof account_creation_request_id !== "string") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "account_creation_request_id is required.");
+      }
+      if (!rawDomain || typeof rawDomain !== "string" || rawDomain.trim() === "") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "domain is required.");
+      }
+      if (!page_url || typeof page_url !== "string" || page_url.trim() === "") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "page_url is required.");
+      }
+      if (!reason || typeof reason !== "string" || reason.trim() === "") {
+        return sendError(reply, 400, "VALIDATION_ERROR", "reason is required.");
+      }
+      if (!Array.isArray(requested_fields) || requested_fields.length === 0) {
+        return sendError(reply, 400, "VALIDATION_ERROR", "requested_fields must be a non-empty array.");
+      }
+
+      const domain = normalizeAccountDomain(rawDomain);
+
+      // Domain-URL match guard
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(page_url).hostname.toLowerCase().replace(/^www\./, "");
+      } catch {
+        return sendError(reply, 400, "INVALID_PAGE_URL", "page_url is not a valid URL.");
+      }
+      if (pageHostname !== domain && !pageHostname.endsWith(`.${domain}`)) {
+        return sendError(reply, 422, "DOMAIN_MISMATCH",
+          `page_url hostname '${pageHostname}' does not match domain '${domain}'. Antigen will not resolve credentials for a different domain.`);
+      }
+
+      // Validate ownership of the AccountCreationRequest
+      const acReq = accountCreationRequests.get(account_creation_request_id);
+      if (!acReq) {
+        return sendError(reply, 404, "NOT_FOUND", "Account creation request not found.");
+      }
+      if (acReq.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "This account creation request belongs to a different delegation.");
+      }
+      if (acReq.status !== "approved" && acReq.status !== "credential_generated") {
+        return sendError(reply, 409, "INVALID_STATE",
+          `Cannot request steps: account creation request status is '${acReq.status}'. Must be approved or credential_generated.`);
+      }
+
+      const now = new Date();
+      const stepRequestId = newId("acrstep");
+      const stepRequest: AccountCreationStepRequest = {
+        step_request_id: stepRequestId,
+        account_creation_request_id,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain,
+        page_url: page_url.trim(),
+        requested_fields,
+        status: "pending_user",
+        created_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+        raw_email_revealed_to_agent: false,
+        raw_username_revealed_to_agent: false,
+        raw_password_revealed_to_agent: false,
+        otp_revealed_to_agent: false,
+      };
+
+      // Process the first requested field (v2 scope: one field per call)
+      const primaryField = requested_fields[0];
+
+      if (primaryField === "account_email" || primaryField === "username") {
+        // Look up account_creation_email preference in privateProfileMemory
+        const emailMemory = Array.from(privateProfileMemory.values()).find(
+          (m) => m.field_kind === "account_creation_email" && m.user_id === MOCK_USER_ID,
+        );
+
+        if (emailMemory) {
+          // Create a ProfileFieldFillRequest directly (bypasses the public endpoint's
+          // field-kind restriction — account_creation_email is not agent-fillable via
+          // the public profile fill API, but is valid here under Antigen supervision).
+          const fillRequestId = newId("pffr");
+          const hint = element_hints?.find((h) => h.field_kind === primaryField);
+          const pffr: ProfileFieldFillRequest = {
+            fill_request_id: fillRequestId,
+            user_id: MOCK_USER_ID,
+            delegation_id: delegation.id,
+            domain,
+            page_url: page_url.trim(),
+            ...(browser_session_id ? { browser_session_id } : {}),
+            requested_fields: [{
+              key: "account_creation_email" as ProfileFieldKind,
+              ...(hint?.selector_hint ? { selector_hint: hint.selector_hint } : {}),
+              ...(hint?.label_hint ? { label: hint.label_hint } : {}),
+              ...(hint?.placeholder_hint ? { placeholder: hint.placeholder_hint } : {}),
+              reason: "Account creation email field fill",
+            }],
+            reason: reason.trim(),
+            status: "pending",
+            raw_profile_value_revealed_to_agent: false,
+            raw_profile_values_revealed_to_agent: false,
+            created_at: now.toISOString(),
+            expires_at: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+          };
+          profileFieldFillRequests.set(fillRequestId, pffr);
+          schedulePersist();
+
+          stepRequest.status = "resolved";
+          stepRequest.profile_fill_request_id = fillRequestId;
+          stepRequest.resolved_at = now.toISOString();
+          accountCreationStepRequests.set(stepRequestId, stepRequest);
+          schedulePersist();
+
+          return reply.send({
+            ok: true,
+            data: {
+              step_request_id: stepRequestId,
+              account_creation_request_id,
+              status: "resolved" as const,
+              resolved_fields: [primaryField],
+              next_action: "execute_profile_field_fill" as const,
+              profile_fill_request_id: fillRequestId,
+              raw_email_revealed_to_agent: false,
+              raw_username_revealed_to_agent: false,
+              raw_password_revealed_to_agent: false,
+              otp_revealed_to_agent: false,
+            },
+          });
+        }
+
+        // Email preference not found — surface to user via step card
+        stepRequest.status = "pending_user";
+        accountCreationStepRequests.set(stepRequestId, stepRequest);
+        schedulePersist();
+
+        return reply.send({
+          ok: true,
+          data: {
+            step_request_id: stepRequestId,
+            account_creation_request_id,
+            status: "pending_user" as const,
+            resolved_fields: [],
+            next_action: "wait_for_user" as const,
+            raw_email_revealed_to_agent: false,
+            raw_username_revealed_to_agent: false,
+            raw_password_revealed_to_agent: false,
+            otp_revealed_to_agent: false,
+          },
+        });
+
+      } else if (primaryField === "password") {
+        // Idempotent: reuse existing vault_pass_id if already generated
+        let passId = acReq.vault_pass_id;
+
+        if (!passId) {
+          // Generate a strong random password — 32 bytes → base64url → 24 chars (~143 bits).
+          // Never stored in plaintext; immediately passed to createAndStoreVaultPass.
+          const generatedPassword = randomBytes(32).toString("base64url").slice(0, 24);
+          const result = await createAndStoreVaultPass({
+            label: `${acReq.domain} (auto-created)`,
+            kind: "login_password",
+            domain: acReq.domain,
+            username: `agent-created@${acReq.domain}`,
+            password: generatedPassword,
+          });
+
+          if (!result.ok) {
+            stepRequest.status = "failed";
+            stepRequest.error = "VAULT_STORE_ERROR";
+            accountCreationStepRequests.set(stepRequestId, stepRequest);
+            schedulePersist();
+            return sendError(reply, 500, "VAULT_STORE_ERROR", "Failed to generate and store credential in vault.");
+          }
+
+          passId = result.pass.pass_id;
+          acReq.vault_pass_id = passId;
+          acReq.credential_material_created = true;
+          // Ensure the request moves to credential_generated if it was only approved
+          if (acReq.status === "approved") {
+            acReq.status = "credential_generated";
+          }
+          accountCreationRequests.set(account_creation_request_id, acReq);
+        }
+
+        stepRequest.status = "resolved";
+        stepRequest.pass_id = passId;
+        stepRequest.resolved_at = now.toISOString();
+        accountCreationStepRequests.set(stepRequestId, stepRequest);
+        schedulePersist();
+
+        return reply.send({
+          ok: true,
+          data: {
+            step_request_id: stepRequestId,
+            account_creation_request_id,
+            status: "resolved" as const,
+            resolved_fields: [primaryField],
+            next_action: "request_secret_field_injection" as const,
+            pass_id: passId,
+            raw_email_revealed_to_agent: false,
+            raw_username_revealed_to_agent: false,
+            raw_password_revealed_to_agent: false,
+            otp_revealed_to_agent: false,
+          },
+        });
+
+      } else if (primaryField === "email_otp") {
+        // Create a SecurityChallenge for email verification.
+        // The agent then uses wait_for_security_challenge + inject_security_challenge_code.
+        const challengeId = newId("chlg");
+        const challenge: SecurityChallenge = {
+          challenge_id: challengeId,
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          browser_session_id: typeof browser_session_id === "string" ? browser_session_id : undefined,
+          domain,
+          page_url: page_url.trim(),
+          challenge_type: "email_device_verification",
+          status: "pending_user",
+          masked_destination: undefined,
+          instructions: `${domain} requires an email verification code. Enter the code in the Antigen UI at /route-run-approvals.`,
+          raw_code_revealed_to_agent: false,
+          created_at: now.toISOString(),
+          expires_at: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+        };
+        securityChallenges.set(challengeId, challenge);
+
+        // Mark email_verified on the parent request so completion can infer passwordless_email_otp
+        acReq.email_verified = true;
+        accountCreationRequests.set(account_creation_request_id, acReq);
+
+        stepRequest.status = "pending_external";
+        stepRequest.email_verification_request_id = challengeId;
+        accountCreationStepRequests.set(stepRequestId, stepRequest);
+        schedulePersist();
+
+        return reply.send({
+          ok: true,
+          data: {
+            step_request_id: stepRequestId,
+            account_creation_request_id,
+            status: "pending_external" as const,
+            resolved_fields: [],
+            next_action: "wait_for_email_otp" as const,
+            email_verification_request_id: challengeId,
+            raw_email_revealed_to_agent: false,
+            raw_username_revealed_to_agent: false,
+            raw_password_revealed_to_agent: false,
+            otp_revealed_to_agent: false,
+          },
+        });
+
+      } else {
+        // Unsupported step kind
+        stepRequest.status = "failed";
+        stepRequest.error = "UNSUPPORTED_ACCOUNT_CREATION_STEP";
+        accountCreationStepRequests.set(stepRequestId, stepRequest);
+        schedulePersist();
+
+        return reply.send({
+          ok: true,
+          data: {
+            step_request_id: stepRequestId,
+            account_creation_request_id,
+            status: "failed" as const,
+            resolved_fields: [],
+            next_action: "retry" as const,
+            error: `UNSUPPORTED_ACCOUNT_CREATION_STEP: '${primaryField}' is not supported in v2. Supported: account_email, username, password, email_otp.`,
+            raw_email_revealed_to_agent: false,
+            raw_username_revealed_to_agent: false,
+            raw_password_revealed_to_agent: false,
+            otp_revealed_to_agent: false,
+          },
+        });
+      }
     },
   );
 }

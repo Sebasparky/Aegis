@@ -282,7 +282,7 @@ export const unlistSkill = (skillId: string) =>
   request<Skill>(`/api/skills/${skillId}/unlist`, { method: "POST", body: JSON.stringify({}) });
 
 // Skills Marketplace
-export type SkillWithInstalled = Skill & { installed: boolean; created_by_you: boolean };
+export type SkillWithInstalled = Skill & { installed: boolean; created_by_you: boolean; preview_asset?: RoutePreviewAsset };
 export type SkillDetail = Skill & { installed: boolean; created_by_you: boolean; snapshot: PublishedSkillVersion | null };
 export const getSkill = (skillId: string) => request<SkillDetail>(`/api/skills/${skillId}`);
 export const listSkills = (params?: { domain?: string; installed?: boolean }) => {
@@ -1232,4 +1232,45 @@ export const submitVerificationCode = (sessionId: string, code: string) =>
   request<{ card: VerificationCardDetail }>(
     `/api/verifications/sessions/${sessionId}/submit-code`,
     { method: "POST", body: JSON.stringify({ code }) },
+  );
+
+// ─── Account Access Resolution v1 ─────────────────────────────────────────────
+
+export interface AccountCreationRequestView {
+  request_id: string;
+  domain: string;
+  signup_url: string;
+  reason: string;
+  wall_type: "login" | "signup" | "unknown";
+  status: string;
+  raw_password_revealed_to_agent: false;
+  otp_revealed_to_agent: false;
+  email_strategy?: "primary_email" | "custom_email";
+  password_strategy?: "aegis_generated" | "user_provided";
+  created_at: string;
+  expires_at: string;
+  approved_at?: string;
+  completed_at?: string;
+  denied_at?: string;
+  error?: string;
+}
+
+export const listAccountCreationRequests = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<AccountCreationRequestView[]>(`/api/internal/account-creation-requests${qs}`);
+};
+
+export const approveAccountCreationRequest = (
+  requestId: string,
+  body: { email_strategy: string; password_strategy: string },
+) =>
+  request<AccountCreationRequestView>(
+    `/api/internal/account-creation-requests/${requestId}/approve`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const denyAccountCreationRequest = (requestId: string) =>
+  request<AccountCreationRequestView>(
+    `/api/internal/account-creation-requests/${requestId}/deny`,
+    { method: "POST", body: JSON.stringify({}) },
   );

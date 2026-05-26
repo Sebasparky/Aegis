@@ -107,7 +107,18 @@ export async function skillRoutes(server: FastifyInstance) {
 
       const result = list
         .sort((a, b) => b.published_at.localeCompare(a.published_at))
-        .map((s) => ({ ...s, installed: installedSkillIds.has(s.skill_id), created_by_you: s.creator_aegis_id === MOCK_AEGIS_ID }));
+        .map((s) => {
+          const latestVersion = Array.from(publishedSkillVersions.values())
+            .filter((v) => v.skill_id === s.skill_id)
+            .sort((a, b) => b.snapshot_at.localeCompare(a.snapshot_at))[0];
+          const previewAsset = latestVersion?.preview_assets?.find((a) => a.kind === "start_page");
+          return {
+            ...s,
+            installed: installedSkillIds.has(s.skill_id),
+            created_by_you: s.creator_aegis_id === MOCK_AEGIS_ID,
+            ...(previewAsset ? { preview_asset: previewAsset } : {}),
+          };
+        });
 
       return { ok: true, data: result };
     }

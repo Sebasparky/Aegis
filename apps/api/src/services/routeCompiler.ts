@@ -303,5 +303,19 @@ export function compileRoute(payload: RecordingPayload): AegisRoute {
     incident_count: 0,
   };
 
+  // Extract start_url from the first recorded event's page URL.
+  // Only set when the hostname matches the declared domain to prevent cross-domain leakage.
+  // Preserved if already set by a caller; this is the only place start_url is written during compilation.
+  const firstEventUrl = payload.events[0]?.url;
+  if (firstEventUrl && !route.start_url) {
+    try {
+      if (new URL(firstEventUrl).hostname === payload.domain) {
+        route.start_url = firstEventUrl;
+      }
+    } catch {
+      // Malformed URL — skip
+    }
+  }
+
   return route;
 }

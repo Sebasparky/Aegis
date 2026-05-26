@@ -138,6 +138,7 @@ export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInsta
           steps={[]}
           trustTier={skill.trust_tier}
           executionMode={skill.execution_mode}
+          previewAssets={skill.preview_asset ? [skill.preview_asset] : undefined}
           showTrustStrip={false}
         />
       </div>
@@ -561,6 +562,11 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink, on
       const report = await verifyRoute(routeId);
       setVerifyReport(report);
       if (report.promoted_trust_tier) setLocalTier(report.promoted_trust_tier);
+      // Re-fetch the route so the preview pane shows any screenshot captured during verification.
+      try {
+        const updatedRoute = await getRoute(routeId);
+        setRoute(updatedRoute);
+      } catch { /* non-fatal — modal still shows the verification result */ }
       mode.onVerified(routeId);
     } catch (err: any) {
       setVerifyError(err.message ?? "Verification failed.");

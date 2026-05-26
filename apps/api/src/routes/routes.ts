@@ -237,17 +237,21 @@ export async function routeRoutes(server: FastifyInstance) {
       schedulePersist();
 
       if (report.passed) {
-        import("../lib/routePreviewCapture.js")
-          .then(({ captureRouteStartPreview }) => captureRouteStartPreview(route))
-          .then((asset) => {
-            if (!asset) return;
+        try {
+          const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+          const asset = await captureRouteStartPreview(route);
+          if (asset) {
             if (!route.preview_assets) route.preview_assets = [];
+            // Replace any existing start_page asset for the same route to avoid duplicates.
+            route.preview_assets = route.preview_assets.filter(a => a.kind !== "start_page");
             route.preview_assets.push(asset);
-            route.preview_assets = route.preview_assets.filter(a => a.kind === "start_page").slice(-3);
             routes.set(route.route_id, route);
             schedulePersist();
-          })
-          .catch((err) => server.log.error(err, "Background preview capture failed"));
+          }
+        } catch (err) {
+          server.log.error(err, "Preview capture failed after verification");
+          // Capture failure is non-fatal — verification result is still returned.
+        }
       }
 
       return { ok: true, data: report };

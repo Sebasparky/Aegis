@@ -742,3 +742,78 @@ describe("GET /api/skills/:skillId — creator_aegis_id + snapshot semantics", (
     expect(found.listing_status).toBe("unlisted");
   });
 });
+
+// ─── GET /api/skills — preview_asset propagation from snapshot ─────────────────
+
+describe("GET /api/skills — preview_asset from PublishedSkillVersion", () => {
+  const PREVIEW_ASSET = {
+    asset_id: "rpa_market_001",
+    kind: "start_page" as const,
+    route_id: "route_test_preview",
+    url_path: "/api/route-preview-assets/test-start.png",
+    captured_at: NOW,
+    redaction_applied: true,
+    source: "dev_seed" as const,
+  };
+
+  it("includes preview_asset in GET /api/skills when snapshot has a start_page asset", async () => {
+    // Publish a route that has a preview asset.
+    const route = makeApprovedRoute({
+      preview_assets: [PREVIEW_ASSET],
+    });
+    routes.set(route.route_id, route);
+
+    await server.inject({
+      method: "POST",
+      url: `/api/routes/${route.route_id}/publish`,
+    });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+
+    const skill = body.data.find((s: any) => s.route_id === route.route_id);
+    expect(skill).toBeDefined();
+    expect(skill.preview_asset).toBeDefined();
+    expect(skill.preview_asset.kind).toBe("start_page");
+    expect(skill.preview_asset.url_path).toBe(PREVIEW_ASSET.url_path);
+    expect(skill.preview_asset.asset_id).toBe(PREVIEW_ASSET.asset_id);
+  });
+
+  it("omits preview_asset from GET /api/skills when snapshot has no preview assets", async () => {
+    const route = makeApprovedRoute(); // no preview_assets
+    routes.set(route.route_id, route);
+
+    await server.inject({
+      method: "POST",
+      url: `/api/routes/${route.route_id}/publish`,
+    });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+
+    const skill = body.data.find((s: any) => s.route_id === route.route_id);
+    expect(skill).toBeDefined();
+    expect(skill.preview_asset).toBeUndefined();
+  });
+
+  it("preview_asset in skill list matches the asset in GET /api/skills/:skillId snapshot", async () => {
+    const route = makeApprovedRoute({ preview_assets: [PREVIEW_ASSET] });
+    routes.set(route.route_id, route);
+
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish` });
+
+    const listRes = await server.inject({ method: "GET", url: "/api/skills" });
+    const listBody = JSON.parse(listRes.body);
+    const listSkill = listBody.data.find((s: any) => s.route_id === route.route_id);
+
+    const detailRes = await server.inject({ method: "GET", url: `/api/skills/${listSkill.skill_id}` });
+    const detailBody = JSON.parse(detailRes.body);
+
+    // Detail modal reads from snapshot.preview_assets; card reads preview_asset shortcut.
+    expect(listSkill.preview_asset.asset_id).toBe(
+      detailBody.data.snapshot.preview_assets[0].asset_id
+    );
+  });
+});

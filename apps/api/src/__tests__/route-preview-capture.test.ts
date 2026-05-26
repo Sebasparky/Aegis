@@ -25,12 +25,17 @@ vi.mock("../lib/routePreviewCapture.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../services/routeVerifier.js", () => ({
+  verifyRouteWithPlaywright: vi.fn(),
+}));
+
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { routeRoutes } from "../routes/routes.js";
 import { routes } from "../store/index.js";
 import { seedTestData, resetStore, IDS } from "./helpers.js";
-import type { AegisRoute } from "@aegis/types";
+import type { AegisRoute, RouteVerificationReport } from "@aegis/types";
+import { verifyRouteWithPlaywright } from "../services/routeVerifier.js";
 import { resolveStartUrl } from "../lib/routePreviewCapture.js";
 
 // ─── resolveStartUrl — URL determination logic ────────────────────────────────
@@ -278,5 +283,152 @@ describe("GET /api/route-preview-assets/:filename — path traversal regex", () 
 
   it("rejects empty string", () => {
     expect(VALID_RE.test("")).toBe(false);
+  });
+});
+
+// ─── POST /api/routes/:routeId/verify — synchronous preview capture ───────────
+
+const PASSED_REPORT: RouteVerificationReport = {
+  route_id: IDS.ROUTE_WIKI,
+  passed: true,
+  started_at: "2026-01-01T00:00:00.000Z",
+  completed_at: "2026-01-01T00:00:01.000Z",
+  step_results: [],
+  errors: [],
+};
+
+describe("POST /api/routes/:routeId/verify — synchronous preview capture", () => {
+  it("stores preview_asset on route immediately after successful verification", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    const mockAsset = {
+      asset_id: "rpa_verify_001",
+      kind: "start_page" as const,
+      route_id: IDS.ROUTE_WIKI,
+      url_path: "/api/route-preview-assets/route_demo_wikipedia_001-start-verify.png",
+      captured_at: "2026-01-01T00:00:01.000Z",
+      width: 1280,
+      height: 800,
+      redaction_applied: true,
+      source: "manual_capture" as const,
+    };
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockAsset);
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+
+    // preview_assets must be populated synchronously — no waiting for a background task.
+    const route = routes.get(IDS.ROUTE_WIKI);
+    expect(route?.preview_assets).toBeDefined();
+    expect(route?.preview_assets?.length).toBe(1);
+    expect(route?.preview_assets?.[0].asset_id).toBe("rpa_verify_001");
+  });
+
+  it("returns ok:true when captureRouteStartPreview returns null (no capturable URL)", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+
+    const route = routes.get(IDS.ROUTE_WIKI);
+    expect(route?.preview_assets ?? []).toHaveLength(0);
+  });
+
+  it("returns ok:true when captureRouteStartPreview throws — capture failure is non-fatal", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("Playwright launch failed"));
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+  });
+
+  it("replaces existing start_page asset on re-verify (no duplicate accumulation)", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+
+    // Seed an existing preview asset on the route.
+    const route = routes.get(IDS.ROUTE_WIKI)!;
+    route.preview_assets = [{
+      asset_id: "rpa_old",
+      kind: "start_page",
+      route_id: IDS.ROUTE_WIKI,
+      url_path: "/api/route-preview-assets/old.png",
+      captured_at: "2026-01-01T00:00:00.000Z",
+      redaction_applied: true,
+      source: "manual_capture",
+    }];
+    routes.set(IDS.ROUTE_WIKI, route);
+
+    const newAsset = {
+      asset_id: "rpa_new",
+      kind: "start_page" as const,
+      route_id: IDS.ROUTE_WIKI,
+      url_path: "/api/route-preview-assets/new.png",
+      captured_at: "2026-01-01T00:00:02.000Z",
+      width: 1280,
+      height: 800,
+      redaction_applied: true,
+      source: "manual_capture" as const,
+    };
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(newAsset);
+
+    await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+
+    const updated = routes.get(IDS.ROUTE_WIKI);
+    const startPages = updated?.preview_assets?.filter(a => a.kind === "start_page") ?? [];
+    expect(startPages).toHaveLength(1);
+    expect(startPages[0].asset_id).toBe("rpa_new");
+  });
+
+  it("does not capture preview when verification fails", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    const failedReport: RouteVerificationReport = { ...PASSED_REPORT, passed: false };
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(failedReport);
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(captureRouteStartPreview).not.toHaveBeenCalled();
+  });
+});
+
+// ─── routeCompiler — start_url extraction ────────────────────────────────────
+
+function makeRecordingPayload(domain: string, firstUrl: string) {
+  return {
+    workflow_name: "Test Route",
+    domain,
+    events: [
+      {
+        type: "click" as const,
+        url: firstUrl,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        locators: [{ type: "role" as const, role: "button", name: "Submit" }],
+      },
+    ],
+  };
+}
+
+describe("routeCompiler — start_url extraction from first event", () => {
+  it("sets start_url when first event hostname matches domain", async () => {
+    const { compileRoute } = await import("../services/routeCompiler.js");
+    const route = compileRoute(makeRecordingPayload("en.wikipedia.org", "https://en.wikipedia.org/wiki/Main_Page") as any);
+    expect(route.start_url).toBe("https://en.wikipedia.org/wiki/Main_Page");
+  });
+
+  it("does not set start_url when first event hostname does not match domain", async () => {
+    const { compileRoute } = await import("../services/routeCompiler.js");
+    const route = compileRoute(makeRecordingPayload("example.com", "https://other-site.com/page") as any);
+    expect(route.start_url).toBeUndefined();
+  });
+
+  it("resolveStartUrl returns the extracted start_url for an external domain route", () => {
+    const route = makeRoute({ domain: "example.com", start_url: "https://example.com/login" });
+    expect(resolveStartUrl(route)).toBe("https://example.com/login");
   });
 });

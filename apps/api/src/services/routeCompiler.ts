@@ -186,6 +186,76 @@ function deriveVariableLabel(event: SemanticRecordingEvent): string {
   return raw.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim();
 }
 
+/** Returns true when a compiled fill step targets a search-type input. */
+function isSearchFillStep(step: RouteStep): boolean {
+  if (step.action !== "fill") return false;
+  const text = `${step.description} ${step.intent}`.toLowerCase();
+  if (/search/i.test(text)) return true;
+  const all = [step.target.preferred_locator, ...step.target.fallback_locators];
+  return all.some(
+    (loc) =>
+      (loc.type === "placeholder" && /search/i.test(loc.value ?? "")) ||
+      (loc.type === "label"       && /search/i.test(loc.name  ?? "")) ||
+      (loc.type === "css"         && (loc.value ?? "").includes('[type="search"]'))
+  );
+}
+
+/**
+ * Post-compilation normalization for search-style routes.
+ *
+ * Rule 1 — Drop a click step that immediately precedes a search-fill step when
+ *           no submit or click follows it. That click was opening/focusing the
+ *           search widget, not a meaningful action the route needs to replay.
+ *
+ * Rule 2 — Add an inferred `submit` step when the last step is a search fill
+ *           with no following submit (user pressed Enter, which the recorder's
+ *           click handler cannot capture).
+ *
+ * Step orders are renumbered after modifications.
+ */
+function normalizeSearchRoute(steps: RouteStep[]): RouteStep[] {
+  if (steps.length === 0) return steps;
+
+  const result = [...steps];
+
+  // Rule 1: drop a click immediately before a search fill when no submit/click follows.
+  for (let i = 0; i < result.length - 1; i++) {
+    const cur  = result[i];
+    const next = result[i + 1];
+    const noSubmitAfter = !result
+      .slice(i + 2)
+      .some((s) => s.action === "click" || s.action === "submit");
+    if (cur.action === "click" && isSearchFillStep(next) && noSubmitAfter) {
+      result.splice(i, 1);
+      i--;
+    }
+  }
+
+  // Rule 2: add inferred submit when the last step is a search fill.
+  const last = result[result.length - 1];
+  if (last && isSearchFillStep(last)) {
+    result.push({
+      step_id: newStepId(),
+      order: result.length + 1,
+      action: "submit",
+      intent: "submit_search",
+      description: "submit search",
+      target: {
+        preferred_locator: last.target.preferred_locator,
+        fallback_locators:  last.target.fallback_locators,
+        confidence: last.target.confidence,
+      },
+      value_policy: undefined,
+      approval_required: false,
+      confidence_required: 0.5,
+    });
+  }
+
+  // Renumber steps sequentially.
+  result.forEach((s, idx) => { s.order = idx + 1; });
+  return result;
+}
+
 export function compileRoute(payload: RecordingPayload): AegisRoute {
   const now = new Date().toISOString();
   const steps: RouteStep[] = [];
@@ -272,6 +342,10 @@ export function compileRoute(payload: RecordingPayload): AegisRoute {
     stepOrder++;
   }
 
+  // Normalize search-style routes: drop focus-open clicks before search fills,
+  // add inferred submit when the final step is a search fill with no captured submit.
+  const finalSteps = normalizeSearchRoute(steps);
+
   const forbiddenList = Array.from(inferredForbidden);
   const allowedList = Array.from(inferredAllowed);
 
@@ -296,7 +370,7 @@ export function compileRoute(payload: RecordingPayload): AegisRoute {
     forbidden_actions: forbiddenList,
     approval_gates: approvalGates,
     confidence_threshold: 0.7,
-    steps,
+    steps: finalSteps,
     variables: variables.length > 0 ? variables : undefined,
     run_count: 0,
     success_rate: 0,

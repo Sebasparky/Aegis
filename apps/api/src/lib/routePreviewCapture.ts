@@ -127,6 +127,15 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
               console.warn(`[routeReplayCapture] Enter fallback failed for step ${step.step_id}:`, enterErr);
             }
           }
+        } else if (step.action === "submit") {
+          // submit steps target the fill input — press Enter to trigger form submission.
+          const locator = await resolveLocatorForReplay(page, step.target);
+          if (locator) {
+            await locator.press("Enter");
+            await page.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+            await page.waitForTimeout(800);
+            lastFilledLocator = locator;
+          }
         }
       } catch (stepErr) {
         // Step failed — do not abort entire capture, just skip this step.

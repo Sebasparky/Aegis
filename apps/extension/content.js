@@ -174,6 +174,27 @@ if (window.__aegisRecorderActive) {
     captureEvent('fill', el, { raw_value: value });
   }, true);
 
+  // Submit: captures form submission from Enter-key presses AND submit-button clicks.
+  // Emits fill first (blur may not fire before page navigates on Enter key submission),
+  // then emits submit. Background worker coalesces duplicate fills for the same field.
+  document.addEventListener('submit', (e) => {
+    if (!isActive) return;
+    const form = e.target;
+    if (!form || form.tagName.toLowerCase() !== 'form') return;
+    const active = document.activeElement;
+    const target = (active && form.contains(active) &&
+      ['input', 'textarea'].includes(active.tagName.toLowerCase()))
+      ? active
+      : form.querySelector('input[type="search"], input[type="text"]');
+    if (!target) return;
+    // Emit fill first so the sequence [fill, submit] is always maintained.
+    const value = target.value ? target.value.trim() : '';
+    if (value && !['submit', 'button', 'reset', 'checkbox', 'radio'].includes(target.type || '')) {
+      captureEvent('fill', target, { raw_value: value });
+    }
+    captureEvent('submit', target);
+  }, true);
+
   // Change: selects and checkbox/radio toggles.
   document.addEventListener('change', (e) => {
     if (!isActive) return;

@@ -135,9 +135,10 @@ async function resolveLocatorWithFallback(
     ...step.target.fallback_locators,
   ];
 
-  // For click-like actions, prefer button/link targets before label/placeholder inputs
+  // For click/navigate, expand candidates to prefer buttons/links over inputs.
+  // submit targets the fill input directly (pressing Enter), so no expansion.
   const candidates: RouteLocator[] =
-    (step.action === "click" || step.action === "submit" || step.action === "navigate")
+    (step.action === "click" || step.action === "navigate")
       ? buildClickCandidates(baseCandidates, step.target)
       : baseCandidates;
 
@@ -170,9 +171,14 @@ async function executeAction(
 ): Promise<{ performed: boolean; error?: string }> {
   switch (step.action) {
     case "navigate":
-    case "click":
-    case "submit": {
+    case "click": {
       await locator.click();
+      return { performed: true };
+    }
+
+    case "submit": {
+      // submit steps target the fill input; press Enter to submit the form.
+      await locator.press("Enter");
       return { performed: true };
     }
 

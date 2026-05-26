@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   listVerificationCards,
   listVerificationTypes,
@@ -14,6 +14,7 @@ import {
   createExternalVerificationSession,
   mockCompleteExternalSession,
   syncExternalVerificationSession,
+  getExternalVerificationSession,
 } from "@/lib/api";
 import type {
   VerificationCardSummary,
@@ -22,6 +23,7 @@ import type {
   ExternalVerificationProviderDescriptor,
 } from "@/lib/api";
 import type { VerificationType } from "@aegis/types";
+import { useRouter } from "next/navigation";
 
 // ─── Static capability metadata ──────────────────────────────────────────────
 
@@ -256,9 +258,24 @@ type OtpFlowState =
 
 // ─── External handoff flow state ──────────────────────────────────────────────
 
+type HandoffModalPhase =
+  | "intro"
+  | "connecting"
+  | "checking"
+  | "completed"
+  | "failed"
+  | "awaiting_return"
+  | "provider_pending"
+  | "requires_input";
+
 type HandoffFlow =
   | { phase: "idle" }
-  | { phase: "active"; sessionId: string; handoff: ExternalVerificationHandoffView };
+  | {
+      phase: "active";
+      sessionId: string;
+      handoff: ExternalVerificationHandoffView;
+      initialModalPhase?: HandoffModalPhase;
+    };
 
 // ─── Handoff CTA labels ───────────────────────────────────────────────────────
 
@@ -1362,16 +1379,6 @@ function RevokedHistoryRow({
 
 // ─── ExternalProviderHandoffModal ─────────────────────────────────────────────
 
-type HandoffModalPhase =
-  | "intro"
-  | "connecting"
-  | "checking"
-  | "completed"
-  | "failed"
-  | "awaiting_return"
-  | "provider_pending"
-  | "requires_input";
-
 function ProviderIconBadge({ providerName }: { providerName: string }) {
   const isIdentity = providerName.includes("stripe") || providerName.includes("gov");
   return (
@@ -1409,13 +1416,16 @@ function ExternalProviderHandoffModal({
   handoff,
   onComplete,
   onCancel,
+  initialPhase,
 }: {
   handoff: ExternalVerificationHandoffView;
   onComplete: () => void;
   onCancel: () => void;
+  initialPhase?: HandoffModalPhase;
 }) {
-  const [phase, setPhase] = useState<HandoffModalPhase>("intro");
+  const [phase, setPhase] = useState<HandoffModalPhase>(initialPhase ?? "intro");
   const [error, setError] = useState<string | null>(null);
+  const didAutoSync = useRef(false);
 
   const runMockFlow = async () => {
     setPhase("connecting");
@@ -1433,9 +1443,8 @@ function ExternalProviderHandoffModal({
 
   const runRedirectFlow = () => {
     if (handoff.handoff_url) {
-      window.open(handoff.handoff_url, "_blank", "noopener,noreferrer");
+      window.location.href = handoff.handoff_url;
     }
-    setPhase("awaiting_return");
   };
 
   const handleSyncAfterReturn = async () => {
@@ -1458,6 +1467,14 @@ function ExternalProviderHandoffModal({
       setPhase("failed");
     }
   };
+
+  useEffect(() => {
+    if (initialPhase === "checking" && !didAutoSync.current) {
+      didAutoSync.current = true;
+      handleSyncAfterReturn();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div
@@ -1894,6 +1911,26 @@ export default function VerifyPage() {
   const [otpInput, setOtpInput] = useState("");
   const [otpError, setOtpError] = useState<string | null>(null);
 
+  const router = useRouter();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const externalSessionId = params.get("external_session_id");
+    if (params.get("verification_return") !== "1" || !externalSessionId) return;
+    getExternalVerificationSession(externalSessionId)
+      .then((result) => {
+        setHandoffFlow({
+          phase: "active",
+          sessionId: externalSessionId,
+          handoff: result.handoff,
+          initialModalPhase: "checking",
+        });
+      })
+      .catch(() => {
+        router.replace("/verify");
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     Promise.all([listVerificationCards(), listVerificationTypes()])
       .then(([cardsData, typesData]) => {
@@ -2073,11 +2110,16 @@ export default function VerifyPage() {
       {handoffFlow.phase === "active" && (
         <ExternalProviderHandoffModal
           handoff={handoffFlow.handoff}
+          initialPhase={handoffFlow.initialModalPhase}
           onComplete={async () => {
             setHandoffFlow({ phase: "idle" });
+            router.replace("/verify");
             await refreshCards();
           }}
-          onCancel={() => setHandoffFlow({ phase: "idle" })}
+          onCancel={() => {
+            setHandoffFlow({ phase: "idle" });
+            router.replace("/verify");
+          }}
         />
       )}
 

@@ -285,13 +285,17 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
     if (descriptor.handoff_mode !== "mock_modal") {
       try {
         const adapter = getAdapter(provider_name as ExternalVerificationProviderName);
-        const returnUrl =
+        const baseReturnUrl =
           process.env.STRIPE_IDENTITY_RETURN_URL ?? "http://localhost:3000/verify";
+        const returnUrlObj = new URL(baseReturnUrl);
+        returnUrlObj.searchParams.set("external_session_id", session.session_id);
+        returnUrlObj.searchParams.set("provider", provider_name);
+        returnUrlObj.searchParams.set("verification_return", "1");
         const adapterResult = await adapter.start({
           session_id: session.session_id,
           user_id: session.user_id,
           verification_type,
-          return_url: returnUrl,
+          return_url: returnUrlObj.toString(),
         });
         session.provider_reference_id = adapterResult.provider_reference_id;
         session.handoff_url = adapterResult.handoff_url;

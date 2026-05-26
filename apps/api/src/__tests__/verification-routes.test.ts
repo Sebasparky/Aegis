@@ -1178,9 +1178,13 @@ describe("Real Provider Adapters (env-gated)", () => {
       expect(mockStripeAdapterStart).toHaveBeenCalledWith(
         expect.objectContaining({
           verification_type: "government_id",
-          return_url: "http://localhost:3000/verify",
+          return_url: expect.stringContaining("verification_return=1"),
         })
       );
+      const callArgs = mockStripeAdapterStart.mock.calls[0][0] as { return_url: string; session_id: string };
+      const returnUrl = new URL(callArgs.return_url);
+      expect(returnUrl.searchParams.get("provider")).toBe("stripe_identity");
+      expect(returnUrl.searchParams.get("external_session_id")).toBe(callArgs.session_id);
     });
 
     it("handoff view has handoff_mode redirect and handoff_url from Stripe", async () => {

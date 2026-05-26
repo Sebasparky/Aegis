@@ -957,14 +957,33 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
       }
       const result = await verifyStoredVerificationCard(card);
       const expired = card.expires_at ? new Date() > new Date(card.expires_at) : false;
+      const revoked = card.revocation_status === "revoked";
+      const currently_valid = result.signature_valid && !revoked && !expired;
+
+      let reason: "signature_invalid" | "revoked" | "expired" | undefined;
+      if (!currently_valid) {
+        if (!result.signature_valid) reason = "signature_invalid";
+        else if (revoked) reason = "revoked";
+        else if (expired) reason = "expired";
+      }
+
       return reply.send({
         ok: true,
         data: {
-          hash_valid: result.hash_valid,
+          card_id: card.card_id,
           signature_valid: result.signature_valid,
+          revocation_status: card.revocation_status,
           expired,
-          revoked: card.revocation_status === "revoked",
+          currently_valid,
+          usable: currently_valid,
+          ...(reason !== undefined ? { reason } : {}),
+          issuer: card.issuer,
+          issued_at: card.issued_at,
+          ...(card.expires_at !== undefined ? { expires_at: card.expires_at } : {}),
           jws_present: card.verification?.jws_present ?? false,
+          // Legacy fields preserved for existing test compatibility
+          hash_valid: result.hash_valid,
+          revoked,
           ...(result.error !== undefined ? { error: result.error } : {}),
         },
       });
@@ -981,7 +1000,14 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
           error: { code: "CARD_NOT_FOUND", message: "Verification card not found." },
         });
       }
+      if (card.revocation_status === "revoked") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "CARD_ALREADY_REVOKED", message: "Card is already revoked." },
+        });
+      }
       card.revocation_status = "revoked";
+      card.revoked_at = new Date().toISOString();
       schedulePersist();
       return reply.send({
         ok: true,

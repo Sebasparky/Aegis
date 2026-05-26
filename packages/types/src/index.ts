@@ -2781,6 +2781,11 @@ export interface VerificationCard {
    * revocation does not invalidate the signed content of the card.
    */
   revocation_status: "active" | "revoked";
+  /**
+   * Mutable field — set when the card is revoked. Intentionally excluded from
+   * the canonical hash so that revocation does not invalidate the signed content.
+   */
+  revoked_at?: string;
   limitations: {
     /** Always the literal false — raw documents are never revealed to agents. */
     raw_document_revealed_to_agent: false;

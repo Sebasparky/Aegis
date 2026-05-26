@@ -42,7 +42,7 @@ export function hashVerificationCard(
   card: Omit<VerificationCard, "verification">
 ): string {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { revocation_status: _rev, ...immutable } = card;
+  const { revocation_status: _rev, revoked_at: _ra, ...immutable } = card;
   const stable = JSON.stringify({ card_json: immutable }, sortedReplacer);
   return createHash("sha256").update(stable, "utf8").digest("hex");
 }

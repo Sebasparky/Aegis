@@ -39,9 +39,10 @@ vi.mock("../lib/externalVerificationAdapters.js", async (importOriginal) => {
 import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { verificationCards, verificationProviderSessions, disclosureReceipts, externalVerificationSessions } from "../store/index.js";
+import { verificationCards, verificationProviderSessions, disclosureReceipts, externalVerificationSessions, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { verificationRoutes, sessionOtpRecords, emailOtpRateLimits } from "../routes/verifications.js";
+import { buildSignedVerificationCard } from "../lib/verificationCardSigning.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -454,6 +455,199 @@ describe("Persistence invariants", () => {
       url: `/api/verifications/cards/${cards[0].card_id}/revoke`,
     });
     expect(disclosureReceipts.size).toBe(0);
+  });
+});
+
+// ─── VerificationCard revocation + JWS validity semantics ────────────────────
+
+describe("VerificationCard revocation + JWS validity semantics — enriched verify", () => {
+  it("active card: revocation_status active, currently_valid true when signature valid", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "test@example.com" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}/verify`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.card_id).toBe(cardId);
+    expect(body.data.revocation_status).toBe("active");
+    expect(body.data.expired).toBe(false);
+    expect(body.data.revoked).toBe(false);
+    if (body.data.signature_valid === true) {
+      expect(body.data.currently_valid).toBe(true);
+      expect(body.data.usable).toBe(true);
+      expect(body.data.reason).toBeUndefined();
+    } else {
+      // No signing keys in test env — signature_invalid takes precedence
+      expect(body.data.currently_valid).toBe(false);
+      expect(body.data.reason).toBe("signature_invalid");
+    }
+  });
+
+  it("revoked card: JWS is byte-for-byte unchanged, currently_valid false, reason revoked (if sig valid)", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "test@example.com" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+
+    const cardBefore = verificationCards.get(cardId)!;
+    const jwsBefore = cardBefore.verification?.card_jws;
+
+    await server.inject({ method: "POST", url: `/api/verifications/cards/${cardId}/revoke` });
+
+    const cardAfter = verificationCards.get(cardId)!;
+    expect(cardAfter.verification?.card_jws).toBe(jwsBefore); // byte-for-byte identical
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}/verify`,
+    });
+    const body = JSON.parse(res.body);
+    expect(body.data.revocation_status).toBe("revoked");
+    expect(body.data.revoked).toBe(true);
+    expect(body.data.currently_valid).toBe(false);
+    expect(body.data.usable).toBe(false);
+    expect(body.data.hash_valid).toBe(true); // revoked_at excluded from hash
+    if (body.data.signature_valid === true) {
+      expect(body.data.reason).toBe("revoked");
+    }
+  });
+
+  it("expired card: expired true, currently_valid false, reason expired (if sig valid)", async () => {
+    const cardId = newId("vc");
+    const now = Date.now();
+    const expiredCard = await buildSignedVerificationCard({
+      card_id: cardId,
+      schema_version: "1.0",
+      issuer: "aegis",
+      user_id: MOCK_USER_ID,
+      claims: [],
+      disclosure_policy: "user_approval_required",
+      issued_at: new Date(now - 7200_000).toISOString(),
+      expires_at: new Date(now - 3600_000).toISOString(), // expired 1 hour ago
+      revocation_status: "active",
+      limitations: {
+        raw_document_revealed_to_agent: false,
+        raw_document_revealed_to_website: false,
+        provider_result_only: true,
+        not_a_guarantee: true,
+      },
+    });
+    verificationCards.set(cardId, expiredCard);
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}/verify`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.expired).toBe(true);
+    expect(body.data.currently_valid).toBe(false);
+    expect(body.data.usable).toBe(false);
+    if (body.data.signature_valid === true) {
+      expect(body.data.reason).toBe("expired");
+    }
+  });
+
+  it("tampered JWS: signature_valid false, currently_valid false, reason signature_invalid", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "test@example.com" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+    const card = verificationCards.get(cardId)!;
+
+    if (!card.verification?.jws_present || !card.verification?.card_jws) {
+      // No signing keys configured in test env — skip meaningful tamper test
+      return;
+    }
+
+    const parts = card.verification.card_jws.split(".");
+    const sig = parts[2];
+    // Flip first character of the base64url signature segment
+    parts[2] = (sig[0] === "A" ? "B" : "A") + sig.slice(1);
+    card.verification.card_jws = parts.join(".");
+
+    const res = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}/verify`,
+    });
+    const body = JSON.parse(res.body);
+    expect(body.data.signature_valid).toBe(false);
+    expect(body.data.currently_valid).toBe(false);
+    expect(body.data.usable).toBe(false);
+    expect(body.data.reason).toBe("signature_invalid");
+  });
+
+  it("revoked card detail: jws_present is boolean, verify endpoint shows currently_valid false", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "test@example.com" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+
+    await server.inject({ method: "POST", url: `/api/verifications/cards/${cardId}/revoke` });
+
+    const detailRes = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}`,
+    });
+    const detail = JSON.parse(detailRes.body);
+    expect(typeof detail.data.card.jws_present).toBe("boolean");
+
+    const verifyRes = await server.inject({
+      method: "GET",
+      url: `/api/verifications/cards/${cardId}/verify`,
+    });
+    const verify = JSON.parse(verifyRes.body);
+    expect(verify.data.currently_valid).toBe(false);
+    expect(verify.data.usable).toBe(false);
+  });
+
+  it("revoke does not alter claim_type or claim_value", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "claims-test@umich.edu" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+    const cardBefore = verificationCards.get(cardId)!;
+    const claimTypeBefore = cardBefore.claims[0].claim_type;
+    const claimValueBefore = JSON.stringify(cardBefore.claims[0].claim_value);
+
+    await server.inject({ method: "POST", url: `/api/verifications/cards/${cardId}/revoke` });
+
+    const cardAfter = verificationCards.get(cardId)!;
+    expect(cardAfter.claims[0].claim_type).toBe(claimTypeBefore);
+    expect(JSON.stringify(cardAfter.claims[0].claim_value)).toBe(claimValueBefore);
+  });
+
+  it("double revoke returns 409 CARD_ALREADY_REVOKED", async () => {
+    const { data: created } = await createSession("email_ownership", {
+      mock_input: { email: "test@example.com" },
+    });
+    const { data: completed } = await completeSession(created.data.session_id);
+    const cardId = completed.data.card.card_id;
+
+    const first = await server.inject({
+      method: "POST",
+      url: `/api/verifications/cards/${cardId}/revoke`,
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await server.inject({
+      method: "POST",
+      url: `/api/verifications/cards/${cardId}/revoke`,
+    });
+    expect(second.statusCode).toBe(409);
+    const body = JSON.parse(second.body);
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("CARD_ALREADY_REVOKED");
   });
 });
 

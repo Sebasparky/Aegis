@@ -94,7 +94,7 @@ Proves the user controls a specific email address. Uses a link-click or code cha
 
 - Assurance level: `provider_verified`
 - Claim fields: `email_domain`, `verified_at`
-- Reuse: The existing `SecurityChallenge` + `ChallengeEmailResolution` infrastructure covers the code challenge path. For v1, email verification can reuse the challenge relay system rather than a third-party provider.
+- Provider: `email_otp` (real Resend delivery via `verify.antigenlabs.ai`). `local_email` is the dev console fallback. `mock_email` uses the existing challenge relay for local testing without sending any email.
 - Expiry: 1 year
 - Feeds: `DelegationPassport.human_subject.identity_level: "email_verified"`
 
@@ -676,7 +676,7 @@ Default behaviors for all verification cards at launch:
 
 ## Provider Integration Strategy
 
-Antigen does not integrate with specific providers in v1. The architecture is provider-agnostic by design: a thin `VerificationProvider` interface abstracts the handoff.
+The architecture is provider-agnostic by design: a thin `VerificationProvider` interface abstracts the handoff.
 
 **Provider abstraction pattern (v1 internal interface):**
 
@@ -690,23 +690,58 @@ interface VerificationProvider {
 }
 ```
 
-**v1 mock providers (for development and testing):**
+**Email providers (v1 — implemented):**
 
-- `MockEmailProvider` — simulates email ownership via the existing challenge relay (SecurityChallenge code injection already works)
-- `MockStudentProvider` — returns a hardcoded student claim for a configurable test email domain
-- `MockGovIdProvider` — returns a normalized gov ID claim; never stores any document
+- `email_otp` — real OTP email delivery through Resend. **This is the preferred real email provider used by `/verify`.**
+- `local_email` — dev console OTP fallback; prints the OTP to the server console. Used when `EMAIL_DELIVERY_PROVIDER` is not configured.
+- `mock_email` — test/mock provider; returns a card immediately without sending any email. Uses the existing challenge relay for local testing.
+
+**Delivery (email_otp):**
+
+- Enabled when `EMAIL_DELIVERY_PROVIDER=resend` and `RESEND_API_KEY` are configured.
+- Verified sending domain: `verify.antigenlabs.ai`
+- Sender: `Antigen <noreply@verify.antigenlabs.ai>`
+- Configurable via `EMAIL_FROM` env var.
+- Falls back to `local_email` console mode when Resend is not configured.
+
+**Privacy invariants for email verification:**
+
+- Full email address is used only for delivery during the active verification session. It is never stored on `VerificationCard`.
+- `VerificationCard.claim_value` for `email_ownership` stores `email_domain` only — never the full email address.
+- Raw OTP is never persisted. Only a SHA-256 hash is stored temporarily in the session for code validation.
+- OTP is never returned in any API response.
+- After verification completes, neither the full email nor the OTP hash is retained.
+
+**Abuse controls:**
+
+- In-memory rate limiting: 3 sends per 15-minute window per user.
+- 60-second resend cooldown.
+- 5 failed code attempts per session — session invalidated on limit.
+
+**Non-goals for email_otp v1:**
+
+- Google OAuth is not implemented.
+- Inbound email receiving is not needed for OTP verification.
+- Resend receiving/webhooks are not part of v1.
+
+Do not rebuild `email_otp` or `local_email` unless explicitly requested.
+
+**Mock providers for other claim types (v1):**
+
+- `MockStudentProvider` — returns a hardcoded student claim for a configurable test email domain.
+- `MockGovIdProvider` — returns a normalized gov ID claim; never stores any document.
 
 **v2 provider integrations to consider:**
 
 | Category | Candidate providers |
 |---|---|
 | ID / document verification | Stripe Identity, Persona, Onfido, Jumio |
-| Email / phone | Twilio Verify, Vonage Verify |
+| Phone | Twilio Verify, Vonage Verify |
 | Student / military | SheerID, ID.me, Student Beans |
 | Business | Middesk, Stripe (business), Companies House (UK) |
 | Domain | Antigen-managed (DNS TXT / HTTP challenge) |
 
-No provider integration is part of Verification v1 implementation scope.
+Non-email provider integrations are post-v1 implementation scope.
 
 ---
 

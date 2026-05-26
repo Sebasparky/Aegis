@@ -5,6 +5,25 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## Email OTP Delivery v1 Completed (2026-05-25)
+
+Resend delivery is implemented and working for email ownership verification.
+
+- Verified sending domain: `verify.antigenlabs.ai`
+- Sender: `Antigen <noreply@verify.antigenlabs.ai>`
+- Env vars: `EMAIL_DELIVERY_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM="Antigen <noreply@verify.antigenlabs.ai>"`
+- `email_otp` is the real provider used by `/verify` for email ownership verification.
+- `local_email` remains the dev console fallback (used when `EMAIL_DELIVERY_PROVIDER` is not `resend`).
+- `mock_email` is the test/mock provider; returns a card immediately without sending any email.
+- `VerificationCard` stores `email_domain` only — full email addresses must never be persisted in cards or returned to the frontend or agents.
+- Raw OTP is never persisted and never returned in any API response; only a SHA-256 hash is stored temporarily for session validation. After verification completes, neither the full email nor the OTP hash is retained.
+- Abuse controls: 3 sends per 15-minute window, 60-second resend cooldown, 5 failed code attempts per session.
+- Google OAuth and inbound email receiving are not implemented in v1.
+- Do not rebuild `email_otp` or `local_email` providers unless explicitly requested.
+- Next UX work: resend code button, countdown timer, change email link, success state, clearer explanation of what email-domain verification proves and what agents can see.
+
+---
+
 ## Two-Approval Payment Smoke Test Checkpoint (2026-05-25)
 
 Full end-to-end smoke test passed with these IDs: card fill auth `pca_9d6b8da0b503`, purchase confirmation auth `pconf_7e523579327b`, purchase handoff `pchoff_8c03eace9499`.

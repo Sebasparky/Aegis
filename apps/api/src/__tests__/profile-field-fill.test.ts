@@ -248,6 +248,8 @@ function assertNoRawProfileData(body: unknown) {
   // Raw profile values — never in any response
   expect(str).not.toContain("Ann Arbor");
   expect(str).not.toContain("123 Main St");
+  expect(str).not.toContain('"VA"');   // region code must not appear as raw masked_summary
+  expect(str).not.toContain('"CA"');   // other short region codes
   expect(str).not.toContain("48104");
   expect(str).not.toContain("15551234567");
   expect(str).not.toContain("alex@aegisdemo");
@@ -270,6 +272,46 @@ function assertNoRawProfileData(body: unknown) {
   expect(str).not.toContain("purchase_authorized");
   expect(str).not.toContain("pconf_");
 }
+
+// ─── maskProfileValue unit tests (via importActual to bypass the module mock) ──
+
+describe("maskProfileValue masking invariants", () => {
+  it("region code 'VA' is never returned raw as masked_summary", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    const result = maskProfileValue("region", "VA");
+    expect(result).not.toBe("VA");
+    expect(result).not.toMatch(/^VA$/);
+  });
+
+  it("city 'Ann Arbor' is masked — first char only", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    const result = maskProfileValue("city", "Ann Arbor");
+    expect(result).not.toBe("Ann Arbor");
+    expect(result).not.toContain("Ann Arbor");
+    expect(result).toMatch(/^A/);
+  });
+
+  it("country 'US' is masked", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    const result = maskProfileValue("country", "US");
+    expect(result).not.toBe("US");
+    expect(result).not.toMatch(/^US$/);
+  });
+
+  it("empty value returns '***' not an empty string", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    expect(maskProfileValue("region", "")).toBe("***");
+    expect(maskProfileValue("city", "")).toBe("***");
+  });
+});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

@@ -2182,7 +2182,7 @@ async function waitForPurchaseConfirmationAuthorization({
 
 async function waitForProfileMemoryRequest({
   profile_memory_request_id,
-  timeout_ms = 300000,
+  timeout_ms = 600000,
   poll_interval_ms = 3000,
 } = {}) {
   if (!profile_memory_request_id) return { error: "VALIDATION_ERROR", message: "profile_memory_request_id is required." };
@@ -2204,7 +2204,17 @@ async function waitForProfileMemoryRequest({
     if (TERMINAL.has(data.status)) return data;
     await new Promise((r) => setTimeout(r, poll_interval_ms));
   }
-  return { error: "TIMEOUT", message: "Timed out waiting for profile memory request completion." };
+
+  // Final check: capture a user submit that landed at the deadline boundary
+  try {
+    const finalRes = await request("GET", `/api/agent/v1/profile-memory-requests/${encodeURIComponent(profile_memory_request_id)}`);
+    if (finalRes.ok && TERMINAL.has(finalRes.data.status)) return finalRes.data;
+  } catch { /* best effort */ }
+
+  return {
+    error: "TIMEOUT",
+    message: "Timed out waiting for profile memory request completion. If the user just submitted values, retry request_profile_field_fill directly.",
+  };
 }
 
 async function executePurchaseConfirmationHandoff({

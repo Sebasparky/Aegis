@@ -4539,7 +4539,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             raw_password_revealed_to_agent: false,
             otp_revealed_to_agent: false,
             next_action: "observe_page_then_proceed",
-            guidance: `A vault credential exists for ${domain}. Observe the current visible page before acting. If the page shows a password field, call request_secret_field_injection with the returned pass_id. If the page shows an email, username, or OTP field, call request_account_creation_step with the matching requested_fields. Do not force a password-login path if the page is not currently asking for a password.`,
+            guidance: `A vault credential exists for ${domain}. Observe the current visible page before acting. If the page shows a password field, call request_secret_field_injection with the returned pass_id. If the page shows an email or username field, call request_account_creation_step with the matching requested_fields. If the page shows an OTP or verification code field, this is a login step-up challenge — call report_security_challenge, then wait_for_security_challenge, then inject_security_challenge_code. Do not call request_account_creation_step for OTP on the credential_available path — no AccountCreationRequest exists. Do not force a password-login path if the page is not currently asking for a password.`,
           },
         });
       }

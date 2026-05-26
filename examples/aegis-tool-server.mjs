@@ -4672,8 +4672,8 @@ const TOOLS = [
       "After receiving credential_available, observe the current visible page and choose the next Antigen primitive based on what the page is actually showing: " +
       "  • Email or username field visible → call request_account_creation_step with requested_fields ['account_email'] or ['username']. " +
       "  • Password field visible → call request_secret_field_injection with the returned pass_id. " +
-      "  • OTP or verification code field visible → call request_account_creation_step with requested_fields ['email_otp'], then use the security challenge tools. " +
-      "  • Magic-link or passwordless prompt visible → call request_account_creation_step with requested_fields ['magic_link'], or report as a step requiring user presence. " +
+      "  • OTP or verification code field visible → this is a login step-up challenge (not account creation). Call report_security_challenge, then wait_for_security_challenge, then inject_security_challenge_code. Do NOT call request_account_creation_step — no AccountCreationRequest exists on the credential_available path. " +
+      "  • Magic-link or passwordless prompt visible → report to the user as a step requiring user presence; do not force password injection. " +
       "Do not switch the site's visible auth flow (e.g. do not click 'Use password instead') just because a saved credential exists. Only switch if that alternative is clearly visible, stable, and will not cause the site to revert to a different flow. " +
       "If the page reverts to OTP or the password field disappears, stop forcing the password path and follow the visible flow. " +
       "Auth wall decision loop: (1) Observe the page. (2) Identify the visible input or action. (3) If ordinary click or navigation, proceed directly. (4) If a sensitive field, call the matching Antigen primitive. (5) After Antigen resolves, return to observation. (6) Repeat until authenticated or blocked. (7) If the site blocks interaction, report the blocker honestly — do not retry with a different auth mode unprompted. " +
@@ -4779,8 +4779,8 @@ const TOOLS = [
       "  wait_for_user (email not on file — direct user to Antigen UI at /route-run-approvals), or " +
       "  retry (step not supported for this field kind). " +
       "Raw email, username, password, and OTP values are never returned to the agent. " +
-      "Requires an active AccountCreationRequest (account_creation_request_id from request_account_access_resolution). " +
-      "Also use this when resolution was 'credential_available' and the visible page asks for a step the saved credential alone does not cover (e.g. an OTP or magic-link step before the password form appears).",
+      "Requires an active AccountCreationRequest (account_creation_request_id from request_account_access_resolution with resolution='pending_user'). " +
+      "Do NOT use this for login step-up OTP when resolution was 'credential_available' — no AccountCreationRequest exists on that path. For login step-up OTP use report_security_challenge → wait_for_security_challenge → inject_security_challenge_code directly.",
     inputSchema: {
       type: "object",
       required: ["account_creation_request_id", "domain", "page_url", "requested_fields", "reason"],

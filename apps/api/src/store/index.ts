@@ -13,6 +13,7 @@ import type {
   AgentConnector,
   AegisRoute,
   Skill,
+  PublishedSkillVersion,
   InstalledSkill,
   RouteRun,
   RouteRunReceipt,
@@ -129,6 +130,8 @@ export const agentConnectors = new Map<string, AgentConnector>();
 export const routes = new Map<string, AegisRoute>();
 
 export const skills = new Map<string, Skill>();
+
+export const publishedSkillVersions = new Map<string, PublishedSkillVersion>();
 
 export const installedSkills = new Map<string, InstalledSkill>();
 

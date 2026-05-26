@@ -276,6 +276,7 @@ export default function RailsPage() {
       )}
       {modalRouteId && modalMode === "marketplace" && selectedSkill && (
         <SkillDetailModal
+          skillId={selectedSkill.skill_id}
           routeId={modalRouteId}
           onClose={closeModal}
           mode={{

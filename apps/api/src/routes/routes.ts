@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, RoutePreviewAsset, RouteReplayAsset } from "@aegis/types";
-import { routes, newId, skills } from "../store/index.js";
+import type { RecordingPayload, RouteTrustTier, RouteVerificationReport, Skill, PublishedSkillVersion, RoutePreviewAsset, RouteReplayAsset } from "@aegis/types";
+import { routes, newId, skills, publishedSkillVersions } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { compileRoute } from "../services/routeCompiler.js";
 import { verifyRouteWithPlaywright } from "../services/routeVerifier.js";
@@ -141,6 +141,14 @@ export async function routeRoutes(server: FastifyInstance) {
     async (req, reply) => {
       if (!routes.has(req.params.routeId)) {
         return sendError(reply, 404, "NOT_FOUND", "Route not found.");
+      }
+      // Soft-unlist any marketplace skill backed by this route.
+      // The published snapshot is preserved; only listing visibility changes.
+      for (const [, skill] of skills.entries()) {
+        if (skill.route_id === req.params.routeId && skill.listing_status !== 'unlisted') {
+          skill.listing_status = 'unlisted';
+          skills.set(skill.skill_id, skill);
+        }
       }
       routes.delete(req.params.routeId);
       schedulePersist();
@@ -343,27 +351,55 @@ export async function routeRoutes(server: FastifyInstance) {
       routes.set(route.route_id, route);
 
       if (decision === "approved") {
+        const now = new Date().toISOString();
         const existingSkill = Array.from(skills.values()).find(
           (s) => s.route_id === route.route_id
         );
-        if (!existingSkill) {
-          const now = new Date().toISOString();
-          const skill: Skill = {
-            skill_id: newId("skill"),
-            route_id: route.route_id,
-            name: route.workflow_name,
-            summary: route.workflow_description ?? "",
-            domain: route.domain,
-            risk_level: route.risk_level,
-            trust_tier: route.trust_tier,
-            required_permissions: route.required_permissions,
-            forbidden_actions: route.forbidden_actions,
-            approval_gates: route.approval_gates,
-            created_at: now,
-            published_at: now,
-          };
-          skills.set(skill.skill_id, skill);
-        }
+        const skill: Skill = existingSkill ?? {
+          skill_id: newId("skill"),
+          route_id: route.route_id,
+          name: route.workflow_name,
+          summary: route.workflow_description ?? "",
+          domain: route.domain,
+          risk_level: route.risk_level,
+          trust_tier: route.trust_tier,
+          required_permissions: route.required_permissions,
+          forbidden_actions: route.forbidden_actions,
+          approval_gates: route.approval_gates,
+          created_at: now,
+          published_at: now,
+          listing_status: 'active',
+        };
+        // Re-list if it was previously unlisted (e.g., route was deleted then re-approved).
+        skill.listing_status = 'active';
+        skills.set(skill.skill_id, skill);
+
+        // Create an immutable snapshot of the route at this publish moment.
+        const version: PublishedSkillVersion = {
+          version_id: newId("psv"),
+          skill_id: skill.skill_id,
+          route_id: route.route_id,
+          snapshot_at: now,
+          workflow_name: route.workflow_name,
+          workflow_description: route.workflow_description ?? "",
+          domain: route.domain,
+          trust_tier: route.trust_tier,
+          risk_level: route.risk_level,
+          required_permissions: route.required_permissions,
+          forbidden_actions: route.forbidden_actions,
+          allowed_actions: route.allowed_actions,
+          approval_gates: route.approval_gates,
+          steps: route.steps,
+          variables: route.variables,
+          execution_mode: route.execution_mode,
+          sensitivity_level: route.sensitivity_level,
+          url_match: route.url_match,
+          start_url: route.start_url,
+          preview_assets: route.preview_assets,
+          replay_assets: route.replay_assets,
+          verification_report: route.verification_report,
+        };
+        publishedSkillVersions.set(version.version_id, version);
       }
 
       schedulePersist();

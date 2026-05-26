@@ -94,7 +94,7 @@ export default function MarketplacePage() {
     <div className="page">
       {selectedSkill && (
         <SkillDetailModal
-          routeId={selectedSkill.route_id}
+          skillId={selectedSkill.skill_id}
           onClose={() => setModalSkillId(null)}
           mode={{
             type: "marketplace",

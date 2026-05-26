@@ -43,6 +43,7 @@ import type {
   ConnectorStatus,
   VerificationType,
   RoutePreviewAsset,
+  PublishedSkillVersion,
 } from "@aegis/types";
 
 export const BASE = "http://localhost:4000";
@@ -271,6 +272,8 @@ export const reviewRoute = (routeId: string, decision: "approved" | "rejected", 
 
 // Skills Marketplace
 export type SkillWithInstalled = Skill & { installed: boolean };
+export type SkillDetail = Skill & { installed: boolean; snapshot: PublishedSkillVersion | null };
+export const getSkill = (skillId: string) => request<SkillDetail>(`/api/skills/${skillId}`);
 export const listSkills = (params?: { domain?: string; installed?: boolean }) => {
   const entries: [string, string][] = [];
   if (params?.domain) entries.push(["domain", params.domain]);

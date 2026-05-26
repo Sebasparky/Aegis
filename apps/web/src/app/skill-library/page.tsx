@@ -98,7 +98,7 @@ export default function SkillLibraryPage() {
     <div className="page">
       {selectedItem && (
         <SkillDetailModal
-          routeId={selectedItem.skill.route_id}
+          skillId={selectedItem.skill.skill_id}
           onClose={() => setModalItemId(null)}
           mode={{
             type: "library",

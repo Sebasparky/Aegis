@@ -1202,6 +1202,34 @@ export interface Skill {
   published_at: string;
   execution_mode?: ExecutionMode;
   sensitivity_level?: SensitivityLevel;
+  /** 'active' = discoverable; 'unlisted' = hidden from browse, installs preserved. Defaults to 'active'. */
+  listing_status?: 'active' | 'unlisted';
+}
+
+export interface PublishedSkillVersion {
+  version_id: string;
+  skill_id: string;
+  /** Original route_id at publish time — may be stale if the route was later deleted. */
+  route_id: string;
+  snapshot_at: string;
+  workflow_name: string;
+  workflow_description: string;
+  domain: string;
+  trust_tier: RouteTrustTier;
+  risk_level: RiskLevel;
+  required_permissions: ActionType[];
+  forbidden_actions: ActionType[];
+  allowed_actions: ActionType[];
+  approval_gates: ApprovalGate[];
+  steps: RouteStep[];
+  variables?: RouteVariable[];
+  execution_mode?: ExecutionMode;
+  sensitivity_level?: SensitivityLevel;
+  url_match?: { hostname?: string; path_prefix?: string };
+  start_url?: string;
+  preview_assets?: RoutePreviewAsset[];
+  replay_assets?: RouteReplayAsset[];
+  verification_report?: RouteVerificationReport;
 }
 
 // ─── External Agent Delegation API v1 — Public Response Types ────────────────

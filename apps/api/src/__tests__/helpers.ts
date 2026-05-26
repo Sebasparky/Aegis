@@ -10,6 +10,7 @@ import {
   collars,
   passes,
   skills,
+  publishedSkillVersions,
   routes,
   installedSkills,
   routeRuns,
@@ -63,6 +64,7 @@ export function resetStore(): void {
   passes.clear();
   agentDelegations.clear();
   skills.clear();
+  publishedSkillVersions.clear();
   installedSkills.clear();
   routes.clear();
   routeRuns.clear();
@@ -273,6 +275,7 @@ export function seedTestData(): void {
     approval_gates: [],
     created_at: NOW,
     published_at: NOW,
+    listing_status: "active",
   };
   skills.set(skillWiki.skill_id, skillWiki);
 
@@ -289,6 +292,7 @@ export function seedTestData(): void {
     approval_gates: [],
     created_at: NOW,
     published_at: NOW,
+    listing_status: "active",
   };
   skills.set(skillPurchase.skill_id, skillPurchase);
 
@@ -305,6 +309,7 @@ export function seedTestData(): void {
     approval_gates: [],
     created_at: NOW,
     published_at: NOW,
+    listing_status: "active",
   };
   skills.set(skillBlocked.skill_id, skillBlocked);
 }

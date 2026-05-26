@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem, ProfileMemoryRequest } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, PublishedSkillVersion, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem, ProfileMemoryRequest } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -19,6 +19,7 @@ import {
   agentConnectors,
   routes,
   skills,
+  publishedSkillVersions,
   installedSkills,
   routeRuns,
   routeRunReceipts,
@@ -578,6 +579,7 @@ export function persistStore(): void {
       agentConnectors: Array.from(agentConnectors.entries()),
       routes: Array.from(routes.entries()),
       skills: Array.from(skills.entries()),
+      publishedSkillVersions: Array.from(publishedSkillVersions.entries()),
       installedSkills: Array.from(installedSkills.entries()),
       routeRuns: Array.from(routeRuns.entries()),
       routeRunReceipts: Array.from(routeRunReceipts.entries()),
@@ -666,6 +668,11 @@ export async function loadStore(): Promise<void> {
     for (const [k, v] of (data.agentConnectors ?? [])) agentConnectors.set(k, v as AgentConnector);
     for (const [k, v] of (data.routes ?? [])) routes.set(k, v as AegisRoute);
     for (const [k, v] of (data.skills ?? [])) skills.set(k, v as Skill);
+    for (const [k, v] of (data.publishedSkillVersions ?? [])) publishedSkillVersions.set(k, v as PublishedSkillVersion);
+    // Backward compat: skills persisted before listing_status was added default to 'active'.
+    for (const [k, s] of skills.entries()) {
+      if (!s.listing_status) { s.listing_status = 'active'; skills.set(k, s); }
+    }
     for (const [k, v] of (data.installedSkills ?? [])) installedSkills.set(k, v as InstalledSkill);
     for (const [k, v] of (data.routeRuns ?? [])) routeRuns.set(k, v as RouteRun);
     for (const [k, v] of (data.routeRunReceipts ?? [])) routeRunReceipts.set(k, v as RouteRunReceipt);
@@ -839,6 +846,7 @@ export async function resetStoreForDemo(): Promise<void> {
   agentDelegations.clear();
   routes.clear();
   skills.clear();
+  publishedSkillVersions.clear();
   installedSkills.clear();
   routeRuns.clear();
   routeRunReceipts.clear();

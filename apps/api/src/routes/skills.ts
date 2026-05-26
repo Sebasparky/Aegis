@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { AgentDelegation, InstalledSkill } from "@aegis/types";
-import { skills, installedSkills, passes, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
+import { skills, publishedSkillVersions, installedSkills, passes, agentDelegations, MOCK_USER_ID, newId } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
@@ -73,18 +73,22 @@ export async function skillRoutes(server: FastifyInstance) {
         delegation = found;
       }
 
-      let list = Array.from(skills.values());
-
-      if (domain) list = list.filter((s) => s.domain === domain);
-
       const installedSkillIds = new Set(
         Array.from(installedSkills.values())
           .filter((i) => i.user_id === MOCK_USER_ID && i.enabled)
           .map((i) => i.skill_id)
       );
 
+      let list = Array.from(skills.values());
+
+      if (domain) list = list.filter((s) => s.domain === domain);
+
       if (installed === "true") {
+        // Library: return all enabled installed skills regardless of listing_status.
         list = list.filter((s) => installedSkillIds.has(s.skill_id));
+      } else {
+        // Marketplace browse: only active listings.
+        list = list.filter((s) => (s.listing_status ?? 'active') === 'active');
       }
 
       // Apply delegation skill-access policy when a valid token is present.
@@ -104,6 +108,30 @@ export async function skillRoutes(server: FastifyInstance) {
         .map((s) => ({ ...s, installed: installedSkillIds.has(s.skill_id) }));
 
       return { ok: true, data: result };
+    }
+  );
+
+  /**
+   * GET /api/skills/:skillId
+   *
+   * Returns a single skill with its most recent published version snapshot.
+   * Works even after the source route has been deleted.
+   */
+  server.get<{ Params: { skillId: string } }>(
+    "/api/skills/:skillId",
+    async (req, reply) => {
+      const skill = skills.get(req.params.skillId);
+      if (!skill) return sendError(reply, 404, "NOT_FOUND", "Skill not found.");
+
+      const snapshot = Array.from(publishedSkillVersions.values())
+        .filter((v) => v.skill_id === skill.skill_id)
+        .sort((a, b) => b.snapshot_at.localeCompare(a.snapshot_at))[0] ?? null;
+
+      const installed = Array.from(installedSkills.values()).some(
+        (i) => i.skill_id === skill.skill_id && i.user_id === MOCK_USER_ID && i.enabled
+      );
+
+      return { ok: true, data: { ...skill, installed, snapshot } };
     }
   );
 

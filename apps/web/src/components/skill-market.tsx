@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AegisRoute, InstalledSkill, RoutePreviewAsset, RouteReplayAsset, RouteStep, RouteVerificationReport, Skill, StepVerificationResult } from "@aegis/types";
 import { BASE } from "../lib/api";
 import {
-  getRoute, listRouteRuns, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
+  getRoute, getSkill, listRouteRuns, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
   installSkill, uninstallSkill,
 } from "../lib/api";
 import type { RouteRunWithSummary, SkillWithInstalled } from "../lib/api";
@@ -340,12 +340,13 @@ type ModalMode =
   | { type: "library"; skill: Skill; installedAt: string; onInstallChange: (id: string, installed: boolean) => void; };
 
 export interface SkillDetailModalProps {
-  routeId: string;
+  routeId?: string;
+  skillId?: string;
   mode: ModalMode;
   onClose: () => void;
 }
 
-export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalProps) {
+export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetailModalProps) {
   const [route, setRoute] = useState<AegisRoute | null>(mode.type === "private_rail" ? mode.route : null);
   const [loadingRoute, setLoadingRoute] = useState(mode.type !== "private_rail");
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -374,25 +375,65 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
   );
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
-  const skillId = mode.type === "marketplace" ? mode.skill.skill_id : mode.type === "library" ? mode.skill.skill_id : null;
+  const [isUnlisted, setIsUnlisted] = useState(false);
+  // snapshotRouteId is captured from the snapshot so runs can still be fetched after source route deletion.
+  const [snapshotRouteId, setSnapshotRouteId] = useState<string | null>(routeId ?? null);
 
-  // Fetch route if needed
+  // Fetch skill detail from snapshot for marketplace / library modes.
   useEffect(() => {
-    if (mode.type !== "private_rail") {
-      setLoadingRoute(true);
-      getRoute(routeId)
-        .then(r => { setRoute(r); setLoadingRoute(false); })
-        .catch(err => { setRouteError(err.message ?? "Could not load route."); setLoadingRoute(false); });
-    }
-  }, [routeId, mode.type]);
+    if (mode.type === "private_rail") return;
+    if (!skillId) return;
+    setLoadingRoute(true);
+    getSkill(skillId)
+      .then(detail => {
+        if (detail.snapshot) {
+          setSnapshotRouteId(detail.snapshot.route_id);
+          setIsUnlisted(detail.listing_status === 'unlisted');
+          setRoute({
+            route_id: detail.snapshot.route_id,
+            workflow_name: detail.snapshot.workflow_name,
+            workflow_description: detail.snapshot.workflow_description,
+            domain: detail.snapshot.domain,
+            trust_tier: detail.snapshot.trust_tier,
+            risk_level: detail.snapshot.risk_level,
+            required_permissions: detail.snapshot.required_permissions,
+            allowed_actions: detail.snapshot.allowed_actions,
+            forbidden_actions: detail.snapshot.forbidden_actions,
+            approval_gates: detail.snapshot.approval_gates,
+            steps: detail.snapshot.steps,
+            variables: detail.snapshot.variables,
+            execution_mode: detail.snapshot.execution_mode,
+            sensitivity_level: detail.snapshot.sensitivity_level,
+            url_match: detail.snapshot.url_match,
+            start_url: detail.snapshot.start_url,
+            preview_assets: detail.snapshot.preview_assets,
+            replay_assets: detail.snapshot.replay_assets,
+            verification_report: detail.snapshot.verification_report,
+            // Required AegisRoute fields with neutral placeholder values.
+            version: "1.0.0",
+            created_at: detail.created_at,
+            last_verified_at: detail.snapshot.snapshot_at,
+            creator_aegis_id: "",
+            confidence_threshold: 0.7,
+            run_count: 0,
+            success_rate: 0,
+            incident_count: 0,
+          } as AegisRoute);
+        }
+        setLoadingRoute(false);
+      })
+      .catch(err => { setRouteError(err.message ?? "Could not load skill."); setLoadingRoute(false); });
+  }, [skillId, mode.type]);
 
-  // Fetch recent runs
+  // Fetch recent runs using snapshot route_id (works even after source route is deleted).
   useEffect(() => {
-    listRouteRuns({ route_id: routeId })
+    const rid = snapshotRouteId;
+    if (!rid) { setLoadingRuns(false); return; }
+    listRouteRuns({ route_id: rid })
       .then(setRuns)
       .catch(() => {})
       .finally(() => setLoadingRuns(false));
-  }, [routeId]);
+  }, [snapshotRouteId]);
 
   // Close on backdrop click
   function handleBackdrop(e: React.MouseEvent) {
@@ -401,7 +442,7 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
 
   // Private rail actions
   async function handleVerify() {
-    if (mode.type !== "private_rail") return;
+    if (mode.type !== "private_rail" || !routeId) return;
     setVerifying(true); setVerifyError(null);
     try {
       const report = await verifyRoute(routeId);
@@ -414,7 +455,7 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
   }
 
   async function handleRename(newName: string) {
-    if (mode.type !== "private_rail") return;
+    if (mode.type !== "private_rail" || !routeId) return;
     await patchRoute(routeId, { workflow_name: newName });
     setLocalName(newName);
     mode.onRenamed(routeId, newName);
@@ -422,6 +463,7 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
   }
 
   async function handleSubmitForReview() {
+    if (!routeId) return;
     setSubmitting(true); setSubmitError(null);
     try {
       const updated = await submitRouteForReview(routeId);
@@ -432,7 +474,7 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
   }
 
   async function handleDelete() {
-    if (mode.type !== "private_rail") return;
+    if (mode.type !== "private_rail" || !routeId) return;
     setDeleting(true);
     try { await deleteRoute(routeId); mode.onDelete(routeId); onClose(); }
     catch { setDeleting(false); }
@@ -484,6 +526,9 @@ export function SkillDetailModal({ routeId, mode, onClose }: SkillDetailModalPro
                 <span className={`skill-badge skill-badge--${sourceBadgeVariant}`}>{sourceBadge}</span>
                 {effectiveTier && (
                   <span className={`skill-badge skill-badge--${trustBadgeVariant(effectiveTier)}`}>{trustBadgeLabel(effectiveTier)}</span>
+                )}
+                {isUnlisted && (
+                  <span className="skill-badge skill-badge--graphite" title="The creator removed this skill from the marketplace. Your installed copy still works.">Removed from marketplace</span>
                 )}
               </div>
               <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink-1)", margin: 0, lineHeight: 1.3 }}>{displayName}</h2>

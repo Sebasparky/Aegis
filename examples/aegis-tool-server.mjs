@@ -3963,7 +3963,7 @@ const TOOLS = [
         },
         timeout_ms: {
           type: "number",
-          description: "Max polling duration in milliseconds. Default: 300000 (5 minutes).",
+          description: "Max polling duration in milliseconds. Default: 600000 (10 minutes).",
         },
         poll_interval_ms: {
           type: "number",

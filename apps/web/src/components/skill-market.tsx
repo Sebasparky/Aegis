@@ -140,18 +140,6 @@ export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInsta
           executionMode={skill.execution_mode}
           showTrustStrip={false}
         />
-        <div className="skill-mcard__overlay">
-          {skill.summary && (
-            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.5, flex: 1, overflow: "hidden" }}>
-              {skill.summary}
-            </p>
-          )}
-          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
-            <span style={{ color: view.primaryActionColor === "green" ? "oklch(0.42 0.09 150)" : "var(--blue)" }}>
-              {view.primaryActionLabel}
-            </span>
-          </div>
-        </div>
       </div>
       <div className="skill-mcard__body">
         <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{skill.name}</div>
@@ -161,30 +149,37 @@ export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInsta
             {skill.summary}
           </p>
         )}
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
-          <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
-            {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
-          </span>
-          {skill.risk_level && skill.risk_level !== "low" && (
-            <>
-              <span>·</span>
-              <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
-                {skill.risk_level} risk
-              </span>
-            </>
-          )}
-          {skill.created_by_you && (
-            <>
-              <span>·</span>
-              <span>Created by you</span>
-            </>
-          )}
-          {!skill.created_by_you && skill.installed && (
-            <>
-              <span>·</span>
-              <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
-            </>
-          )}
+        <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 4, paddingTop: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+            <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+              {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
+            </span>
+            {skill.risk_level && skill.risk_level !== "low" && (
+              <>
+                <span>·</span>
+                <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                  {skill.risk_level} risk
+                </span>
+              </>
+            )}
+            {skill.created_by_you && (
+              <>
+                <span>·</span>
+                <span>Created by you</span>
+              </>
+            )}
+            {!skill.created_by_you && skill.installed && (
+              <>
+                <span>·</span>
+                <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
+              </>
+            )}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 500 }}>
+            <span style={{ color: view.primaryActionColor === "green" ? "oklch(0.42 0.09 150)" : "var(--blue)" }}>
+              {view.primaryActionLabel}
+            </span>
+          </div>
         </div>
       </div>
     </button>
@@ -209,6 +204,14 @@ function RealRoutePreview({ asset }: { asset: RoutePreviewAsset }) {
 }
 
 function NeutralFallback({ name, domain, steps }: { name: string; domain: string; steps: PreviewStep[] }) {
+  if (steps.length === 0) {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, padding: "12px 16px", textAlign: "center" }}>
+        <span style={{ fontSize: 12, color: "var(--ink-4)" }}>No captured preview yet</span>
+        <span style={{ fontSize: 10.5, color: "var(--ink-4)", opacity: 0.7 }}>Preview will appear after a verified run</span>
+      </div>
+    );
+  }
   return (
     <div className="route-preview-fallback">
       <div className="route-preview-fallback__domain">{domain}</div>
@@ -222,9 +225,6 @@ function NeutralFallback({ name, domain, steps }: { name: string; domain: string
       ))}
       {steps.length > 3 && (
         <div className="route-preview-fallback__more">+{steps.length - 3} more step{steps.length - 3 !== 1 ? "s" : ""}</div>
-      )}
-      {steps.length === 0 && (
-        <div className="route-preview-fallback__more" style={{ fontStyle: "italic" }}>No steps recorded</div>
       )}
       <div className="route-preview-fallback__caption">No captured start page yet.</div>
     </div>

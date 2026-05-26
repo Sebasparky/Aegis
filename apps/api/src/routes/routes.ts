@@ -26,6 +26,7 @@ function createSkillSnapshot(route: AegisRoute): { skill: Skill; version: Publis
     created_at: now,
     published_at: now,
     listing_status: "active",
+    creator_aegis_id: route.creator_aegis_id,
   };
   skill.listing_status = "active";
   skills.set(skill.skill_id, skill);

@@ -3,23 +3,16 @@
 import { useEffect, useState } from "react";
 import type { InstalledSkill, Skill } from "@aegis/types";
 import { listInstalledSkills, uninstallSkill } from "../../lib/api";
-import { SkillPreviewPane, SkillDetailModal, trustBadgeVariant, trustBadgeLabel, riskPillColor, friendlyShortDate } from "@/components/skill-market";
+import { SkillPreviewPane, SkillDetailModal, isRouteVerified, friendlyShortDate } from "@/components/skill-market";
 
-type PillColor = "green" | "amber" | "red" | "blue" | "graphite";
-function pillStyle(color: PillColor): React.CSSProperties {
-  const map: Record<PillColor, React.CSSProperties> = {
-    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"  },
-    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    graphite: { background: "var(--graphite-soft)", color: "var(--ink-3)",         border: "1px solid var(--hairline)"  },
-  };
-  return { ...map[color], fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, display: "inline-flex", alignItems: "center" };
-}
+const DEMO_CREATOR_AEGIS_ID = "aid_user_001";
 
 type InstalledItem = InstalledSkill & { skill: Skill };
 
 function InstalledSkillCard({ item, onClick }: { item: InstalledItem; onClick: () => void }) {
+  const isOwn = item.skill.creator_aegis_id === DEMO_CREATOR_AEGIS_ID;
+  const isUnlisted = item.skill.listing_status === "unlisted";
+
   return (
     <button className="skill-mcard" onClick={onClick} type="button">
       <div className="skill-mcard__preview">
@@ -29,6 +22,7 @@ function InstalledSkillCard({ item, onClick }: { item: InstalledItem; onClick: (
           steps={[]}
           trustTier={item.skill.trust_tier}
           executionMode={item.skill.execution_mode}
+          showTrustStrip={false}
         />
         <div className="skill-mcard__overlay">
           {item.skill.summary && (
@@ -36,35 +30,45 @@ function InstalledSkillCard({ item, onClick }: { item: InstalledItem; onClick: (
               {item.skill.summary}
             </p>
           )}
-          <div style={{ flexShrink: 0 }}>
-            <span style={{ fontSize: 12, color: "var(--blue)", fontWeight: 500 }}>Click to view details →</span>
+          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
+            <span style={{ color: "var(--blue)" }}>View details →</span>
           </div>
         </div>
       </div>
       <div className="skill-mcard__body">
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-          <span className="skill-badge skill-badge--installed">Installed</span>
-          <span className={`skill-badge skill-badge--${trustBadgeVariant(item.skill.trust_tier)}`}>
-            {trustBadgeLabel(item.skill.trust_tier)}
-          </span>
-        </div>
         <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{item.skill.name}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
-          <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{item.skill.domain}</span>
-          {item.skill.risk_level && item.skill.risk_level !== "low" && (
-            <>
-              <span className="dot-sep">·</span>
-              <span style={pillStyle(riskPillColor(item.skill.risk_level))}>{item.skill.risk_level} risk</span>
-            </>
-          )}
-          <span className="dot-sep">·</span>
-          <span style={{ color: "var(--ink-4)" }}>Installed {friendlyShortDate(item.installed_at)}</span>
-        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{item.skill.domain}</div>
         {item.skill.summary && (
-          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
             {item.skill.summary}
           </p>
         )}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+          <span style={{ color: isRouteVerified(item.skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+            {isRouteVerified(item.skill.trust_tier) ? "✓ Verified" : "Needs verification"}
+          </span>
+          {item.skill.risk_level && item.skill.risk_level !== "low" && (
+            <>
+              <span>·</span>
+              <span style={{ color: item.skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                {item.skill.risk_level} risk
+              </span>
+            </>
+          )}
+          {isOwn ? (
+            <>
+              <span>·</span>
+              <span>Created by you</span>
+            </>
+          ) : isUnlisted ? (
+            <>
+              <span>·</span>
+              <span>Unlisted, still in your library</span>
+            </>
+          ) : null}
+          <span>·</span>
+          <span>Installed {friendlyShortDate(item.installed_at)}</span>
+        </div>
       </div>
     </button>
   );

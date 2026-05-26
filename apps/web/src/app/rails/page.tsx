@@ -9,23 +9,11 @@ import {
 import type { SkillWithInstalled } from "../../lib/api";
 import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
 import {
-  SkillPreviewPane, SkillDetailModal, trustBadgeVariant, trustBadgeLabel,
-  riskPillColor, isRouteVerified, TIER_LABEL,
+  SkillPreviewPane, SkillDetailModal,
+  isRouteVerified, TIER_LABEL,
 } from "@/components/skill-market";
 
 // ─── Design primitives ────────────────────────────────────────────────────────
-
-type PillColor = "green" | "amber" | "red" | "blue" | "graphite";
-function pillStyle(color: PillColor): React.CSSProperties {
-  const map: Record<PillColor, React.CSSProperties> = {
-    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"  },
-    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    graphite: { background: "var(--graphite-soft)", color: "var(--ink-3)",         border: "1px solid var(--hairline)"  },
-  };
-  return { ...map[color], fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, display: "inline-flex", alignItems: "center" };
-}
 
 function HeaderStat({ value, label }: { value: string | number; label: string }) {
   return (
@@ -49,7 +37,6 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Preview thumbnail */}
       <div className="skill-mcard__preview skill-mcard__preview--lg">
         <SkillPreviewPane
           domain={route.domain}
@@ -61,24 +48,31 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
           replayAssets={route.replay_assets}
           enableReplay={true}
           replaying={hovered}
+          showTrustStrip={false}
         />
       </div>
 
-      {/* Card body — title + domain + compact trust/risk row */}
       <div className="skill-mcard__body">
         <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>
           {route.workflow_name}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
-          <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{route.domain}</span>
-          <span className="dot-sep">·</span>
-          <span className={`skill-badge skill-badge--${trustBadgeVariant(route.trust_tier)}`}>
-            {trustBadgeLabel(route.trust_tier)}
+        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{route.domain}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+          <span style={{ color: isRouteVerified(route.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+            {isRouteVerified(route.trust_tier) ? "✓ Verified" : "Needs verification"}
           </span>
           {route.risk_level !== "low" && (
             <>
-              <span className="dot-sep">·</span>
-              <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
+              <span>·</span>
+              <span style={{ color: route.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                {route.risk_level} risk
+              </span>
+            </>
+          )}
+          {route.marketplace_status === "approved" && (
+            <>
+              <span>·</span>
+              <span>Listed</span>
             </>
           )}
         </div>
@@ -90,69 +84,68 @@ function PrivateRailCard({ route, onClick }: { route: AegisRoute; onClick: () =>
 // ─── MarketplaceGridCard ──────────────────────────────────────────────────────
 
 function MarketplaceGridCard({ skill, onClick }: { skill: SkillWithInstalled; onClick: () => void }) {
-  const previewSteps = (skill as any).steps ?? [];
-
   return (
     <button className="skill-mcard" onClick={onClick} type="button">
-      {/* Preview thumbnail — Skill has no steps, show placeholder with name/domain */}
       <div className="skill-mcard__preview">
         <SkillPreviewPane
           domain={skill.domain}
           name={skill.name}
-          steps={previewSteps}
+          steps={[]}
           trustTier={skill.trust_tier}
           executionMode={skill.execution_mode}
+          showTrustStrip={false}
         />
-        {/* Hover overlay */}
         <div className="skill-mcard__overlay">
           {skill.summary && (
             <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.5, flex: 1, overflow: "hidden" }}>
               {skill.summary}
             </p>
           )}
-          {skill.approval_gates.length > 0 && (
-            <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", margin: 0, flexShrink: 0 }}>
-              {skill.approval_gates.length} approval gate{skill.approval_gates.length !== 1 ? "s" : ""}
-            </p>
-          )}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            {skill.installed ? (
-              <span style={{ fontSize: 12, fontWeight: 500, color: "oklch(0.42 0.09 150)" }}>✓ Installed</span>
+          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
+            {skill.created_by_you ? (
+              <span style={{ color: "var(--blue)" }}>View your listing →</span>
+            ) : skill.installed ? (
+              <span style={{ color: "oklch(0.42 0.09 150)" }}>✓ In library</span>
             ) : (
-              <span style={{ fontSize: 12, color: "var(--blue)", fontWeight: 500 }}>Click to install →</span>
+              <span style={{ color: "var(--blue)" }}>Install →</span>
             )}
           </div>
         </div>
       </div>
 
-      {/* Card body */}
       <div className="skill-mcard__body">
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-          <span className="skill-badge skill-badge--mkt">Marketplace</span>
-          <span className={`skill-badge skill-badge--${trustBadgeVariant(skill.trust_tier)}`}>
-            {trustBadgeLabel(skill.trust_tier)}
-          </span>
-          {skill.installed && (
-            <span className="skill-badge skill-badge--installed">Installed</span>
-          )}
-        </div>
-        <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>
-          {skill.name}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
-          <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{skill.domain}</span>
-          {skill.risk_level && skill.risk_level !== "low" && (
-            <>
-              <span className="dot-sep">·</span>
-              <span style={pillStyle(riskPillColor(skill.risk_level))}>{skill.risk_level} risk</span>
-            </>
-          )}
-        </div>
+        <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{skill.name}</div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{skill.domain}</div>
         {skill.summary && (
-          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
             {skill.summary}
           </p>
         )}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+          <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+            {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
+          </span>
+          {skill.risk_level && skill.risk_level !== "low" && (
+            <>
+              <span>·</span>
+              <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                {skill.risk_level} risk
+              </span>
+            </>
+          )}
+          {skill.created_by_you && (
+            <>
+              <span>·</span>
+              <span>Created by you</span>
+            </>
+          )}
+          {!skill.created_by_you && skill.installed && (
+            <>
+              <span>·</span>
+              <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
+            </>
+          )}
+        </div>
       </div>
     </button>
   );

@@ -7,6 +7,8 @@ function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
 }
 
+const MOCK_AEGIS_ID = "aid_user_001";
+
 export async function skillRoutes(server: FastifyInstance) {
   /**
    * GET /api/skills
@@ -105,7 +107,7 @@ export async function skillRoutes(server: FastifyInstance) {
 
       const result = list
         .sort((a, b) => b.published_at.localeCompare(a.published_at))
-        .map((s) => ({ ...s, installed: installedSkillIds.has(s.skill_id) }));
+        .map((s) => ({ ...s, installed: installedSkillIds.has(s.skill_id), created_by_you: s.creator_aegis_id === MOCK_AEGIS_ID }));
 
       return { ok: true, data: result };
     }
@@ -131,7 +133,7 @@ export async function skillRoutes(server: FastifyInstance) {
         (i) => i.skill_id === skill.skill_id && i.user_id === MOCK_USER_ID && i.enabled
       );
 
-      return { ok: true, data: { ...skill, installed, snapshot } };
+      return { ok: true, data: { ...skill, installed, created_by_you: skill.creator_aegis_id === MOCK_AEGIS_ID, snapshot } };
     }
   );
 

@@ -523,3 +523,120 @@ describe("GET /api/skills — backward compat: skill without listing_status", ()
     expect(body.data.some((s: any) => s.skill_id === legacySkill.skill_id)).toBe(true);
   });
 });
+
+// ─── created_by_you ownership flag ───────────────────────────────────────────
+
+describe("created_by_you — ownership flag in skill responses", () => {
+  it("GET /api/skills returns created_by_you: true for the demo user's published route", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_user_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const found = body.data.find((s: any) => s.skill_id === skill.skill_id);
+    expect(found).toBeDefined();
+    expect(found.created_by_you).toBe(true);
+  });
+
+  it("GET /api/skills returns created_by_you: false for a different creator", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_other_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    const body = JSON.parse(res.body);
+    const found = body.data.find((s: any) => s.skill_id === skill.skill_id);
+    expect(found).toBeDefined();
+    expect(found.created_by_you).toBe(false);
+  });
+
+  it("GET /api/skills/:skillId returns created_by_you: true for the demo user's skill", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_user_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.created_by_you).toBe(true);
+  });
+
+  it("GET /api/skills/:skillId returns created_by_you: false for a different creator", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_other_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    const body = JSON.parse(res.body);
+    expect(body.data.created_by_you).toBe(false);
+  });
+
+  it("creator_aegis_id is propagated from route to skill on publish", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_user_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+    expect(skill.creator_aegis_id).toBe("aid_user_001");
+  });
+});
+
+// ─── Unlisted skill direct access ────────────────────────────────────────────
+
+describe("Unlisted skill — direct access for created_by_you or installed", () => {
+  it("unlisted skill is not in GET /api/skills browse", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    const body = JSON.parse(res.body);
+    expect(body.data.some((s: any) => s.skill_id === skill.skill_id)).toBe(false);
+  });
+
+  it("unlisted skill is still accessible via GET /api/skills/:skillId", async () => {
+    const route = makeApprovedRoute({ creator_aegis_id: "aid_user_001", trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const res = await server.inject({ method: "GET", url: `/api/skills/${skill.skill_id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.listing_status).toBe("unlisted");
+    expect(body.data.created_by_you).toBe(true);
+    expect(body.data.snapshot).not.toBeNull();
+  });
+
+  it("unlisted installed skill appears in GET /api/skills?installed=true with installed: true", async () => {
+    const route = makeApprovedRoute({ trust_tier: "aegis_scanned", marketplace_status: undefined });
+    routes.set(route.route_id, route);
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish`, payload: {} });
+    const skill = Array.from(skills.values()).find(s => s.route_id === route.route_id)!;
+
+    // Install before unlisting
+    installedSkills.set("inskill_direct_test", {
+      installed_skill_id: "inskill_direct_test",
+      skill_id: skill.skill_id,
+      user_id: MOCK_USER_ID,
+      installed_at: NOW,
+      enabled: true,
+    });
+    await server.inject({ method: "POST", url: `/api/skills/${skill.skill_id}/unlist`, payload: {} });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills?installed=true" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const found = body.data.find((s: any) => s.skill_id === skill.skill_id);
+    expect(found).toBeDefined();
+    expect(found.installed).toBe(true);
+  });
+});

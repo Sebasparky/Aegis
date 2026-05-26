@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { AegisRoute, InstalledSkill, RoutePreviewAsset, RouteReplayAsset, RouteStep, RouteVerificationReport, Skill, StepVerificationResult } from "@aegis/types";
+import type { AegisRoute, RoutePreviewAsset, RouteReplayAsset, RouteVerificationReport, Skill } from "@aegis/types";
 import { BASE } from "../lib/api";
 import {
   getRoute, getSkill, listRouteRuns, deleteRoute, verifyRoute, patchRoute, submitRouteForReview,
@@ -182,7 +182,7 @@ function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: 
 
 // ─── SkillPreviewPane ─────────────────────────────────────────────────────────
 
-export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets, replayAssets, enableReplay, replaying }: {
+export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode, previewAssets, replayAssets, enableReplay, replaying, showTrustStrip = true }: {
   domain: string;
   name: string;
   steps: PreviewStep[];
@@ -192,6 +192,7 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
   replayAssets?: RouteReplayAsset[];
   enableReplay?: boolean;
   replaying?: boolean;
+  showTrustStrip?: boolean;
 }) {
   const isLocal = domain === "localhost" || domain === "127.0.0.1";
   const dotColor = isLocal ? "oklch(0.62 0.09 150)" : "oklch(0.62 0.09 240)";
@@ -248,7 +249,6 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
               backgroundImage: `url(${posterSrc})`,
             } : undefined}
           >
-            {/* Video opacity-0 until first frame confirmed painted; poster is the CSS background */}
             <video
               ref={videoRef}
               className={`route-replay-video${videoVisible ? " route-replay-video--visible" : ""}`}
@@ -286,13 +286,15 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
         )}
       </div>
 
-      {/* Trust strip */}
-      <div style={{ padding: "5px 12px", borderTop: "1px solid var(--hairline)", background: "rgba(255,255,255,0.65)", display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-        <span className={`skill-badge skill-badge--${trustBadgeVariant(trustTier)}`}>{trustBadgeLabel(trustTier)}</span>
-        {executionMode === "aegis_controlled" && (
-          <span className="skill-badge skill-badge--scanned">Aegis Controlled</span>
-        )}
-      </div>
+      {/* Trust strip — optional, suppressed on cards */}
+      {showTrustStrip && (
+        <div style={{ padding: "5px 12px", borderTop: "1px solid var(--hairline)", background: "rgba(255,255,255,0.65)", display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          <span className={`skill-badge skill-badge--${trustBadgeVariant(trustTier)}`}>{trustBadgeLabel(trustTier)}</span>
+          {executionMode === "aegis_controlled" && (
+            <span className="skill-badge skill-badge--scanned">Aegis Controlled</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -344,9 +346,13 @@ export interface SkillDetailModalProps {
   skillId?: string;
   mode: ModalMode;
   onClose: () => void;
+  backLink?: { label: string; href: string };
 }
 
-export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetailModalProps) {
+// AegisID of the demo user — used to derive ownership in library mode
+const DEMO_CREATOR_AEGIS_ID = "aid_user_001";
+
+export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink }: SkillDetailModalProps) {
   const [route, setRoute] = useState<AegisRoute | null>(mode.type === "private_rail" ? mode.route : null);
   const [loadingRoute, setLoadingRoute] = useState(mode.type !== "private_rail");
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -380,7 +386,6 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [isUnlisted, setIsUnlisted] = useState(false);
-  // snapshotRouteId is captured from the snapshot so runs can still be fetched after source route deletion.
   const [snapshotRouteId, setSnapshotRouteId] = useState<string | null>(routeId ?? null);
 
   // Fetch skill detail from snapshot for marketplace / library modes.
@@ -413,7 +418,6 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
             preview_assets: detail.snapshot.preview_assets,
             replay_assets: detail.snapshot.replay_assets,
             verification_report: detail.snapshot.verification_report,
-            // Required AegisRoute fields with neutral placeholder values.
             version: "1.0.0",
             created_at: detail.created_at,
             last_verified_at: detail.snapshot.snapshot_at,
@@ -435,7 +439,7 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
     getSkillByRoute(routeId).then(setLinkedSkill);
   }, [routeId, mode.type]);
 
-  // Fetch recent runs using snapshot route_id (works even after source route is deleted).
+  // Fetch recent runs using snapshot route_id.
   useEffect(() => {
     const rid = snapshotRouteId;
     if (!rid) { setLoadingRuns(false); return; }
@@ -445,7 +449,6 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
       .finally(() => setLoadingRuns(false));
   }, [snapshotRouteId]);
 
-  // Close on backdrop click
   function handleBackdrop(e: React.MouseEvent) {
     if (e.target === e.currentTarget) onClose();
   }
@@ -540,9 +543,8 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
 
   const sectionLabel: React.CSSProperties = { fontSize: 10.5, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--ink-3)", margin: "0 0 10px" };
   const effectiveTier = mode.type === "private_rail" ? localTier : (route?.trust_tier ?? "");
-  const sourceBadge = mode.type === "private_rail" ? "Private Rail" : mode.type === "marketplace" ? "Marketplace" : "Installed";
-  const sourceBadgeVariant = mode.type === "private_rail" ? "private" : mode.type === "marketplace" ? "mkt" : "installed";
   const displayName = mode.type === "private_rail" ? localName : (mode.type === "marketplace" ? mode.skill.name : mode.skill.name);
+  const displayDomain = mode.type === "private_rail" ? (route?.domain ?? "") : (mode.type === "marketplace" ? mode.skill.domain : mode.skill.domain);
 
   // Derived marketplace state for private_rail mode
   const marketplaceState: "not_published" | "listed" | "unlisted" =
@@ -550,6 +552,28 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
     linkedSkill.listing_status === "active" ? "listed" : "unlisted";
   const isVerified = isRouteVerified(localTier);
   const busy = verifying || deleting || submitting || publishing || unlisting;
+
+  // Creator check for marketplace/library modes
+  const isCreatedByYou =
+    mode.type === "marketplace" ? mode.skill.created_by_you :
+    mode.type === "library" ? mode.skill.creator_aegis_id === DEMO_CREATOR_AEGIS_ID :
+    false;
+
+  // One-line status text for the modal header
+  const statusLine = (() => {
+    if (mode.type === "private_rail" && route) {
+      const riskText = route.risk_level === "low" ? "Low risk" : route.risk_level === "medium" ? "Medium risk" : "High risk";
+      const mktText = marketplaceState === "listed" ? "· Listed" : marketplaceState === "unlisted" ? "· Unlisted" : "";
+      return `${riskText} ${mktText}`.trim();
+    }
+    if (mode.type === "marketplace" || mode.type === "library") {
+      const verText = isRouteVerified(effectiveTier) ? "Verified" : "Needs verification";
+      const ownerText = isCreatedByYou ? "· Created by you" : (installed ? "· In library" : "");
+      const unlistedText = isUnlisted ? "· Unlisted" : "";
+      return `${verText} ${ownerText} ${unlistedText}`.trim();
+    }
+    return "";
+  })();
 
   return (
     <>
@@ -559,31 +583,33 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
       <div className="skill-modal-backdrop" onClick={handleBackdrop}>
         <div className="skill-modal" role="dialog" aria-modal="true">
 
+          {/* ── Back link (deep-link breadcrumb) ── */}
+          {backLink && (
+            <div style={{ padding: "10px 20px 0" }}>
+              <a
+                href={backLink.href}
+                style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4 }}
+              >
+                ← {backLink.label}
+              </a>
+            </div>
+          )}
+
           {/* ── Header ── */}
           <div className="skill-modal__header">
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 0 }}>
+              <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink-1)", margin: 0, lineHeight: 1.3 }}>{displayName}</h2>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <span className={`skill-badge skill-badge--${sourceBadgeVariant}`}>{sourceBadge}</span>
-                {effectiveTier && (
-                  <span className={`skill-badge skill-badge--${trustBadgeVariant(effectiveTier)}`}>{trustBadgeLabel(effectiveTier)}</span>
+                {displayDomain && (
+                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "var(--ink-3)" }}>{displayDomain}</span>
                 )}
-                {mode.type === "private_rail" && route && (
-                  <span style={pillStyle(riskPillColor(route.risk_level))}>{route.risk_level} risk</span>
-                )}
-                {mode.type === "private_rail" && marketplaceState === "listed" && (
-                  <span style={{ ...pillStyle("green") }}>Listed</span>
-                )}
-                {mode.type === "private_rail" && marketplaceState === "unlisted" && (
-                  <span style={{ ...pillStyle("graphite") }}>Unlisted</span>
-                )}
-                {isUnlisted && mode.type !== "private_rail" && (
-                  <span className="skill-badge skill-badge--graphite" title="The creator removed this skill from the marketplace. Your installed copy still works.">Removed from marketplace</span>
+                {statusLine && (
+                  <>
+                    <span style={{ fontSize: 11, color: "var(--hairline)" }}>·</span>
+                    <span style={{ fontSize: 12, color: "var(--ink-4)" }}>{statusLine}</span>
+                  </>
                 )}
               </div>
-              <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink-1)", margin: 0, lineHeight: 1.3 }}>{displayName}</h2>
-              {mode.type === "private_rail" && route && (
-                <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>{route.domain}</p>
-              )}
             </div>
             <button className="skill-modal__close" onClick={onClose} aria-label="Close">×</button>
           </div>
@@ -591,56 +617,73 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
           {/* ── Body ── */}
           <div className="skill-modal__body">
 
-            {/* Hero action row — private_rail only */}
+            {/* Private rail: preview + actions */}
+            {mode.type === "private_rail" && route && (
+              <div style={{ borderRadius: "var(--r-2)", overflow: "hidden", height: 160, border: "1px solid var(--hairline)", flexShrink: 0 }}>
+                <SkillPreviewPane
+                  domain={route.domain}
+                  name={route.workflow_name}
+                  steps={route.steps}
+                  trustTier={route.trust_tier}
+                  executionMode={route.execution_mode}
+                  previewAssets={route.preview_assets}
+                  replayAssets={route.replay_assets}
+                  showTrustStrip={false}
+                />
+              </div>
+            )}
+
             {mode.type === "private_rail" && (
-              <div style={{ display: "flex", gap: 16, alignItems: "flex-start", padding: "14px 16px", background: "rgba(255,255,255,0.55)", border: "1px solid var(--hairline)", borderRadius: "var(--r-2)" }}>
-                {/* Preview thumbnail placeholder */}
-                <div style={{ flexShrink: 0, width: 56, height: 42, borderRadius: "var(--r-1)", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, color: "var(--ink-4)" }}>
-                  {route?.replay_assets?.length ? "▶" : "⬡"}
-                </div>
-                {/* Actions */}
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                    {/* Primary action */}
-                    {marketplaceState === "listed" ? (
-                      <a href="/marketplace" className="a-btn a-btn--primary" style={{ fontSize: 13, textDecoration: "none" }}>
-                        View Marketplace Listing
-                      </a>
-                    ) : isVerified && (marketplaceState === "not_published" || marketplaceState === "unlisted") ? (
-                      <button onClick={handlePublish} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
-                        {publishing ? "Publishing…" : marketplaceState === "unlisted" ? "Re-publish to Marketplace" : "Publish to Marketplace"}
-                      </button>
-                    ) : (
-                      <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
-                        {verifying ? "Verifying…" : "Verify Route"}
-                      </button>
-                    )}
-                    {/* Secondary: Rename */}
-                    <button onClick={() => setShowRename(true)} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
-                      Rename
-                    </button>
-                    {/* Secondary: Unlist (only if listed) */}
-                    {marketplaceState === "listed" && (
-                      <button onClick={handleUnlist} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
-                        {unlisting ? "Unlisting…" : "Unlist"}
-                      </button>
-                    )}
-                    {/* Secondary: Verify if already verified (re-verify) */}
-                    {isVerified && marketplaceState !== "not_published" && (
-                      <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
-                        {verifying ? "Verifying…" : "Re-verify"}
-                      </button>
-                    )}
-                    {/* Danger: Delete */}
-                    <button onClick={handleDelete} disabled={busy} style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 500, padding: "6px 12px", borderRadius: "var(--r-1)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", color: "oklch(0.45 0.13 25)", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.5 : 1 }}>
-                      {deleting ? "Deleting…" : "Delete"}
-                    </button>
-                  </div>
-                  {/* Error messages */}
-                  {verifyError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>Verification error: {verifyError}</p>}
-                  {publishError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{publishError}</p>}
-                  {submitError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{submitError}</p>}
-                </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                {/* Primary action */}
+                {marketplaceState === "listed" && linkedSkill ? (
+                  <a
+                    href={`/marketplace?skill=${linkedSkill.skill_id}&from=rails`}
+                    className="a-btn a-btn--primary"
+                    style={{ fontSize: 13, textDecoration: "none" }}
+                  >
+                    View Marketplace Listing
+                  </a>
+                ) : isVerified && (marketplaceState === "not_published" || marketplaceState === "unlisted") ? (
+                  <button onClick={handlePublish} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
+                    {publishing ? "Publishing…" : marketplaceState === "unlisted" ? "Re-publish to Marketplace" : "Publish to Marketplace"}
+                  </button>
+                ) : (
+                  <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
+                    {verifying ? "Verifying…" : "Verify Route"}
+                  </button>
+                )}
+                {/* Secondary: Rename */}
+                <button onClick={() => setShowRename(true)} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                  Rename
+                </button>
+                {/* Secondary: Unlist */}
+                {marketplaceState === "listed" && (
+                  <button onClick={handleUnlist} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                    {unlisting ? "Unlisting…" : "Unlist"}
+                  </button>
+                )}
+                {/* Secondary: Re-verify */}
+                {isVerified && marketplaceState !== "not_published" && (
+                  <button onClick={handleVerify} disabled={busy} className="a-btn a-btn--ghost" style={{ fontSize: 12.5, opacity: busy ? 0.5 : 1 }}>
+                    {verifying ? "Verifying…" : "Re-verify"}
+                  </button>
+                )}
+                {/* Danger: Delete */}
+                <button
+                  onClick={handleDelete}
+                  disabled={busy}
+                  style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 500, padding: "6px 12px", borderRadius: "var(--r-1)", background: "var(--red-soft)", border: "1px solid var(--red-ring)", color: "oklch(0.45 0.13 25)", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.5 : 1 }}
+                >
+                  {deleting ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            )}
+
+            {/* Error messages */}
+            {mode.type === "private_rail" && (verifyError || publishError || submitError) && (
+              <div style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", padding: "8px 12px", background: "var(--red-soft)", border: "1px solid var(--red-ring)", borderRadius: "var(--r-2)" }}>
+                {verifyError || publishError || submitError}
               </div>
             )}
 
@@ -739,31 +782,35 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
               </div>
             )}
 
-            {/* 5. Marketplace status (private rail) */}
+            {/* 5. Marketplace status (private rail) — plain language */}
             {mode.type === "private_rail" && (
               <div>
                 <p style={sectionLabel}>Marketplace</p>
                 {marketplaceState === "listed" && linkedSkill && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--green-soft)", border: "1px solid var(--green-ring)", borderRadius: "var(--r-2)" }}>
-                    <span style={{ fontSize: 13, color: "oklch(0.42 0.09 150)", fontWeight: 600 }}>Published and listed</span>
-                    <span style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", marginLeft: "auto" }}>{linkedSkill.skill_id}</span>
-                  </div>
+                  <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <span>Listed in Marketplace</span>
+                    <a
+                      href={`/marketplace?skill=${linkedSkill.skill_id}&from=rails`}
+                      style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none" }}
+                    >
+                      View listing →
+                    </a>
+                  </p>
                 )}
-                {marketplaceState === "unlisted" && linkedSkill && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--graphite-soft)", border: "1px solid var(--hairline)", borderRadius: "var(--r-2)" }}>
-                    <span style={{ fontSize: 13, color: "var(--ink-3)", fontWeight: 600 }}>Unlisted — hidden from browse</span>
-                    <span style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", marginLeft: "auto" }}>{linkedSkill.skill_id}</span>
-                  </div>
+                {marketplaceState === "unlisted" && (
+                  <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0 }}>
+                    Unlisted — hidden from browse. Installed copies still work.
+                  </p>
                 )}
                 {marketplaceState === "not_published" && (
-                  <p style={{ fontSize: 12.5, color: "var(--ink-4)", margin: 0 }}>
+                  <p style={{ fontSize: 13, color: "var(--ink-4)", margin: 0 }}>
                     {isVerified ? "Verified and ready to publish." : "Verify this route to make it eligible for the marketplace."}
                   </p>
                 )}
               </div>
             )}
 
-            {/* Skill summary — marketplace / library modes */}
+            {/* Skill summary + install actions — marketplace / library modes */}
             {(mode.type === "marketplace" || mode.type === "library") && (
               <>
                 {mode.skill.summary && (
@@ -772,26 +819,39 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
                     <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, lineHeight: 1.6 }}>{mode.skill.summary}</p>
                   </div>
                 )}
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  {installError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{installError}</p>}
-                  {installed ? (
-                    <button onClick={handleUninstall} disabled={installing} style={{ ...pillStyle("red"), fontSize: 12.5, padding: "6px 14px", cursor: installing ? "not-allowed" : "pointer", opacity: installing ? 0.5 : 1, border: "1px solid var(--red-ring)" }}>
-                      {installing ? "…" : "Uninstall"}
-                    </button>
-                  ) : (
-                    <button onClick={handleInstall} disabled={installing} className="a-btn a-btn--primary" style={{ opacity: installing ? 0.5 : 1 }}>
-                      {installing ? "Installing…" : "Install skill"}
-                    </button>
-                  )}
-                  {installed && <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Installed in your Skill Library</span>}
-                  {mode.type === "library" && (
-                    <span style={{ fontSize: 12, color: "var(--ink-4)" }}>Installed {friendlyShortDate(mode.installedAt)}</span>
-                  )}
-                </div>
+
+                {/* Created by you — manage from Rails */}
+                {isCreatedByYou ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0 }}>
+                      This is your skill.{" "}
+                      <a href="/rails" style={{ color: "var(--blue)", textDecoration: "none" }}>
+                        Manage it from Rails →
+                      </a>
+                    </p>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    {installError && <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{installError}</p>}
+                    {installed ? (
+                      <button onClick={handleUninstall} disabled={installing} style={{ ...pillStyle("red"), fontSize: 12.5, padding: "6px 14px", cursor: installing ? "not-allowed" : "pointer", opacity: installing ? 0.5 : 1, border: "1px solid var(--red-ring)" }}>
+                        {installing ? "…" : "Uninstall"}
+                      </button>
+                    ) : (
+                      <button onClick={handleInstall} disabled={installing} className="a-btn a-btn--primary" style={{ opacity: installing ? 0.5 : 1 }}>
+                        {installing ? "Installing…" : "Install skill"}
+                      </button>
+                    )}
+                    {installed && <span style={{ fontSize: 12, color: "oklch(0.42 0.09 150)", fontWeight: 500 }}>Installed in your Skill Library</span>}
+                    {mode.type === "library" && (
+                      <span style={{ fontSize: 12, color: "var(--ink-4)" }}>Installed {friendlyShortDate(mode.installedAt)}</span>
+                    )}
+                  </div>
+                )}
               </>
             )}
 
-            {/* 6. Recent runs (lower priority) */}
+            {/* 6. Recent runs */}
             <div>
               <p style={{ ...sectionLabel, opacity: 0.7 }}>Recent runs</p>
               {loadingRuns ? (
@@ -814,9 +874,9 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose }: SkillDetai
               )}
             </div>
 
-            {/* Footer metadata */}
+            {/* Footer: muted route ID */}
             {routeId && (
-              <p style={{ fontSize: 10.5, fontFamily: "monospace", color: "var(--ink-5, var(--ink-4))", margin: 0, paddingTop: 4 }}>{routeId}</p>
+              <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--ink-5, var(--ink-4))", margin: 0, paddingTop: 4, opacity: 0.5 }}>{routeId}</p>
             )}
 
           </div>

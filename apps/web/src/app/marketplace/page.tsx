@@ -1,20 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listSkills, installSkill, uninstallSkill, type SkillWithInstalled } from "../../lib/api";
-import { SkillPreviewPane, SkillDetailModal, trustBadgeVariant, trustBadgeLabel, riskPillColor } from "@/components/skill-market";
-
-type PillColor = "green" | "amber" | "red" | "blue" | "graphite";
-function pillStyle(color: PillColor): React.CSSProperties {
-  const map: Record<PillColor, React.CSSProperties> = {
-    green:    { background: "var(--green-soft)",    color: "oklch(0.42 0.09 150)", border: "1px solid var(--green-ring)" },
-    amber:    { background: "var(--amber-soft)",    color: "oklch(0.45 0.12 75)",  border: "1px solid var(--amber-ring)" },
-    red:      { background: "var(--red-soft)",      color: "oklch(0.45 0.13 25)",  border: "1px solid var(--red-ring)"  },
-    blue:     { background: "var(--blue-soft)",     color: "oklch(0.45 0.09 240)", border: "1px solid var(--blue-ring)" },
-    graphite: { background: "var(--graphite-soft)", color: "var(--ink-3)",         border: "1px solid var(--hairline)"  },
-  };
-  return { ...map[color], fontSize: 11, fontWeight: 500, padding: "2px 9px", borderRadius: 999, display: "inline-flex", alignItems: "center" };
-}
+import { listSkills, getSkill, type SkillWithInstalled } from "../../lib/api";
+import { SkillPreviewPane, SkillDetailModal, isRouteVerified, riskPillColor } from "@/components/skill-market";
 
 function MarketplaceBrowseCard({ skill, onClick }: { skill: SkillWithInstalled; onClick: () => void }) {
   return (
@@ -26,6 +14,7 @@ function MarketplaceBrowseCard({ skill, onClick }: { skill: SkillWithInstalled; 
           steps={[]}
           trustTier={skill.trust_tier}
           executionMode={skill.execution_mode}
+          showTrustStrip={false}
         />
         <div className="skill-mcard__overlay">
           {skill.summary && (
@@ -33,43 +22,50 @@ function MarketplaceBrowseCard({ skill, onClick }: { skill: SkillWithInstalled; 
               {skill.summary}
             </p>
           )}
-          {skill.approval_gates.length > 0 && (
-            <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", margin: 0, flexShrink: 0 }}>
-              {skill.approval_gates.length} approval gate{skill.approval_gates.length !== 1 ? "s" : ""}
-            </p>
-          )}
-          <div style={{ flexShrink: 0 }}>
-            {skill.installed ? (
-              <span style={{ fontSize: 12, fontWeight: 500, color: "oklch(0.42 0.09 150)" }}>✓ Installed in your library</span>
+          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 500 }}>
+            {skill.created_by_you ? (
+              <span style={{ color: "var(--blue)" }}>View your listing →</span>
+            ) : skill.installed ? (
+              <span style={{ color: "oklch(0.42 0.09 150)" }}>✓ In library</span>
             ) : (
-              <span style={{ fontSize: 12, color: "var(--blue)", fontWeight: 500 }}>Click to view and install →</span>
+              <span style={{ color: "var(--blue)" }}>Install →</span>
             )}
           </div>
         </div>
       </div>
       <div className="skill-mcard__body">
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-          <span className="skill-badge skill-badge--mkt">Marketplace</span>
-          <span className={`skill-badge skill-badge--${trustBadgeVariant(skill.trust_tier)}`}>
-            {trustBadgeLabel(skill.trust_tier)}
-          </span>
-          {skill.installed && <span className="skill-badge skill-badge--installed">Installed</span>}
-        </div>
         <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--ink-1)", lineHeight: 1.3 }}>{skill.name}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 }}>
-          <span style={{ fontFamily: "monospace", color: "var(--ink-2)", fontSize: 11.5 }}>{skill.domain}</span>
-          {skill.risk_level && skill.risk_level !== "low" && (
-            <>
-              <span className="dot-sep">·</span>
-              <span style={pillStyle(riskPillColor(skill.risk_level))}>{skill.risk_level} risk</span>
-            </>
-          )}
-        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", fontFamily: "monospace" }}>{skill.domain}</div>
         {skill.summary && (
-          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+          <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
             {skill.summary}
           </p>
         )}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", fontSize: 11.5, color: "var(--ink-4)" }}>
+          <span style={{ color: isRouteVerified(skill.trust_tier) ? "oklch(0.42 0.09 150)" : "var(--ink-4)" }}>
+            {isRouteVerified(skill.trust_tier) ? "✓ Verified" : "Needs verification"}
+          </span>
+          {skill.risk_level && skill.risk_level !== "low" && (
+            <>
+              <span>·</span>
+              <span style={{ color: skill.risk_level === "high" ? "oklch(0.45 0.13 25)" : "oklch(0.45 0.12 75)" }}>
+                {skill.risk_level} risk
+              </span>
+            </>
+          )}
+          {skill.created_by_you && (
+            <>
+              <span>·</span>
+              <span>Created by you</span>
+            </>
+          )}
+          {!skill.created_by_you && skill.installed && (
+            <>
+              <span>·</span>
+              <span style={{ color: "oklch(0.42 0.09 150)" }}>In library</span>
+            </>
+          )}
+        </div>
       </div>
     </button>
   );
@@ -79,33 +75,79 @@ export default function MarketplacePage() {
   const [skills, setSkills] = useState<SkillWithInstalled[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalSkillId, setModalSkillId] = useState<string | null>(null);
+  const [directSkill, setDirectSkill] = useState<SkillWithInstalled | null>(null);
+  const [fromRails, setFromRails] = useState(false);
 
   useEffect(() => {
     listSkills().then(setSkills).finally(() => setLoading(false));
   }, []);
 
+  // Read query params on mount (client-only)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const skillParam = params.get("skill");
+    const fromParam = params.get("from");
+    if (fromParam === "rails") setFromRails(true);
+    if (skillParam) setModalSkillId(skillParam);
+  }, []);
+
+  // When skills are loaded and deep-linked skill isn't in the active list (e.g. unlisted), fetch it directly
+  useEffect(() => {
+    if (!modalSkillId || loading) return;
+    const found = skills.find(s => s.skill_id === modalSkillId);
+    if (!found) {
+      getSkill(modalSkillId)
+        .then(detail => setDirectSkill({ ...detail }))
+        .catch(() => setDirectSkill(null));
+    }
+  }, [modalSkillId, skills, loading]);
+
   function handleInstallChange(skillId: string, installed: boolean) {
     setSkills(prev => prev.map(s => s.skill_id === skillId ? { ...s, installed } : s));
+    if (directSkill?.skill_id === skillId) {
+      setDirectSkill(prev => prev ? { ...prev, installed } : null);
+    }
   }
 
-  const selectedSkill = modalSkillId ? skills.find(s => s.skill_id === modalSkillId) ?? null : null;
+  function handleCloseModal() {
+    setModalSkillId(null);
+    setDirectSkill(null);
+    // Clear URL params without full navigation
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("skill") || url.searchParams.has("from")) {
+      url.searchParams.delete("skill");
+      url.searchParams.delete("from");
+      window.history.replaceState({}, "", url.pathname);
+      setFromRails(false);
+    }
+  }
+
+  const selectedSkill = modalSkillId
+    ? (skills.find(s => s.skill_id === modalSkillId) ?? directSkill ?? null)
+    : null;
 
   return (
     <div className="page">
       {selectedSkill && (
         <SkillDetailModal
           skillId={selectedSkill.skill_id}
-          onClose={() => setModalSkillId(null)}
+          onClose={handleCloseModal}
           mode={{
             type: "marketplace",
             skill: selectedSkill,
             onInstallChange: handleInstallChange,
           }}
+          backLink={fromRails ? { label: "Back to Rails", href: "/rails" } : undefined}
         />
       )}
 
       {/* Hero */}
       <div className="a-card" style={{ padding: "24px 28px 20px", marginBottom: 0 }}>
+        {fromRails && !modalSkillId && (
+          <a href="/rails" style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--blue)", textDecoration: "none", marginBottom: 12 }}>
+            ← Back to Rails
+          </a>
+        )}
         <div className="a-eyebrow">Marketplace</div>
         <h1 style={{ fontSize: 24, fontWeight: 600, color: "var(--ink-1)", margin: "6px 0 8px", letterSpacing: "-0.02em" }}>
           Skill Marketplace
@@ -117,7 +159,7 @@ export default function MarketplacePage() {
         {!loading && skills.length > 0 && (
           <p style={{ fontSize: 12, color: "var(--ink-4)", margin: "10px 0 0" }}>
             {skills.length} skill{skills.length !== 1 ? "s" : ""} available
-            {skills.filter(s => s.installed).length > 0 && ` · ${skills.filter(s => s.installed).length} installed`}
+            {skills.filter(s => s.installed).length > 0 && ` · ${skills.filter(s => s.installed).length} in your library`}
           </p>
         )}
       </div>

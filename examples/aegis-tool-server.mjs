@@ -4667,11 +4667,20 @@ const TOOLS = [
     description:
       "Call this when you reach a login or signup wall on a website and need to determine how to proceed. " +
       "Antigen checks the vault for an existing credential for the domain. " +
-      "If found, returns resolution='credential_available' with pass_id — proceed by calling request_secret_field_injection. " +
-      "If not found, creates a pending account creation request and returns resolution='pending_user'. " +
+      "If found, returns resolution='credential_available' with pass_id. " +
+      "IMPORTANT: credential_available means Antigen has a saved credential for this domain — it does NOT mean the page is asking for a password or that you should immediately force a password-login path. " +
+      "After receiving credential_available, observe the current visible page and choose the next Antigen primitive based on what the page is actually showing: " +
+      "  • Email or username field visible → call request_account_creation_step with requested_fields ['account_email'] or ['username']. " +
+      "  • Password field visible → call request_secret_field_injection with the returned pass_id. " +
+      "  • OTP or verification code field visible → call request_account_creation_step with requested_fields ['email_otp'], then use the security challenge tools. " +
+      "  • Magic-link or passwordless prompt visible → call request_account_creation_step with requested_fields ['magic_link'], or report as a step requiring user presence. " +
+      "Do not switch the site's visible auth flow (e.g. do not click 'Use password instead') just because a saved credential exists. Only switch if that alternative is clearly visible, stable, and will not cause the site to revert to a different flow. " +
+      "If the page reverts to OTP or the password field disappears, stop forcing the password path and follow the visible flow. " +
+      "Auth wall decision loop: (1) Observe the page. (2) Identify the visible input or action. (3) If ordinary click or navigation, proceed directly. (4) If a sensitive field, call the matching Antigen primitive. (5) After Antigen resolves, return to observation. (6) Repeat until authenticated or blocked. (7) If the site blocks interaction, report the blocker honestly — do not retry with a different auth mode unprompted. " +
+      "If credential not found, creates a pending account creation request and returns resolution='pending_user'. " +
       "Tell the user: 'Please open /route-run-approvals in the Antigen UI and approve the account creation request.' " +
-      "Then poll get_account_access_resolution until status='credential_generated', and use the returned pass_id to call request_secret_field_injection. " +
-      "IMPORTANT: Never type credentials directly — always use request_secret_field_injection for username and password fields. " +
+      "Then poll get_account_access_resolution until status='credential_generated', and use the returned pass_id only for the field the visible page is currently asking for. " +
+      "IMPORTANT: Never type credentials directly — always use Antigen primitives for sensitive fields. " +
       "IMPORTANT: Normalize the domain before calling (e.g. 'github.com' not 'https://github.com/signup'). " +
       "IMPORTANT: page_url must be on the same domain (or a subdomain) as domain.",
     inputSchema: {
@@ -4687,7 +4696,7 @@ const TOOLS = [
         },
         reason: {
           type: "string",
-          description: "Why the agent needs access to this account. Be specific, e.g. 'Checking out IKEA cart requires an account.'",
+          description: "Why the agent needs access to this account. Be specific, e.g. 'Checking out cart requires an account.'",
         },
         wall_type: {
           type: "string",
@@ -4720,13 +4729,15 @@ const TOOLS = [
   {
     name: "complete_account_creation_handoff",
     description:
-      "Call after the signup form has been submitted and the outcome is known. " +
+      "Call after a signup or authentication attempt completes and the outcome is confirmed. " +
+      "Only call this if an AccountCreationRequest was created — that is, if request_account_access_resolution returned resolution='pending_user' (not 'credential_available'). " +
+      "If resolution was 'credential_available' and the site authenticated via a passwordless or OTP flow, do not call this — no AccountCreationRequest was created for that path. " +
       "Only valid when the account creation request status is 'credential_generated'. " +
-      "Use 'authenticated' if the agent is now logged in. " +
+      "Use 'authenticated' only when the browser is actually authenticated (confirmed by page state — not just after form submission). " +
       "Use 'signup_failed' if the form submission failed (e.g. email already taken, validation error). " +
       "Use 'email_verification_pending' if the site sent a verification email before allowing login. " +
-      "Optionally pass access_method if known (e.g. 'login_password', 'passwordless_email_otp'); " +
-      "Antigen infers 'login_password' when a vault credential was generated, 'passwordless_email_otp' when email was verified without a password. " +
+      "Pass access_method when the flow is known: 'login_password' if a password was used, 'passwordless_email_otp' if email OTP or magic link succeeded without a password. " +
+      "Antigen infers 'login_password' when a vault credential was generated and 'passwordless_email_otp' when email was verified without a password, if access_method is omitted. " +
       "This closes the audit loop and records the final outcome.",
     inputSchema: {
       type: "object",
@@ -4752,15 +4763,24 @@ const TOOLS = [
   {
     name: "request_account_creation_step",
     description:
-      "Use after request_account_access_resolution has created or found an AccountCreationRequest and the " +
-      "current signup page is asking for a sensitive value such as email, username, password, or email OTP. " +
-      "Call this once per sensitive page field — do not ask the user for the value in chat. " +
-      "Antigen resolves the step privately (via CDP fill, vault, or challenge relay) and returns a next_action " +
-      "telling the agent what to do: execute_profile_field_fill (email was queued for CDP fill), " +
-      "request_secret_field_injection (password pass_id is ready), wait_for_email_otp (OTP challenge created — " +
-      "use wait_for_security_challenge then inject_security_challenge_code with the returned " +
-      "email_verification_request_id), wait_for_user (email not on file — user must provide via Antigen UI), " +
-      "or retry (step not supported). Raw email, username, password, and OTP are never returned to the agent.",
+      "Use when the current visible page is asking for a sensitive account value: email, username, password, OTP, or magic link. " +
+      "This is the preferred Antigen primitive for any sensitive auth step, regardless of whether a saved credential exists for the domain. " +
+      "Choose requested_fields based on what the page actually shows right now — not on what the domain typically does or what credentials are in the vault: " +
+      "  • Email input visible → ['account_email'] " +
+      "  • Username input visible → ['username'] " +
+      "  • Password input visible → ['password'] " +
+      "  • OTP or verification code field visible → ['email_otp'] " +
+      "  • Magic-link or passwordless prompt visible → ['magic_link'] " +
+      "Call once per visible sensitive field. Do not ask the user for the value in chat. " +
+      "Antigen resolves the step privately (via CDP fill, vault, or challenge relay) and returns a next_action telling the agent what to do: " +
+      "  execute_profile_field_fill (email queued for CDP fill — call execute_profile_field_fill next), " +
+      "  request_secret_field_injection (password pass_id is ready — only call injection if the password field is still visible on the current page), " +
+      "  wait_for_email_otp (OTP challenge created — call wait_for_security_challenge then inject_security_challenge_code with the returned email_verification_request_id), " +
+      "  wait_for_user (email not on file — direct user to Antigen UI at /route-run-approvals), or " +
+      "  retry (step not supported for this field kind). " +
+      "Raw email, username, password, and OTP values are never returned to the agent. " +
+      "Requires an active AccountCreationRequest (account_creation_request_id from request_account_access_resolution). " +
+      "Also use this when resolution was 'credential_available' and the visible page asks for a step the saved credential alone does not cover (e.g. an OTP or magic-link step before the password form appears).",
     inputSchema: {
       type: "object",
       required: ["account_creation_request_id", "domain", "page_url", "requested_fields", "reason"],

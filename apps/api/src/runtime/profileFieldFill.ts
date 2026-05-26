@@ -47,13 +47,10 @@ export function maskProfileValue(kind: ProfileFieldKind, rawValue: string): stri
     }
     case "phone":
       return `***-***-${rawValue.slice(-4)}`;
-    case "shipping_address_line1": {
-      const parts = rawValue.split(" ");
-      if (parts.length > 1) return `*** ${parts.slice(1).join(" ")}`;
-      return `${rawValue[0]}***`;
-    }
+    case "shipping_address_line1":
+      return "Street address filled";
     case "shipping_address_line2":
-      return rawValue.length > 0 ? `${rawValue[0]}***` : "";
+      return rawValue.length > 0 ? "Address line 2 filled" : "";
     case "postal_code":
       return `${rawValue[0]}***`;
     case "city":
@@ -61,7 +58,7 @@ export function maskProfileValue(kind: ProfileFieldKind, rawValue: string): stri
     case "country":
       return rawValue.length > 0 ? `${rawValue[0]}***` : "***";
     default:
-      return `${rawValue[0]}***`;
+      return rawValue.length > 0 ? `${rawValue[0]}***` : "***";
   }
 }
 

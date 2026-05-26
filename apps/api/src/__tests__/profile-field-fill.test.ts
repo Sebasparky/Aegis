@@ -253,6 +253,11 @@ function assertNoRawProfileData(body: unknown) {
   expect(str).not.toContain("48104");
   expect(str).not.toContain("15551234567");
   expect(str).not.toContain("alex@aegisdemo");
+  // Address terms — street names, suffixes, unit identifiers must not leak
+  expect(str).not.toContain("Main");
+  expect(str).not.toContain(" St");
+  expect(str).not.toContain("Apt");
+  expect(str).not.toContain("4B");
   expect(str).not.toContain("mock-resolved-value-never-returned");
   // KMS/credential material
   expect(str).not.toContain("mock-ciphertext-b64");
@@ -310,6 +315,37 @@ describe("maskProfileValue masking invariants", () => {
     );
     expect(maskProfileValue("region", "")).toBe("***");
     expect(maskProfileValue("city", "")).toBe("***");
+  });
+
+  it("shipping_address_line1 does not reveal street number, name, or suffix", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    const masked = maskProfileValue("shipping_address_line1", "123 Main St");
+    expect(masked).not.toContain("123");
+    expect(masked).not.toContain("Main");
+    expect(masked).not.toContain(" St");  // address suffix, not substring of "Street"
+    expect(masked).not.toBe("123 Main St");
+    expect(masked).toBe("Street address filled");
+  });
+
+  it("shipping_address_line2 does not reveal apartment or unit content", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    const masked = maskProfileValue("shipping_address_line2", "Apt 4B");
+    expect(masked).not.toContain("Apt");
+    expect(masked).not.toContain("4B");
+    expect(masked).not.toBe("Apt 4B");
+    expect(masked).toBe("Address line 2 filled");
+  });
+
+  it("empty shipping_address_line2 returns '***' via early guard", async () => {
+    const { maskProfileValue } = await vi.importActual<{ maskProfileValue: (k: string, v: string) => string }>(
+      "../runtime/profileFieldFill.js",
+    );
+    // empty string is falsy — early guard returns "***" before reaching the case
+    expect(maskProfileValue("shipping_address_line2", "")).toBe("***");
   });
 });
 

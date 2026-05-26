@@ -1247,6 +1247,7 @@ export interface AccountCreationRequestView {
   otp_revealed_to_agent: false;
   email_strategy?: "primary_email" | "custom_email";
   password_strategy?: "aegis_generated" | "user_provided";
+  has_default_account_email?: boolean;
   created_at: string;
   expires_at: string;
   approved_at?: string;
@@ -1255,19 +1256,36 @@ export interface AccountCreationRequestView {
   error?: string;
 }
 
+export interface AccountCreationApproveBody {
+  email_strategy: string;
+  password_strategy: string;
+  email?: string;
+  save_as_default_account_email?: boolean;
+}
+
 export const listAccountCreationRequests = (status?: string) => {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return request<AccountCreationRequestView[]>(`/api/internal/account-creation-requests${qs}`);
 };
 
-export const approveAccountCreationRequest = (
+// Uses raw fetch so the error code is preserved for inline recovery in the approval card.
+export const approveAccountCreationRequest = async (
   requestId: string,
-  body: { email_strategy: string; password_strategy: string },
-) =>
-  request<AccountCreationRequestView>(
-    `/api/internal/account-creation-requests/${requestId}/approve`,
-    { method: "POST", body: JSON.stringify(body) },
-  );
+  body: AccountCreationApproveBody,
+): Promise<AccountCreationRequestView> => {
+  const res = await fetch(`${BASE}/api/internal/account-creation-requests/${requestId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!json.ok) {
+    const err = new Error(json.error?.message ?? "Approval failed.") as Error & { code?: string };
+    err.code = json.error?.code;
+    throw err;
+  }
+  return json.data as AccountCreationRequestView;
+};
 
 export const denyAccountCreationRequest = (requestId: string) =>
   request<AccountCreationRequestView>(

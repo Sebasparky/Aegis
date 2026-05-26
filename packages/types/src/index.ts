@@ -2945,7 +2945,8 @@ export type ProfileFieldKind =
   | "city"
   | "region"
   | "postal_code"
-  | "country";
+  | "country"
+  | "account_creation_email"; // user preference: email to use when agents create accounts; not agent-fillable
 
 export type ProfileDisclosureMode =
   | "fill_only"
@@ -3141,4 +3142,6 @@ export interface AccountCreationResult {
 export interface AccountCreationApproval {
   email_strategy: AccountEmailStrategy;
   password_strategy: AccountPasswordStrategy;
+  email?: string;                        // inline email provided by user when none is saved
+  save_as_default_account_email?: boolean;
 }

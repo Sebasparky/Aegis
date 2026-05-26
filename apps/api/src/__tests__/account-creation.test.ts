@@ -429,7 +429,7 @@ describe("POST /api/internal/account-creation-requests/:id/approve — credentia
     expect(stored.vault_pass_id).toMatch(/^pass_vault_/);
   });
 
-  it("returns 422 NO_PRIMARY_EMAIL when no email memory exists", async () => {
+  it("returns 422 ACCOUNT_EMAIL_REQUIRED when no email memory exists and no inline email provided", async () => {
     seedDelegation();
     // No profile memory seeded.
 
@@ -449,7 +449,7 @@ describe("POST /api/internal/account-creation-requests/:id/approve — credentia
     });
 
     expect(approveRes.statusCode).toBe(422);
-    expect(approveRes.json().error.code).toBe("NO_PRIMARY_EMAIL");
+    expect(approveRes.json().error.code).toBe("ACCOUNT_EMAIL_REQUIRED");
     // Vault must not have grown.
     expect(aegisVaultPasses.size).toBe(0);
   });
@@ -662,6 +662,194 @@ describe("safe flags — present in all response shapes", () => {
     });
     expect(completeRes.json().data.raw_password_revealed_to_agent).toBe(false);
     expect(completeRes.json().data.otp_revealed_to_agent).toBe(false);
+  });
+});
+
+describe("email resolution — missing email / inline email / save-as-default", () => {
+  async function createRequest(domain = TEST_DOMAIN) {
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/account-access-resolutions",
+      headers: { ...agentHeaders(), "content-type": "application/json" },
+      payload: { domain, page_url: `https://www.${domain}/signup`, reason: "email resolution test" },
+    });
+    return res.json().data.account_creation_request_id as string;
+  }
+
+  it("T1: approve without saved email returns ACCOUNT_EMAIL_REQUIRED; no vault pass created", async () => {
+    seedDelegation();
+    const requestId = await createRequest();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: { email_strategy: "primary_email", password_strategy: "aegis_generated" },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ACCOUNT_EMAIL_REQUIRED");
+    expect(aegisVaultPasses.size).toBe(0);
+    // Request status must remain pending_user so the user can retry.
+    expect(accountCreationRequests.get(requestId)!.status).toBe("pending_user");
+  });
+
+  it("T2: approve with inline email creates credential; response contains no email or password", async () => {
+    seedDelegation();
+    const requestId = await createRequest();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: {
+        email_strategy: "primary_email",
+        password_strategy: "aegis_generated",
+        email: "inline@example.com",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.status).toBe("credential_generated");
+    expect(body.data.raw_password_revealed_to_agent).toBe(false);
+    expect(body.data.otp_revealed_to_agent).toBe(false);
+    expect(res.body).not.toContain("inline@example.com");
+    expect(res.body).not.toContain("vault_pass_id");
+    // Internal record must have vault_pass_id (repository mock creates it).
+    expect(accountCreationRequests.get(requestId)!.vault_pass_id).toMatch(/^pass_vault_/);
+  });
+
+  it("T3: approve with inline email + save_as_default stores encrypted preference; subsequent list shows has_default_account_email: true", async () => {
+    seedDelegation();
+    const requestId = await createRequest();
+
+    const approveRes = await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: {
+        email_strategy: "primary_email",
+        password_strategy: "aegis_generated",
+        email: "default@example.com",
+        save_as_default_account_email: true,
+      },
+    });
+    expect(approveRes.statusCode).toBe(200);
+
+    // account_creation_email preference must be stored in profile memory.
+    const preference = Array.from(privateProfileMemory.values()).find(
+      m => m.user_id === MOCK_USER_ID && m.field_kind === "account_creation_email",
+    );
+    expect(preference).toBeTruthy();
+    expect(preference!.provenance.domain_at_creation).toBe("aegis.preferences");
+    // Raw email must not be stored anywhere — only the encrypted blob.
+    expect(JSON.stringify(Array.from(privateProfileMemory.values()))).not.toContain("default@example.com");
+
+    // Internal list must show has_default_account_email: true.
+    const listRes = await server.inject({ method: "GET", url: "/api/internal/account-creation-requests" });
+    const entries = listRes.json().data as { has_default_account_email?: boolean }[];
+    expect(entries.some(e => e.has_default_account_email === true)).toBe(true);
+  });
+
+  it("T4: approve when email blob is missing returns ACCOUNT_EMAIL_DECRYPT_FAILED; no vault pass created", async () => {
+    seedDelegation();
+    // Seed a profile memory item but intentionally omit the encrypted blob.
+    const memId = "ppm_email_no_blob";
+    privateProfileMemory.set(memId, {
+      memory_id: memId,
+      user_id: MOCK_USER_ID,
+      field_kind: "email",
+      value_ref: `ppvault://${memId}/value`,
+      data_class: 2,
+      sensitivity: "private",
+      default_disclosure_mode: "fill_only",
+      agent_visible_allowed: false,
+      provenance: { source: "seeded", domain_at_creation: "aegisdemo.local" },
+      created_at: NOW,
+      updated_at: NOW,
+      user_editable: true,
+      uses: [],
+    });
+    // Note: encryptedSecretVault.set NOT called — blob is missing.
+
+    const requestId = await createRequest();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: { email_strategy: "primary_email", password_strategy: "aegis_generated" },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ACCOUNT_EMAIL_DECRYPT_FAILED");
+    expect(aegisVaultPasses.size).toBe(0);
+    // Request status must remain pending_user.
+    expect(accountCreationRequests.get(requestId)!.status).toBe("pending_user");
+  });
+
+  it("T5: password not generated before email is resolved; vault unchanged on ACCOUNT_EMAIL_REQUIRED", async () => {
+    seedDelegation();
+    const vaultSizeBefore = aegisVaultPasses.size;
+    const requestId = await createRequest();
+
+    await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: { email_strategy: "primary_email", password_strategy: "aegis_generated" },
+    });
+
+    // Vault must not have grown — no password should have been generated or stored.
+    expect(aegisVaultPasses.size).toBe(vaultSizeBefore);
+  });
+
+  it("T6: save_as_default without provided email is a no-op; no preference stored", async () => {
+    seedDelegation();
+    const requestId = await createRequest();
+
+    // No email in body, save_as_default: true but there's nothing to save.
+    await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: {
+        email_strategy: "primary_email",
+        password_strategy: "aegis_generated",
+        save_as_default_account_email: true,
+        // email not provided
+      },
+    });
+
+    // Should have returned ACCOUNT_EMAIL_REQUIRED; no preference stored.
+    const preference = Array.from(privateProfileMemory.values()).find(
+      m => m.field_kind === "account_creation_email",
+    );
+    expect(preference).toBeUndefined();
+  });
+
+  it("T7: raw_password_revealed_to_agent and otp_revealed_to_agent remain false after inline email approval", async () => {
+    seedDelegation();
+    const requestId = await createRequest();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/account-creation-requests/${requestId}/approve`,
+      headers: { "content-type": "application/json" },
+      payload: {
+        email_strategy: "primary_email",
+        password_strategy: "aegis_generated",
+        email: "safety@example.com",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json().data;
+    expect(body.raw_password_revealed_to_agent).toBe(false);
+    expect(body.otp_revealed_to_agent).toBe(false);
+    expect(res.body).not.toContain("safety@example.com");
+    assertSafeFlags(res.body);
   });
 });
 

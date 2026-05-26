@@ -57,6 +57,7 @@ import {
   approveAccountCreationRequest,
   denyAccountCreationRequest,
   type AccountCreationRequestView,
+  type AccountCreationApproveBody,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -1530,17 +1531,42 @@ function PendingAccountCreationCard({
   const [approving, setApproving] = useState(false);
   const [denying, setDenying] = useState(false);
   const [approved, setApproved] = useState(false);
+  const [emailInput, setEmailInput] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Show email input when no default is saved, or after a recoverable email error.
+  const [emailNeeded, setEmailNeeded] = useState(!req.has_default_account_email);
+  const [decryptFailed, setDecryptFailed] = useState(false);
+
+  const emailInputValid = emailInput.includes("@") && emailInput.includes(".");
 
   async function handleApprove() {
     if (approving || denying) return;
+    if (emailNeeded && !emailInputValid) return;
     setApproving(true);
+    setError(null);
     try {
-      await approveAccountCreationRequest(req.request_id, {
+      const body: AccountCreationApproveBody = {
         email_strategy: "primary_email",
         password_strategy: "aegis_generated",
-      });
+        ...(emailNeeded && emailInput
+          ? { email: emailInput, save_as_default_account_email: saveAsDefault }
+          : {}),
+      };
+      await approveAccountCreationRequest(req.request_id, body);
       setApproved(true);
       onApproved();
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === "ACCOUNT_EMAIL_REQUIRED") {
+        setEmailNeeded(true);
+      } else if (code === "ACCOUNT_EMAIL_DECRYPT_FAILED") {
+        setEmailNeeded(true);
+        setDecryptFailed(true);
+        setError("Antigen found an account email but could not decrypt it. Re-enter your email to replace it.");
+      } else {
+        setError((err as Error).message ?? "Approval failed. Please try again.");
+      }
     } finally {
       setApproving(false);
     }
@@ -1559,6 +1585,7 @@ function PendingAccountCreationCard({
 
   const expiresAt = req.expires_at ? new Date(req.expires_at) : null;
   const isExpired = expiresAt !== null && expiresAt <= new Date();
+  const approveDisabled = approving || denying || approved || (emailNeeded && !emailInputValid);
 
   return (
     <div className="apr-card apr-card--amber">
@@ -1600,14 +1627,63 @@ function PendingAccountCreationCard({
           </p>
         </SectionCard>
 
-        <SectionCard label="Email">
-          <p style={{ fontSize: 13, color: "var(--ink-1)", fontWeight: 600, margin: "0 0 4px" }}>
-            Your Antigen primary email
-          </p>
-          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
-            Antigen uses the email stored in your profile. The agent never sees the raw email address.
-          </p>
-        </SectionCard>
+        {emailNeeded ? (
+          <SectionCard label="Account email">
+            {decryptFailed && error && (
+              <div style={{
+                background: "oklch(0.97 0.02 25)",
+                border: "1px solid oklch(0.88 0.06 25)",
+                borderRadius: "var(--r-2)",
+                padding: "10px 12px",
+                marginBottom: 10,
+              }}>
+                <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0, lineHeight: 1.5 }}>{error}</p>
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <input
+                type="email"
+                value={emailInput}
+                onChange={e => setEmailInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !approveDisabled) handleApprove(); }}
+                placeholder="you@example.com"
+                disabled={approving || approved}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  background: "var(--surface-1)",
+                  border: "1px solid var(--hairline)",
+                  borderRadius: "var(--r-2)",
+                  padding: "8px 12px",
+                  fontSize: 13,
+                  color: "var(--ink-1)",
+                  fontFamily: "inherit",
+                }}
+              />
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-2)", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={saveAsDefault}
+                  onChange={e => setSaveAsDefault(e.target.checked)}
+                  disabled={approving || approved}
+                />
+                Use this as my default for future account creation
+              </label>
+              <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0, lineHeight: 1.5 }}>
+                The agent will not see your email or password.
+              </p>
+            </div>
+          </SectionCard>
+        ) : (
+          <SectionCard label="Email">
+            <p style={{ fontSize: 13, color: "var(--ink-1)", fontWeight: 600, margin: "0 0 4px" }}>
+              Using your default account creation email
+            </p>
+            <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+              The agent will not see your email or password.
+            </p>
+          </SectionCard>
+        )}
 
         <SectionCard label="Password">
           <CheckList items={[
@@ -1629,6 +1705,10 @@ function PendingAccountCreationCard({
           </p>
         </SectionCard>
 
+        {!decryptFailed && error && (
+          <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>{error}</p>
+        )}
+
         {isExpired ? (
           <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>
             This request has expired. The agent will need to request account access again.
@@ -1636,7 +1716,7 @@ function PendingAccountCreationCard({
         ) : (
           <div style={{ display: "flex", gap: 10 }}>
             <button
-              disabled={approving || denying || approved}
+              disabled={approveDisabled}
               onClick={handleApprove}
               className="a-btn a-btn--primary"
             >

@@ -7,12 +7,15 @@ import {
   privateProfileMemory,
   encryptedSecretVault,
   MOCK_USER_ID,
+  newId,
 } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { createAndStoreVaultPass } from "./vault-passes.js";
 import { getKmsProvider } from "../lib/kms.js";
 
 function safeView(r: AccountCreationRequest) {
+  const hasDefaultEmail = Array.from(privateProfileMemory.values())
+    .some(m => m.user_id === MOCK_USER_ID && m.field_kind === "account_creation_email");
   return {
     request_id: r.request_id,
     domain: r.domain,
@@ -25,6 +28,7 @@ function safeView(r: AccountCreationRequest) {
     // email_strategy is safe to show; email_used (the resolved value) is never stored or returned
     email_strategy: r.policy?.email_strategy,
     password_strategy: r.policy?.password_strategy,
+    has_default_account_email: hasDefaultEmail,
     created_at: r.created_at,
     expires_at: r.expires_at,
     approved_at: r.approved_at,
@@ -81,42 +85,114 @@ export async function accountCreationRoutes(server: FastifyInstance): Promise<vo
     const emailStrategy = body?.email_strategy ?? "primary_email";
     const passwordStrategy = body?.password_strategy ?? "aegis_generated";
 
-    // Resolve email from private profile memory if primary_email strategy selected.
-    // emailUsed stays server-side only — never returned in any response.
+    // Resolve account email — stays server-side only, never returned in any response.
+    // Resolution order:
+    //   1. Inline email provided by user in this approval request
+    //   2. Saved account_creation_email preference
+    //   3. Generic email profile field (legacy fallback)
+    //   4. None found → 422 ACCOUNT_EMAIL_REQUIRED
     let emailUsed = "";
     if (emailStrategy === "primary_email") {
-      const emailMemory = Array.from(privateProfileMemory.values()).find(
-        m => m.user_id === MOCK_USER_ID && m.field_kind === "email",
-      );
-      if (!emailMemory) {
-        return reply.status(422).send({
-          ok: false,
-          error: {
-            code: "NO_PRIMARY_EMAIL",
-            message: "No primary email found in your Antigen profile. Add an email via the profile memory request flow before creating an account.",
-          },
-        });
+      const inlineEmail = typeof body?.email === "string" ? body.email.trim() : "";
+      if (inlineEmail) {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inlineEmail)) {
+          return reply.status(422).send({
+            ok: false,
+            error: { code: "INVALID_EMAIL_FORMAT", message: "The provided email address is not valid." },
+          });
+        }
+        emailUsed = inlineEmail;
+      } else {
+        // Try account_creation_email preference first, then generic email.
+        const emailMemory =
+          Array.from(privateProfileMemory.values()).find(
+            m => m.user_id === MOCK_USER_ID && m.field_kind === "account_creation_email",
+          ) ??
+          Array.from(privateProfileMemory.values()).find(
+            m => m.user_id === MOCK_USER_ID && m.field_kind === "email",
+          );
+
+        if (!emailMemory) {
+          return reply.status(422).send({
+            ok: false,
+            error: {
+              code: "ACCOUNT_EMAIL_REQUIRED",
+              message: "No account email is saved. Provide an email to continue.",
+            },
+          });
+        }
+
+        const blob = encryptedSecretVault.get(emailMemory.memory_id);
+        if (!blob) {
+          return reply.status(422).send({
+            ok: false,
+            error: { code: "ACCOUNT_EMAIL_DECRYPT_FAILED", message: "Antigen found an account email but could not read it. Re-enter your email to replace it." },
+          });
+        }
+        try {
+          const kms = getKmsProvider();
+          emailUsed = await kms.decryptSecret(blob, {
+            user_id: MOCK_USER_ID,
+            pass_id: emailMemory.memory_id,
+            domain: emailMemory.provenance.domain_at_creation, // use stored provenance, not hardcoded
+            purpose: "profile_field",
+          });
+        } catch {
+          return reply.status(422).send({
+            ok: false,
+            error: {
+              code: "ACCOUNT_EMAIL_DECRYPT_FAILED",
+              message: "Antigen found an account email but could not decrypt it. Re-enter your email to replace it.",
+            },
+          });
+        }
       }
-      const blob = encryptedSecretVault.get(emailMemory.memory_id);
-      if (!blob) {
-        return reply.status(500).send({ ok: false, error: { code: "VAULT_READ_ERROR", message: "Could not retrieve email from vault." } });
-      }
-      try {
-        const kms = getKmsProvider();
-        emailUsed = await kms.decryptSecret(blob, {
-          user_id: MOCK_USER_ID,
-          pass_id: emailMemory.memory_id,
-          domain: "aegisdemo.local",
-          purpose: "profile_field",
-        });
-      } catch (err) {
-        console.error("[account-creation] KMS decrypt failed for email:", err);
-        return reply.status(500).send({ ok: false, error: { code: "KMS_DECRYPT_FAILED", message: "Could not decrypt email from vault." } });
+
+      // Persist as account_creation_email preference if user requested.
+      if (body?.save_as_default_account_email && emailUsed) {
+        try {
+          const kms = getKmsProvider();
+          const existing = Array.from(privateProfileMemory.values()).find(
+            m => m.user_id === MOCK_USER_ID && m.field_kind === "account_creation_email",
+          );
+          const memoryId = existing?.memory_id ?? newId("ppm");
+          const blob = await kms.encryptSecret(emailUsed, {
+            user_id: MOCK_USER_ID,
+            pass_id: memoryId,
+            domain: "aegis.preferences", // fixed sentinel for user preferences
+            purpose: "profile_field",
+          });
+          encryptedSecretVault.set(memoryId, blob);
+          const now = new Date().toISOString();
+          if (!existing) {
+            privateProfileMemory.set(memoryId, {
+              memory_id: memoryId,
+              user_id: MOCK_USER_ID,
+              field_kind: "account_creation_email",
+              value_ref: `ppvault://${memoryId}/value`,
+              data_class: 2,
+              sensitivity: "private",
+              default_disclosure_mode: "fill_only",
+              agent_visible_allowed: false,
+              provenance: { source: "user_provided", domain_at_creation: "aegis.preferences" },
+              created_at: now,
+              updated_at: now,
+              user_editable: true,
+              uses: [],
+            });
+          } else {
+            existing.updated_at = now;
+            privateProfileMemory.set(memoryId, existing);
+          }
+        } catch {
+          // Non-fatal: preference save failure does not block credential creation.
+          console.error("[account-creation] Failed to save account_creation_email preference.");
+        }
       }
     }
 
-    // Generate a strong random password. 32 bytes of entropy → base64url → first 24 chars.
-    // ~143 bits of entropy, URL-safe characters, no ambiguous chars.
+    // Generate a strong random password only after email is resolved.
+    // 32 bytes of entropy → base64url → first 24 chars (~143 bits).
     // This value is used only to call createAndStoreVaultPass and is never stored elsewhere.
     const generatedPassword = randomBytes(32).toString("base64url").slice(0, 24);
 

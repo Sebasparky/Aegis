@@ -477,6 +477,58 @@ describe("POST /api/internal/profile-memory-requests/:id/submit", () => {
     expect(body.raw_profile_value_revealed_to_agent).toBe(false);
   });
 
+  it("submit region 'VA' → response never contains 'VA', agent GET returns completed with no raw values", async () => {
+    seedDelegation();
+    // Create a pending request for a missing region field
+    const reqId = "pmreq_submit_region_va";
+    profileMemoryRequests.set(reqId, {
+      request_id: reqId,
+      user_id: MOCK_USER_ID,
+      delegation_id: DELEGATION_ID,
+      domain: TEST_DOMAIN,
+      page_url: TEST_PAGE_URL,
+      missing_fields: ["region"],
+      reason: "Checkout shipping form",
+      status: "pending_user",
+      raw_profile_value_revealed_to_agent: false,
+      created_at: NOW,
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    });
+
+    // User submits the region value in the approvals UI
+    const submitRes = await server.inject({
+      method: "POST",
+      url: `/api/internal/profile-memory-requests/${reqId}/submit`,
+      payload: { values: { region: "VA" }, save_for_future: true },
+    });
+
+    expect(submitRes.statusCode).toBe(200);
+    // Submit response must never contain the raw region value
+    expect(submitRes.payload).not.toContain('"VA"');
+    expect(submitRes.payload).not.toContain("VA");
+    const submitBody = JSON.parse(submitRes.payload);
+    expect(submitBody.ok).toBe(true);
+    expect(submitBody.status).toBe("completed");
+    expect(submitBody.raw_profile_value_revealed_to_agent).toBe(false);
+
+    // Agent polls GET — should now see completed (wait_for_profile_memory_request behavior)
+    const pollRes = await server.inject({
+      method: "GET",
+      url: `/api/agent/v1/profile-memory-requests/${reqId}`,
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+
+    expect(pollRes.statusCode).toBe(200);
+    // Agent GET response must never contain the raw region value
+    expect(pollRes.payload).not.toContain('"VA"');
+    expect(pollRes.payload).not.toContain("VA");
+    const pollBody = JSON.parse(pollRes.payload);
+    expect(pollBody.data.status).toBe("completed");
+    expect(pollBody.data.completed_at).toBeDefined();
+    expect(pollBody.data.raw_profile_value_revealed_to_agent).toBe(false);
+    expect(pollBody.data.next_action).toMatch(/retry request_profile_field_fill/i);
+  });
+
   it("after submit, profile-field-fill creates a fill_request_id", async () => {
     seedDelegation();
     const reqId = "pmreq_submit_004";

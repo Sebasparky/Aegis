@@ -129,9 +129,15 @@ export function buildSkillCardView(skill: SkillWithInstalled): SkillCardView {
 
 export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInstalled; onClick: () => void }) {
   const view = buildSkillCardView(skill);
+  const [replaying, setReplaying] = useState(false);
+  const enableReplay = Boolean(skill.replay_assets?.some((a) => a.kind === "replay_video"));
   return (
     <button className="skill-mcard" onClick={onClick} type="button">
-      <div className="skill-mcard__preview">
+      <div
+        className="skill-mcard__preview"
+        onMouseEnter={() => setReplaying(true)}
+        onMouseLeave={() => setReplaying(false)}
+      >
         <SkillPreviewPane
           domain={skill.domain}
           name={skill.name}
@@ -139,6 +145,9 @@ export function MarketplaceSkillCard({ skill, onClick }: { skill: SkillWithInsta
           trustTier={skill.trust_tier}
           executionMode={skill.execution_mode}
           previewAssets={skill.preview_asset ? [skill.preview_asset] : undefined}
+          replayAssets={skill.replay_assets}
+          enableReplay={enableReplay}
+          replaying={replaying}
           showTrustStrip={false}
         />
       </div>

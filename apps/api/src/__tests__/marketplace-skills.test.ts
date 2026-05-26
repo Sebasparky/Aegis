@@ -824,3 +824,77 @@ describe("GET /api/skills — preview_asset from PublishedSkillVersion", () => {
     );
   });
 });
+
+// ─── GET /api/skills — replay_assets propagation from snapshot ─────────────────
+
+describe("GET /api/skills — replay_assets from PublishedSkillVersion", () => {
+  const PREVIEW_ASSET = {
+    asset_id: "rpa_replay_test_001",
+    kind: "start_page" as const,
+    route_id: "route_replay_test",
+    url_path: "/api/route-preview-assets/replay-start.png",
+    captured_at: NOW,
+    redaction_applied: true,
+    source: "dev_seed" as const,
+  };
+  const POSTER_ASSET = {
+    asset_id: "rra_replay_poster_001",
+    route_id: "route_replay_test",
+    route_hash: "replay_hash_001",
+    kind: "poster_frame" as const,
+    url_path: "/api/route-preview-assets/replay-poster.png",
+    captured_at: NOW,
+    redaction_applied: true,
+    source: "dev_seed" as const,
+    replay_safety: "full" as const,
+  };
+  const VIDEO_ASSET = {
+    asset_id: "rra_replay_video_001",
+    route_id: "route_replay_test",
+    route_hash: "replay_hash_001",
+    kind: "replay_video" as const,
+    url_path: "/api/route-preview-assets/replay-video.webm",
+    poster_url_path: "/api/route-preview-assets/replay-poster.png",
+    captured_at: NOW,
+    redaction_applied: true,
+    source: "dev_seed" as const,
+    replay_safety: "full" as const,
+  };
+
+  it("includes replay_assets in skill list item when snapshot has replay assets", async () => {
+    const route = makeApprovedRoute({
+      preview_assets: [PREVIEW_ASSET],
+      replay_assets: [POSTER_ASSET, VIDEO_ASSET],
+    });
+    routes.set(route.route_id, route);
+
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish` });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+
+    const skill = body.data.find((s: any) => s.route_id === route.route_id);
+    expect(skill).toBeDefined();
+    expect(skill.preview_asset.kind).toBe("start_page");
+    expect(skill.replay_assets).toHaveLength(2);
+    expect(skill.replay_assets.some((a: any) => a.kind === "poster_frame")).toBe(true);
+    expect(skill.replay_assets.some((a: any) => a.kind === "replay_video")).toBe(true);
+  });
+
+  it("returns empty replay_assets array when snapshot has no replay assets", async () => {
+    const route = makeApprovedRoute({ preview_assets: [PREVIEW_ASSET] });
+    routes.set(route.route_id, route);
+
+    await server.inject({ method: "POST", url: `/api/routes/${route.route_id}/publish` });
+
+    const res = await server.inject({ method: "GET", url: "/api/skills" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+
+    const skill = body.data.find((s: any) => s.route_id === route.route_id);
+    expect(skill).toBeDefined();
+    expect(Array.isArray(skill.replay_assets)).toBe(true);
+    expect(skill.replay_assets).toHaveLength(0);
+  });
+});

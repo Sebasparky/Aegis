@@ -117,6 +117,7 @@ export async function skillRoutes(server: FastifyInstance) {
             installed: installedSkillIds.has(s.skill_id),
             created_by_you: s.creator_aegis_id === MOCK_AEGIS_ID,
             ...(previewAsset ? { preview_asset: previewAsset } : {}),
+            replay_assets: latestVersion?.replay_assets ?? [],
           };
         });
 

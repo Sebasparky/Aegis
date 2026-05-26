@@ -43,6 +43,7 @@ import type {
   ConnectorStatus,
   VerificationType,
   RoutePreviewAsset,
+  RouteReplayAsset,
   PublishedSkillVersion,
 } from "@aegis/types";
 
@@ -282,7 +283,7 @@ export const unlistSkill = (skillId: string) =>
   request<Skill>(`/api/skills/${skillId}/unlist`, { method: "POST", body: JSON.stringify({}) });
 
 // Skills Marketplace
-export type SkillWithInstalled = Skill & { installed: boolean; created_by_you: boolean; preview_asset?: RoutePreviewAsset };
+export type SkillWithInstalled = Skill & { installed: boolean; created_by_you: boolean; preview_asset?: RoutePreviewAsset; replay_assets?: RouteReplayAsset[] };
 export type SkillDetail = Skill & { installed: boolean; created_by_you: boolean; snapshot: PublishedSkillVersion | null };
 export const getSkill = (skillId: string) => request<SkillDetail>(`/api/skills/${skillId}`);
 export const listSkills = (params?: { domain?: string; installed?: boolean }) => {

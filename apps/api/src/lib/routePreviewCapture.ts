@@ -135,7 +135,9 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
     }
 
     // Allow final page state to settle before closing.
-    await page.waitForTimeout(800);
+    await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(1000);
 
     // For route_demo_wikipedia_001, verify the replay reached the Michigan article.
     let expectedDestinationMissed = false;

@@ -323,6 +323,38 @@ describe("POST /api/routes/:routeId/capture-replay-preview", () => {
     const route = routes.get(IDS.ROUTE_WIKI);
     expect(route?.replay_assets ?? []).toHaveLength(0);
   });
+
+  it("re-captures replace existing replay_assets by kind without duplicating", async () => {
+    const { captureRouteReplay } = await import("../lib/routePreviewCapture.js");
+
+    // Seed an existing capture on the route.
+    const route = routes.get(IDS.ROUTE_WIKI)!;
+    route.replay_assets = makeReplayAssets(IDS.ROUTE_WIKI, 1000000);
+    routes.set(IDS.ROUTE_WIKI, route);
+
+    // New capture with fresh asset_ids.
+    const newAssets = makeReplayAssets(IDS.ROUTE_WIKI, 2000000).map(a => ({
+      ...a,
+      asset_id: a.asset_id.replace("001", "002"),
+    }));
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(newAssets);
+
+    await server.inject({
+      method: "POST",
+      url: `/api/routes/${IDS.ROUTE_WIKI}/capture-replay-preview`,
+    });
+
+    const updated = routes.get(IDS.ROUTE_WIKI)!;
+    const videos = updated.replay_assets?.filter(a => a.kind === "replay_video") ?? [];
+    const posters = updated.replay_assets?.filter(a => a.kind === "poster_frame") ?? [];
+
+    // Exactly one of each kind — no duplicates.
+    expect(videos).toHaveLength(1);
+    expect(posters).toHaveLength(1);
+    // The new asset_ids replaced the old ones.
+    expect(videos[0].asset_id).toBe("rra_video_002");
+    expect(posters[0].asset_id).toBe("rra_poster_002");
+  });
 });
 
 // ─── Static asset filename validation — video extensions ─────────────────────

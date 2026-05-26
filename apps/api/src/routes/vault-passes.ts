@@ -55,7 +55,7 @@ async function toView(pass: AegisVaultPass): Promise<VaultPassView> {
 // Password is encrypted and stored via KMS; plaintext is never persisted.
 type CreateOneResult = { ok: true; pass: AegisVaultPass } | { ok: false; error: string };
 
-async function createAndStoreVaultPass(params: {
+export async function createAndStoreVaultPass(params: {
   label: string;
   kind: AegisPassKind;
   domain: string;

@@ -51,6 +51,7 @@ import { paymentCardFillRoutes } from "./routes/payment-card-fills.js";
 import { purchaseConfirmationRoutes } from "./routes/purchase-confirmations.js";
 import { profileFieldFillRoutes } from "./routes/profile-field-fills.js";
 import { profileMemoryRequestRoutes } from "./routes/profile-memory-requests.js";
+import { accountCreationRoutes } from "./routes/account-creation.js";
 import { taskBrowserSessionRoutes } from "./routes/task-browser-sessions.js";
 import {
   expireInactiveTaskBrowserSessions,
@@ -158,6 +159,7 @@ async function main() {
   await server.register(purchaseConfirmationRoutes);
   await server.register(profileFieldFillRoutes);
   await server.register(profileMemoryRequestRoutes);
+  await server.register(accountCreationRoutes);
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);

@@ -2390,6 +2390,118 @@ async function createWorkspaceArtifact({ workspace_id, name, kind, content, task
   return res.data;
 }
 
+// ─── Account Access Resolution v1 handlers ────────────────────────────────────
+
+async function requestAccountAccessResolution({ domain, page_url, reason, wall_type = "unknown" } = {}) {
+  if (!domain || typeof domain !== "string" || !domain.trim())
+    return { error: "VALIDATION_ERROR", message: "domain is required. Provide the normalized domain (e.g. 'github.com', not 'https://github.com/signup')." };
+  if (!page_url || typeof page_url !== "string" || !page_url.trim())
+    return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!reason || typeof reason !== "string" || !reason.trim())
+    return { error: "VALIDATION_ERROR", message: "reason is required." };
+
+  let res;
+  try {
+    res = await request("POST", "/api/agent/v1/account-access-resolutions", {
+      domain: domain.trim(),
+      page_url: page_url.trim(),
+      reason: reason.trim(),
+      wall_type,
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to resolve account access." };
+  }
+
+  const d = res.data;
+  if (d.resolution === "credential_available") {
+    return {
+      resolution: "credential_available",
+      domain: d.domain,
+      pass_id: d.pass_id,
+      pass_label: d.pass_label,
+      has_password: d.has_password,
+      raw_password_revealed_to_agent: false,
+      otp_revealed_to_agent: false,
+      next_action: d.next_action,
+      guidance: d.guidance,
+    };
+  }
+
+  return {
+    resolution: "pending_user",
+    account_creation_request_id: d.account_creation_request_id,
+    domain: d.domain,
+    raw_password_revealed_to_agent: false,
+    otp_revealed_to_agent: false,
+    expires_at: d.expires_at,
+    next_action: d.next_action,
+    guidance: d.guidance,
+  };
+}
+
+async function getAccountAccessResolution({ request_id } = {}) {
+  if (!request_id || typeof request_id !== "string" || !request_id.trim())
+    return { error: "VALIDATION_ERROR", message: "request_id is required." };
+
+  let res;
+  try {
+    res = await request("GET", `/api/agent/v1/account-access-resolutions/${encodeURIComponent(request_id.trim())}`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to get account creation status." };
+  }
+
+  const d = res.data;
+  const terminal = ["completed", "denied", "expired", "failed"].includes(d.status);
+  return {
+    request_id: d.request_id,
+    status: d.status,
+    domain: d.domain,
+    raw_password_revealed_to_agent: false,
+    otp_revealed_to_agent: false,
+    ...(d.pass_id ? { pass_id: d.pass_id, pass_label: d.pass_label } : {}),
+    ...(d.error ? { error: d.error } : {}),
+    next_action: d.next_action,
+    expires_at: d.expires_at,
+    terminal,
+  };
+}
+
+async function completeAccountCreationHandoff({ request_id, outcome } = {}) {
+  if (!request_id || typeof request_id !== "string" || !request_id.trim())
+    return { error: "VALIDATION_ERROR", message: "request_id is required." };
+
+  const VALID_OUTCOMES = ["authenticated", "signup_failed", "email_verification_pending"];
+  if (!outcome || !VALID_OUTCOMES.includes(outcome))
+    return { error: "VALIDATION_ERROR", message: `outcome must be one of: ${VALID_OUTCOMES.join(", ")}.` };
+
+  let res;
+  try {
+    res = await request("POST", `/api/agent/v1/account-access-resolutions/${encodeURIComponent(request_id.trim())}/complete`, { outcome });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to complete account creation." };
+  }
+
+  const d = res.data;
+  return {
+    request_id: d.request_id,
+    status: d.status,
+    domain: d.domain,
+    raw_password_revealed_to_agent: false,
+    otp_revealed_to_agent: false,
+    ...(d.completed_at ? { completed_at: d.completed_at } : {}),
+    ...(d.error ? { error: d.error } : {}),
+  };
+}
+
 // ─── Agent-Runnable Skill Run Lifecycle handlers ──────────────────────────────
 
 async function startSkillRun({ run_id } = {}) {
@@ -4498,6 +4610,86 @@ const TOOLS = [
       required: ["workspace_id", "name", "kind", "content"],
     },
   },
+  {
+    name: "request_account_access_resolution",
+    description:
+      "Call this when you reach a login or signup wall on a website and need to determine how to proceed. " +
+      "Antigen checks the vault for an existing credential for the domain. " +
+      "If found, returns resolution='credential_available' with pass_id — proceed by calling request_secret_field_injection. " +
+      "If not found, creates a pending account creation request and returns resolution='pending_user'. " +
+      "Tell the user: 'Please open /route-run-approvals in the Antigen UI and approve the account creation request.' " +
+      "Then poll get_account_access_resolution until status='credential_generated', and use the returned pass_id to call request_secret_field_injection. " +
+      "IMPORTANT: Never type credentials directly — always use request_secret_field_injection for username and password fields. " +
+      "IMPORTANT: Normalize the domain before calling (e.g. 'github.com' not 'https://github.com/signup'). " +
+      "IMPORTANT: page_url must be on the same domain (or a subdomain) as domain.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "Normalized domain, e.g. 'github.com'. Do not include protocol, path, or query string.",
+        },
+        page_url: {
+          type: "string",
+          description: "Full URL of the login or signup page the agent is currently on.",
+        },
+        reason: {
+          type: "string",
+          description: "Why the agent needs access to this account. Be specific, e.g. 'Checking out IKEA cart requires an account.'",
+        },
+        wall_type: {
+          type: "string",
+          enum: ["login", "signup", "unknown"],
+          description: "'login' if the page is a login form for an existing account; 'signup' if it is a registration/create account form; 'unknown' if unclear.",
+        },
+      },
+      required: ["domain", "page_url", "reason"],
+    },
+  },
+  {
+    name: "get_account_access_resolution",
+    description:
+      "Poll the status of an account creation request. " +
+      "Use after request_account_access_resolution returns resolution='pending_user'. " +
+      "Poll every few seconds until status='credential_generated' — at that point pass_id is returned. " +
+      "Once you have pass_id, call request_secret_field_injection to fill the email and password fields. " +
+      "Terminal statuses: completed, denied, expired, failed. Do not poll after terminal status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: {
+          type: "string",
+          description: "The account_creation_request_id returned by request_account_access_resolution.",
+        },
+      },
+      required: ["request_id"],
+    },
+  },
+  {
+    name: "complete_account_creation_handoff",
+    description:
+      "Call after the signup form has been submitted and the outcome is known. " +
+      "Only valid when the account creation request status is 'credential_generated'. " +
+      "Use 'authenticated' if the agent is now logged in. " +
+      "Use 'signup_failed' if the form submission failed (e.g. email already taken, validation error). " +
+      "Use 'email_verification_pending' if the site sent a verification email before allowing login. " +
+      "This closes the audit loop and records the final outcome.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: {
+          type: "string",
+          description: "The account_creation_request_id from request_account_access_resolution.",
+        },
+        outcome: {
+          type: "string",
+          enum: ["authenticated", "signup_failed", "email_verification_pending"],
+          description: "The outcome of the signup attempt.",
+        },
+      },
+      required: ["request_id", "outcome"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -4728,6 +4920,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "create_workspace_artifact":
       result = await createWorkspaceArtifact(a);
+      break;
+    case "request_account_access_resolution":
+      result = await requestAccountAccessResolution(a);
+      break;
+    case "get_account_access_resolution":
+      result = await getAccountAccessResolution(a);
+      break;
+    case "complete_account_creation_handoff":
+      result = await completeAccountCreationHandoff(a);
       break;
     default:
       return {

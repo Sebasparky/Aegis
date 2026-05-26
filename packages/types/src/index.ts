@@ -3063,3 +3063,82 @@ export interface ProfileMemoryRequest {
   expires_at: string;
   completed_at?: string;
 }
+
+// ─── Account Access Resolution v1 ────────────────────────────────────────────
+// Created when an agent reaches a login/signup wall and calls
+// request_account_access_resolution. If a vault credential exists for the domain,
+// the response is credential_available and the agent proceeds with
+// request_secret_field_injection. If no credential exists, an AccountCreationRequest
+// is created (pending_user) and the user approves it in /route-run-approvals.
+// Antigen generates a strong password and stores it in the vault at approval time.
+// The raw generated password is never returned to any caller or logged.
+
+export type AccountCreationStatus =
+  | "pending_user"           // awaiting user approval in Antigen UI
+  | "approved"               // user approved; credential generation in progress
+  | "credential_generated"   // password generated and stored in vault; pass_id safe to return
+  | "completed"              // agent confirmed authenticated after signup
+  | "denied"                 // user denied account creation
+  | "expired"                // 10-minute TTL elapsed before approval
+  | "failed";                // internal error during credential generation
+
+export type AccountEmailStrategy = "primary_email" | "custom_email";
+export type AccountPasswordStrategy = "aegis_generated" | "user_provided";
+
+export interface AccountCreationPolicy {
+  email_strategy: AccountEmailStrategy;
+  password_strategy: AccountPasswordStrategy;
+  /** Always the literal false — generated password is never returned via any API response. */
+  raw_password_revealed_to_agent: false;
+  /** Always the literal false — OTP codes are never revealed to the agent. */
+  otp_revealed_to_agent: false;
+  save_to_vault: true;
+}
+
+/** In-store record for an account creation request. vault_pass_id is internal only. */
+export interface AccountCreationRequest {
+  request_id: string;             // "acreq_..."
+  user_id: string;
+  delegation_id: string;
+  domain: string;                 // normalized (e.g. "github.com")
+  signup_url: string;
+  reason: string;
+  wall_type: "login" | "signup" | "unknown";
+  status: AccountCreationStatus;
+  /** Always the literal false — generated password is never returned to the agent. */
+  raw_password_revealed_to_agent: false;
+  /** Always the literal false — OTP codes are never revealed to the agent. */
+  otp_revealed_to_agent: false;
+  /** Internal only — the vault pass_id created on approval. Never returned in agent-facing responses. */
+  vault_pass_id?: string;
+  policy?: AccountCreationPolicy;
+  created_at: string;
+  expires_at: string;             // 10-minute TTL
+  approved_at?: string;
+  completed_at?: string;
+  denied_at?: string;
+  error?: string;
+}
+
+/** Agent-safe result shape — no vault_pass_id, no raw password, no email values. */
+export interface AccountCreationResult {
+  request_id: string;
+  status: AccountCreationStatus;
+  domain: string;
+  /** Always the literal false — generated password is never returned to the agent. */
+  raw_password_revealed_to_agent: false;
+  /** Always the literal false — OTP codes are never revealed to the agent. */
+  otp_revealed_to_agent: false;
+  /** Present when status is credential_generated or completed. Safe metadata identifier. */
+  pass_id?: string;
+  pass_label?: string;
+  next_action?: string;
+  completed_at?: string;
+  error?: string;
+}
+
+/** Body the user submits when approving an account creation request in the Antigen UI. */
+export interface AccountCreationApproval {
+  email_strategy: AccountEmailStrategy;
+  password_strategy: AccountPasswordStrategy;
+}

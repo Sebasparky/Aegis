@@ -47,6 +47,7 @@ import type {
   PrivateProfileMemoryItem,
   ProfileFieldFillRequest,
   ProfileMemoryRequest,
+  AccountCreationRequest,
 } from "@aegis/types";
 import type { EncryptedSecretBlob } from "../lib/kms.js";
 
@@ -371,6 +372,11 @@ export const verificationCards = new Map<string, VerificationCard>();
 export const disclosureReceipts = new Map<string, DisclosureReceipt>();
 
 export const trustSignalDisclosureRecords = new Map<string, TrustSignalDisclosureRecord>();
+
+// ─── Account Access Resolution v1 ─────────────────────────────────────────────
+// Ephemeral — browser context is gone on restart. pending_user requests
+// implicitly expire because this map starts empty after restart.
+export const accountCreationRequests = new Map<string, AccountCreationRequest>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

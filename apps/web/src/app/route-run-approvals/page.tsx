@@ -53,6 +53,10 @@ import {
   submitProfileMemoryRequest,
   cancelProfileMemoryRequest,
   type ProfileMemoryRequestView,
+  listAccountCreationRequests,
+  approveAccountCreationRequest,
+  denyAccountCreationRequest,
+  type AccountCreationRequestView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -1514,6 +1518,146 @@ function PendingProfileMemoryRequestCard({
   );
 }
 
+function PendingAccountCreationCard({
+  req,
+  onApproved,
+  onDenied,
+}: {
+  req: AccountCreationRequestView;
+  onApproved: () => void;
+  onDenied: () => void;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [denying, setDenying] = useState(false);
+  const [approved, setApproved] = useState(false);
+
+  async function handleApprove() {
+    if (approving || denying) return;
+    setApproving(true);
+    try {
+      await approveAccountCreationRequest(req.request_id, {
+        email_strategy: "primary_email",
+        password_strategy: "aegis_generated",
+      });
+      setApproved(true);
+      onApproved();
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  async function handleDeny() {
+    if (approving || denying) return;
+    setDenying(true);
+    try {
+      await denyAccountCreationRequest(req.request_id);
+      onDenied();
+    } finally {
+      setDenying(false);
+    }
+  }
+
+  const expiresAt = req.expires_at ? new Date(req.expires_at) : null;
+  const isExpired = expiresAt !== null && expiresAt <= new Date();
+
+  return (
+    <div className="apr-card apr-card--amber">
+      <div className="apr-card__head">
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: 0 }}>
+              Account Creation Request
+            </p>
+            <span style={{
+              background: "oklch(0.97 0.03 75)",
+              color: "oklch(0.45 0.12 75)",
+              border: "1px solid oklch(0.88 0.06 75)",
+              fontSize: 11,
+              fontWeight: 700,
+              padding: "1px 7px",
+              borderRadius: 999,
+            }}>
+              NEEDS APPROVAL
+            </span>
+          </div>
+          <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", fontFamily: "monospace", margin: 0 }}>
+            {req.domain}
+          </p>
+        </div>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>
+          {isExpired ? "Expired" : approved ? "Approved" : "Waiting"}
+        </span>
+      </div>
+
+      <div className="apr-card__body">
+        <SectionCard label="Why the agent needs an account">
+          <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, lineHeight: 1.55 }}>{req.reason}</p>
+        </SectionCard>
+
+        <SectionCard label="Signup page">
+          <p style={{ fontSize: 11.5, color: "var(--ink-3)", fontFamily: "monospace", margin: 0, wordBreak: "break-all" }}>
+            {req.signup_url}
+          </p>
+        </SectionCard>
+
+        <SectionCard label="Email">
+          <p style={{ fontSize: 13, color: "var(--ink-1)", fontWeight: 600, margin: "0 0 4px" }}>
+            Your Antigen primary email
+          </p>
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+            Antigen uses the email stored in your profile. The agent never sees the raw email address.
+          </p>
+        </SectionCard>
+
+        <SectionCard label="Password">
+          <CheckList items={[
+            "Antigen generates a strong random password (24 characters, ~143 bits of entropy).",
+            "The password is stored in your vault immediately on approval — encrypted via KMS.",
+            "The agent never sees the generated password. raw_password_revealed_to_agent: false.",
+            "After approval, the agent fills the signup form using your vault credential via CDP injection.",
+          ]} />
+        </SectionCard>
+
+        <SectionCard label="Approving this will">
+          <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0, lineHeight: 1.7 }}>
+            · Antigen generates and encrypts a password into your vault<br />
+            · The agent fills the signup form using request_secret_field_injection<br />
+            · The credential is saved for future logins to {req.domain}<br />
+            {expiresAt && !isExpired && (
+              <>· Request expires {expiresAt.toLocaleTimeString()}</>
+            )}
+          </p>
+        </SectionCard>
+
+        {isExpired ? (
+          <p style={{ fontSize: 12, color: "oklch(0.45 0.13 25)", margin: 0 }}>
+            This request has expired. The agent will need to request account access again.
+          </p>
+        ) : (
+          <div style={{ display: "flex", gap: 10 }}>
+            <button
+              disabled={approving || denying || approved}
+              onClick={handleApprove}
+              className="a-btn a-btn--primary"
+            >
+              {approving ? "Creating credential…" : approved ? "Approved" : "Approve and create credential"}
+            </button>
+            <button
+              disabled={approving || denying || approved}
+              onClick={handleDeny}
+              className="a-btn a-btn--danger"
+            >
+              {denying ? "Denying…" : "Deny"}
+            </button>
+          </div>
+        )}
+
+        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{req.request_id}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function RouteRunApprovalsPage() {
@@ -1526,6 +1670,7 @@ export default function RouteRunApprovalsPage() {
   const [purchaseConfirmations, setPurchaseConfirmations] = useState<PurchaseConfirmationAuthorizationView[]>([]);
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
   const [profileMemReqs, setProfileMemReqs] = useState<ProfileMemoryRequestView[]>([]);
+  const [accountCreationReqs, setAccountCreationReqs] = useState<AccountCreationRequestView[]>([]);
   const [emailResolverStatus, setEmailResolverStatus] = useState<EmailResolverStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1551,8 +1696,9 @@ export default function RouteRunApprovalsPage() {
       listPaymentCardFillAuthorizations("pending_approval").catch(() => []),
       listPurchaseConfirmationAuthorizations("pending_approval").catch(() => []),
       listProfileMemoryRequests("pending_user").catch(() => []),
+      listAccountCreationRequests("pending_user").catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs, acreqs]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1565,6 +1711,7 @@ export default function RouteRunApprovalsPage() {
         setCardFillAuths(cardAuths);
         setPurchaseConfirmations(pconfs);
         setProfileMemReqs(pmreqs);
+        setAccountCreationReqs(acreqs);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1804,9 +1951,17 @@ export default function RouteRunApprovalsPage() {
     setDismissedDiagnostics((prev) => new Set(prev).add(id));
   }
 
+  function handleAccountCreationApproved(id: string) {
+    setAccountCreationReqs((prev) => prev.filter((r) => r.request_id !== id));
+  }
+
+  function handleAccountCreationDenied(id: string) {
+    setAccountCreationReqs((prev) => prev.filter((r) => r.request_id !== id));
+  }
+
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length + accountCreationReqs.length;
 
   return (
     <div className="page">
@@ -2127,6 +2282,26 @@ export default function RouteRunApprovalsPage() {
                       req={r}
                       onSaved={() => handleProfileMemReqSaved(r.request_id)}
                       onCancelled={() => handleProfileMemReqCancelled(r.request_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Account creation requests */}
+              {accountCreationReqs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Account creation needed</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      An agent reached a login wall but no credential exists for this domain. Approve to have Antigen generate a password and store it in your vault.
+                    </p>
+                  </div>
+                  {accountCreationReqs.map((r) => (
+                    <PendingAccountCreationCard
+                      key={r.request_id}
+                      req={r}
+                      onApproved={() => handleAccountCreationApproved(r.request_id)}
+                      onDenied={() => handleAccountCreationDenied(r.request_id)}
                     />
                   ))}
                 </div>

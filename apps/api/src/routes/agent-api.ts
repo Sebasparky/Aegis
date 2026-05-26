@@ -33,6 +33,7 @@ import type {
   ProfileFieldRequest,
   ProfileFieldFillRequest,
   ProfileMemoryRequest,
+  AccountCreationRequest,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -71,6 +72,7 @@ import {
   profileFieldFillRequests,
   profileMemoryRequests,
   encryptedSecretVault,
+  accountCreationRequests,
   challengeEmailResolutions,
   aegisWorkspaces,
   workspaceTasks,
@@ -96,6 +98,7 @@ import { checkSensitiveGrant } from "../lib/sensitiveGrants.js";
 import { runObservationDryRun } from "../runtime/observationDryRun.js";
 import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 import { classifyLoginOutcome, storeDiagnostic } from "../lib/loginDiagnostics.js";
+import { normalizeAccountDomain, accountCreationNextAction, accountCreationPassIdForAgent } from "./account-creation.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -4448,6 +4451,234 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_profile_value_revealed_to_agent: false,
           raw_profile_values_revealed_to_agent: false,
           note: "Antigen injected profile field values directly via CDP. Raw values were never returned to the agent.",
+        },
+      });
+    },
+  );
+
+  // ─── Account Access Resolution v1 ─────────────────────────────────────────
+
+  // POST /api/agent/v1/account-access-resolutions
+  // Called when the agent reaches a login/signup wall. Checks the vault for an existing
+  // credential for the domain. If found, returns credential_available and the agent should
+  // call request_secret_field_injection. If not found, creates a pending AccountCreationRequest
+  // and returns pending_user — the user approves in /route-run-approvals.
+  server.post<{
+    Body: {
+      domain?: string;
+      page_url?: string;
+      reason?: string;
+      wall_type?: "login" | "signup" | "unknown";
+    };
+  }>(
+    "/api/agent/v1/account-access-resolutions",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const collarResult = resolveEffectiveCollar(delegation, collars);
+      if (!collarResult.ok) {
+        return reply.status(collarResult.status as number).send({
+          ok: false,
+          error: { code: collarResult.code, message: collarResult.message },
+        });
+      }
+
+      const { domain: rawDomain, page_url, reason, wall_type = "unknown" } = req.body ?? {};
+
+      if (!rawDomain || typeof rawDomain !== "string" || rawDomain.trim() === "") {
+        return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "domain is required." } });
+      }
+      if (!page_url || typeof page_url !== "string" || page_url.trim() === "") {
+        return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "page_url is required." } });
+      }
+      if (!reason || typeof reason !== "string" || reason.trim() === "") {
+        return reply.status(400).send({ ok: false, error: { code: "VALIDATION_ERROR", message: "reason is required." } });
+      }
+
+      const domain = normalizeAccountDomain(rawDomain);
+
+      // Domain-URL match guard: the URL's hostname must match the normalized domain
+      // or be a subdomain of it. Prevents creating IKEA credentials for an evil.com page.
+      let pageHostname: string;
+      try {
+        pageHostname = new URL(page_url).hostname.toLowerCase().replace(/^www\./, "");
+      } catch {
+        return reply.status(400).send({ ok: false, error: { code: "INVALID_PAGE_URL", message: "page_url is not a valid URL." } });
+      }
+      if (pageHostname !== domain && !pageHostname.endsWith(`.${domain}`)) {
+        return reply.status(400).send({
+          ok: false,
+          error: {
+            code: "DOMAIN_MISMATCH",
+            message: `page_url hostname '${pageHostname}' does not match domain '${domain}'. Antigen will not create credentials for a different domain than the page you are on.`,
+          },
+        });
+      }
+
+      // Vault lookup — check if a credential already exists for this domain.
+      const existingPass = Array.from(aegisVaultPasses.values()).find(
+        p => p.user_id === MOCK_USER_ID && p.domain === domain,
+      );
+
+      if (existingPass) {
+        return reply.send({
+          ok: true,
+          data: {
+            resolution: "credential_available",
+            domain,
+            pass_id: existingPass.pass_id,
+            pass_label: existingPass.label,
+            has_password: true,
+            raw_password_revealed_to_agent: false,
+            otp_revealed_to_agent: false,
+            next_action: "request_secret_field_injection",
+            guidance: `A vault credential exists for ${domain}. Navigate to the login page and call request_secret_field_injection for the username and password fields.`,
+          },
+        });
+      }
+
+      // No credential — create a pending account creation request.
+      const requestId = newId("acreq");
+      const now = new Date();
+      const expires = new Date(now.getTime() + 10 * 60 * 1000); // 10-minute TTL
+
+      const acr: AccountCreationRequest = {
+        request_id: requestId,
+        user_id: MOCK_USER_ID,
+        delegation_id: delegation.id,
+        domain,
+        signup_url: page_url.trim(),
+        reason: reason.trim(),
+        wall_type,
+        status: "pending_user",
+        raw_password_revealed_to_agent: false,
+        otp_revealed_to_agent: false,
+        created_at: now.toISOString(),
+        expires_at: expires.toISOString(),
+      };
+
+      accountCreationRequests.set(requestId, acr);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          resolution: "pending_user",
+          account_creation_request_id: requestId,
+          domain,
+          raw_password_revealed_to_agent: false,
+          otp_revealed_to_agent: false,
+          expires_at: expires.toISOString(),
+          next_action: "poll_account_creation_request",
+          guidance: `No credential exists for ${domain}. An account creation request has been created. Tell the user to approve it in the Antigen UI at /route-run-approvals. Poll get_account_access_resolution with request_id '${requestId}' until status is 'credential_generated', then call request_secret_field_injection with the returned pass_id.`,
+        },
+      });
+    },
+  );
+
+  // GET /api/agent/v1/account-access-resolutions/:requestId
+  // Agent polls for status. Returns pass_id only when credential_generated or completed.
+  server.get<{ Params: { requestId: string } }>(
+    "/api/agent/v1/account-access-resolutions/:requestId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { requestId } = req.params;
+      const r = accountCreationRequests.get(requestId);
+      if (!r) {
+        return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Account creation request not found." } });
+      }
+      if (r.delegation_id !== delegation.id) {
+        return reply.status(403).send({ ok: false, error: { code: "FORBIDDEN", message: "This account creation request belongs to a different delegation." } });
+      }
+
+      // Lazy expiry.
+      if (r.status === "pending_user" && new Date(r.expires_at) <= new Date()) {
+        r.status = "expired";
+        accountCreationRequests.set(requestId, r);
+      }
+
+      const passId = accountCreationPassIdForAgent(r);
+
+      return reply.send({
+        ok: true,
+        data: {
+          request_id: r.request_id,
+          status: r.status,
+          domain: r.domain,
+          raw_password_revealed_to_agent: false,
+          otp_revealed_to_agent: false,
+          ...(passId ? { pass_id: passId, pass_label: `${r.domain} (auto-created)` } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          next_action: accountCreationNextAction(r.status),
+          expires_at: r.expires_at,
+        },
+      });
+    },
+  );
+
+  // POST /api/agent/v1/account-access-resolutions/:requestId/complete
+  // Called by the agent after the signup form has been submitted and the outcome is known.
+  // Only valid when status is credential_generated.
+  server.post<{
+    Params: { requestId: string };
+    Body: { outcome?: "authenticated" | "signup_failed" | "email_verification_pending" };
+  }>(
+    "/api/agent/v1/account-access-resolutions/:requestId/complete",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const { requestId } = req.params;
+      const { outcome } = req.body ?? {};
+
+      const VALID_OUTCOMES = ["authenticated", "signup_failed", "email_verification_pending"];
+      if (!outcome || !VALID_OUTCOMES.includes(outcome)) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "VALIDATION_ERROR", message: `outcome must be one of: ${VALID_OUTCOMES.join(", ")}.` },
+        });
+      }
+
+      const r = accountCreationRequests.get(requestId);
+      if (!r) {
+        return reply.status(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Account creation request not found." } });
+      }
+      if (r.delegation_id !== delegation.id) {
+        return reply.status(403).send({ ok: false, error: { code: "FORBIDDEN", message: "This account creation request belongs to a different delegation." } });
+      }
+      if (r.status !== "credential_generated") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "INVALID_STATE", message: `Cannot complete: request status is '${r.status}'. Only credential_generated requests can be completed.` },
+        });
+      }
+
+      const now = new Date().toISOString();
+      if (outcome === "authenticated") {
+        r.status = "completed";
+        r.completed_at = now;
+      } else {
+        r.status = "failed";
+        r.error = outcome === "signup_failed"
+          ? "Agent reported signup failed."
+          : "Email verification required before login is possible.";
+      }
+      accountCreationRequests.set(requestId, r);
+      schedulePersist();
+
+      return reply.send({
+        ok: true,
+        data: {
+          request_id: r.request_id,
+          status: r.status,
+          domain: r.domain,
+          raw_password_revealed_to_agent: false,
+          otp_revealed_to_agent: false,
+          ...(r.completed_at ? { completed_at: r.completed_at } : {}),
+          ...(r.error ? { error: r.error } : {}),
         },
       });
     },

@@ -1,12 +1,16 @@
 /**
- * Secret Field Masking v1 tests.
+ * Secret Field Masking + Realistic Fill tests.
  *
- * Tests the masking JavaScript expression produced by executeSecretInjectionViaCDP.
- * No real Chrome needed — exercises the expression strings in a Node.js environment
- * using a simulated HTMLInputElement with native setter/getter semantics.
+ * Tests the CDP fill behavior produced by executeSecretInjectionViaCDP:
+ * - Happy path: focus → Input.insertText (secret in params) → mask/blur eval
+ * - Fallback path: setter-based fill when Input.insertText fails
+ * - Password masking invariants
+ * - Security: no Runtime.evaluate expression ever contains the raw secret on happy path
+ *
+ * No real Chrome needed — exercises CDP message sequences and expression strings.
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach } from "vitest";
 
 // ─── Mocks required to load secretInjection.ts without side effects ────────────
 
@@ -18,17 +22,30 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
-// ws is used by executeSecretInjectionViaCDP for real CDP — capture sent messages.
-let capturedExpression: string | null = null;
+// Capture ALL CDP commands sent over the WebSocket so tests can assert on sequence and content.
+type CapturedMsg = { id: number; method: string; params?: Record<string, unknown>; sessionId?: string };
+let sentMessages: CapturedMsg[] = [];
+
+// Controls whether the mock should simulate Input.insertText failure (for fallback tests).
+let simulateInsertTextFailure = false;
 
 vi.mock("ws", () => {
   const handlers: Record<string, ((...args: unknown[]) => void)[]> = {};
+
   const FakeWs = vi.fn().mockImplementation(function (this: Record<string, unknown>) {
     this.send = (raw: string) => {
-      const msg = JSON.parse(raw);
+      const msg = JSON.parse(raw) as CapturedMsg & { method: string };
+      sentMessages.push(msg);
+
+      if (msg.method === "Target.attachToTarget") {
+        handlers["message"]?.forEach((h) =>
+          h(JSON.stringify({ id: msg.id, result: { sessionId: "mock_session" } })),
+        );
+        return;
+      }
+
       if (msg.method === "Runtime.evaluate") {
-        capturedExpression = msg.params.expression as string;
-        // Emit a synthetic evaluate result so the CDP flow resolves.
+        // Return a success result for all eval phases.
         handlers["message"]?.forEach((h) =>
           h(
             JSON.stringify({
@@ -38,21 +55,35 @@ vi.mock("ws", () => {
             }),
           ),
         );
+        return;
       }
-      if (msg.method === "Target.attachToTarget") {
-        handlers["message"]?.forEach((h) =>
-          h(JSON.stringify({ id: msg.id, result: { sessionId: "mock_session" } })),
-        );
+
+      if (msg.method === "Input.insertText") {
+        if (simulateInsertTextFailure) {
+          // Return a CDP error so the fallback setter path is taken.
+          handlers["message"]?.forEach((h) =>
+            h(JSON.stringify({ id: msg.id, error: { code: -32601, message: "Method not found" } })),
+          );
+        } else {
+          // Return empty success result.
+          handlers["message"]?.forEach((h) =>
+            h(JSON.stringify({ id: msg.id, result: {} })),
+          );
+        }
+        return;
       }
     };
+
     this.on = (event: string, handler: (...args: unknown[]) => void) => {
       handlers[event] = handlers[event] ?? [];
       handlers[event].push(handler);
       if (event === "open") setTimeout(() => handler(), 0);
     };
+
     this.close = vi.fn();
     this.terminate = vi.fn();
   });
+
   return { default: FakeWs };
 });
 
@@ -97,109 +128,168 @@ function makeInjection(field_kind: "password" | "username"): SecretFieldInjectio
 }
 
 /**
- * Simulate applying the fill expression in a Node.js-only environment.
- * We build a fake input element that mirrors the native getter/setter pattern,
- * then run the CDP expression via Function constructor.
- *
- * IMPORTANT: The mock resolved value used here is a placeholder string — tests
- * verify structure/behavior, never log or assert on real secret values.
+ * Simulate applying a fill expression in Node.js using a fake HTMLInputElement.
+ * Used only for fallback setter tests — verifies the expression structure is correct.
  */
-function simulateFill(expression: string): {
-  value: string;
-  antigenFilled: string | null;
-} {
+function simulateFill(expression: string): { value: string; antigenFilled: string | null } {
   let internalValue = "";
 
   const el = Object.create(null) as Record<string, unknown>;
-
-  // Simulate HTMLInputElement.prototype.value native getter/setter.
-  // The expression accesses Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
-  // so we wire that up on a fake prototype.
   const fakeProto = Object.create(null);
   Object.defineProperty(fakeProto, "value", {
     get: () => internalValue,
-    set: (v: string) => {
-      internalValue = v;
-    },
+    set: (v: string) => { internalValue = v; },
     configurable: true,
   });
-
-  // Give el the prototype-level descriptor via a local HTMLInputElement stand-in.
   const fakeHTMLInputElement = { prototype: fakeProto };
-
-  // Set up dispatchEvent (no-op) and setAttribute.
   const attributes: Record<string, string> = {};
   el.dispatchEvent = (_e: unknown) => true;
-  el.setAttribute = (name: string, val: string) => {
-    attributes[name] = val;
-  };
-
-  // Apply own-property to make el.value readable from the prototype initially.
+  el.setAttribute = (name: string, val: string) => { attributes[name] = val; };
   Object.defineProperty(el, "value", {
     get: () => fakeProto.value,
-    set: (v: string) => {
-      fakeProto.value = v;
-    },
+    set: (v: string) => { fakeProto.value = v; },
     configurable: true,
   });
 
-  // Build a sandboxed function with the fake globals the expression needs.
   // eslint-disable-next-line no-new-func
-  const fn = new Function(
-    "el",
-    "HTMLInputElement",
-    "Event",
-    "Object",
-    `return ${expression}`,
-  );
+  const fn = new Function("el", "HTMLInputElement", "Event", "InputEvent", "Object", `return ${expression}`);
+  fn(el, fakeHTMLInputElement, class Event {}, class InputEvent {}, Object);
 
-  fn(el, fakeHTMLInputElement, class Event {}, Object);
-
-  return {
-    value: el.value as string,
-    antigenFilled: attributes["data-antigen-filled"] ?? null,
-  };
+  return { value: el.value as string, antigenFilled: attributes["data-antigen-filled"] ?? null };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("Secret Field Masking v1 — fill expression structure", () => {
+describe("Realistic Fill — happy path sequence", () => {
   beforeEach(() => {
-    capturedExpression = null;
+    sentMessages = [];
+    simulateInsertTextFailure = false;
   });
 
-  it("password fill expression contains Object.defineProperty masking", async () => {
+  it("sends focus Runtime.evaluate before Input.insertText", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
-    expect(capturedExpression).not.toBeNull();
-    expect(capturedExpression).toContain("Object.defineProperty");
-    expect(capturedExpression).toContain("data-antigen-filled");
+    const evalIdx = sentMessages.findIndex((m) => m.method === "Runtime.evaluate");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    expect(evalIdx).toBeGreaterThanOrEqual(0);
+    expect(insertIdx).toBeGreaterThan(evalIdx);
   });
 
-  it("username fill expression does NOT contain Object.defineProperty masking", async () => {
+  it("sends Input.insertText on the happy path", async () => {
     await executeSecretInjectionViaCDP(makeInjection("username"), "PLACEHOLDER", "http://localhost:9222");
-    expect(capturedExpression).not.toBeNull();
-    expect(capturedExpression).not.toContain("Object.defineProperty");
-    expect(capturedExpression).toContain("data-antigen-filled");
+    expect(sentMessages.some((m) => m.method === "Input.insertText")).toBe(true);
   });
 
-  it("fill expression never contains the literal resolved value as a plaintext substring", async () => {
-    const secret = "UNIQUE_TEST_SENTINEL_VALUE";
+  it("Input.insertText params.text contains the resolved value", async () => {
+    const secret = "UNIQUE_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("username"), secret, "http://localhost:9222");
+    const insertMsg = sentMessages.find((m) => m.method === "Input.insertText");
+    expect(insertMsg).toBeDefined();
+    expect(insertMsg!.params?.text).toBe(secret);
+  });
+
+  it("no Runtime.evaluate expression contains the resolved value on the happy path", async () => {
+    const secret = "UNIQUE_SECRET_SENTINEL_EXPR";
     await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
-    expect(capturedExpression).not.toBeNull();
-    // The value appears as a JSON-encoded string literal, not raw plaintext.
-    // Confirm the raw string is not present outside of JSON encoding context.
-    const raw = capturedExpression!;
+    const evalMsgs = sentMessages.filter((m) => m.method === "Runtime.evaluate");
+    expect(evalMsgs.length).toBeGreaterThan(0);
+    for (const m of evalMsgs) {
+      const expr = m.params?.expression as string;
+      expect(expr).not.toContain(secret);
+    }
+  });
+
+  it("no Runtime.evaluate expression contains the resolved value even JSON-encoded", async () => {
+    const secret = "UNIQUE_SECRET_JSON_ENCODE_TEST";
+    await executeSecretInjectionViaCDP(makeInjection("username"), secret, "http://localhost:9222");
     const jsonEncoded = JSON.stringify(secret);
-    // Strip the JSON-encoded occurrence; the raw value must not appear elsewhere.
-    const stripped = raw.replace(jsonEncoded, "");
-    expect(stripped).not.toContain(secret);
+    const evalMsgs = sentMessages.filter((m) => m.method === "Runtime.evaluate");
+    for (const m of evalMsgs) {
+      const expr = m.params?.expression as string;
+      expect(expr).not.toContain(jsonEncoded);
+    }
+  });
+
+  it("sends a mask/blur Runtime.evaluate after Input.insertText for password", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const afterInsert = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    expect(afterInsert.length).toBeGreaterThan(0);
+    const maskExpr = afterInsert[afterInsert.length - 1].params?.expression as string;
+    expect(maskExpr).toContain("Object.defineProperty");
+    expect(maskExpr).toContain("blur");
+  });
+
+  it("sends a blur Runtime.evaluate after Input.insertText for username (no mask)", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("username"), "PLACEHOLDER", "http://localhost:9222");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const afterInsert = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    expect(afterInsert.length).toBeGreaterThan(0);
+    const blurExpr = afterInsert[afterInsert.length - 1].params?.expression as string;
+    expect(blurExpr).not.toContain("Object.defineProperty");
+    expect(blurExpr).toContain("blur");
+  });
+
+  it("result reports success and never contains the resolved value", async () => {
+    const secret = "UNIQUE_RESULT_SENTINEL";
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    expect(result.success).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 });
 
-describe("Secret Field Masking v1 — fill expression behavior (simulated DOM)", () => {
-  it("password mask: el.value returns '' after fill expression runs", () => {
-    // Build a minimal fill expression matching what secretInjection.ts produces
-    // for a password field with input_type selector.
+describe("Realistic Fill — fallback setter path", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = true;
+  });
+
+  it("falls back to setter Runtime.evaluate when Input.insertText fails", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("username"), "FALLBACK_VAL", "http://localhost:9222");
+    // Should have sent Input.insertText (which failed) then a setter Runtime.evaluate
+    expect(sentMessages.some((m) => m.method === "Input.insertText")).toBe(true);
+    // After the failed insertText there should be a Runtime.evaluate with the value
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const fallbackEvals = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    expect(fallbackEvals.length).toBeGreaterThan(0);
+  });
+
+  it("fallback setter expression contains the value (JSON-encoded, as original path)", async () => {
+    const secret = "FALLBACK_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("username"), secret, "http://localhost:9222");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const fallbackEvals = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    const fallbackExpr = fallbackEvals[0]?.params?.expression as string | undefined;
+    expect(fallbackExpr).toBeDefined();
+    expect(fallbackExpr).toContain(JSON.stringify(secret));
+  });
+
+  it("fallback path result does not expose the resolved value", async () => {
+    const secret = "FALLBACK_LEAK_TEST";
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("fallback setter for password includes Object.defineProperty mask", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("password"), "FALLBACK_PWD", "http://localhost:9222");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const fallbackEvals = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    const fallbackExpr = fallbackEvals[0]?.params?.expression as string | undefined;
+    expect(fallbackExpr).toBeDefined();
+    expect(fallbackExpr).toContain("Object.defineProperty");
+  });
+
+  it("fallback setter for username does not include Object.defineProperty mask", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("username"), "FALLBACK_USER", "http://localhost:9222");
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const fallbackEvals = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    const fallbackExpr = fallbackEvals[0]?.params?.expression as string | undefined;
+    expect(fallbackExpr).toBeDefined();
+    expect(fallbackExpr).not.toContain("Object.defineProperty");
+  });
+});
+
+describe("Password mask DOM simulation — fallback setter expression", () => {
+  it("password mask: el.value returns '' after fallback setter expression runs", () => {
     const maskExpr = `(function() {
       var el = el_param;
       if (!el) return { ok: false, reason: 'element not found' };
@@ -207,6 +297,7 @@ describe("Secret Field Masking v1 — fill expression behavior (simulated DOM)",
       setter.call(el, "placeholder_value");
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
       Object.defineProperty(el, 'value', {
         get: function() { return ''; },
         set: function(v) { setter.call(el, v); },
@@ -216,46 +307,36 @@ describe("Secret Field Masking v1 — fill expression behavior (simulated DOM)",
       return { ok: true };
     })()`;
 
-    // The expression references 'el_param' not 'el' to avoid shadowing in Function scope.
-    // Adjust to pass el as argument named el_param.
-    const fn = new Function("el_param", "HTMLInputElement", "Event", "Object", `return ${maskExpr}`);
+    const fn = new Function("el_param", "HTMLInputElement", "Event", "InputEvent", "Object", `return ${maskExpr}`);
 
     let internalValue = "";
     const proto = { get value() { return internalValue; }, set value(v: string) { internalValue = v; } };
     const fakeHTMLInputElement = { prototype: proto };
     const attrs: Record<string, string> = {};
-    const el = {
-      dispatchEvent: () => true,
-      setAttribute: (k: string, v: string) => { attrs[k] = v; },
-    };
-    // Wire el.value to prototype initially.
+    const el = { dispatchEvent: () => true, setAttribute: (k: string, v: string) => { attrs[k] = v; } };
     Object.defineProperty(el, "value", {
       get: () => proto.value,
       set: (v: string) => { proto.value = v; },
       configurable: true,
     });
 
-    fn(el, fakeHTMLInputElement, class Event {}, Object);
+    fn(el, fakeHTMLInputElement, class Event {}, class InputEvent {}, Object);
 
     expect((el as Record<string, unknown>).value).toBe("");
     expect(attrs["data-antigen-filled"]).toBe("true");
   });
 
-  it("password mask: setter still works after masking (re-assignment updates internal state)", () => {
+  it("password mask: setter still works after masking", () => {
     let internalValue = "";
     const proto = { get value() { return internalValue; }, set value(v: string) { internalValue = v; } };
     const fakeHTMLInputElement = { prototype: proto };
-    const el = {
-      dispatchEvent: () => true,
-      setAttribute: () => {},
-    };
+    const el = { dispatchEvent: () => true, setAttribute: () => {} };
     Object.defineProperty(el, "value", {
       get: () => proto.value,
       set: (v: string) => { proto.value = v; },
       configurable: true,
     });
 
-    // Apply mask directly.
     const setter = Object.getOwnPropertyDescriptor(fakeHTMLInputElement.prototype, "value")!.set!;
     Object.defineProperty(el, "value", {
       get: () => "",
@@ -263,60 +344,24 @@ describe("Secret Field Masking v1 — fill expression behavior (simulated DOM)",
       configurable: true,
     });
 
-    // Getter returns "".
     expect((el as Record<string, unknown>).value).toBe("");
-    // Setter should update internal state without throwing.
     expect(() => { (el as Record<string, unknown>).value = "re_injected"; }).not.toThrow();
-  });
-
-  it("username fill: el.value is still readable after fill (no masking applied)", () => {
-    const usernameExpr = `(function() {
-      var el = el_param;
-      if (!el) return { ok: false, reason: 'element not found' };
-      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, "placeholder_value");
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.setAttribute('data-antigen-filled', 'true');
-      return { ok: true };
-    })()`;
-
-    const fn = new Function("el_param", "HTMLInputElement", "Event", "Object", `return ${usernameExpr}`);
-
-    let internalValue = "";
-    const proto = { get value() { return internalValue; }, set value(v: string) { internalValue = v; } };
-    const fakeHTMLInputElement = { prototype: proto };
-    const attrs: Record<string, string> = {};
-    const el = {
-      dispatchEvent: () => true,
-      setAttribute: (k: string, v: string) => { attrs[k] = v; },
-    };
-    Object.defineProperty(el, "value", {
-      get: () => proto.value,
-      set: (v: string) => { proto.value = v; },
-      configurable: true,
-    });
-
-    fn(el, fakeHTMLInputElement, class Event {}, Object);
-
-    // Username should remain readable — agents may need it for error recovery.
-    expect((el as Record<string, unknown>).value).toBe("placeholder_value");
-    expect(attrs["data-antigen-filled"]).toBe("true");
   });
 });
 
-describe("Secret Field Masking v1 — executeSecretInjectionViaCDP returns no secret in result", () => {
+describe("Realistic Fill — result safety invariants", () => {
   beforeEach(() => {
-    capturedExpression = null;
+    sentMessages = [];
+    simulateInsertTextFailure = false;
   });
 
-  it("result for password field contains no resolved value", async () => {
+  it("password field result contains no resolved value", async () => {
     const result = await executeSecretInjectionViaCDP(makeInjection("password"), "SENTINEL_SECRET", "http://localhost:9222");
     expect(JSON.stringify(result)).not.toContain("SENTINEL_SECRET");
     expect(result.success).toBe(true);
   });
 
-  it("result for username field contains no resolved value", async () => {
+  it("username field result contains no resolved value", async () => {
     const result = await executeSecretInjectionViaCDP(makeInjection("username"), "SENTINEL_USERNAME", "http://localhost:9222");
     expect(JSON.stringify(result)).not.toContain("SENTINEL_USERNAME");
     expect(result.success).toBe(true);

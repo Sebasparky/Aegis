@@ -220,7 +220,11 @@ export async function executeProfileFieldFillViaCDP(
       let fieldIdx = 0;
       let msgId = 1;
       let sessionId: string | null = null;
-      let phase: "attach" | "iframe_check" | "fill" = "attach";
+      let phase: "attach" | "iframe_check" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
+
+      // Track CDP command IDs for unambiguous response routing.
+      let attachMsgId: number | null = null;
+      let insertMsgId: number | null = null;
 
       const timer = setTimeout(() => {
         ws.terminate();
@@ -247,6 +251,32 @@ export async function executeProfileFieldFillViaCDP(
         return id;
       };
 
+      const recordFilled = (rawValue: string) => {
+        const field = fields[fieldIdx];
+        entries.push({
+          key: field.key,
+          field_filled: true,
+          status: "filled",
+          masked_summary: maskProfileValue(field.key, rawValue),
+          raw_profile_value_revealed_to_agent: false,
+        });
+        fieldIdx++;
+        advanceField();
+      };
+
+      const recordFailed = (error: string) => {
+        const field = fields[fieldIdx];
+        entries.push({
+          key: field.key,
+          field_filled: false,
+          status: "failed",
+          raw_profile_value_revealed_to_agent: false,
+          error,
+        });
+        fieldIdx++;
+        advanceField();
+      };
+
       const advanceField = () => {
         if (fieldIdx >= fields.length) {
           clearTimeout(timer);
@@ -256,6 +286,7 @@ export async function executeProfileFieldFillViaCDP(
         }
         const field = fields[fieldIdx];
         const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+        // Include tagName in result so the handler can branch on SELECT vs INPUT.
         const iframeCheck = `(function() {
           var el = ${selectorExpr};
           if (!el) return { ok: false, reason: 'element not found' };
@@ -264,14 +295,14 @@ export async function executeProfileFieldFillViaCDP(
             if (node.tagName === 'IFRAME') return { ok: false, reason: 'IFRAME_NOT_SUPPORTED' };
             node = node.parentNode;
           }
-          return { ok: true };
+          return { ok: true, tagName: el.tagName };
         })()`;
         phase = "iframe_check";
         send("Runtime.evaluate", { expression: iframeCheck, returnByValue: true }, sessionId!);
       };
 
       ws.on("open", () => {
-        send("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+        attachMsgId = send("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
       });
 
       ws.on("message", (raw) => {
@@ -282,41 +313,73 @@ export async function executeProfileFieldFillViaCDP(
           return;
         }
 
+        const id = msg.id as number | undefined;
         const result = msg.result as Record<string, unknown> | undefined;
 
-        if (result?.sessionId && !sessionId) {
+        // Attach response — identified by tracked message ID.
+        if (id === attachMsgId && result?.sessionId && !sessionId) {
           sessionId = result.sessionId as string;
           advanceField();
           return;
         }
 
+        // Input.insertText response — result is empty {}, not a Runtime.evaluate shape.
+        if (id === insertMsgId) {
+          insertMsgId = null;
+          const field = fields[fieldIdx];
+          const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+          if (msg.error) {
+            // Input.insertText not supported — fall back to setter fill (value embedded in JS).
+            const resolvedValue = resolvedValues.get(field.key) ?? "";
+            const setterFallbackExpr = `(function() {
+              var el = ${selectorExpr};
+              if (!el) return { ok: false, reason: 'element not found' };
+              var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(el, ${JSON.stringify(resolvedValue)});
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+              el.setAttribute('data-antigen-filled', 'true');
+              return { ok: true };
+            })()`;
+            phase = "input_setter_fallback";
+            send("Runtime.evaluate", { expression: setterFallbackExpr, returnByValue: true }, sessionId!);
+          } else {
+            // Insert succeeded — dispatch change/blur and mark filled.
+            const blurExpr = `(function() {
+              var el = ${selectorExpr};
+              if (!el) return { ok: false, reason: 'element not found' };
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+              el.setAttribute('data-antigen-filled', 'true');
+              return { ok: true };
+            })()`;
+            phase = "input_blur";
+            send("Runtime.evaluate", { expression: blurExpr, returnByValue: true }, sessionId!);
+          }
+          return;
+        }
+
         const evalResult = result?.result as Record<string, unknown> | undefined;
         if (evalResult?.type === "object" && evalResult?.value !== undefined && sessionId) {
-          const val = evalResult.value as { ok?: boolean; reason?: string };
+          const val = evalResult.value as { ok?: boolean; reason?: string; tagName?: string };
           const field = fields[fieldIdx];
 
           if (phase === "iframe_check") {
             if (!val?.ok) {
-              entries.push({
-                key: field.key,
-                field_filled: false,
-                status: "failed",
-                raw_profile_value_revealed_to_agent: false,
-                error: `CDP iframe check: ${val?.reason ?? "unknown"}`,
-              });
-              fieldIdx++;
-              advanceField();
+              recordFailed(`CDP iframe check: ${val?.reason ?? "unknown"}`);
               return;
             }
-            // Iframe check passed — fill the field (handles native <select> and <input>)
-            const resolvedValue = resolvedValues.get(field.key) ?? "";
             const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
-            // No DOM value masking — leave field value intact so checkout pages can read and submit it.
-            const fillExpr = `(function() {
-              var el = ${selectorExpr};
-              if (!el) return { ok: false, reason: 'element not found' };
-              var rawVal = ${JSON.stringify(resolvedValue)};
-              if (el.tagName === 'SELECT') {
+            const resolvedValue = resolvedValues.get(field.key) ?? "";
+
+            if (val.tagName === "SELECT") {
+              // SELECT element — use existing setter fill (no realistic typing needed for dropdowns).
+              // No DOM value masking — leave field value intact so checkout pages can read and submit it.
+              const selectFillExpr = `(function() {
+                var el = ${selectorExpr};
+                if (!el) return { ok: false, reason: 'element not found' };
+                var rawVal = ${JSON.stringify(resolvedValue)};
                 var stateMap = ${JSON.stringify(US_STATE_MAP)};
                 var stateRevMap = ${JSON.stringify(US_STATE_REV_MAP)};
                 var countryMap = ${JSON.stringify(COUNTRY_MAP)};
@@ -344,41 +407,57 @@ export async function executeProfileFieldFillViaCDP(
                 el.dispatchEvent(new Event('blur', { bubbles: true }));
                 el.setAttribute('data-antigen-filled', 'true');
                 return { ok: true };
-              }
-              var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-              setter.call(el, rawVal);
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              el.setAttribute('data-antigen-filled', 'true');
-              return { ok: true };
-            })()`;
-            phase = "fill";
-            send("Runtime.evaluate", { expression: fillExpr, returnByValue: true }, sessionId);
+              })()`;
+              phase = "select_fill";
+              send("Runtime.evaluate", { expression: selectFillExpr, returnByValue: true }, sessionId);
+            } else {
+              // INPUT element — realistic 3-phase fill: focus/clear → Input.insertText → blur.
+              // No secret in this expression.
+              const focusExpr = `(function() {
+                var el = ${selectorExpr};
+                if (!el) return { ok: false, reason: 'element not found' };
+                el.scrollIntoView({ block: 'nearest' });
+                el.focus();
+                var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(el, '');
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+                return { ok: true };
+              })()`;
+              phase = "input_focus";
+              send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId);
+            }
             return;
           }
 
-          if (phase === "fill") {
-            const field = fields[fieldIdx];
+          if (phase === "input_focus") {
+            if (!val?.ok) {
+              recordFailed(`CDP evaluate (focus): ${val?.reason ?? "element not found"}`);
+              return;
+            }
+            // Focus succeeded — type via Input.insertText (value in CDP params, not JS expression).
+            const resolvedValue = resolvedValues.get(field.key) ?? "";
+            phase = "input_insert";
+            insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+            return;
+          }
+
+          if (phase === "input_blur" || phase === "input_setter_fallback") {
             const rawValue = resolvedValues.get(field.key) ?? "";
             if (val?.ok) {
-              entries.push({
-                key: field.key,
-                field_filled: true,
-                status: "filled",
-                masked_summary: maskProfileValue(field.key, rawValue),
-                raw_profile_value_revealed_to_agent: false,
-              });
+              recordFilled(rawValue);
             } else {
-              entries.push({
-                key: field.key,
-                field_filled: false,
-                status: "failed",
-                raw_profile_value_revealed_to_agent: false,
-                error: `CDP evaluate: ${val?.reason ?? "unknown"}`,
-              });
+              recordFailed(`CDP evaluate: ${val?.reason ?? "unknown"}`);
             }
-            fieldIdx++;
-            advanceField();
+            return;
+          }
+
+          if (phase === "select_fill") {
+            const rawValue = resolvedValues.get(field.key) ?? "";
+            if (val?.ok) {
+              recordFilled(rawValue);
+            } else {
+              recordFailed(`CDP evaluate: ${val?.reason ?? "unknown"}`);
+            }
             return;
           }
         }
@@ -386,15 +465,7 @@ export async function executeProfileFieldFillViaCDP(
         if (msg.error) {
           const field = fields[fieldIdx];
           if (field) {
-            entries.push({
-              key: field.key,
-              field_filled: false,
-              status: "failed",
-              raw_profile_value_revealed_to_agent: false,
-              error: `CDP error: ${JSON.stringify(msg.error)}`,
-            });
-            fieldIdx++;
-            advanceField();
+            recordFailed(`CDP error: ${JSON.stringify(msg.error)}`);
           }
         }
       });

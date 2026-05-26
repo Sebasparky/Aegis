@@ -10,7 +10,16 @@ import type { SecretFieldInjection } from "@aegis/types";
  * a CDP session on the same Chrome instance: multiple clients can connect to the browser-level
  * WS simultaneously, each managing their own sessions.
  *
- * The resolvedValue flows: KMS → this function → CDP Runtime.evaluate → browser field.
+ * Happy path (realistic fill):
+ *   1. Runtime.evaluate — focus field and clear existing value (no secret in expression)
+ *   2. Input.insertText  — type the secret via CDP params (never embedded in JS eval)
+ *   3. Runtime.evaluate — apply password mask + dispatch change/blur + set data-antigen-filled
+ *
+ * Fallback (setter fill): if Input.insertText fails, falls back to the original
+ * native-setter + event-dispatch approach. Secret still flows only through CDP; it appears
+ * JSON-encoded in the fallback Runtime.evaluate expression but is never returned or logged.
+ *
+ * The resolvedValue flows: KMS → this function → CDP params / Runtime.evaluate → browser field.
  * It is never logged, returned in an API response, or persisted.
  */
 export async function executeSecretInjectionViaCDP(
@@ -57,7 +66,7 @@ export async function executeSecretInjectionViaCDP(
       return { success: false, error: "No page targets found via CDP." };
     }
 
-    // Build a JS fill expression from element_hint, mirroring the Playwright locator logic.
+    // Build a JS selector expression from element_hint, mirroring the Playwright locator logic.
     const { selector_hint, label, placeholder, input_type } = injection.element_hint ?? {};
 
     let selectorExpr: string;
@@ -82,14 +91,45 @@ export async function executeSecretInjectionViaCDP(
       selectorExpr = `document.querySelector('input[type="email"],input[type="text"],input:not([type])')`;
     }
 
-    // Embed resolvedValue as a JSON string literal so it never appears in logs as plain text.
-    // For password fields: after dispatching events, shadow el.value with an own-property
-    // getter that returns '' — preventing aria snapshot readback via element.value while
-    // keeping the native form value intact for browser form submission.
-    // React/Vue/Angular capture the value during the input event; masking after is safe for
-    // those frameworks. Vanilla JS onsubmit handlers that read el.value will get ''.
-    // This is a JS-layer mitigation, not a browser-engine security boundary.
+    // Phase 1 (focus/clear): locate element, scroll into view, focus, clear existing value.
+    // No secret value in this expression.
+    const focusExpr = `(function() {
+      var el = ${selectorExpr};
+      if (!el) return { ok: false, reason: 'element not found' };
+      el.scrollIntoView({ block: 'nearest' });
+      el.focus();
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '');
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+      return { ok: true };
+    })()`;
+
+    // Phase 3 (mask/blur): apply password mask if needed, dispatch change/blur, mark filled.
+    // No secret value in this expression.
     const maskBlock = injection.field_kind === "password"
+      ? `
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      Object.defineProperty(el, 'value', {
+        get: function() { return ''; },
+        set: function(v) { setter.call(el, v); },
+        configurable: true,
+      });`
+      : "";
+
+    const maskBlurExpr = `(function() {
+      var el = ${selectorExpr};
+      if (!el) return { ok: false, reason: 'element not found' };${maskBlock}
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+      el.setAttribute('data-antigen-filled', 'true');
+      return { ok: true };
+    })()`;
+
+    // Fallback setter fill (used only if Input.insertText fails).
+    // Secret appears JSON-encoded in the expression — same as the original implementation.
+    // React/Vue/Angular capture the value during the input event; masking after is safe for
+    // those frameworks. Vanilla JS onsubmit handlers that read el.value will get '' for passwords.
+    const setterFallbackMaskBlock = injection.field_kind === "password"
       ? `
       Object.defineProperty(el, 'value', {
         get: function() { return ''; },
@@ -98,13 +138,14 @@ export async function executeSecretInjectionViaCDP(
       });`
       : "";
 
-    const fillExpr = `(function() {
+    const setterFallbackExpr = `(function() {
       var el = ${selectorExpr};
       if (!el) return { ok: false, reason: 'element not found' };
       var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(el, ${JSON.stringify(resolvedValue)});
       el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));${maskBlock}
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));${setterFallbackMaskBlock}
       el.setAttribute('data-antigen-filled', 'true');
       return { ok: true };
     })()`;
@@ -113,12 +154,20 @@ export async function executeSecretInjectionViaCDP(
       const ws = new WebSocket(browserWsUrl);
       let msgId = 1;
       let sessionId: string | null = null;
+
+      // Track each CDP command's message ID so responses can be routed unambiguously.
+      let attachId: number;
+      let focusId: number;
+      let insertId: number;
+      let maskId: number;
+      let fallbackId: number;
+
       const timer = setTimeout(() => {
         ws.terminate();
         resolve({ success: false, error: "CDP fill timed out after 10 seconds." });
       }, 10_000);
 
-      const send = (method: string, params: Record<string, unknown> = {}, sid?: string) => {
+      const send = (method: string, params: Record<string, unknown> = {}, sid?: string): number => {
         const id = msgId++;
         const msg: Record<string, unknown> = { id, method, params };
         if (sid) msg.sessionId = sid;
@@ -126,8 +175,14 @@ export async function executeSecretInjectionViaCDP(
         return id;
       };
 
+      const finish = (success: boolean, error?: string) => {
+        clearTimeout(timer);
+        ws.close();
+        resolve({ success, error });
+      };
+
       ws.on("open", () => {
-        send("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+        attachId = send("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
       });
 
       ws.on("message", (raw) => {
@@ -138,38 +193,69 @@ export async function executeSecretInjectionViaCDP(
           return;
         }
 
-        // Attached — got a session ID; now evaluate the fill expression.
+        const id = msg.id as number | undefined;
         const result = msg.result as Record<string, unknown> | undefined;
-        if (result?.sessionId && !sessionId) {
+
+        // Attach response — got a session ID; start phase 1 (focus/clear).
+        if (id === attachId) {
+          if (!result?.sessionId) {
+            finish(false, "CDP attach failed: no sessionId returned.");
+            return;
+          }
           sessionId = result.sessionId as string;
-          send("Runtime.evaluate", { expression: fillExpr, returnByValue: true }, sessionId);
+          focusId = send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId);
           return;
         }
 
-        // Evaluate result returned.
-        const evalResult = (result?.result as Record<string, unknown> | undefined);
-        if (evalResult?.type === "object" && evalResult?.value !== undefined && sessionId) {
-          clearTimeout(timer);
-          ws.close();
-          const val = evalResult.value as { ok?: boolean; reason?: string };
-          if (val?.ok) {
-            resolve({ success: true });
+        // Phase 1 result — focus/clear eval.
+        if (id === focusId) {
+          const val = (result?.result as Record<string, unknown> | undefined);
+          const evalVal = val?.value as { ok?: boolean; reason?: string } | undefined;
+          if (evalVal?.ok) {
+            // Focus succeeded — phase 2: type via Input.insertText (secret in params, not in JS).
+            insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
           } else {
-            resolve({ success: false, error: `CDP evaluate: ${val?.reason ?? "unknown"}` });
+            finish(false, `CDP evaluate (focus): ${evalVal?.reason ?? "element not found"}`);
           }
           return;
         }
 
-        if (msg.error) {
-          clearTimeout(timer);
-          ws.close();
-          resolve({ success: false, error: `CDP error: ${JSON.stringify(msg.error)}` });
+        // Phase 2 result — Input.insertText.
+        if (id === insertId) {
+          if (msg.error) {
+            // Input.insertText not supported or failed — fall back to setter fill.
+            fallbackId = send("Runtime.evaluate", { expression: setterFallbackExpr, returnByValue: true }, sessionId!);
+          } else {
+            // Insert succeeded — phase 3: apply mask/blur.
+            maskId = send("Runtime.evaluate", { expression: maskBlurExpr, returnByValue: true }, sessionId!);
+          }
+          return;
+        }
+
+        // Phase 3 result — mask/blur eval.
+        if (id === maskId) {
+          const val = (result?.result as Record<string, unknown> | undefined);
+          const evalVal = val?.value as { ok?: boolean; reason?: string } | undefined;
+          finish(!!evalVal?.ok, evalVal?.ok ? undefined : `CDP evaluate (mask/blur): ${evalVal?.reason ?? "unknown"}`);
+          return;
+        }
+
+        // Fallback setter result.
+        if (id === fallbackId) {
+          const val = (result?.result as Record<string, unknown> | undefined);
+          const evalVal = val?.value as { ok?: boolean; reason?: string } | undefined;
+          finish(!!evalVal?.ok, evalVal?.ok ? undefined : `CDP fallback: ${evalVal?.reason ?? "unknown"}`);
+          return;
+        }
+
+        if (msg.error && !id) {
+          finish(false, `CDP error: ${JSON.stringify(msg.error)}`);
         }
       });
 
       ws.on("error", (err) => {
         clearTimeout(timer);
-        resolve({ success: false, error: `WebSocket error: ${err.message}` });
+        resolve({ success: false, error: `WebSocket error: ${(err as Error).message}` });
       });
     });
   } catch (err: unknown) {

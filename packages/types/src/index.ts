@@ -1307,6 +1307,13 @@ export interface InstalledSkill {
   enabled: boolean;
 }
 
+export type StepFailureReason =
+  | "locator_not_found"
+  | "action_threw"
+  | "no_meaningful_progress"
+  | "fallback_attempted_failed"
+  | "fallback_blocked_safety";
+
 export interface StepVerificationResult {
   step_id: string;
   order: number;
@@ -1318,6 +1325,7 @@ export interface StepVerificationResult {
   passed: boolean;
   confidence: number;
   error?: string;
+  failure_reason?: StepFailureReason;
 }
 
 export interface RouteVerificationReport {

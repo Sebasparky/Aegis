@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { createHash } from "crypto";
 import type { AegisRoute, RoutePreviewAsset, RouteReplayAsset, RouteStep, RouteLocator } from "@aegis/types";
 import { newId } from "../store/index.js";
+import { classifyStepSafety, SENSITIVE_CLICK_RE } from "./stepSafety.js";
 
 const __filename = fileURLToPath(import.meta.url);
 export const PREVIEW_DIR = join(dirname(__filename), "../../.data/route-previews");
@@ -21,27 +22,7 @@ export function resolveStartUrl(route: AegisRoute): string | null {
 
 // ─── Replay Capture ───────────────────────────────────────────────────────────
 
-const SENSITIVE_CLICK_RE = /\b(submit|confirm|pay|purchase|checkout|sign[\s-]?in|log[\s-]?in|transfer|delete|remove|download|buy|order|proceed|authorize|approve)\b/i;
-
-export function classifyStepSafety(step: RouteStep): "safe" | "sensitive" {
-  if (step.approval_required) return "sensitive";
-
-  if (step.action === "fill") {
-    if (step.value_policy?.type === "safe_literal" && step.value_policy.value !== undefined) return "safe";
-    return "sensitive";
-  }
-
-  if (step.action === "click") {
-    const text = `${step.intent} ${step.description}`;
-    if (SENSITIVE_CLICK_RE.test(text)) return "sensitive";
-    return "safe";
-  }
-
-  if (step.action === "navigate" || step.action === "read") return "safe";
-
-  // Conservative default — unknown or ambiguous actions are treated as sensitive.
-  return "sensitive";
-}
+export { classifyStepSafety };
 
 function routeHash(route: AegisRoute): string {
   const input = `${route.route_id}:${route.version}:${route.steps.map(s => s.step_id).join(",")}`;

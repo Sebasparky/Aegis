@@ -7,6 +7,7 @@ import type {
   StepVerificationResult,
   RouteVerificationReport,
 } from "@aegis/types";
+import { classifyStepSafety } from "../lib/stepSafety.js";
 
 // Confidence by locator type (mirrors the compiler's scoring)
 const LOCATOR_CONFIDENCE: Record<RouteLocator["type"], number> = {
@@ -53,6 +54,26 @@ async function wikipediaOutcomeMatches(page: Page, searchQuery: string): Promise
     h1.toLowerCase().includes(q);
 }
 
+// ── Page state helpers ────────────────────────────────────────────────────────
+
+interface PageState {
+  url: string;
+  title: string;
+}
+
+async function capturePageState(page: Page): Promise<PageState> {
+  return {
+    url: page.url(),
+    title: await page.title().catch(() => ""),
+  };
+}
+
+function hasMeaningfulProgress(before: PageState, after: PageState): boolean {
+  return before.url !== after.url || before.title !== after.title;
+}
+
+// ── Locator building ──────────────────────────────────────────────────────────
+
 function buildPlaywrightLocator(page: Page, loc: RouteLocator): Locator {
   switch (loc.type) {
     case "role":
@@ -72,6 +93,35 @@ function buildPlaywrightLocator(page: Page, loc: RouteLocator): Locator {
   }
 }
 
+// For click/submit steps, inject synthetic clickable candidates before
+// label/placeholder entries to avoid resolving to a label-matched input
+// when a submit button exists.
+function buildClickCandidates(
+  candidates: RouteLocator[],
+  stepTarget: RouteStep["target"],
+): RouteLocator[] {
+  const nameHint =
+    stepTarget.preferred_locator.name ??
+    stepTarget.fallback_locators.find(l => l.name)?.name;
+
+  const synthetic: RouteLocator[] = [];
+  if (nameHint) {
+    synthetic.push({ type: "role", role: "button", name: nameHint });
+    synthetic.push({ type: "role", role: "link", name: nameHint });
+  }
+  // Broad submit-input CSS selector as additional fallback
+  synthetic.push({ type: "css", value: "button[type=submit], input[type=submit]" });
+
+  // Deduplicate: synthetic first, then original candidates
+  const seen = new Set<string>();
+  const merged: RouteLocator[] = [];
+  for (const loc of [...synthetic, ...candidates]) {
+    const key = JSON.stringify(loc);
+    if (!seen.has(key)) { seen.add(key); merged.push(loc); }
+  }
+  return merged;
+}
+
 async function resolveLocatorWithFallback(
   page: Page,
   step: RouteStep,
@@ -80,10 +130,16 @@ async function resolveLocatorWithFallback(
   selected: RouteLocator | null;
   found: boolean;
 }> {
-  const candidates: RouteLocator[] = [
+  const baseCandidates: RouteLocator[] = [
     step.target.preferred_locator,
     ...step.target.fallback_locators,
   ];
+
+  // For click-like actions, prefer button/link targets before label/placeholder inputs
+  const candidates: RouteLocator[] =
+    (step.action === "click" || step.action === "submit" || step.action === "navigate")
+      ? buildClickCandidates(baseCandidates, step.target)
+      : baseCandidates;
 
   const attempts: StepVerificationResult["locator_attempts"] = [];
 
@@ -173,9 +229,16 @@ async function executeAction(
   }
 }
 
+// ── Per-step execution ────────────────────────────────────────────────────────
+
+interface ExecuteVerificationStepOpts {
+  lastSafeFillLocator?: RouteLocator | null;
+}
+
 async function executeVerificationStep(
   page: Page,
   step: RouteStep,
+  opts: ExecuteVerificationStepOpts = {},
 ): Promise<StepVerificationResult> {
   const { attempts, selected, found } = await resolveLocatorWithFallback(page, step);
 
@@ -191,16 +254,22 @@ async function executeVerificationStep(
       passed: false,
       confidence: 0,
       error: "No locator resolved — element not found on page.",
+      failure_reason: "locator_not_found",
     };
   }
 
   const playwrightLoc = buildPlaywrightLocator(page, selected);
+  const isClickLike =
+    step.action === "click" || step.action === "submit" || step.action === "navigate";
 
   try {
+    // Capture pre-action page state for click-like steps
+    const preState = isClickLike ? await capturePageState(page) : null;
+
     const { performed, error: actionError } = await executeAction(page, step, playwrightLoc);
 
     if (actionError && step.value_policy?.type === "sensitive_redacted") {
-      // Sensitive_redacted steps are marked as requiring approval, not failed
+      // sensitive_redacted steps: locator resolved; skip is expected
       return {
         step_id: step.step_id,
         order: step.order,
@@ -209,12 +278,142 @@ async function executeVerificationStep(
         selected_locator: selected,
         locator_found: true,
         action_performed: false,
-        passed: true, // locator resolved; skip is expected
+        passed: true,
         confidence: LOCATOR_CONFIDENCE[selected.type],
         error: actionError,
       };
     }
 
+    if (actionError) {
+      return {
+        step_id: step.step_id,
+        order: step.order,
+        action: step.action,
+        locator_attempts: attempts,
+        selected_locator: selected,
+        locator_found: true,
+        action_performed: false,
+        passed: false,
+        confidence: LOCATOR_CONFIDENCE[selected.type],
+        error: actionError,
+        failure_reason: "action_threw",
+      };
+    }
+
+    // ── Outcome detection for click-like steps ──────────────────────────────
+    if (isClickLike && preState !== null) {
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: 5_000 });
+      } catch {
+        // Timeout is non-fatal; proceed to state comparison
+      }
+
+      const postState = await capturePageState(page);
+
+      if (hasMeaningfulProgress(preState, postState)) {
+        // Action caused observable navigation — step passes
+        return {
+          step_id: step.step_id,
+          order: step.order,
+          action: step.action,
+          locator_attempts: attempts,
+          selected_locator: selected,
+          locator_found: true,
+          action_performed: true,
+          passed: true,
+          confidence: LOCATOR_CONFIDENCE[selected.type],
+        };
+      }
+
+      // No progress — consider Enter fallback for safe steps with a prior fill
+      const stepSafety = classifyStepSafety(step);
+
+      if (stepSafety === "sensitive") {
+        return {
+          step_id: step.step_id,
+          order: step.order,
+          action: step.action,
+          locator_attempts: attempts,
+          selected_locator: selected,
+          locator_found: true,
+          action_performed: performed,
+          passed: false,
+          confidence: LOCATOR_CONFIDENCE[selected.type],
+          error: "Click caused no meaningful page progress; Enter fallback blocked (sensitive step).",
+          failure_reason: "fallback_blocked_safety",
+        };
+      }
+
+      if (!opts.lastSafeFillLocator) {
+        return {
+          step_id: step.step_id,
+          order: step.order,
+          action: step.action,
+          locator_attempts: attempts,
+          selected_locator: selected,
+          locator_found: true,
+          action_performed: performed,
+          passed: false,
+          confidence: LOCATOR_CONFIDENCE[selected.type],
+          error: "Click caused no meaningful page progress.",
+          failure_reason: "no_meaningful_progress",
+        };
+      }
+
+      // ── Enter fallback ──────────────────────────────────────────────────
+      try {
+        const fillLoc = buildPlaywrightLocator(page, opts.lastSafeFillLocator);
+        await fillLoc.press("Enter");
+        try {
+          await page.waitForLoadState("domcontentloaded", { timeout: 10_000 });
+        } catch { /* non-fatal */ }
+
+        const postFallbackState = await capturePageState(page);
+        if (hasMeaningfulProgress(preState, postFallbackState)) {
+          return {
+            step_id: step.step_id,
+            order: step.order,
+            action: step.action,
+            locator_attempts: attempts,
+            selected_locator: selected,
+            locator_found: true,
+            action_performed: true,
+            passed: true,
+            confidence: LOCATOR_CONFIDENCE[selected.type],
+          };
+        }
+
+        return {
+          step_id: step.step_id,
+          order: step.order,
+          action: step.action,
+          locator_attempts: attempts,
+          selected_locator: selected,
+          locator_found: true,
+          action_performed: performed,
+          passed: false,
+          confidence: LOCATOR_CONFIDENCE[selected.type],
+          error: "Click caused no meaningful progress; Enter fallback also produced no progress.",
+          failure_reason: "fallback_attempted_failed",
+        };
+      } catch (fallbackErr: any) {
+        return {
+          step_id: step.step_id,
+          order: step.order,
+          action: step.action,
+          locator_attempts: attempts,
+          selected_locator: selected,
+          locator_found: true,
+          action_performed: performed,
+          passed: false,
+          confidence: LOCATOR_CONFIDENCE[selected.type],
+          error: `Enter fallback threw: ${String(fallbackErr?.message ?? fallbackErr)}`,
+          failure_reason: "fallback_attempted_failed",
+        };
+      }
+    }
+
+    // ── Non-click steps (fill, select, download, etc.) ──────────────────────
     return {
       step_id: step.step_id,
       order: step.order,
@@ -239,9 +438,12 @@ async function executeVerificationStep(
       passed: false,
       confidence: LOCATOR_CONFIDENCE[selected.type],
       error: String(err?.message ?? err),
+      failure_reason: "action_threw",
     };
   }
 }
+
+// ── Main verification entry point ─────────────────────────────────────────────
 
 export async function verifyRouteWithPlaywright(
   route: AegisRoute,
@@ -275,8 +477,6 @@ export async function verifyRouteWithPlaywright(
             errors: [`Failed to load Wikipedia: ${msg}`],
           };
         }
-        // On timeout, check whether the search input is already attached — if so,
-        // the page is usable enough to proceed even without domcontentloaded firing.
         try {
           await page
             .getByRole("searchbox", { name: /search wikipedia/i })
@@ -295,9 +495,19 @@ export async function verifyRouteWithPlaywright(
         }
       }
 
+      let lastSafeFillLocator: RouteLocator | null = null;
+
       for (const step of route.steps) {
-        const result = await executeVerificationStep(page, step);
+        const result = await executeVerificationStep(page, step, { lastSafeFillLocator });
         step_results.push(result);
+
+        if (step.action === "fill" && result.passed && result.selected_locator !== null &&
+            classifyStepSafety(step) === "safe") {
+          lastSafeFillLocator = result.selected_locator;
+        } else if (step.action === "fill") {
+          lastSafeFillLocator = null;
+        }
+
         if (!result.passed && result.error) {
           errors.push(`Step ${step.order} (${step.intent}): ${result.error}`);
         }
@@ -307,24 +517,11 @@ export async function verifyRouteWithPlaywright(
       const allStepsPassed = step_results.length > 0 && step_results.every((r) => r.passed);
 
       if (allStepsPassed && searchQuery) {
-        // Wait for any navigation triggered by the last step to settle.
+        // Wait for any remaining navigation to settle
         try { await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }); } catch {}
 
-        // Fallback 1: if the steps left us on Main_Page (e.g. the click opened the
-        // search overlay instead of submitting the form), try filling + Enter.
-        if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
-          try {
-            await page
-              .getByRole("searchbox", { name: /search wikipedia/i })
-              .or(page.locator('input[name="search"]'))
-              .first()
-              .fill(searchQuery);
-            await page.keyboard.press("Enter");
-            await page.waitForLoadState("domcontentloaded", { timeout: 15_000 });
-          } catch {}
-        }
-
-        // Fallback 2: if still no match, navigate directly to the expected article URL.
+        // Fallback: if the generic Enter fallback still left us on the start page,
+        // navigate directly to the expected article URL as a last resort.
         if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
           const articleUrl =
             `https://en.wikipedia.org/wiki/${encodeURIComponent(searchQuery).replace(/%20/g, "_")}`;
@@ -333,7 +530,6 @@ export async function verifyRouteWithPlaywright(
           } catch {}
         }
 
-        // Final outcome check — fail only if all three fallbacks were exhausted.
         if (!(await wikipediaOutcomeMatches(page, searchQuery))) {
           errors.push(
             `Expected result page for "${searchQuery}" but page title/URL/heading did not match. URL: ${page.url()}`,
@@ -380,7 +576,6 @@ export async function verifyRouteWithPlaywright(
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Dismiss any browser dialogs (e.g., the "Please select a month" alert)
   page.on("dialog", async (dialog) => { await dialog.dismiss(); });
 
   const step_results: StepVerificationResult[] = [];
@@ -409,9 +604,19 @@ export async function verifyRouteWithPlaywright(
       };
     }
 
+    let lastSafeFillLocator: RouteLocator | null = null;
+
     for (const step of route.steps) {
-      const result = await executeVerificationStep(page, step);
+      const result = await executeVerificationStep(page, step, { lastSafeFillLocator });
       step_results.push(result);
+
+      if (step.action === "fill" && result.passed && result.selected_locator !== null &&
+          classifyStepSafety(step) === "safe") {
+        lastSafeFillLocator = result.selected_locator;
+      } else if (step.action === "fill") {
+        lastSafeFillLocator = null;
+      }
+
       if (!result.passed && result.error) {
         errors.push(`Step ${step.order} (${step.intent}): ${result.error}`);
       }

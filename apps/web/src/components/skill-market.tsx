@@ -446,12 +446,13 @@ export interface SkillDetailModalProps {
   mode: ModalMode;
   onClose: () => void;
   backLink?: { label: string; href: string };
+  onViewMarketplaceListing?: (skillId: string) => void;
 }
 
 // AegisID of the demo user — used to derive ownership in library mode
 const DEMO_CREATOR_AEGIS_ID = "aid_user_001";
 
-export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink }: SkillDetailModalProps) {
+export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink, onViewMarketplaceListing }: SkillDetailModalProps) {
   const [route, setRoute] = useState<AegisRoute | null>(mode.type === "private_rail" ? mode.route : null);
   const [loadingRoute, setLoadingRoute] = useState(mode.type !== "private_rail");
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -738,13 +739,23 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink }: 
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                 {/* Primary action */}
                 {marketplaceState === "listed" && linkedSkill ? (
-                  <a
-                    href={`/marketplace?skill=${linkedSkill.skill_id}&from=rails`}
-                    className="a-btn a-btn--primary"
-                    style={{ fontSize: 13, textDecoration: "none" }}
-                  >
-                    View Marketplace Listing
-                  </a>
+                  onViewMarketplaceListing ? (
+                    <button
+                      onClick={() => onViewMarketplaceListing(linkedSkill.skill_id)}
+                      className="a-btn a-btn--primary"
+                      style={{ fontSize: 13 }}
+                    >
+                      View Marketplace Listing
+                    </button>
+                  ) : (
+                    <a
+                      href={`/rails?tab=marketplace&skill=${linkedSkill.skill_id}`}
+                      className="a-btn a-btn--primary"
+                      style={{ fontSize: 13, textDecoration: "none" }}
+                    >
+                      View Marketplace Listing
+                    </a>
+                  )
                 ) : isVerified && (marketplaceState === "not_published" || marketplaceState === "unlisted") ? (
                   <button onClick={handlePublish} disabled={busy} className="a-btn a-btn--primary" style={{ fontSize: 13, opacity: busy ? 0.5 : 1 }}>
                     {publishing ? "Publishing…" : marketplaceState === "unlisted" ? "Re-publish to Marketplace" : "Publish to Marketplace"}
@@ -890,12 +901,21 @@ export function SkillDetailModal({ routeId, skillId, mode, onClose, backLink }: 
                 {marketplaceState === "listed" && linkedSkill && (
                   <p style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <span>Listed in Marketplace</span>
-                    <a
-                      href={`/marketplace?skill=${linkedSkill.skill_id}&from=rails`}
-                      style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none" }}
-                    >
-                      View listing →
-                    </a>
+                    {onViewMarketplaceListing ? (
+                      <button
+                        onClick={() => onViewMarketplaceListing(linkedSkill.skill_id)}
+                        style={{ fontSize: 12, color: "var(--blue)", background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                      >
+                        View listing →
+                      </button>
+                    ) : (
+                      <a
+                        href={`/rails?tab=marketplace&skill=${linkedSkill.skill_id}`}
+                        style={{ fontSize: 12, color: "var(--blue)", textDecoration: "none" }}
+                      >
+                        View listing →
+                      </a>
+                    )}
                   </p>
                 )}
                 {marketplaceState === "unlisted" && (

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { AegisRoute } from "@aegis/types";
 import {
   listRoutes, recordRoute,
-  listSkills,
+  listSkills, getSkill,
 } from "../../lib/api";
 import type { SkillWithInstalled } from "../../lib/api";
 import { SpotlightHeroCard } from "@/components/spotlight-hero-card";
@@ -99,6 +99,11 @@ export default function RailsPage() {
   const [modalRouteId, setModalRouteId] = useState<string | null>(null);
   const [modalMode, setModalMode] = useState<"private_rail" | "marketplace" | null>(null);
 
+  // Marketplace-by-skill-id state (for "View Marketplace Listing" deep-link path)
+  const [directMarketplaceSkill, setDirectMarketplaceSkill] = useState<SkillWithInstalled | null>(null);
+  // Pending skill_id to open once marketplace skills finish loading (from URL params)
+  const [pendingSkillId, setPendingSkillId] = useState<string | null>(null);
+
   const [showAdvancedRecorder, setShowAdvancedRecorder] = useState(false);
   const [jsonInput, setJsonInput] = useState("");
   const [compiling, setCompiling] = useState(false);
@@ -110,6 +115,28 @@ export default function RailsPage() {
   useEffect(() => {
     listRoutes().then(setRoutes).finally(() => setLoading(false));
   }, []);
+
+  // Read deep-link params on mount: /rails?tab=marketplace&skill=skill_id
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tab") === "marketplace") {
+      setTab("marketplace");
+      const skillId = params.get("skill");
+      if (skillId) setPendingSkillId(skillId);
+    }
+  }, []);
+
+  // Once marketplace skills load, open the pending deep-linked skill modal
+  useEffect(() => {
+    if (!pendingSkillId || !skillsLoaded) return;
+    const skill = skills.find(s => s.skill_id === pendingSkillId);
+    if (skill) {
+      setDirectMarketplaceSkill(skill);
+    } else {
+      getSkill(pendingSkillId).then(s => setDirectMarketplaceSkill(s)).catch(() => {});
+    }
+    setPendingSkillId(null);
+  }, [pendingSkillId, skills, skillsLoaded]);
 
   useEffect(() => {
     if (tab === "marketplace" && !skillsLoaded) {
@@ -153,6 +180,12 @@ export default function RailsPage() {
   function closeModal() {
     setModalRouteId(null);
     setModalMode(null);
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("skill")) {
+      params.delete("skill");
+      const search = params.toString();
+      window.history.replaceState({}, "", "/rails" + (search ? `?${search}` : ""));
+    }
   }
 
   async function handleCompile(e: React.FormEvent) {
@@ -169,6 +202,25 @@ export default function RailsPage() {
     } catch (err: any) {
       setCompileError(err.message ?? "Compilation failed.");
     } finally { setCompiling(false); }
+  }
+
+  function handleViewMarketplaceListing(skillId: string) {
+    // Close the private rail modal and switch to the Marketplace subtab
+    setModalRouteId(null);
+    setModalMode(null);
+    setTab("marketplace");
+    const skill = skills.find(s => s.skill_id === skillId);
+    if (skill) {
+      setDirectMarketplaceSkill(skill);
+    } else if (skillsLoaded) {
+      getSkill(skillId).then(s => setDirectMarketplaceSkill(s)).catch(() => {});
+    } else {
+      setPendingSkillId(skillId);
+    }
+    const params = new URLSearchParams();
+    params.set("tab", "marketplace");
+    params.set("skill", skillId);
+    window.history.replaceState({}, "", `/rails?${params}`);
   }
 
   const verifiedCount = routes.filter(r => isRouteVerified(r.trust_tier)).length;
@@ -188,6 +240,7 @@ export default function RailsPage() {
         <SkillDetailModal
           routeId={modalRouteId}
           onClose={closeModal}
+          onViewMarketplaceListing={handleViewMarketplaceListing}
           mode={{
             type: "private_rail",
             route: selectedRoute,
@@ -205,6 +258,23 @@ export default function RailsPage() {
           mode={{
             type: "marketplace",
             skill: selectedSkill,
+            onInstallChange: handleInstallChange,
+          }}
+        />
+      )}
+      {directMarketplaceSkill && (
+        <SkillDetailModal
+          skillId={directMarketplaceSkill.skill_id}
+          onClose={() => {
+            setDirectMarketplaceSkill(null);
+            const params = new URLSearchParams(window.location.search);
+            params.delete("skill");
+            const search = params.toString();
+            window.history.replaceState({}, "", "/rails" + (search ? `?${search}` : ""));
+          }}
+          mode={{
+            type: "marketplace",
+            skill: directMarketplaceSkill,
             onInstallChange: handleInstallChange,
           }}
         />

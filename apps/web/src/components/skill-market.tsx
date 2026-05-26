@@ -234,7 +234,7 @@ function NeutralFallback({ name, domain, steps }: { name: string; domain: string
 
 // ─── StepReplayOverlay ────────────────────────────────────────────────────────
 
-function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: boolean }) {
+function StepReplayOverlay({ steps, playing, previewSrc }: { steps: PreviewStep[]; playing: boolean; previewSrc?: string }) {
   const [activeIdx, setActiveIdx] = useState(0);
   const reducedMotion = useRef(false);
 
@@ -252,11 +252,13 @@ function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: 
     return () => clearInterval(id);
   }, [playing, steps.length]);
 
-  const cls = `step-replay-overlay${playing ? " step-replay-overlay--playing" : ""}`;
+  const cls = `step-replay-overlay${playing ? " step-replay-overlay--playing" : ""}${previewSrc ? " step-replay-overlay--has-bg" : ""}`;
 
   if (steps.length === 0) {
     return (
       <div className={cls}>
+        {previewSrc && <img src={previewSrc} className="step-replay-overlay__bg" alt="" aria-hidden draggable={false} />}
+        {previewSrc && <div className="step-replay-overlay__dim" />}
         <span className="step-replay-overlay__empty">No recorded steps yet.</span>
       </div>
     );
@@ -264,6 +266,8 @@ function StepReplayOverlay({ steps, playing }: { steps: PreviewStep[]; playing: 
 
   return (
     <div className={cls}>
+      {previewSrc && <img src={previewSrc} className="step-replay-overlay__bg" alt="" aria-hidden draggable={false} />}
+      {previewSrc && <div className="step-replay-overlay__dim" />}
       <p className="step-replay-overlay__header">Route replay</p>
       {steps.map((step, i) => {
         const isActive = reducedMotion.current || i === activeIdx;
@@ -376,12 +380,12 @@ export function SkillPreviewPane({ domain, name, steps, trustTier, executionMode
         ) : startPageAsset ? (
           <>
             <RealRoutePreview asset={startPageAsset} />
-            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} />}
+            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} previewSrc={posterSrc} />}
           </>
         ) : (
           <>
             <NeutralFallback name={name} domain={domain} steps={steps} />
-            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} />}
+            {enableReplay && <StepReplayOverlay steps={steps} playing={replaying ?? false} previewSrc={posterSrc} />}
           </>
         )}
       </div>

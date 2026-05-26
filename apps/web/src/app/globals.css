@@ -1371,19 +1371,38 @@ body {
 }
 .step-replay-overlay--playing { opacity: 1; }
 
+/* When a real screenshot is available, replace generic dark overlay with the actual image */
+.step-replay-overlay--has-bg {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.step-replay-overlay__bg {
+  position: absolute; inset: 0; z-index: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: top center;
+  filter: blur(2px) brightness(0.48);
+  pointer-events: none; user-select: none; display: block;
+}
+.step-replay-overlay__dim {
+  position: absolute; inset: 0; z-index: 1;
+  background: rgba(14, 16, 24, 0.35);
+  pointer-events: none;
+}
+
 .step-replay-overlay__header {
   font-size: 9.5px; font-weight: 700; letter-spacing: 0.14em;
   text-transform: uppercase; color: rgba(255,255,255,0.32);
-  margin: 0 0 4px;
+  margin: 0 0 4px; position: relative; z-index: 2;
 }
 .step-replay-overlay__empty {
   font-size: 11px; color: rgba(255,255,255,0.45);
-  font-style: italic; text-align: center;
+  font-style: italic; text-align: center; position: relative; z-index: 2;
 }
 .step-replay-overlay__row {
   display: flex; align-items: center; gap: 6px;
   opacity: 0.35; transition: opacity 0.25s ease, background 0.25s ease;
-  border-radius: var(--r-1); padding: 3px 6px;
+  border-radius: var(--r-1); padding: 3px 6px; position: relative; z-index: 2;
 }
 .step-replay-overlay__row--active {
   opacity: 1; background: rgba(255,255,255,0.07);

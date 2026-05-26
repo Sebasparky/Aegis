@@ -117,6 +117,21 @@ describe("classifyStepSafety", () => {
     const step = makeStep({ action: "download" as any });
     expect(classifyStepSafety(step)).toBe("sensitive");
   });
+
+  it("classifies submit action with submit_search intent as safe", () => {
+    const step = makeStep({ action: "submit", intent: "submit_search", description: "submit search" });
+    expect(classifyStepSafety(step)).toBe("safe");
+  });
+
+  it("classifies submit action with pay intent as sensitive", () => {
+    const step = makeStep({ action: "submit", intent: "submit_payment", description: "submit payment form" });
+    expect(classifyStepSafety(step)).toBe("sensitive");
+  });
+
+  it("classifies submit action with approval_required as sensitive", () => {
+    const step = makeStep({ action: "submit", intent: "submit_search", description: "submit search", approval_required: true });
+    expect(classifyStepSafety(step)).toBe("sensitive");
+  });
 });
 
 // ─── POST /api/routes/:routeId/capture-replay-preview ────────────────────────

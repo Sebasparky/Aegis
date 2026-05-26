@@ -3,6 +3,12 @@ import type { RouteStep } from "@aegis/types";
 export const SENSITIVE_CLICK_RE =
   /\b(submit|confirm|pay|purchase|checkout|sign[\s-]?in|log[\s-]?in|transfer|delete|remove|download|buy|order|proceed|authorize|approve)\b/i;
 
+// For submit-action steps the word "submit" in intent/description is the action name, not a
+// sensitivity signal. Use a narrower pattern that catches payment/login/destructive submits.
+// Includes "payment" explicitly since \bpay\b does not match inside "payment".
+export const SENSITIVE_SUBMIT_RE =
+  /\b(confirm|pay|payment|purchase|checkout|sign[\s-]?in|log[\s-]?in|transfer|delete|remove|buy|order|proceed|authorize|approve)\b/i;
+
 export function classifyStepSafety(step: RouteStep): "safe" | "sensitive" {
   if (step.approval_required) return "sensitive";
 
@@ -14,6 +20,13 @@ export function classifyStepSafety(step: RouteStep): "safe" | "sensitive" {
   if (step.action === "click") {
     const text = `${step.intent} ${step.description}`;
     if (SENSITIVE_CLICK_RE.test(text)) return "sensitive";
+    return "safe";
+  }
+
+  if (step.action === "submit") {
+    // "submit" in intent/description is the action name — use SENSITIVE_SUBMIT_RE (no "submit" word).
+    const text = `${step.intent} ${step.description}`;
+    if (SENSITIVE_SUBMIT_RE.test(text)) return "sensitive";
     return "safe";
   }
 

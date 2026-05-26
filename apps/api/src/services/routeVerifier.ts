@@ -177,7 +177,9 @@ async function executeAction(
     }
 
     case "submit": {
-      // submit steps target the fill input; press Enter to submit the form.
+      // Focus before pressing Enter to ensure keyboard events reach the filled input
+      // even if autocomplete shifted DOM focus away during the preceding fill step.
+      await locator.focus().catch(() => {});
       await locator.press("Enter");
       return { performed: true };
     }

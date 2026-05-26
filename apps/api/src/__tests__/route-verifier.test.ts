@@ -18,6 +18,7 @@ function makeFakeLocator(opts: {
   attached?: boolean;
   onPress?: (key: string) => void;
   onClick?: () => void;
+  onFocus?: () => void;
 } = {}) {
   const loc: Record<string, any> = {
     waitFor: vi.fn().mockImplementation(({ state }: { state: string }) => {
@@ -31,6 +32,10 @@ function makeFakeLocator(opts: {
       return Promise.resolve();
     }),
     fill: vi.fn().mockResolvedValue(undefined),
+    focus: vi.fn().mockImplementation(() => {
+      opts.onFocus?.();
+      return Promise.resolve();
+    }),
     press: vi.fn().mockImplementation((key: string) => {
       opts.onPress?.(key);
       return Promise.resolve();
@@ -48,6 +53,7 @@ interface FakePageOpts {
   locatorAttached?: boolean;
   onLocatorPress?: (key: string) => void;
   onLocatorClick?: () => void;
+  onFocus?: () => void;
   onWaitForLoadState?: () => void;
 }
 
@@ -56,6 +62,7 @@ function makeFakePage(opts: FakePageOpts) {
     attached: opts.locatorAttached ?? true,
     onPress: opts.onLocatorPress,
     onClick: opts.onLocatorClick,
+    onFocus: opts.onFocus,
   });
 
   const page: Record<string, any> = {
@@ -130,6 +137,24 @@ function makeFillStep(overrides: Partial<RouteStep> = {}): RouteStep {
     value_policy: { type: "safe_literal", value: "Michigan", store_value: true },
     approval_required: false,
     confidence_required: 0.7,
+    ...overrides,
+  };
+}
+
+function makeSubmitStep(overrides: Partial<RouteStep> = {}): RouteStep {
+  return {
+    step_id: "step_submit_001",
+    order: 2,
+    action: "submit",
+    intent: "submit_search",
+    description: "submit search",
+    target: {
+      preferred_locator: { type: "label", name: "Search" },
+      fallback_locators: [],
+      confidence: 0.88,
+    },
+    approval_required: false,
+    confidence_required: 0.5,
     ...overrides,
   };
 }
@@ -321,5 +346,69 @@ describe("routeVerifier — outcome detection and Enter fallback", () => {
     expect(report.step_results[1].passed).toBe(false);
     expect(report.step_results[1].failure_reason).toBe("fallback_attempted_failed");
     expect(page._locator.press).toHaveBeenCalledWith("Enter");
+  });
+
+  it("fill + submit → Enter causes URL navigation → step passes", async () => {
+    const state = { url: "http://localhost:3001/bank.html", title: "Demo Bank" };
+    const page = makeFakePage({
+      state,
+      onLocatorPress: (key) => {
+        if (key === "Enter") {
+          state.url = "http://localhost:3001/results?q=Michigan";
+          state.title = "Results — Michigan";
+        }
+      },
+    });
+    mockLaunch.mockResolvedValueOnce(makeFakeBrowser(page));
+
+    const report = await verifyRouteWithPlaywright(
+      makeRoute([makeFillStep(), makeSubmitStep()]),
+    );
+
+    expect(report.passed).toBe(true);
+    expect(report.step_results[0].passed).toBe(true); // fill
+    expect(report.step_results[1].passed).toBe(true); // submit
+    expect(page._locator.press).toHaveBeenCalledWith("Enter");
+  });
+
+  it("fill + submit → submit focuses locator before pressing Enter", async () => {
+    const state = { url: "http://localhost:3001/bank.html", title: "Demo Bank" };
+    let focusCalled = false;
+    let focusBeforePress = false;
+    const page = makeFakePage({
+      state,
+      onFocus: () => { focusCalled = true; },
+      onLocatorPress: (key) => {
+        if (key === "Enter") {
+          if (focusCalled) focusBeforePress = true;
+          state.url = "http://localhost:3001/results?q=Michigan";
+          state.title = "Results";
+        }
+      },
+    });
+    mockLaunch.mockResolvedValueOnce(makeFakeBrowser(page));
+
+    await verifyRouteWithPlaywright(
+      makeRoute([makeFillStep(), makeSubmitStep()]),
+    );
+
+    expect(page._locator.focus).toHaveBeenCalled();
+    expect(focusBeforePress).toBe(true);
+  });
+
+  it("fill + submit → submit step classified as safe (Enter fallback not blocked)", async () => {
+    const state = { url: "http://localhost:3001/bank.html", title: "Demo Bank" };
+    // Enter never causes navigation — tests that fallback fires (not blocked) and fails gracefully
+    const page = makeFakePage({ state });
+    mockLaunch.mockResolvedValueOnce(makeFakeBrowser(page));
+
+    const report = await verifyRouteWithPlaywright(
+      makeRoute([makeFillStep(), makeSubmitStep()]),
+    );
+
+    // Submit is safe → fallback fires → both attempts fail → fallback_attempted_failed
+    // NOT fallback_blocked_safety
+    expect(report.step_results[1].failure_reason).toBe("fallback_attempted_failed");
+    expect(report.step_results[1].failure_reason).not.toBe("fallback_blocked_safety");
   });
 });

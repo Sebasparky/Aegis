@@ -105,6 +105,8 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
           const locator = await resolveLocatorForReplay(page, step.target);
           if (locator) {
             await locator.fill(step.value_policy.value);
+            // Keep focus on the filled input so autocomplete doesn't steal it before the submit step.
+            await locator.focus().catch(() => {});
             lastFilledLocator = locator;
             await page.waitForTimeout(400);
           }
@@ -128,12 +130,35 @@ export async function captureRouteReplay(route: AegisRoute): Promise<RouteReplay
             }
           }
         } else if (step.action === "submit") {
-          // submit steps target the fill input — press Enter to trigger form submission.
-          const locator = await resolveLocatorForReplay(page, step.target);
+          // Prefer the Playwright locator stored from the preceding fill step — avoids
+          // re-resolving after autocomplete modifies the DOM and ensures Enter targets
+          // the exact same element that was filled.
+          const locator = lastFilledLocator ?? await resolveLocatorForReplay(page, step.target);
           if (locator) {
+            const prevUrl = page.url();
+            await locator.focus().catch(() => {});
             await locator.press("Enter");
             await page.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+            await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
             await page.waitForTimeout(800);
+            // Fallback B: if Enter produced no URL change, try clicking a visible search submit button.
+            if (page.url() === prevUrl) {
+              for (const btn of [
+                page.getByRole("button", { name: /search/i }).first(),
+                page.locator("button[type=submit]").first(),
+                page.locator("input[type=submit]").first(),
+                page.locator("form button").first(),
+              ]) {
+                try {
+                  if (await btn.count() > 0) {
+                    await btn.click();
+                    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+                    await page.waitForTimeout(800);
+                    break;
+                  }
+                } catch { /* try next candidate */ }
+              }
+            }
             lastFilledLocator = locator;
           }
         }

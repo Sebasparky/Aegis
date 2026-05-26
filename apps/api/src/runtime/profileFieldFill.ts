@@ -28,7 +28,7 @@ export function validateProfileFillSelector(selector: string): { valid: boolean;
 
 // Generate a masked summary for display purposes only — raw value is consumed by CDP and never returned.
 // DOM value is left intact (not masked) so checkout pages can read and submit it normally.
-function maskProfileValue(kind: ProfileFieldKind, rawValue: string): string {
+export function maskProfileValue(kind: ProfileFieldKind, rawValue: string): string {
   if (!rawValue) return "***";
   switch (kind) {
     case "first_name":
@@ -59,7 +59,7 @@ function maskProfileValue(kind: ProfileFieldKind, rawValue: string): string {
     case "city":
     case "region":
     case "country":
-      return rawValue;
+      return rawValue.length > 0 ? `${rawValue[0]}***` : "***";
     default:
       return `${rawValue[0]}***`;
   }

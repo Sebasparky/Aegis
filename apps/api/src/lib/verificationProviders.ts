@@ -198,65 +198,159 @@ export function findProviderForType(
 // Metadata-only descriptors for handoff-based external providers.
 // These are not VerificationProvider instances — they describe external flows.
 
+// ─── Mock provider descriptors (always available as fallbacks) ───────────────
+
+const MOCK_SHEERID_STUDENT: ExternalVerificationProviderDescriptor = {
+  provider_name: "mock_sheerid_student",
+  display_name: "Student Eligibility Verification",
+  supported_types: ["student_status"],
+  provider_category: "affiliation",
+  real_provider_family: "sheerid",
+  handoff_mode: "mock_modal",
+  privacy_summary: [
+    "Antigen stores only your institution name and verified status.",
+    "No academic records, transcripts, or grades are ever shared.",
+    "Raw eligibility data is never exposed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove you are a verified student.",
+    "Agents can prove your institution name.",
+    "Agents cannot access underlying eligibility data.",
+  ],
+};
+
+const MOCK_SHEERID_MILITARY: ExternalVerificationProviderDescriptor = {
+  provider_name: "mock_sheerid_military",
+  display_name: "Military Status Verification",
+  supported_types: ["military_status"],
+  provider_category: "affiliation",
+  real_provider_family: "sheerid",
+  handoff_mode: "mock_modal",
+  privacy_summary: [
+    "Antigen stores only your verified military affiliation status.",
+    "No service records, rank, or deployment history are shared.",
+    "Raw eligibility data is never exposed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove you have verified military affiliation.",
+    "Agents cannot access service records or personal military data.",
+  ],
+};
+
+const MOCK_STRIPE_IDENTITY: ExternalVerificationProviderDescriptor = {
+  provider_name: "mock_stripe_identity",
+  display_name: "Identity Verification",
+  supported_types: ["government_id"],
+  provider_category: "identity",
+  real_provider_family: "stripe_identity",
+  handoff_mode: "mock_modal",
+  privacy_summary: [
+    "Antigen stores only your verified identity status — no documents are retained.",
+    "No document images, document numbers, DOB, or SSN are ever stored or shared.",
+    "Raw documents are never revealed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove your identity has been verified.",
+    "Agents cannot access any document details, numbers, or images.",
+  ],
+};
+
+// ─── Real provider descriptors (enabled by env vars) ─────────────────────────
+// These replace their mock equivalents when the corresponding env vars are set.
+// Antigen uses these providers to verify users for its own trust/account workflow,
+// then issues a minimal signed VerificationCard. No raw provider data is retained.
+
+const STRIPE_IDENTITY_DESCRIPTOR: ExternalVerificationProviderDescriptor = {
+  provider_name: "stripe_identity",
+  display_name: "Identity Verification",
+  supported_types: ["government_id"],
+  provider_category: "identity",
+  real_provider_family: "stripe_identity",
+  handoff_mode: "redirect",
+  privacy_summary: [
+    "Antigen stores only your verified identity status — no documents are retained.",
+    "No document images, document numbers, DOB, or SSN are ever stored or shared.",
+    "Raw documents are never revealed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove your identity has been verified.",
+    "Agents cannot access any document details, numbers, or images.",
+  ],
+};
+
+const SHEERID_STUDENT_DESCRIPTOR: ExternalVerificationProviderDescriptor = {
+  provider_name: "sheerid_student",
+  display_name: "Student Eligibility Verification",
+  supported_types: ["student_status"],
+  provider_category: "affiliation",
+  real_provider_family: "sheerid",
+  handoff_mode: "redirect",
+  privacy_summary: [
+    "Antigen stores only your institution name and verified status.",
+    "No academic records, transcripts, or grades are ever shared.",
+    "Raw eligibility data is never exposed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove you are a verified student.",
+    "Agents can prove your institution name.",
+    "Agents cannot access underlying eligibility data.",
+  ],
+};
+
+const SHEERID_MILITARY_DESCRIPTOR: ExternalVerificationProviderDescriptor = {
+  provider_name: "sheerid_military",
+  display_name: "Military Status Verification",
+  supported_types: ["military_status"],
+  provider_category: "affiliation",
+  real_provider_family: "sheerid",
+  handoff_mode: "redirect",
+  privacy_summary: [
+    "Antigen stores only your verified military affiliation status.",
+    "No service records, rank, or deployment history are shared.",
+    "Raw eligibility data is never exposed to agents or websites.",
+  ],
+  agent_disclosure_summary: [
+    "Agents can prove you have verified military affiliation.",
+    "Agents cannot access service records or personal military data.",
+  ],
+};
+
+/**
+ * Returns one descriptor per capability type.
+ * Prefers real providers when env vars are explicitly set; falls back to mocks.
+ * Reads env at call time so tests can override process.env in beforeEach.
+ */
+export function listExternalProviderDescriptors(): ExternalVerificationProviderDescriptor[] {
+  const stripeEnabled =
+    process.env.STRIPE_IDENTITY_ENABLED === "true" && !!process.env.STRIPE_SECRET_KEY;
+  const sheerIdBaseEnabled =
+    process.env.SHEERID_ENABLED === "true" && !!process.env.SHEERID_API_TOKEN;
+
+  return [
+    // government_id: real Stripe OR mock fallback — never both
+    stripeEnabled ? STRIPE_IDENTITY_DESCRIPTOR : MOCK_STRIPE_IDENTITY,
+    // student_status
+    sheerIdBaseEnabled && !!process.env.SHEERID_STUDENT_PROGRAM_ID
+      ? SHEERID_STUDENT_DESCRIPTOR
+      : MOCK_SHEERID_STUDENT,
+    // military_status
+    sheerIdBaseEnabled && !!process.env.SHEERID_MILITARY_PROGRAM_ID
+      ? SHEERID_MILITARY_DESCRIPTOR
+      : MOCK_SHEERID_MILITARY,
+  ];
+}
+
+/** Kept for backward compatibility; searches the dynamic list. */
 export const EXTERNAL_PROVIDER_DESCRIPTORS: ExternalVerificationProviderDescriptor[] = [
-  {
-    provider_name: "mock_sheerid_student",
-    display_name: "Student Eligibility Verification",
-    supported_types: ["student_status"],
-    provider_category: "affiliation",
-    real_provider_family: "sheerid",
-    handoff_mode: "mock_modal",
-    privacy_summary: [
-      "Antigen stores only your institution name and verified status.",
-      "No academic records, transcripts, or grades are ever shared.",
-      "Raw eligibility data is never exposed to agents or websites.",
-    ],
-    agent_disclosure_summary: [
-      "Agents can prove you are a verified student.",
-      "Agents can prove your institution name.",
-      "Agents cannot access underlying eligibility data.",
-    ],
-  },
-  {
-    provider_name: "mock_sheerid_military",
-    display_name: "Military Status Verification",
-    supported_types: ["military_status"],
-    provider_category: "affiliation",
-    real_provider_family: "sheerid",
-    handoff_mode: "mock_modal",
-    privacy_summary: [
-      "Antigen stores only your verified military affiliation status.",
-      "No service records, rank, or deployment history are shared.",
-      "Raw eligibility data is never exposed to agents or websites.",
-    ],
-    agent_disclosure_summary: [
-      "Agents can prove you have verified military affiliation.",
-      "Agents cannot access service records or personal military data.",
-    ],
-  },
-  {
-    provider_name: "mock_stripe_identity",
-    display_name: "Identity Verification",
-    supported_types: ["government_id"],
-    provider_category: "identity",
-    real_provider_family: "stripe_identity",
-    handoff_mode: "mock_modal",
-    privacy_summary: [
-      "Antigen stores only your verified identity status — no documents are retained.",
-      "No document images, document numbers, DOB, or SSN are ever stored or shared.",
-      "Raw documents are never revealed to agents or websites.",
-    ],
-    agent_disclosure_summary: [
-      "Agents can prove your identity has been verified.",
-      "Agents cannot access any document details, numbers, or images.",
-    ],
-  },
+  MOCK_STRIPE_IDENTITY,
+  MOCK_SHEERID_STUDENT,
+  MOCK_SHEERID_MILITARY,
 ];
 
 export function findExternalProviderDescriptor(
   providerName: string
 ): ExternalVerificationProviderDescriptor | undefined {
-  return EXTERNAL_PROVIDER_DESCRIPTORS.find(
+  return listExternalProviderDescriptors().find(
     (d) => d.provider_name === (providerName as ExternalVerificationProviderName)
   );
 }

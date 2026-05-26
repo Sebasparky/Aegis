@@ -13,6 +13,7 @@ import {
   submitVerificationCode,
   createExternalVerificationSession,
   mockCompleteExternalSession,
+  syncExternalVerificationSession,
 } from "@/lib/api";
 import type {
   VerificationCardSummary,
@@ -1361,7 +1362,15 @@ function RevokedHistoryRow({
 
 // ─── ExternalProviderHandoffModal ─────────────────────────────────────────────
 
-type HandoffModalPhase = "intro" | "connecting" | "checking" | "completed" | "failed";
+type HandoffModalPhase =
+  | "intro"
+  | "connecting"
+  | "checking"
+  | "completed"
+  | "failed"
+  | "awaiting_return"
+  | "provider_pending"
+  | "requires_input";
 
 function ProviderIconBadge({ providerName }: { providerName: string }) {
   const isIdentity = providerName.includes("stripe") || providerName.includes("gov");
@@ -1422,6 +1431,34 @@ function ExternalProviderHandoffModal({
     }
   };
 
+  const runRedirectFlow = () => {
+    if (handoff.handoff_url) {
+      window.open(handoff.handoff_url, "_blank", "noopener,noreferrer");
+    }
+    setPhase("awaiting_return");
+  };
+
+  const handleSyncAfterReturn = async () => {
+    setPhase("checking");
+    try {
+      const result = await syncExternalVerificationSession(handoff.session_id);
+      if (result.status === "card_issued") {
+        setPhase("completed");
+        onComplete();
+      } else if (result.status === "pending" || result.status === "provider_pending") {
+        setPhase("provider_pending");
+      } else if (result.status === "requires_input") {
+        setPhase("requires_input");
+      } else {
+        setError(result.failure_reason ?? "Verification failed.");
+        setPhase("failed");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verification failed.");
+      setPhase("failed");
+    }
+  };
+
   return (
     <div
       style={{
@@ -1435,7 +1472,8 @@ function ExternalProviderHandoffModal({
         padding: 24,
       }}
       onClick={(e) => {
-        if (e.target === e.currentTarget && phase !== "connecting" && phase !== "checking") onCancel();
+        const blocked = phase === "connecting" || phase === "checking" || phase === "awaiting_return";
+        if (e.target === e.currentTarget && !blocked) onCancel();
       }}
     >
       <div
@@ -1467,7 +1505,7 @@ function ExternalProviderHandoffModal({
               {handoff.provider_display_name}
             </div>
           </div>
-          {(phase === "intro" || phase === "failed") && (
+          {(phase === "intro" || phase === "failed" || phase === "provider_pending" || phase === "requires_input") && (
             <button
               style={{
                 background: "none",
@@ -1524,14 +1562,144 @@ function ExternalProviderHandoffModal({
               <button
                 className="a-btn a-btn--primary"
                 style={{ width: "100%", fontSize: 13, padding: "9px 0", justifyContent: "center" }}
-                onClick={runMockFlow}
+                onClick={handoff.handoff_mode === "redirect" ? runRedirectFlow : runMockFlow}
               >
-                Continue
+                {handoff.handoff_mode === "redirect"
+                  ? `Continue to ${handoff.provider_display_name}`
+                  : "Continue"}
               </button>
-              <div style={{ textAlign: "center", marginTop: 10, fontSize: 10, color: "var(--ink-5, var(--ink-4))" }}>
-                Local development simulation
-              </div>
+              {handoff.handoff_mode === "mock_modal" && (
+                <div style={{ textAlign: "center", marginTop: 10, fontSize: 10, color: "var(--ink-5, var(--ink-4))" }}>
+                  Local development simulation
+                </div>
+              )}
             </>
+          )}
+
+          {phase === "awaiting_return" && (
+            <div style={{ textAlign: "center" }}>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: "50%",
+                  background: "oklch(0.94 0.04 240)",
+                  border: "2px solid oklch(0.80 0.08 240)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  margin: "0 auto 14px",
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+                  <path d="M10 4v6l3 3" stroke="oklch(0.45 0.10 240)" strokeWidth="2" strokeLinecap="round"/>
+                  <circle cx="10" cy="10" r="7.5" stroke="oklch(0.55 0.08 240)" strokeWidth="1.4" fill="none"/>
+                </svg>
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", marginBottom: 8 }}>
+                Complete verification in the opened tab
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 20px", lineHeight: 1.6 }}>
+                Finish your identity check with {handoff.provider_display_name}, then return here.
+              </p>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ width: "100%", fontSize: 13, padding: "9px 0", justifyContent: "center", marginBottom: 10 }}
+                onClick={handleSyncAfterReturn}
+              >
+                I completed verification
+              </button>
+              <button
+                className="a-btn a-btn--ghost"
+                style={{ width: "100%", fontSize: 12, padding: "7px 0", justifyContent: "center" }}
+                onClick={() => {
+                  if (handoff.handoff_url) window.open(handoff.handoff_url, "_blank", "noopener,noreferrer");
+                }}
+              >
+                Reopen verification tab
+              </button>
+            </div>
+          )}
+
+          {phase === "provider_pending" && (
+            <div style={{ textAlign: "center" }}>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: "50%",
+                  background: "oklch(0.96 0.03 60)",
+                  border: "2px solid oklch(0.85 0.07 60)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  margin: "0 auto 14px",
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                  <circle cx="9" cy="9" r="6.5" stroke="oklch(0.55 0.10 60)" strokeWidth="1.4" fill="none"/>
+                  <path d="M9 5v4l2.5 2.5" stroke="oklch(0.45 0.10 60)" strokeWidth="1.6" strokeLinecap="round"/>
+                </svg>
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", marginBottom: 8 }}>
+                Verification in progress
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 20px", lineHeight: 1.6 }}>
+                {handoff.provider_display_name} is still processing your submission. Check back in a few minutes.
+              </p>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ width: "100%", fontSize: 13, padding: "9px 0", justifyContent: "center", marginBottom: 10 }}
+                onClick={handleSyncAfterReturn}
+              >
+                Check again
+              </button>
+              <button className="a-btn a-btn--ghost" style={{ width: "100%", fontSize: 12, padding: "7px 0", justifyContent: "center" }} onClick={onCancel}>
+                Close
+              </button>
+            </div>
+          )}
+
+          {phase === "requires_input" && (
+            <div style={{ textAlign: "center" }}>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: "50%",
+                  background: "oklch(0.95 0.04 25)",
+                  border: "2px solid oklch(0.85 0.08 25)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  margin: "0 auto 14px",
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                  <path d="M9 5v5" stroke="oklch(0.45 0.12 25)" strokeWidth="2" strokeLinecap="round"/>
+                  <circle cx="9" cy="13" r="1" fill="oklch(0.45 0.12 25)"/>
+                </svg>
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink-1)", marginBottom: 8 }}>
+                Additional information required
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 20px", lineHeight: 1.6 }}>
+                {handoff.provider_display_name} needs more from you. Return to the verification tab to complete the process.
+              </p>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ width: "100%", fontSize: 13, padding: "9px 0", justifyContent: "center", marginBottom: 10 }}
+                onClick={() => {
+                  if (handoff.handoff_url) window.open(handoff.handoff_url, "_blank", "noopener,noreferrer");
+                  setPhase("awaiting_return");
+                }}
+              >
+                Reopen verification tab
+              </button>
+              <button className="a-btn a-btn--ghost" style={{ width: "100%", fontSize: 12, padding: "7px 0", justifyContent: "center" }} onClick={onCancel}>
+                Cancel
+              </button>
+            </div>
           )}
 
           {(phase === "connecting" || phase === "checking") && (

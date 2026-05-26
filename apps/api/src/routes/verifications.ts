@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual, randomInt } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type {
+  AssuranceLevel,
   VerificationCard,
   VerificationType,
+  VerifiedClaimValue,
   VerificationProviderSession,
   ExternalVerificationSession,
   ExternalVerificationHandoffView,
@@ -24,9 +26,10 @@ import {
   PROVIDERS,
   findProvider,
   findProviderForType,
-  EXTERNAL_PROVIDER_DESCRIPTORS,
+  listExternalProviderDescriptors,
   findExternalProviderDescriptor,
 } from "../lib/verificationProviders.js";
+import { getAdapter } from "../lib/externalVerificationAdapters.js";
 import { sendVerificationOtpEmail } from "../lib/emailDelivery.js";
 
 const KNOWN_VERIFICATION_TYPES = new Set<string>([
@@ -164,9 +167,57 @@ function toHandoffView(
     privacy_guarantees: descriptor.privacy_summary,
     agent_can_prove: descriptor.agent_disclosure_summary,
     expires_at: session.expires_at,
+    handoff_mode: descriptor.handoff_mode,
+    handoff_url: descriptor.handoff_mode !== "mock_modal" ? session.handoff_url : undefined,
     raw_provider_payload_revealed_to_agent: false,
     raw_document_revealed_to_agent: false,
   };
+}
+
+// ─── Shared card issuance ─────────────────────────────────────────────────────
+
+async function buildAndStoreCard(
+  session: ExternalVerificationSession,
+  claimType: VerificationType,
+  claimValue: VerifiedClaimValue,
+  assuranceLevel: AssuranceLevel,
+  expiresAt?: string
+): Promise<VerificationCard> {
+  const now = new Date().toISOString();
+  const cardId = newId("vc");
+  const claim = {
+    claim_id: newId("vc_claim"),
+    card_id: cardId,
+    claim_type: claimType,
+    claim_value: claimValue,
+    assurance_level: assuranceLevel,
+    verified_at: now,
+    ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+  };
+  const cardFields = {
+    card_id: cardId,
+    schema_version: "1.0" as const,
+    issuer: "aegis" as const,
+    user_id: session.user_id,
+    claims: [claim],
+    disclosure_policy: "user_approval_required" as const,
+    issued_at: now,
+    ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+    revocation_status: "active" as const,
+    limitations: {
+      raw_document_revealed_to_agent: false as const,
+      raw_document_revealed_to_website: false as const,
+      provider_result_only: true as const,
+      not_a_guarantee: true as const,
+    },
+  };
+  const card = await buildSignedVerificationCard(cardFields);
+  verificationCards.set(card.card_id, card);
+  schedulePersist();
+  session.status = "card_issued";
+  session.completed_at = now;
+  session.card_id = card.card_id;
+  return card;
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -180,7 +231,7 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
           name: p.name,
           supported_types: p.supported_types,
         })),
-        external_providers: EXTERNAL_PROVIDER_DESCRIPTORS,
+        external_providers: listExternalProviderDescriptors(),
       },
     });
   });
@@ -229,6 +280,31 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
       raw_provider_payload_revealed_to_agent: false,
       raw_document_revealed_to_agent: false,
     };
+
+    // For real redirect/embedded providers, call the adapter to create the provider session
+    if (descriptor.handoff_mode !== "mock_modal") {
+      try {
+        const adapter = getAdapter(provider_name as ExternalVerificationProviderName);
+        const returnUrl =
+          process.env.STRIPE_IDENTITY_RETURN_URL ?? "http://localhost:3000/verify";
+        const adapterResult = await adapter.start({
+          session_id: session.session_id,
+          user_id: session.user_id,
+          verification_type,
+          return_url: returnUrl,
+        });
+        session.provider_reference_id = adapterResult.provider_reference_id;
+        session.handoff_url = adapterResult.handoff_url;
+      } catch (err) {
+        return reply.status(502).send({
+          ok: false,
+          error: {
+            code: "PROVIDER_START_FAILED",
+            message: err instanceof Error ? err.message : "Provider initialization failed.",
+          },
+        });
+      }
+    }
 
     externalVerificationSessions.set(session.session_id, session);
 
@@ -301,84 +377,28 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
         });
       }
 
-      // Normalize claim by provider
-      const now = new Date().toISOString();
-      let claimType: VerificationType;
-      let claimValue: Record<string, string>;
-      let assuranceLevel: "provider_verified" | "document_verified";
-      let expiresAt: string | undefined;
-
-      if (session.provider_name === "mock_sheerid_student") {
-        claimType = "student_status";
-        claimValue = {
-          kind: "student_status",
-          status: "verified_student",
-          verification_method: "provider_handoff",
-          provider: "mock_sheerid_student",
-          institution_name: "University of Michigan",
-          institution_domain: "umich.edu",
-        };
-        assuranceLevel = "provider_verified";
-      } else if (session.provider_name === "mock_sheerid_military") {
-        claimType = "military_status";
-        claimValue = {
-          kind: "military_status",
-          status: "verified_military_affiliation",
-          verification_method: "provider_handoff",
-          provider: "mock_sheerid_military",
-          affiliation: "military",
-        };
-        assuranceLevel = "provider_verified";
-      } else {
-        // mock_stripe_identity
-        claimType = "government_id";
-        claimValue = {
-          kind: "government_id",
-          status: "identity_verified",
-          verification_method: "provider_handoff",
-          provider: "mock_stripe_identity",
-          identity_assurance_level: "mock_document_selfie",
-        };
-        assuranceLevel = "document_verified";
-        expiresAt = new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString();
+      // Delegate claim normalization to the mock adapter
+      const mockAdapter = getAdapter(session.provider_name);
+      const syncResult = await mockAdapter.sync("unused");
+      if (syncResult.status !== "verified") {
+        return reply.status(500).send({
+          ok: false,
+          error: { code: "MOCK_COMPLETE_FAILED", message: "Mock adapter did not return a verified result." },
+        });
       }
 
-      const cardId = newId("vc");
-      const claim = {
-        claim_id: newId("vc_claim"),
-        card_id: cardId,
-        claim_type: claimType,
-        claim_value: claimValue as Parameters<typeof buildSignedVerificationCard>[0]["claims"][0]["claim_value"],
-        assurance_level: assuranceLevel,
-        verified_at: now,
-        ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
-      };
+      const expiresAt =
+        session.provider_name === "mock_stripe_identity"
+          ? new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString()
+          : undefined;
 
-      const cardFields = {
-        card_id: cardId,
-        schema_version: "1.0" as const,
-        issuer: "aegis" as const,
-        user_id: MOCK_USER_ID,
-        claims: [claim],
-        disclosure_policy: "user_approval_required" as const,
-        issued_at: now,
-        ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
-        revocation_status: "active" as const,
-        limitations: {
-          raw_document_revealed_to_agent: false as const,
-          raw_document_revealed_to_website: false as const,
-          provider_result_only: true as const,
-          not_a_guarantee: true as const,
-        },
-      };
-
-      const card = await buildSignedVerificationCard(cardFields);
-      verificationCards.set(card.card_id, card);
-      schedulePersist();
-
-      session.status = "card_issued";
-      session.completed_at = now;
-      session.card_id = card.card_id;
+      const card = await buildAndStoreCard(
+        session,
+        syncResult.claim_type,
+        syncResult.claim_value,
+        syncResult.assurance_level,
+        expiresAt
+      );
 
       return reply.status(201).send({
         ok: true,
@@ -386,6 +406,136 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
           card: toVerificationCardSummary(card),
           session_id: session.session_id,
         },
+      });
+    }
+  );
+
+  // ─── Sync endpoint — polls real provider status, issues card when verified ────
+
+  server.post<{ Params: { sessionId: string } }>(
+    "/api/verifications/external-sessions/:sessionId/sync",
+    async (req, reply) => {
+      const session = externalVerificationSessions.get(req.params.sessionId);
+      if (!session || session.user_id !== MOCK_USER_ID) {
+        return reply.status(404).send({
+          ok: false,
+          error: { code: "SESSION_NOT_FOUND", message: "External verification session not found." },
+        });
+      }
+
+      if (session.status === "card_issued") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "SESSION_ALREADY_COMPLETED", message: "Verification card already issued for this session." },
+        });
+      }
+
+      if (session.status === "failed" || session.status === "cancelled" || session.status === "expired") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "SESSION_TERMINAL", message: `Session is ${session.status} and cannot be completed.` },
+        });
+      }
+
+      if (new Date() > new Date(session.expires_at)) {
+        session.status = "expired";
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "SESSION_EXPIRED", message: "Verification session has expired." },
+        });
+      }
+
+      const descriptor = findExternalProviderDescriptor(session.provider_name);
+      if (!descriptor) {
+        return reply.status(500).send({
+          ok: false,
+          error: { code: "PROVIDER_NOT_FOUND", message: "Provider descriptor no longer available." },
+        });
+      }
+
+      // Mock providers: sync is an instant verify (same as mock-complete)
+      if (descriptor.handoff_mode === "mock_modal") {
+        const adapter = getAdapter(session.provider_name);
+        const mockResult = await adapter.sync("unused");
+        if (mockResult.status !== "verified") {
+          return reply.status(500).send({
+            ok: false,
+            error: { code: "MOCK_SYNC_FAILED", message: "Mock adapter did not return a verified result." },
+          });
+        }
+        const expiresAt =
+          session.provider_name === "mock_stripe_identity"
+            ? new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString()
+            : undefined;
+        const card = await buildAndStoreCard(
+          session,
+          mockResult.claim_type,
+          mockResult.claim_value,
+          mockResult.assurance_level,
+          expiresAt
+        );
+        return reply.status(201).send({
+          ok: true,
+          data: { status: "card_issued", card: toVerificationCardSummary(card), session_id: session.session_id },
+        });
+      }
+
+      // Real providers: require a stored provider_reference_id from the adapter.start() call
+      if (!session.provider_reference_id) {
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "NO_PROVIDER_REFERENCE", message: "No provider reference found. Start the session first." },
+        });
+      }
+
+      let syncResult;
+      try {
+        const adapter = getAdapter(session.provider_name);
+        syncResult = await adapter.sync(session.provider_reference_id);
+      } catch (err) {
+        return reply.status(502).send({
+          ok: false,
+          error: {
+            code: "PROVIDER_SYNC_FAILED",
+            message: err instanceof Error ? err.message : "Provider sync failed.",
+          },
+        });
+      }
+
+      if (syncResult.status === "verified") {
+        // government_id from Stripe gets a 5-year expiry; others inherit provider convention
+        const expiresAt =
+          syncResult.claim_type === "government_id"
+            ? new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString()
+            : undefined;
+        const card = await buildAndStoreCard(
+          session,
+          syncResult.claim_type,
+          syncResult.claim_value,
+          syncResult.assurance_level,
+          expiresAt
+        );
+        return reply.status(201).send({
+          ok: true,
+          data: { status: "card_issued", card: toVerificationCardSummary(card), session_id: session.session_id },
+        });
+      }
+
+      if (syncResult.status === "pending") {
+        session.status = "provider_pending";
+        return reply.send({ ok: true, data: { status: "pending" } });
+      }
+
+      if (syncResult.status === "requires_input") {
+        return reply.send({ ok: true, data: { status: "requires_input" } });
+      }
+
+      // failed
+      session.status = "failed";
+      session.failure_reason = syncResult.failure_reason;
+      return reply.send({
+        ok: true,
+        data: { status: "failed", failure_reason: syncResult.failure_reason },
       });
     }
   );

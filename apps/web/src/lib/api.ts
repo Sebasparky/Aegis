@@ -1134,6 +1134,8 @@ export interface ExternalVerificationHandoffView {
   privacy_guarantees: string[];
   agent_can_prove: string[];
   expires_at: string;
+  handoff_mode: "mock_modal" | "redirect" | "embedded";
+  handoff_url?: string;
   raw_provider_payload_revealed_to_agent: false;
   raw_document_revealed_to_agent: false;
 }
@@ -1161,6 +1163,17 @@ export const getExternalVerificationSession = (sessionId: string) =>
 export const mockCompleteExternalSession = (sessionId: string) =>
   request<{ card: VerificationCardSummary; session_id: string }>(
     `/api/verifications/external-sessions/${sessionId}/mock-complete`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const syncExternalVerificationSession = (sessionId: string) =>
+  request<{
+    status: "card_issued" | "pending" | "provider_pending" | "requires_input" | "failed";
+    card?: VerificationCardSummary;
+    session_id?: string;
+    failure_reason?: string;
+  }>(
+    `/api/verifications/external-sessions/${sessionId}/sync`,
     { method: "POST", body: JSON.stringify({}) },
   );
 

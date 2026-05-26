@@ -2839,7 +2839,10 @@ export interface DisclosureReceipt {
 export type ExternalVerificationProviderName =
   | "mock_sheerid_student"
   | "mock_sheerid_military"
-  | "mock_stripe_identity";
+  | "mock_stripe_identity"
+  | "stripe_identity"
+  | "sheerid_student"
+  | "sheerid_military";
 
 export type ExternalVerificationSessionStatus =
   | "created"
@@ -2871,6 +2874,8 @@ export interface ExternalVerificationSession {
   handoff_url?: string;
   mock_handoff_token?: string;
   provider_reference_id?: string;
+  /** Reserved for Stripe embedded flow; never returned in views or API responses. */
+  client_secret?: string;
   created_at: string;
   expires_at: string;
   completed_at?: string;
@@ -2893,6 +2898,9 @@ export interface ExternalVerificationHandoffView {
   privacy_guarantees: string[];
   agent_can_prove: string[];
   expires_at: string;
+  /** Populated for redirect/embedded providers; absent for mock_modal. */
+  handoff_url?: string;
+  handoff_mode: "mock_modal" | "redirect" | "embedded";
   /** Always the literal false — raw provider payload is never revealed to agents. */
   raw_provider_payload_revealed_to_agent: false;
   /** Always the literal false — raw documents are never revealed to agents. */

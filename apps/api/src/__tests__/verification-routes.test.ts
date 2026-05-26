@@ -8,7 +8,35 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+// ─── Adapter mock (for real provider adapter tests) ───────────────────────────
+// Mocks getAdapter() for stripe_identity to provide controllable start/sync
+// without hitting the real Stripe SDK. Mock providers delegate to the original
+// implementation so existing tests are unaffected.
+
+const { mockStripeAdapterStart, mockStripeAdapterSync } = vi.hoisted(() => ({
+  mockStripeAdapterStart: vi.fn(),
+  mockStripeAdapterSync: vi.fn(),
+}));
+
+vi.mock("../lib/externalVerificationAdapters.js", async (importOriginal) => {
+  type AdapterMod = typeof import("../lib/externalVerificationAdapters.js");
+  const original = await importOriginal<AdapterMod>();
+  return {
+    ...original,
+    getAdapter: (providerName: string) => {
+      if (providerName === "stripe_identity") {
+        return {
+          start: mockStripeAdapterStart,
+          sync: mockStripeAdapterSync,
+        };
+      }
+      // Delegate to real implementation for mock_* and sheerid_* providers
+      return original.getAdapter(providerName as Parameters<AdapterMod["getAdapter"]>[0]);
+    },
+  };
+});
+
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { verificationCards, verificationProviderSessions, disclosureReceipts, externalVerificationSessions } from "../store/index.js";
@@ -1079,5 +1107,222 @@ describe("External Verification Provider Handoff", () => {
     const { res, data } = await createExternalSession("student_status", "mock_stripe_identity");
     expect(res.statusCode).toBe(400);
     expect(data.error.code).toBe("PROVIDER_TYPE_MISMATCH");
+  });
+});
+
+// ─── Real Provider Adapter Tests (env-gated) ──────────────────────────────────
+
+async function syncExternalSession(sessionId: string) {
+  const res = await server.inject({
+    method: "POST",
+    url: `/api/verifications/external-sessions/${sessionId}/sync`,
+    payload: {},
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+const REAL_PROVIDER_EXTRA_FORBIDDEN = ["client_secret", ...EXTERNAL_FORBIDDEN_FIELDS];
+
+describe("Real Provider Adapters (env-gated)", () => {
+  afterEach(() => {
+    delete process.env.STRIPE_IDENTITY_ENABLED;
+    delete process.env.STRIPE_SECRET_KEY;
+    delete process.env.STRIPE_IDENTITY_RETURN_URL;
+    delete process.env.SHEERID_ENABLED;
+    delete process.env.SHEERID_API_TOKEN;
+    delete process.env.SHEERID_STUDENT_PROGRAM_ID;
+    delete process.env.SHEERID_MILITARY_PROGRAM_ID;
+    mockStripeAdapterStart.mockReset();
+    mockStripeAdapterSync.mockReset();
+  });
+
+  // ─── Provider selection ───────────────────────────────────────────────────
+
+  it("GET /types returns mock_stripe_identity when STRIPE_IDENTITY_ENABLED is not set", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/verifications/types" });
+    const body = JSON.parse(res.body);
+    const names = body.data.external_providers.map((p: { provider_name: string }) => p.provider_name);
+    expect(names).toContain("mock_stripe_identity");
+    expect(names).not.toContain("stripe_identity");
+  });
+
+  it("GET /types returns stripe_identity (not mock) when STRIPE_IDENTITY_ENABLED=true and STRIPE_SECRET_KEY set", async () => {
+    process.env.STRIPE_IDENTITY_ENABLED = "true";
+    process.env.STRIPE_SECRET_KEY = "sk_test_xxx";
+    const res = await server.inject({ method: "GET", url: "/api/verifications/types" });
+    const body = JSON.parse(res.body);
+    const names = body.data.external_providers.map((p: { provider_name: string }) => p.provider_name);
+    expect(names).toContain("stripe_identity");
+    expect(names).not.toContain("mock_stripe_identity");
+    expect(names).toHaveLength(3); // no duplicates — exactly 3 providers
+    expect(new Set(names).size).toBe(3);
+  });
+
+  // ─── Stripe Identity sandbox ──────────────────────────────────────────────
+
+  describe("stripe_identity external session", () => {
+    beforeEach(() => {
+      process.env.STRIPE_IDENTITY_ENABLED = "true";
+      process.env.STRIPE_SECRET_KEY = "sk_test_xxx";
+      process.env.STRIPE_IDENTITY_RETURN_URL = "http://localhost:3000/verify";
+      mockStripeAdapterStart.mockResolvedValue({
+        provider_reference_id: "vs_test_123",
+        handoff_url: "https://verify.stripe.com/start/live_test_abc",
+      });
+    });
+
+    it("POST /external-sessions calls adapter.start() with correct args", async () => {
+      const { res } = await createExternalSession("government_id", "stripe_identity");
+      expect(res.statusCode).toBe(201);
+      expect(mockStripeAdapterStart).toHaveBeenCalledOnce();
+      expect(mockStripeAdapterStart).toHaveBeenCalledWith(
+        expect.objectContaining({
+          verification_type: "government_id",
+          return_url: "http://localhost:3000/verify",
+        })
+      );
+    });
+
+    it("handoff view has handoff_mode redirect and handoff_url from Stripe", async () => {
+      const { data } = await createExternalSession("government_id", "stripe_identity");
+      const handoff = data.data.handoff;
+      expect(handoff.handoff_mode).toBe("redirect");
+      expect(handoff.handoff_url).toBe("https://verify.stripe.com/start/live_test_abc");
+    });
+
+    it("provider_reference_id is NOT exposed in the POST response", async () => {
+      const { res } = await createExternalSession("government_id", "stripe_identity");
+      expect(res.body).not.toMatch(/"provider_reference_id"\s*:/);
+    });
+
+    it("provider_reference_id is stored server-side in the session", async () => {
+      const { data } = await createExternalSession("government_id", "stripe_identity");
+      const session = externalVerificationSessions.get(data.data.session_id);
+      expect(session?.provider_reference_id).toBe("vs_test_123");
+    });
+
+    it("POST /external-sessions response contains no forbidden fields", async () => {
+      const { res } = await createExternalSession("government_id", "stripe_identity");
+      for (const field of REAL_PROVIDER_EXTRA_FORBIDDEN) {
+        expect(res.body, `"${field}" must not appear`).not.toMatch(new RegExp(`"${field}"\\s*:`));
+      }
+    });
+
+    it("POST /sync on verified Stripe session issues minimal government_id card", async () => {
+      const { data: sessionData } = await createExternalSession("government_id", "stripe_identity");
+      const sessionId = sessionData.data.session_id;
+      mockStripeAdapterSync.mockResolvedValue({
+        status: "verified",
+        claim_type: "government_id",
+        claim_value: { kind: "government_id", status: "identity_verified", verification_method: "provider_handoff", provider: "stripe_identity", identity_assurance_level: "document_verified" },
+        assurance_level: "document_verified",
+      });
+      const { res, data } = await syncExternalSession(sessionId);
+      expect(res.statusCode).toBe(201);
+      expect(data.data.status).toBe("card_issued");
+      expect(data.data.card.claim_types).toContain("government_id");
+      const card = Array.from(verificationCards.values())[0];
+      const claim = card.claims[0];
+      expect(claim.claim_type).toBe("government_id");
+      expect((claim.claim_value as Record<string, string>).status).toBe("identity_verified");
+      expect((claim.claim_value as Record<string, string>).verification_method).toBe("provider_handoff");
+      expect((claim.claim_value as Record<string, string>).provider).toBe("stripe_identity");
+      expect((claim.claim_value as Record<string, string>).identity_assurance_level).toBe("document_verified");
+      expect(claim.assurance_level).toBe("document_verified");
+    });
+
+    it("POST /sync on processing Stripe session returns pending, no card issued", async () => {
+      const { data: sessionData } = await createExternalSession("government_id", "stripe_identity");
+      mockStripeAdapterSync.mockResolvedValue({ status: "pending" });
+      const { res, data } = await syncExternalSession(sessionData.data.session_id);
+      expect(res.statusCode).toBe(200);
+      expect(data.data.status).toBe("pending");
+      expect(verificationCards.size).toBe(0);
+    });
+
+    it("POST /sync on requires_input Stripe session returns requires_input, no card issued", async () => {
+      const { data: sessionData } = await createExternalSession("government_id", "stripe_identity");
+      mockStripeAdapterSync.mockResolvedValue({ status: "requires_input" });
+      const { data } = await syncExternalSession(sessionData.data.session_id);
+      expect(data.data.status).toBe("requires_input");
+      expect(verificationCards.size).toBe(0);
+    });
+
+    it("POST /sync response contains no forbidden fields on verified session", async () => {
+      const { data: sessionData } = await createExternalSession("government_id", "stripe_identity");
+      mockStripeAdapterSync.mockResolvedValue({
+        status: "verified",
+        claim_type: "government_id",
+        claim_value: { kind: "government_id", status: "identity_verified", verification_method: "provider_handoff", provider: "stripe_identity", identity_assurance_level: "document_verified" },
+        assurance_level: "document_verified",
+      });
+      const { res } = await syncExternalSession(sessionData.data.session_id);
+      for (const field of REAL_PROVIDER_EXTRA_FORBIDDEN) {
+        expect(res.body, `"${field}" must not appear in sync response`).not.toMatch(
+          new RegExp(`"${field}"\\s*:`)
+        );
+      }
+    });
+
+    it("POST /sync on already card_issued session returns 409", async () => {
+      const { data: sessionData } = await createExternalSession("government_id", "stripe_identity");
+      const sessionId = sessionData.data.session_id;
+      mockStripeAdapterSync.mockResolvedValue({
+        status: "verified",
+        claim_type: "government_id",
+        claim_value: { kind: "government_id", status: "identity_verified", verification_method: "provider_handoff", provider: "stripe_identity", identity_assurance_level: "document_verified" },
+        assurance_level: "document_verified",
+      });
+      await syncExternalSession(sessionId); // first sync issues card
+      const { res, data } = await syncExternalSession(sessionId); // second sync should 409
+      expect(res.statusCode).toBe(409);
+      expect(data.error.code).toBe("SESSION_ALREADY_COMPLETED");
+    });
+  });
+
+  // ─── SheerID scaffolding ──────────────────────────────────────────────────
+
+  it("POST /external-sessions with sheerid_student when env configured returns 502 PROVIDER_START_FAILED", async () => {
+    process.env.SHEERID_ENABLED = "true";
+    process.env.SHEERID_API_TOKEN = "sheerid_token_xxx";
+    process.env.SHEERID_STUDENT_PROGRAM_ID = "program_student_123";
+    const { res, data } = await createExternalSession("student_status", "sheerid_student");
+    expect(res.statusCode).toBe(502);
+    expect(data.error.code).toBe("PROVIDER_START_FAILED");
+    expect(data.error.message).toMatch(/SHEERID_INTEGRATION_PENDING/);
+  });
+
+  it("POST /external-sessions with sheerid_military when env configured returns 502 PROVIDER_START_FAILED", async () => {
+    process.env.SHEERID_ENABLED = "true";
+    process.env.SHEERID_API_TOKEN = "sheerid_token_xxx";
+    process.env.SHEERID_MILITARY_PROGRAM_ID = "program_military_123";
+    const { res, data } = await createExternalSession("military_status", "sheerid_military");
+    expect(res.statusCode).toBe(502);
+    expect(data.error.code).toBe("PROVIDER_START_FAILED");
+    expect(data.error.message).toMatch(/SHEERID_INTEGRATION_PENDING/);
+  });
+
+  it("falls back to mock_sheerid_student when SHEERID env is absent", async () => {
+    const { res, data } = await createExternalSession("student_status", "mock_sheerid_student");
+    expect(res.statusCode).toBe(201);
+    expect(data.data.handoff.provider_name).toBe("mock_sheerid_student");
+  });
+
+  // ─── /sync on mock providers ──────────────────────────────────────────────
+
+  it("POST /sync on mock_sheerid_student session issues student_status card", async () => {
+    const { data: sessionData } = await createExternalSession("student_status", "mock_sheerid_student");
+    const { res, data } = await syncExternalSession(sessionData.data.session_id);
+    expect(res.statusCode).toBe(201);
+    expect(data.data.status).toBe("card_issued");
+    expect(data.data.card.claim_types).toContain("student_status");
+  });
+
+  it("POST /sync on mock_stripe_identity session issues government_id card", async () => {
+    const { data: sessionData } = await createExternalSession("government_id", "mock_stripe_identity");
+    const { res, data } = await syncExternalSession(sessionData.data.session_id);
+    expect(res.statusCode).toBe(201);
+    expect(data.data.status).toBe("card_issued");
+    expect(data.data.card.claim_types).toContain("government_id");
   });
 });

@@ -100,7 +100,11 @@ describe("POST /api/routes/:routeId/review — publish creates snapshot", () => 
 
   it("copies preview_assets and replay_assets into snapshot", async () => {
     const route = makeApprovedRoute({
-      preview_assets: [{ asset_id: "asset_test_1", kind: "start_page", route_id: "route_tmp", url_path: "/", captured_at: NOW, redaction_applied: false, source: "dev_seed" }],
+      preview_assets: [{ asset_id: "asset_test_1", kind: "start_page", route_id: "route_tmp", url_path: "/api/route-preview-assets/test-start.png", captured_at: NOW, redaction_applied: true, source: "dev_seed" }],
+      replay_assets: [
+        { asset_id: "rra_snap_poster", route_id: "route_tmp", route_hash: "snap_hash", kind: "poster_frame", url_path: "/api/route-preview-assets/test-poster.png", captured_at: NOW, redaction_applied: true, source: "dev_seed", replay_safety: "full" },
+        { asset_id: "rra_snap_video", route_id: "route_tmp", route_hash: "snap_hash", kind: "replay_video", url_path: "/api/route-preview-assets/test-replay.webm", poster_url_path: "/api/route-preview-assets/test-poster.png", captured_at: NOW, redaction_applied: true, source: "dev_seed", replay_safety: "full" },
+      ],
     });
     routes.set(route.route_id, route);
 
@@ -116,6 +120,9 @@ describe("POST /api/routes/:routeId/review — publish creates snapshot", () => 
     );
     expect(snapshot!.preview_assets).toHaveLength(1);
     expect(snapshot!.preview_assets![0].kind).toBe("start_page");
+    expect(snapshot!.replay_assets).toHaveLength(2);
+    expect(snapshot!.replay_assets!.some(a => a.kind === "replay_video")).toBe(true);
+    expect(snapshot!.replay_assets!.some(a => a.kind === "poster_frame")).toBe(true);
   });
 
   it("does not create a snapshot on rejection", async () => {

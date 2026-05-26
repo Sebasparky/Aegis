@@ -238,19 +238,38 @@ export async function routeRoutes(server: FastifyInstance) {
 
       if (report.passed) {
         try {
-          const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
-          const asset = await captureRouteStartPreview(route);
-          if (asset) {
+          const { captureRouteStartPreview, captureRouteReplay } = await import("../lib/routePreviewCapture.js");
+          // Run both captures in parallel — each is non-fatal; a failure logs but does not fail verification.
+          // captureRouteReplay has its own 20s navigation timeout plus per-step timeouts inside.
+          const [previewResult, replayResult] = await Promise.allSettled([
+            captureRouteStartPreview(route),
+            captureRouteReplay(route),
+          ]);
+
+          if (previewResult.status === "fulfilled" && previewResult.value) {
             if (!route.preview_assets) route.preview_assets = [];
-            // Replace any existing start_page asset for the same route to avoid duplicates.
+            // Replace any existing start_page asset to avoid duplicates on re-verify.
             route.preview_assets = route.preview_assets.filter(a => a.kind !== "start_page");
-            route.preview_assets.push(asset);
-            routes.set(route.route_id, route);
-            schedulePersist();
+            route.preview_assets.push(previewResult.value);
+          } else if (previewResult.status === "rejected") {
+            server.log.error(previewResult.reason, "Preview capture failed after verification");
           }
+
+          if (replayResult.status === "fulfilled" && replayResult.value?.length) {
+            const assets = replayResult.value;
+            if (!route.replay_assets) route.replay_assets = [];
+            // Replace existing poster_frame / replay_video by kind to avoid duplicates on re-verify.
+            const incoming = new Set(assets.map((a) => a.kind));
+            route.replay_assets = route.replay_assets.filter((a) => !incoming.has(a.kind));
+            route.replay_assets.push(...assets);
+          } else if (replayResult.status === "rejected") {
+            server.log.error(replayResult.reason, "Replay capture failed after verification");
+          }
+
+          routes.set(route.route_id, route);
+          schedulePersist();
         } catch (err) {
-          server.log.error(err, "Preview capture failed after verification");
-          // Capture failure is non-fatal — verification result is still returned.
+          server.log.error(err, "Asset capture failed after verification");
         }
       }
 

@@ -397,6 +397,142 @@ describe("POST /api/routes/:routeId/verify — synchronous preview capture", () 
   });
 });
 
+// ─── POST /api/routes/:routeId/verify — replay asset auto-generation ─────────
+
+import type { RouteReplayAsset } from "@aegis/types";
+import { captureRouteReplay } from "../lib/routePreviewCapture.js";
+
+function makeVerifyReplayAssets(routeId: string): RouteReplayAsset[] {
+  return [
+    {
+      asset_id: "rra_verify_poster",
+      route_id: routeId,
+      route_hash: "verify_hash_001",
+      kind: "poster_frame",
+      url_path: `/api/route-preview-assets/${routeId}-poster-verify.png`,
+      captured_at: "2026-01-01T00:00:01.000Z",
+      width: 1280,
+      height: 800,
+      redaction_applied: true,
+      source: "manual_capture",
+      replay_safety: "full",
+    },
+    {
+      asset_id: "rra_verify_video",
+      route_id: routeId,
+      route_hash: "verify_hash_001",
+      kind: "replay_video",
+      url_path: `/api/route-preview-assets/${routeId}-replay-verify.webm`,
+      poster_url_path: `/api/route-preview-assets/${routeId}-poster-verify.png`,
+      captured_at: "2026-01-01T00:00:01.000Z",
+      width: 1280,
+      height: 800,
+      redaction_applied: true,
+      source: "manual_capture",
+      replay_safety: "full",
+    },
+  ];
+}
+
+const PASSED_REPORT_REPLAY: RouteVerificationReport = {
+  route_id: IDS.ROUTE_WIKI,
+  passed: true,
+  started_at: "2026-01-01T00:00:00.000Z",
+  completed_at: "2026-01-01T00:00:01.000Z",
+  step_results: [],
+  errors: [],
+};
+
+describe("POST /api/routes/:routeId/verify — replay asset auto-generation", () => {
+  it("calls captureRouteReplay alongside captureRouteStartPreview on successful verification", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT_REPLAY);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+
+    expect(captureRouteStartPreview).toHaveBeenCalledOnce();
+    expect(captureRouteReplay).toHaveBeenCalledOnce();
+  });
+
+  it("stores replay_assets on route after successful verification", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT_REPLAY);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeVerifyReplayAssets(IDS.ROUTE_WIKI));
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+
+    const route = routes.get(IDS.ROUTE_WIKI);
+    expect(route?.replay_assets).toBeDefined();
+    expect(route?.replay_assets?.some(a => a.kind === "replay_video")).toBe(true);
+    expect(route?.replay_assets?.some(a => a.kind === "poster_frame")).toBe(true);
+  });
+
+  it("verification still returns ok:true when captureRouteReplay returns null", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT_REPLAY);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+
+    const route = routes.get(IDS.ROUTE_WIKI);
+    expect(route?.replay_assets ?? []).toHaveLength(0);
+  });
+
+  it("verification still returns ok:true when captureRouteReplay throws", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT_REPLAY);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("Playwright crashed"));
+
+    const res = await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).ok).toBe(true);
+  });
+
+  it("re-verify replaces existing replay_assets by kind without duplicating", async () => {
+    const { captureRouteStartPreview } = await import("../lib/routePreviewCapture.js");
+
+    // Seed existing replay assets.
+    const route = routes.get(IDS.ROUTE_WIKI)!;
+    route.replay_assets = makeVerifyReplayAssets(IDS.ROUTE_WIKI).map(a => ({ ...a, asset_id: "rra_old_" + a.kind }));
+    routes.set(IDS.ROUTE_WIKI, route);
+
+    const newAssets = makeVerifyReplayAssets(IDS.ROUTE_WIKI).map(a => ({ ...a, asset_id: "rra_new_" + a.kind }));
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PASSED_REPORT_REPLAY);
+    (captureRouteStartPreview as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (captureRouteReplay as ReturnType<typeof vi.fn>).mockResolvedValueOnce(newAssets);
+
+    await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+
+    const updated = routes.get(IDS.ROUTE_WIKI)!;
+    const videos = updated.replay_assets?.filter(a => a.kind === "replay_video") ?? [];
+    const posters = updated.replay_assets?.filter(a => a.kind === "poster_frame") ?? [];
+    expect(videos).toHaveLength(1);
+    expect(posters).toHaveLength(1);
+    expect(videos[0].asset_id).toBe("rra_new_replay_video");
+    expect(posters[0].asset_id).toBe("rra_new_poster_frame");
+  });
+
+  it("captureRouteReplay is NOT called when verification fails", async () => {
+    (verifyRouteWithPlaywright as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...PASSED_REPORT_REPLAY,
+      passed: false,
+    });
+
+    await server.inject({ method: "POST", url: `/api/routes/${IDS.ROUTE_WIKI}/verify` });
+
+    expect(captureRouteReplay).not.toHaveBeenCalled();
+  });
+});
+
 // ─── routeCompiler — start_url extraction ────────────────────────────────────
 
 function makeRecordingPayload(domain: string, firstUrl: string) {

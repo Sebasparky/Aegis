@@ -1,6 +1,72 @@
 import WebSocket from "ws";
 import type { ProfileFieldFillRequest, ProfileFieldFillEntry, ProfileFieldKind } from "@aegis/types";
 
+// US state abbreviation → full name (uppercase keys)
+const US_STATE_MAP: Record<string, string> = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+  CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
+  HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+  KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+  MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri",
+  MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey",
+  NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio",
+  OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
+  SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont",
+  VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+  DC: "District of Columbia",
+};
+// Full name → abbreviation (lowercase keys for case-insensitive lookup)
+const US_STATE_REV_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(US_STATE_MAP).map(([abbr, name]) => [name.toLowerCase(), abbr]),
+);
+
+// ISO 2-letter code → full name (uppercase keys)
+const COUNTRY_MAP: Record<string, string> = {
+  US: "United States", CA: "Canada", GB: "United Kingdom",
+  AU: "Australia", DE: "Germany", FR: "France", NL: "Netherlands",
+  SE: "Sweden", NO: "Norway", DK: "Denmark", FI: "Finland",
+  JP: "Japan", CN: "China", IN: "India", BR: "Brazil", MX: "Mexico",
+};
+// Full name → code (lowercase keys)
+const COUNTRY_REV_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(COUNTRY_MAP).map(([code, name]) => [name.toLowerCase(), code]),
+);
+
+/**
+ * Find the best matching <select> option value for a raw profile value.
+ * Tries exact case-insensitive match first, then state/country abbreviation mapping.
+ * Returns the option's `.value` attribute on match, or null if no match found.
+ * Exported for unit testing — the same logic is also embedded in the CDP fill expression.
+ */
+export function findBestSelectOption(
+  options: Array<{ value: string; text: string }>,
+  rawValue: string,
+): string | null {
+  const lower = rawValue.toLowerCase().trim();
+
+  const exact = options.find(
+    (o) => o.value.toLowerCase() === lower || o.text.toLowerCase().trim() === lower,
+  );
+  if (exact) return exact.value;
+
+  const upper = rawValue.toUpperCase();
+  const alt =
+    US_STATE_MAP[upper] ??
+    US_STATE_REV_MAP[lower] ??
+    COUNTRY_MAP[upper] ??
+    COUNTRY_REV_MAP[lower];
+
+  if (alt) {
+    const altLower = alt.toLowerCase().trim();
+    const altMatch = options.find(
+      (o) => o.value.toLowerCase() === altLower || o.text.toLowerCase().trim() === altLower,
+    );
+    if (altMatch) return altMatch.value;
+  }
+
+  return null;
+}
+
 // Reuse same dangerous-selector rules as paymentCardFill.ts — profile fill targets input fields only.
 const DANGEROUS_SELECTOR_PATTERNS: RegExp[] = [
   /\bbutton\b/i,
@@ -73,7 +139,7 @@ function buildSelectorExpr(selector_hint?: string, label?: string, placeholder?:
       var lbl = labels.find(function(l) { return l.textContent && l.textContent.trim().toLowerCase().indexOf(${JSON.stringify(label.toLowerCase())}) !== -1; });
       if (!lbl) return null;
       if (lbl.htmlFor) return document.getElementById(lbl.htmlFor);
-      return lbl.querySelector('input');
+      return lbl.querySelector('input, select');
     })()`;
   }
   if (placeholder) {
@@ -242,15 +308,45 @@ export async function executeProfileFieldFillViaCDP(
               advanceField();
               return;
             }
-            // Iframe check passed — fill the field
+            // Iframe check passed — fill the field (handles native <select> and <input>)
             const resolvedValue = resolvedValues.get(field.key) ?? "";
             const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
             // No DOM value masking — leave field value intact so checkout pages can read and submit it.
             const fillExpr = `(function() {
               var el = ${selectorExpr};
               if (!el) return { ok: false, reason: 'element not found' };
+              var rawVal = ${JSON.stringify(resolvedValue)};
+              if (el.tagName === 'SELECT') {
+                var stateMap = ${JSON.stringify(US_STATE_MAP)};
+                var stateRevMap = ${JSON.stringify(US_STATE_REV_MAP)};
+                var countryMap = ${JSON.stringify(COUNTRY_MAP)};
+                var countryRevMap = ${JSON.stringify(COUNTRY_REV_MAP)};
+                var lower = rawVal.toLowerCase().trim();
+                var upper = rawVal.toUpperCase();
+                var opts = Array.from(el.options).map(function(o) { return { value: o.value, text: o.text }; });
+                var match = opts.find(function(o) {
+                  return o.value.toLowerCase() === lower || o.text.toLowerCase().trim() === lower;
+                });
+                if (!match) {
+                  var alt = stateMap[upper] || stateRevMap[lower] || countryMap[upper] || countryRevMap[lower];
+                  if (alt) {
+                    var altLow = alt.toLowerCase().trim();
+                    match = opts.find(function(o) {
+                      return o.value.toLowerCase() === altLow || o.text.toLowerCase().trim() === altLow;
+                    });
+                  }
+                }
+                if (!match) return { ok: false, reason: 'select_option_not_found' };
+                var sel = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+                if (sel && sel.set) { sel.set.call(el, match.value); } else { el.value = match.value; }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                el.setAttribute('data-antigen-filled', 'true');
+                return { ok: true };
+              }
               var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-              setter.call(el, ${JSON.stringify(resolvedValue)});
+              setter.call(el, rawVal);
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.dispatchEvent(new Event('change', { bubbles: true }));
               el.setAttribute('data-antigen-filled', 'true');

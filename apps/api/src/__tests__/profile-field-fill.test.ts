@@ -349,6 +349,57 @@ describe("maskProfileValue masking invariants", () => {
   });
 });
 
+// ─── findBestSelectOption unit tests ─────────────────────────────────────────
+
+describe("findBestSelectOption select option matching", () => {
+  type FindFn = (opts: Array<{ value: string; text: string }>, raw: string) => string | null;
+  let findBestSelectOption: FindFn;
+
+  beforeAll(async () => {
+    const mod = await vi.importActual<{ findBestSelectOption: FindFn }>(
+      "../runtime/profileFieldFill.js",
+    );
+    findBestSelectOption = mod.findBestSelectOption;
+  });
+
+  it("matches option.value exactly — case-insensitive (VA → VA)", () => {
+    const opts = [{ value: "VA", text: "Virginia" }, { value: "CA", text: "California" }];
+    expect(findBestSelectOption(opts, "VA")).toBe("VA");
+  });
+
+  it("maps full state name to abbreviation (Virginia → VA via option.value)", () => {
+    const opts = [{ value: "VA", text: "Virginia" }, { value: "CA", text: "California" }];
+    expect(findBestSelectOption(opts, "Virginia")).toBe("VA");
+  });
+
+  it("matches option.text for country code (US → option value US)", () => {
+    const opts = [{ value: "US", text: "United States" }, { value: "CA", text: "Canada" }];
+    expect(findBestSelectOption(opts, "US")).toBe("US");
+  });
+
+  it("maps country full name to code (United States → US)", () => {
+    const opts = [{ value: "US", text: "United States" }, { value: "CA", text: "Canada" }];
+    expect(findBestSelectOption(opts, "United States")).toBe("US");
+  });
+
+  it("maps abbreviation to full name when option.text is the full name (VA with text options)", () => {
+    const opts = [{ value: "virginia", text: "Virginia" }, { value: "california", text: "California" }];
+    expect(findBestSelectOption(opts, "VA")).toBe("virginia");
+  });
+
+  it("returns null when no option matches", () => {
+    const opts = [{ value: "VA", text: "Virginia" }];
+    expect(findBestSelectOption(opts, "ZZZZ")).toBeNull();
+  });
+
+  it("select option not found — result is null, not the raw value", () => {
+    const opts = [{ value: "TX", text: "Texas" }];
+    const result = findBestSelectOption(opts, "Virginia");
+    expect(result).toBeNull();
+    expect(result).not.toBe("Virginia");
+  });
+});
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("POST /api/agent/v1/profile-field-fills", () => {

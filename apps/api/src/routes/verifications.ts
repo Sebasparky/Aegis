@@ -1,9 +1,17 @@
 import { createHash, timingSafeEqual, randomInt } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { VerificationCard, VerificationType, VerificationProviderSession } from "@aegis/types";
+import type {
+  VerificationCard,
+  VerificationType,
+  VerificationProviderSession,
+  ExternalVerificationSession,
+  ExternalVerificationHandoffView,
+  ExternalVerificationProviderName,
+} from "@aegis/types";
 import {
   verificationCards,
   verificationProviderSessions,
+  externalVerificationSessions,
   MOCK_USER_ID,
   newId,
 } from "../store/index.js";
@@ -12,7 +20,13 @@ import {
   buildSignedVerificationCard,
   verifyStoredVerificationCard,
 } from "../lib/verificationCardSigning.js";
-import { PROVIDERS, findProvider, findProviderForType } from "../lib/verificationProviders.js";
+import {
+  PROVIDERS,
+  findProvider,
+  findProviderForType,
+  EXTERNAL_PROVIDER_DESCRIPTORS,
+  findExternalProviderDescriptor,
+} from "../lib/verificationProviders.js";
 import { sendVerificationOtpEmail } from "../lib/emailDelivery.js";
 
 const KNOWN_VERIFICATION_TYPES = new Set<string>([
@@ -121,6 +135,40 @@ function toVerificationCardDetail(card: VerificationCard) {
   };
 }
 
+// ─── External session helpers ─────────────────────────────────────────────────
+
+const HANDOFF_TITLES: Record<string, string> = {
+  student_status: "Verify Your Student Status",
+  military_status: "Verify Your Military Status",
+  government_id: "Verify Your Identity",
+};
+
+const HANDOFF_DESCRIPTIONS: Record<string, string> = {
+  student_status: "Confirm your enrollment through a trusted student eligibility provider. Only your institution name and verified status will be stored.",
+  military_status: "Confirm your military affiliation through a trusted eligibility provider. Only your affiliation status will be stored.",
+  government_id: "Verify your identity through a trusted identity provider. No documents or document numbers are stored — only your verified status.",
+};
+
+function toHandoffView(
+  session: ExternalVerificationSession,
+  descriptor: ReturnType<typeof findExternalProviderDescriptor> & object
+): ExternalVerificationHandoffView {
+  return {
+    session_id: session.session_id,
+    verification_type: session.verification_type,
+    provider_name: session.provider_name,
+    provider_display_name: descriptor.display_name,
+    status: session.status,
+    title: HANDOFF_TITLES[session.verification_type] ?? "Verify",
+    description: HANDOFF_DESCRIPTIONS[session.verification_type] ?? "",
+    privacy_guarantees: descriptor.privacy_summary,
+    agent_can_prove: descriptor.agent_disclosure_summary,
+    expires_at: session.expires_at,
+    raw_provider_payload_revealed_to_agent: false,
+    raw_document_revealed_to_agent: false,
+  };
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 export async function verificationRoutes(server: FastifyInstance): Promise<void> {
@@ -132,9 +180,215 @@ export async function verificationRoutes(server: FastifyInstance): Promise<void>
           name: p.name,
           supported_types: p.supported_types,
         })),
+        external_providers: EXTERNAL_PROVIDER_DESCRIPTORS,
       },
     });
   });
+
+  // ─── External verification session endpoints ─────────────────────────────
+
+  server.post<{
+    Body: { verification_type: VerificationType; provider_name: string };
+  }>("/api/verifications/external-sessions", async (req, reply) => {
+    const { verification_type, provider_name } = req.body ?? {};
+
+    if (!verification_type || !KNOWN_VERIFICATION_TYPES.has(verification_type as string)) {
+      return reply.status(400).send({
+        ok: false,
+        error: { code: "UNKNOWN_VERIFICATION_TYPE", message: `Unknown verification type: ${verification_type}` },
+      });
+    }
+
+    const descriptor = findExternalProviderDescriptor(provider_name);
+    if (!descriptor) {
+      return reply.status(400).send({
+        ok: false,
+        error: { code: "UNKNOWN_EXTERNAL_PROVIDER", message: `Unknown external provider: ${provider_name}` },
+      });
+    }
+
+    if (!descriptor.supported_types.includes(verification_type)) {
+      return reply.status(400).send({
+        ok: false,
+        error: {
+          code: "PROVIDER_TYPE_MISMATCH",
+          message: `Provider ${provider_name} does not support ${verification_type}.`,
+        },
+      });
+    }
+
+    const now = new Date();
+    const session: ExternalVerificationSession = {
+      session_id: newId("evps"),
+      verification_type,
+      provider_name: provider_name as ExternalVerificationProviderName,
+      user_id: MOCK_USER_ID,
+      status: "handoff_ready",
+      created_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+      raw_provider_payload_revealed_to_agent: false,
+      raw_document_revealed_to_agent: false,
+    };
+
+    externalVerificationSessions.set(session.session_id, session);
+
+    return reply.status(201).send({
+      ok: true,
+      data: {
+        session_id: session.session_id,
+        status: session.status,
+        handoff: toHandoffView(session, descriptor),
+      },
+    });
+  });
+
+  server.get<{ Params: { sessionId: string } }>(
+    "/api/verifications/external-sessions/:sessionId",
+    async (req, reply) => {
+      const session = externalVerificationSessions.get(req.params.sessionId);
+      if (!session || session.user_id !== MOCK_USER_ID) {
+        return reply.status(404).send({
+          ok: false,
+          error: { code: "SESSION_NOT_FOUND", message: "External verification session not found." },
+        });
+      }
+
+      const descriptor = findExternalProviderDescriptor(session.provider_name);
+      if (!descriptor) {
+        return reply.status(500).send({
+          ok: false,
+          error: { code: "PROVIDER_NOT_FOUND", message: "Provider descriptor no longer available." },
+        });
+      }
+
+      return reply.send({
+        ok: true,
+        data: { handoff: toHandoffView(session, descriptor) },
+      });
+    }
+  );
+
+  server.post<{ Params: { sessionId: string } }>(
+    "/api/verifications/external-sessions/:sessionId/mock-complete",
+    async (req, reply) => {
+      const session = externalVerificationSessions.get(req.params.sessionId);
+      if (!session || session.user_id !== MOCK_USER_ID) {
+        return reply.status(404).send({
+          ok: false,
+          error: { code: "SESSION_NOT_FOUND", message: "External verification session not found." },
+        });
+      }
+
+      if (session.status === "card_issued") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "SESSION_ALREADY_COMPLETED", message: "Verification card already issued for this session." },
+        });
+      }
+
+      if (session.status === "failed" || session.status === "cancelled" || session.status === "expired") {
+        return reply.status(409).send({
+          ok: false,
+          error: { code: "SESSION_TERMINAL", message: `Session is ${session.status} and cannot be completed.` },
+        });
+      }
+
+      if (new Date() > new Date(session.expires_at)) {
+        session.status = "expired";
+        return reply.status(400).send({
+          ok: false,
+          error: { code: "SESSION_EXPIRED", message: "Verification session has expired." },
+        });
+      }
+
+      // Normalize claim by provider
+      const now = new Date().toISOString();
+      let claimType: VerificationType;
+      let claimValue: Record<string, string>;
+      let assuranceLevel: "provider_verified" | "document_verified";
+      let expiresAt: string | undefined;
+
+      if (session.provider_name === "mock_sheerid_student") {
+        claimType = "student_status";
+        claimValue = {
+          kind: "student_status",
+          status: "verified_student",
+          verification_method: "provider_handoff",
+          provider: "mock_sheerid_student",
+          institution_name: "University of Michigan",
+          institution_domain: "umich.edu",
+        };
+        assuranceLevel = "provider_verified";
+      } else if (session.provider_name === "mock_sheerid_military") {
+        claimType = "military_status";
+        claimValue = {
+          kind: "military_status",
+          status: "verified_military_affiliation",
+          verification_method: "provider_handoff",
+          provider: "mock_sheerid_military",
+          affiliation: "military",
+        };
+        assuranceLevel = "provider_verified";
+      } else {
+        // mock_stripe_identity
+        claimType = "government_id";
+        claimValue = {
+          kind: "government_id",
+          status: "identity_verified",
+          verification_method: "provider_handoff",
+          provider: "mock_stripe_identity",
+          identity_assurance_level: "mock_document_selfie",
+        };
+        assuranceLevel = "document_verified";
+        expiresAt = new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString();
+      }
+
+      const cardId = newId("vc");
+      const claim = {
+        claim_id: newId("vc_claim"),
+        card_id: cardId,
+        claim_type: claimType,
+        claim_value: claimValue as Parameters<typeof buildSignedVerificationCard>[0]["claims"][0]["claim_value"],
+        assurance_level: assuranceLevel,
+        verified_at: now,
+        ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+      };
+
+      const cardFields = {
+        card_id: cardId,
+        schema_version: "1.0" as const,
+        issuer: "aegis" as const,
+        user_id: MOCK_USER_ID,
+        claims: [claim],
+        disclosure_policy: "user_approval_required" as const,
+        issued_at: now,
+        ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+        revocation_status: "active" as const,
+        limitations: {
+          raw_document_revealed_to_agent: false as const,
+          raw_document_revealed_to_website: false as const,
+          provider_result_only: true as const,
+          not_a_guarantee: true as const,
+        },
+      };
+
+      const card = await buildSignedVerificationCard(cardFields);
+      verificationCards.set(card.card_id, card);
+      schedulePersist();
+
+      session.status = "card_issued";
+      session.completed_at = now;
+      session.card_id = card.card_id;
+
+      return reply.status(201).send({
+        ok: true,
+        data: {
+          card: toVerificationCardSummary(card),
+          session_id: session.session_id,
+        },
+      });
+    }
+  );
 
   server.post<{
     Body: { verification_type: VerificationType; provider_name?: string; mock_input?: unknown; email?: string };

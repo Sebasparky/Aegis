@@ -282,8 +282,8 @@ export const unlistSkill = (skillId: string) =>
   request<Skill>(`/api/skills/${skillId}/unlist`, { method: "POST", body: JSON.stringify({}) });
 
 // Skills Marketplace
-export type SkillWithInstalled = Skill & { installed: boolean };
-export type SkillDetail = Skill & { installed: boolean; snapshot: PublishedSkillVersion | null };
+export type SkillWithInstalled = Skill & { installed: boolean; created_by_you: boolean };
+export type SkillDetail = Skill & { installed: boolean; created_by_you: boolean; snapshot: PublishedSkillVersion | null };
 export const getSkill = (skillId: string) => request<SkillDetail>(`/api/skills/${skillId}`);
 export const listSkills = (params?: { domain?: string; installed?: boolean }) => {
   const entries: [string, string][] = [];
@@ -1111,9 +1111,57 @@ export interface VerificationSessionView {
   delivery_mode?: "email" | "dev_console";
 }
 
+// External provider handoff types
+export interface ExternalVerificationProviderDescriptor {
+  provider_name: string;
+  display_name: string;
+  supported_types: VerificationType[];
+  provider_category: "affiliation" | "identity";
+  real_provider_family: string;
+  handoff_mode: string;
+  privacy_summary: string[];
+  agent_disclosure_summary: string[];
+}
+
+export interface ExternalVerificationHandoffView {
+  session_id: string;
+  verification_type: VerificationType;
+  provider_name: string;
+  provider_display_name: string;
+  status: string;
+  title: string;
+  description: string;
+  privacy_guarantees: string[];
+  agent_can_prove: string[];
+  expires_at: string;
+  raw_provider_payload_revealed_to_agent: false;
+  raw_document_revealed_to_agent: false;
+}
+
 export const listVerificationTypes = () =>
-  request<{ providers: Array<{ name: string; supported_types: VerificationType[] }> }>(
-    "/api/verifications/types",
+  request<{
+    providers: Array<{ name: string; supported_types: VerificationType[] }>;
+    external_providers: ExternalVerificationProviderDescriptor[];
+  }>("/api/verifications/types");
+
+export const createExternalVerificationSession = (body: {
+  verification_type: VerificationType;
+  provider_name: string;
+}) =>
+  request<{ session_id: string; status: string; handoff: ExternalVerificationHandoffView }>(
+    "/api/verifications/external-sessions",
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const getExternalVerificationSession = (sessionId: string) =>
+  request<{ handoff: ExternalVerificationHandoffView }>(
+    `/api/verifications/external-sessions/${sessionId}`,
+  );
+
+export const mockCompleteExternalSession = (sessionId: string) =>
+  request<{ card: VerificationCardSummary; session_id: string }>(
+    `/api/verifications/external-sessions/${sessionId}/mock-complete`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 
 export const createVerificationSession = (body: {

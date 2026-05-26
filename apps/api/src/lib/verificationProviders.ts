@@ -3,6 +3,8 @@ import type {
   AssuranceLevel,
   VerifiedClaim,
   VerificationProviderSession,
+  ExternalVerificationProviderDescriptor,
+  ExternalVerificationProviderName,
 } from "@aegis/types";
 
 export interface ProviderClaimResult {
@@ -190,4 +192,71 @@ export function findProviderForType(
   type: VerificationType
 ): VerificationProvider | undefined {
   return PROVIDERS.find((p) => p.supported_types.includes(type));
+}
+
+// ─── External Provider Descriptors ───────────────────────────────────────────
+// Metadata-only descriptors for handoff-based external providers.
+// These are not VerificationProvider instances — they describe external flows.
+
+export const EXTERNAL_PROVIDER_DESCRIPTORS: ExternalVerificationProviderDescriptor[] = [
+  {
+    provider_name: "mock_sheerid_student",
+    display_name: "Student Eligibility Verification",
+    supported_types: ["student_status"],
+    provider_category: "affiliation",
+    real_provider_family: "sheerid",
+    handoff_mode: "mock_modal",
+    privacy_summary: [
+      "Antigen stores only your institution name and verified status.",
+      "No academic records, transcripts, or grades are ever shared.",
+      "Raw eligibility data is never exposed to agents or websites.",
+    ],
+    agent_disclosure_summary: [
+      "Agents can prove you are a verified student.",
+      "Agents can prove your institution name.",
+      "Agents cannot access underlying eligibility data.",
+    ],
+  },
+  {
+    provider_name: "mock_sheerid_military",
+    display_name: "Military Status Verification",
+    supported_types: ["military_status"],
+    provider_category: "affiliation",
+    real_provider_family: "sheerid",
+    handoff_mode: "mock_modal",
+    privacy_summary: [
+      "Antigen stores only your verified military affiliation status.",
+      "No service records, rank, or deployment history are shared.",
+      "Raw eligibility data is never exposed to agents or websites.",
+    ],
+    agent_disclosure_summary: [
+      "Agents can prove you have verified military affiliation.",
+      "Agents cannot access service records or personal military data.",
+    ],
+  },
+  {
+    provider_name: "mock_stripe_identity",
+    display_name: "Identity Verification",
+    supported_types: ["government_id"],
+    provider_category: "identity",
+    real_provider_family: "stripe_identity",
+    handoff_mode: "mock_modal",
+    privacy_summary: [
+      "Antigen stores only your verified identity status — no documents are retained.",
+      "No document images, document numbers, DOB, or SSN are ever stored or shared.",
+      "Raw documents are never revealed to agents or websites.",
+    ],
+    agent_disclosure_summary: [
+      "Agents can prove your identity has been verified.",
+      "Agents cannot access any document details, numbers, or images.",
+    ],
+  },
+];
+
+export function findExternalProviderDescriptor(
+  providerName: string
+): ExternalVerificationProviderDescriptor | undefined {
+  return EXTERNAL_PROVIDER_DESCRIPTORS.find(
+    (d) => d.provider_name === (providerName as ExternalVerificationProviderName)
+  );
 }

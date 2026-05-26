@@ -40,6 +40,7 @@ import type {
   PurchaseConfirmationAuthorization,
   PurchaseConfirmationHandoffRecord,
   VerificationProviderSession,
+  ExternalVerificationSession,
   VerificationCard,
   DisclosureReceipt,
   TrustSignalDisclosureRecord,
@@ -361,6 +362,9 @@ export const workspaceAuditEvents = new Map<string, WorkspaceAuditEvent>();
 
 /** Ephemeral provider sessions — not persisted; expire after 30 min or on restart. */
 export const verificationProviderSessions = new Map<string, VerificationProviderSession>();
+
+/** Ephemeral external verification sessions — not persisted; expire after 30 min or on restart. */
+export const externalVerificationSessions = new Map<string, ExternalVerificationSession>();
 
 export const verificationCards = new Map<string, VerificationCard>();
 

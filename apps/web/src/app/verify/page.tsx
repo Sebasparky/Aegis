@@ -11,10 +11,14 @@ import {
   completeVerificationSession,
   createEmailVerificationSession,
   submitVerificationCode,
+  createExternalVerificationSession,
+  mockCompleteExternalSession,
 } from "@/lib/api";
 import type {
   VerificationCardSummary,
   VerificationCardDetail,
+  ExternalVerificationHandoffView,
+  ExternalVerificationProviderDescriptor,
 } from "@/lib/api";
 import type { VerificationType } from "@aegis/types";
 
@@ -241,6 +245,20 @@ type OtpFlowState =
   | { phase: "idle" }
   | { phase: "email_input"; type: VerificationType; providerName: string }
   | { phase: "otp_input"; sessionId: string; deliveryMode?: "email" | "dev_console" };
+
+// ─── External handoff flow state ──────────────────────────────────────────────
+
+type HandoffFlow =
+  | { phase: "idle" }
+  | { phase: "active"; sessionId: string; handoff: ExternalVerificationHandoffView };
+
+// ─── Handoff CTA labels ───────────────────────────────────────────────────────
+
+const HANDOFF_CTA: Partial<Record<VerificationType, string>> = {
+  student_status: "Verify student status",
+  military_status: "Verify military status",
+  government_id: "Verify identity",
+};
 
 // ─── Other types ─────────────────────────────────────────────────────────────
 
@@ -1077,25 +1095,29 @@ function CapabilityCard({
   mockForm,
   onStartMock,
   onStartReal,
+  onStartHandoff,
   onChangeMockForm,
   onSubmitMock,
   onCancelMock,
   submitting,
   submitError,
+  externalProvider,
 }: {
   group: VerificationGroup;
   mockVerifying: boolean;
   mockForm: MockForm;
   onStartMock: () => void;
   onStartReal: () => void;
+  onStartHandoff: () => void;
   onChangeMockForm: (f: MockForm) => void;
   onSubmitMock: () => void;
   onCancelMock: () => void;
   submitting: boolean;
   submitError: string | null;
+  externalProvider?: ExternalVerificationProviderDescriptor;
 }) {
   const { def, state, mockProvider, realProvider } = group;
-  const canReverify = (state === "revoked" || state === "expired") && (!!mockProvider || !!realProvider);
+  const canReverify = (state === "revoked" || state === "expired") && (!!mockProvider || !!realProvider || !!externalProvider);
 
   const statusBadge =
     state === "expired" ? (
@@ -1192,7 +1214,11 @@ function CapabilityCard({
       {!mockVerifying && (
         <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
           {canReverify && (
-            <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={realProvider ? onStartReal : onStartMock}>
+            <button
+              className="a-btn a-btn--primary"
+              style={{ fontSize: 11 }}
+              onClick={externalProvider ? onStartHandoff : realProvider ? onStartReal : onStartMock}
+            >
               Re-verify
             </button>
           )}
@@ -1201,12 +1227,17 @@ function CapabilityCard({
               Coming soon
             </button>
           )}
-          {state === "not_verified" && realProvider && (
+          {state === "not_verified" && externalProvider && (
+            <button className="a-btn a-btn--primary" style={{ fontSize: 12 }} onClick={onStartHandoff}>
+              {HANDOFF_CTA[def.type] ?? "Verify"}
+            </button>
+          )}
+          {state === "not_verified" && !externalProvider && realProvider && (
             <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={onStartReal}>
               Verify email
             </button>
           )}
-          {state === "not_verified" && !realProvider && (
+          {state === "not_verified" && !externalProvider && !realProvider && mockProvider && (
             <button className="a-btn a-btn--primary" style={{ fontSize: 11 }} onClick={onStartMock}>
               Mock verify
             </button>
@@ -1324,6 +1355,318 @@ function RevokedHistoryRow({
   );
 }
 
+// ─── ExternalProviderHandoffModal ─────────────────────────────────────────────
+
+type HandoffModalPhase = "intro" | "connecting" | "checking" | "completed" | "failed";
+
+const PROVIDER_ICONS: Record<string, string> = {
+  mock_sheerid_student: "🎓",
+  mock_sheerid_military: "⭐",
+  mock_stripe_identity: "🪪",
+};
+
+function ExternalProviderHandoffModal({
+  handoff,
+  onComplete,
+  onCancel,
+}: {
+  handoff: ExternalVerificationHandoffView;
+  onComplete: () => void;
+  onCancel: () => void;
+}) {
+  const [phase, setPhase] = useState<HandoffModalPhase>("intro");
+  const [error, setError] = useState<string | null>(null);
+
+  const providerIcon = PROVIDER_ICONS[handoff.provider_name] ?? "🔐";
+
+  const runMockFlow = async () => {
+    setPhase("connecting");
+    await new Promise((r) => setTimeout(r, 800));
+    setPhase("checking");
+    try {
+      await new Promise((r) => setTimeout(r, 1200));
+      await mockCompleteExternalSession(handoff.session_id);
+      setPhase("completed");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verification failed.");
+      setPhase("failed");
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        zIndex: 1000,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && phase !== "connecting" && phase !== "checking") onCancel();
+      }}
+    >
+      <div
+        style={{
+          background: "var(--paper)",
+          borderRadius: "var(--r-3)",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08)",
+          width: "100%",
+          maxWidth: 480,
+          overflow: "hidden",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "20px 24px 16px",
+            borderBottom: "1px solid var(--hairline)",
+            background: "linear-gradient(135deg, oklch(0.97 0.01 240), oklch(0.99 0.005 80))",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 14,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 28,
+              width: 48,
+              height: 48,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "oklch(0.96 0.01 240)",
+              borderRadius: "var(--r-2)",
+              border: "1px solid var(--hairline)",
+              flexShrink: 0,
+            }}
+          >
+            {providerIcon}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--ink-1)", lineHeight: 1.2 }}>
+              {handoff.title}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 3 }}>
+              via {handoff.provider_display_name}
+            </div>
+          </div>
+          {phase === "intro" && (
+            <button
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: "var(--ink-4)",
+                fontSize: 18,
+                padding: 0,
+                lineHeight: 1,
+              }}
+              onClick={onCancel}
+              aria-label="Close"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "20px 24px" }}>
+          {phase === "intro" && (
+            <>
+              <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 16px", lineHeight: 1.6 }}>
+                {handoff.description}
+              </p>
+
+              {/* Privacy guarantees */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                  Privacy guarantees
+                </div>
+                {handoff.privacy_guarantees.map((g, i) => (
+                  <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                    <span style={{ color: "oklch(0.42 0.09 150)", fontSize: 12, flexShrink: 0, marginTop: 1 }}>✓</span>
+                    <span style={{ fontSize: 12, color: "var(--ink-2)", lineHeight: 1.5 }}>{g}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* What agents can prove */}
+              <div
+                style={{
+                  padding: "12px 14px",
+                  background: "oklch(0.97 0.012 240)",
+                  border: "1px solid oklch(0.92 0.02 240)",
+                  borderRadius: "var(--r-2)",
+                  marginBottom: 16,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 600, color: "oklch(0.42 0.09 240)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                  Agents can prove
+                </div>
+                {handoff.agent_can_prove.map((a, i) => (
+                  <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: i < handoff.agent_can_prove.length - 1 ? 4 : 0 }}>
+                    <span style={{ color: "oklch(0.42 0.09 240)", fontSize: 12, flexShrink: 0, marginTop: 1 }}>→</span>
+                    <span style={{ fontSize: 12, color: "oklch(0.35 0.07 240)", lineHeight: 1.5 }}>{a}</span>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                className="a-btn a-btn--primary"
+                style={{ width: "100%", fontSize: 13, padding: "10px 0", justifyContent: "center" }}
+                onClick={runMockFlow}
+              >
+                Continue to provider →
+              </button>
+              <div style={{ textAlign: "center", marginTop: 10, fontSize: 11, color: "var(--ink-4)" }}>
+                Local development simulation
+              </div>
+            </>
+          )}
+
+          {(phase === "connecting" || phase === "checking") && (
+            <div style={{ textAlign: "center", padding: "20px 0" }}>
+              {/* Progress timeline */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "flex-start", maxWidth: 260, margin: "0 auto 24px" }}>
+                {[
+                  { label: "Connecting to provider", done: true, active: phase === "connecting" },
+                  { label: "Provider checking status", done: phase === "checking", active: phase === "checking" },
+                  { label: "Issuing signed card", done: false, active: false },
+                ].map((step, i) => (
+                  <div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                    <div
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: "50%",
+                        border: step.done
+                          ? "2px solid oklch(0.42 0.09 150)"
+                          : step.active
+                          ? "2px solid oklch(0.62 0.09 240)"
+                          : "2px solid var(--hairline)",
+                        background: step.done
+                          ? "oklch(0.42 0.09 150)"
+                          : "transparent",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        transition: "all 0.3s",
+                      }}
+                    >
+                      {step.done && <span style={{ color: "white", fontSize: 10, fontWeight: 700 }}>✓</span>}
+                      {step.active && !step.done && (
+                        <div
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            background: "oklch(0.62 0.09 240)",
+                            animation: "pulse 1s ease-in-out infinite",
+                          }}
+                        />
+                      )}
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        color: step.done
+                          ? "oklch(0.42 0.09 150)"
+                          : step.active
+                          ? "var(--ink-1)"
+                          : "var(--ink-4)",
+                        fontWeight: step.active ? 500 : 400,
+                        transition: "color 0.3s",
+                      }}
+                    >
+                      {step.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p style={{ fontSize: 12, color: "var(--ink-3)", margin: 0 }}>
+                {phase === "connecting" ? "Establishing secure connection…" : "Verifying your eligibility…"}
+              </p>
+            </div>
+          )}
+
+          {phase === "completed" && (
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 44, marginBottom: 12 }}>✅</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--ink-1)", marginBottom: 6 }}>
+                Verification complete
+              </div>
+              <p style={{ fontSize: 13, color: "var(--ink-2)", margin: "0 0 16px", lineHeight: 1.6 }}>
+                A signed verification card has been issued and added to your credential wallet.
+              </p>
+              <div
+                style={{
+                  padding: "12px 14px",
+                  background: "var(--green-soft)",
+                  border: "1px solid var(--green-ring)",
+                  borderRadius: "var(--r-2)",
+                  marginBottom: 16,
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 600, color: "oklch(0.35 0.08 150)", marginBottom: 6 }}>
+                  Agents can now prove
+                </div>
+                {handoff.agent_can_prove.map((a, i) => (
+                  <div key={i} style={{ fontSize: 12, color: "oklch(0.40 0.07 150)", marginBottom: 3 }}>
+                    → {a}
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: "oklch(0.50 0.06 150)", marginTop: 8 }}>
+                  Raw documents, provider payloads, and personal data are never shared with agents.
+                </div>
+              </div>
+              <button
+                className="a-btn a-btn--primary"
+                style={{ width: "100%", fontSize: 13, padding: "10px 0", justifyContent: "center" }}
+                onClick={onComplete}
+              >
+                Done
+              </button>
+            </div>
+          )}
+
+          {phase === "failed" && (
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "var(--ink-1)", marginBottom: 6 }}>
+                Verification failed
+              </div>
+              <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px" }}>
+                {error ?? "An error occurred during verification."}
+              </p>
+              <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                <button className="a-btn a-btn--ghost" style={{ fontSize: 12 }} onClick={onCancel}>
+                  Cancel
+                </button>
+                <button
+                  className="a-btn a-btn--primary"
+                  style={{ fontSize: 12 }}
+                  onClick={() => {
+                    setPhase("intro");
+                    setError(null);
+                  }}
+                >
+                  Try again
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function VerifyPage() {
@@ -1331,6 +1674,7 @@ export default function VerifyPage() {
   const [providers, setProviders] = useState<
     { name: string; supported_types: VerificationType[] }[]
   >([]);
+  const [externalProviders, setExternalProviders] = useState<ExternalVerificationProviderDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [verifyResults, setVerifyResults] = useState<Record<string, VerifyResult>>({});
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
@@ -1345,6 +1689,7 @@ export default function VerifyPage() {
   const [verifying, setVerifying] = useState<string | null>(null);
   const [expandedGroupType, setExpandedGroupType] = useState<VerificationType | null>(null);
   const [otpFlow, setOtpFlow] = useState<OtpFlowState>({ phase: "idle" });
+  const [handoffFlow, setHandoffFlow] = useState<HandoffFlow>({ phase: "idle" });
   const [emailInput, setEmailInput] = useState("");
   const [otpInput, setOtpInput] = useState("");
   const [otpError, setOtpError] = useState<string | null>(null);
@@ -1354,6 +1699,7 @@ export default function VerifyPage() {
       .then(([cardsData, typesData]) => {
         setCards(cardsData.cards);
         setProviders(typesData.providers);
+        setExternalProviders(typesData.external_providers ?? []);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -1435,6 +1781,18 @@ export default function VerifyPage() {
     setOtpError(null);
   };
 
+  const handleStartHandoff = async (verificationType: VerificationType, providerName: string) => {
+    try {
+      const result = await createExternalVerificationSession({
+        verification_type: verificationType,
+        provider_name: providerName,
+      });
+      setHandoffFlow({ phase: "active", sessionId: result.session_id, handoff: result.handoff });
+    } catch (e) {
+      console.error("Failed to start handoff:", e);
+    }
+  };
+
   const handleSubmitEmail = async () => {
     if (otpFlow.phase !== "email_input") return;
     setSubmitting(true);
@@ -1512,6 +1870,17 @@ export default function VerifyPage() {
 
   return (
     <div className="page">
+      {handoffFlow.phase === "active" && (
+        <ExternalProviderHandoffModal
+          handoff={handoffFlow.handoff}
+          onComplete={async () => {
+            setHandoffFlow({ phase: "idle" });
+            await refreshCards();
+          }}
+          onCancel={() => setHandoffFlow({ phase: "idle" })}
+        />
+      )}
+
       {otpFlow.phase !== "idle" && (
         <EmailOtpModal
           phase={otpFlow.phase === "email_input" ? "email_input" : "otp_input"}
@@ -1776,12 +2145,19 @@ export default function VerifyPage() {
             >
               {availableGroups.map((group) => {
                 const isMockVerifyingThis = mockVerifyingType === group.type;
+                const extProvider = externalProviders.find((p) =>
+                  p.supported_types.includes(group.type)
+                );
                 return (
                   <CapabilityCard
                     key={group.type}
                     group={group}
                     mockVerifying={isMockVerifyingThis}
                     mockForm={isMockVerifyingThis ? mockForm : {}}
+                    externalProvider={extProvider}
+                    onStartHandoff={() => {
+                      if (extProvider) handleStartHandoff(group.type, extProvider.provider_name);
+                    }}
                     onStartMock={() => {
                       setMockVerifyingType(group.type);
                       setMockForm({});

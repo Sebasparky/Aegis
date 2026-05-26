@@ -11,7 +11,7 @@ vi.mock("../store/persistence.js", () => ({
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { verificationCards, verificationProviderSessions, disclosureReceipts } from "../store/index.js";
+import { verificationCards, verificationProviderSessions, disclosureReceipts, externalVerificationSessions } from "../store/index.js";
 import { schedulePersist } from "../store/persistence.js";
 import { verificationRoutes, sessionOtpRecords, emailOtpRateLimits } from "../routes/verifications.js";
 
@@ -69,6 +69,7 @@ afterAll(async () => {
 beforeEach(() => {
   verificationCards.clear();
   verificationProviderSessions.clear();
+  externalVerificationSessions.clear();
   disclosureReceipts.clear();
   sessionOtpRecords.clear();
   emailOtpRateLimits.clear();
@@ -889,5 +890,194 @@ describe("email_otp provider — submit-code", () => {
     expect(sessionOtpRecords.has(sessionId)).toBe(true);
     await submitCode(sessionId, otp!);
     expect(sessionOtpRecords.has(sessionId)).toBe(false);
+  });
+});
+
+// ─── External Verification Provider Handoff tests ─────────────────────────────
+
+async function createExternalSession(
+  verification_type: string,
+  provider_name: string
+) {
+  const res = await server.inject({
+    method: "POST",
+    url: "/api/verifications/external-sessions",
+    payload: { verification_type, provider_name },
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+async function mockCompleteExternal(sessionId: string) {
+  const res = await server.inject({
+    method: "POST",
+    url: `/api/verifications/external-sessions/${sessionId}/mock-complete`,
+    payload: {},
+  });
+  return { res, data: JSON.parse(res.body) };
+}
+
+const EXTERNAL_FORBIDDEN_FIELDS = [
+  "ssn",
+  "dob",
+  "legal_name",
+  "document_number",
+  "biometric",
+  "selfie",
+  "raw_document",
+  "raw_provider_payload",
+  "provider_payload",
+  "provider_reference_id",
+];
+
+describe("External Verification Provider Handoff", () => {
+  it("GET /api/verifications/types includes all three external providers", async () => {
+    const res = await server.inject({ method: "GET", url: "/api/verifications/types" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.ok).toBe(true);
+    const names = body.data.external_providers.map((p: { provider_name: string }) => p.provider_name);
+    expect(names).toContain("mock_sheerid_student");
+    expect(names).toContain("mock_sheerid_military");
+    expect(names).toContain("mock_stripe_identity");
+  });
+
+  it("creates student_status external session with status handoff_ready and safe handoff view", async () => {
+    const { res, data } = await createExternalSession("student_status", "mock_sheerid_student");
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    expect(data.data.status).toBe("handoff_ready");
+    const handoff = data.data.handoff;
+    expect(handoff.session_id).toMatch(/^evps_/);
+    expect(handoff.verification_type).toBe("student_status");
+    expect(handoff.provider_name).toBe("mock_sheerid_student");
+    expect(handoff.raw_provider_payload_revealed_to_agent).toBe(false);
+    expect(handoff.raw_document_revealed_to_agent).toBe(false);
+    expect(Array.isArray(handoff.privacy_guarantees)).toBe(true);
+    expect(Array.isArray(handoff.agent_can_prove)).toBe(true);
+    // Must never expose sensitive fields
+    for (const field of EXTERNAL_FORBIDDEN_FIELDS) {
+      expect(res.body, `"${field}" must not appear`).not.toMatch(new RegExp(`"${field}"\\s*:`));
+    }
+  });
+
+  it("creates military_status external session with handoff_ready", async () => {
+    const { res, data } = await createExternalSession("military_status", "mock_sheerid_military");
+    expect(res.statusCode).toBe(201);
+    expect(data.data.status).toBe("handoff_ready");
+    expect(data.data.handoff.verification_type).toBe("military_status");
+    expect(data.data.handoff.raw_provider_payload_revealed_to_agent).toBe(false);
+    expect(data.data.handoff.raw_document_revealed_to_agent).toBe(false);
+  });
+
+  it("creates government_id external session with handoff_ready", async () => {
+    const { res, data } = await createExternalSession("government_id", "mock_stripe_identity");
+    expect(res.statusCode).toBe(201);
+    expect(data.data.status).toBe("handoff_ready");
+    expect(data.data.handoff.verification_type).toBe("government_id");
+    expect(data.data.handoff.raw_provider_payload_revealed_to_agent).toBe(false);
+    expect(data.data.handoff.raw_document_revealed_to_agent).toBe(false);
+  });
+
+  it("mock-complete student session issues student_status card with correct claim fields", async () => {
+    const { data: session } = await createExternalSession("student_status", "mock_sheerid_student");
+    const sessionId = session.data.session_id;
+    const { res, data } = await mockCompleteExternal(sessionId);
+    expect(res.statusCode).toBe(201);
+    expect(data.ok).toBe(true);
+    expect(data.data.card.claim_types).toContain("student_status");
+    expect(verificationCards.size).toBe(1);
+    const card = Array.from(verificationCards.values())[0];
+    const claim = card.claims[0];
+    expect(claim.claim_type).toBe("student_status");
+    expect((claim.claim_value as Record<string, string>).status).toBe("verified_student");
+    expect((claim.claim_value as Record<string, string>).verification_method).toBe("provider_handoff");
+    expect((claim.claim_value as Record<string, string>).provider).toBe("mock_sheerid_student");
+    expect((claim.claim_value as Record<string, string>).institution_name).toBe("University of Michigan");
+    expect(claim.assurance_level).toBe("provider_verified");
+    // session must be marked card_issued
+    expect(externalVerificationSessions.get(sessionId)?.status).toBe("card_issued");
+  });
+
+  it("mock-complete military session issues military_status card with correct claim fields", async () => {
+    const { data: session } = await createExternalSession("military_status", "mock_sheerid_military");
+    const { res, data } = await mockCompleteExternal(session.data.session_id);
+    expect(res.statusCode).toBe(201);
+    expect(data.data.card.claim_types).toContain("military_status");
+    const card = Array.from(verificationCards.values())[0];
+    const claim = card.claims[0];
+    expect(claim.claim_type).toBe("military_status");
+    expect((claim.claim_value as Record<string, string>).status).toBe("verified_military_affiliation");
+    expect((claim.claim_value as Record<string, string>).affiliation).toBe("military");
+    expect((claim.claim_value as Record<string, string>).provider).toBe("mock_sheerid_military");
+  });
+
+  it("mock-complete government_id session issues government_id card with correct claim fields and no sensitive data", async () => {
+    const { data: session } = await createExternalSession("government_id", "mock_stripe_identity");
+    const { res, data } = await mockCompleteExternal(session.data.session_id);
+    expect(res.statusCode).toBe(201);
+    expect(data.data.card.claim_types).toContain("government_id");
+    const card = Array.from(verificationCards.values())[0];
+    const claim = card.claims[0];
+    expect(claim.claim_type).toBe("government_id");
+    expect((claim.claim_value as Record<string, string>).status).toBe("identity_verified");
+    expect((claim.claim_value as Record<string, string>).identity_assurance_level).toBe("mock_document_selfie");
+    expect(claim.assurance_level).toBe("document_verified");
+    // No sensitive data in any response
+    for (const field of EXTERNAL_FORBIDDEN_FIELDS) {
+      expect(res.body, `"${field}" must not appear in government_id response`).not.toMatch(
+        new RegExp(`"${field}"\\s*:`)
+      );
+    }
+  });
+
+  it("raw_provider_payload_revealed_to_agent and raw_document_revealed_to_agent are literally false in all responses", async () => {
+    const { res: createRes } = await createExternalSession("student_status", "mock_sheerid_student");
+    const sessionId = JSON.parse(createRes.body).data.session_id;
+    const { res: getRes } = (() => {
+      return { res: { body: "" } }; // placeholder — checked via create response
+    })();
+    // Check create response
+    const createBody = JSON.parse(createRes.body);
+    expect(createBody.data.handoff.raw_provider_payload_revealed_to_agent).toBe(false);
+    expect(createBody.data.handoff.raw_document_revealed_to_agent).toBe(false);
+    // Check GET response
+    const getRealRes = await server.inject({
+      method: "GET",
+      url: `/api/verifications/external-sessions/${sessionId}`,
+    });
+    const getBody = JSON.parse(getRealRes.body);
+    expect(getBody.data.handoff.raw_provider_payload_revealed_to_agent).toBe(false);
+    expect(getBody.data.handoff.raw_document_revealed_to_agent).toBe(false);
+    // Both must not be true, null, or a string
+    expect(typeof createBody.data.handoff.raw_provider_payload_revealed_to_agent).toBe("boolean");
+    expect(typeof createBody.data.handoff.raw_document_revealed_to_agent).toBe("boolean");
+    void getRes;
+  });
+
+  it("cannot mock-complete an already card_issued session — returns 409", async () => {
+    const { data: session } = await createExternalSession("student_status", "mock_sheerid_student");
+    const sessionId = session.data.session_id;
+    await mockCompleteExternal(sessionId);
+    const { res, data } = await mockCompleteExternal(sessionId);
+    expect(res.statusCode).toBe(409);
+    expect(data.error.code).toBe("SESSION_ALREADY_COMPLETED");
+  });
+
+  it("cannot mock-complete a non-existent session — returns 404", async () => {
+    const { res, data } = await mockCompleteExternal("evps_doesnotexist");
+    expect(res.statusCode).toBe(404);
+    expect(data.error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("returns 400 for unknown external provider", async () => {
+    const { res, data } = await createExternalSession("student_status", "nonexistent_provider");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("UNKNOWN_EXTERNAL_PROVIDER");
+  });
+
+  it("returns 400 when provider does not support the requested verification_type", async () => {
+    const { res, data } = await createExternalSession("student_status", "mock_stripe_identity");
+    expect(res.statusCode).toBe(400);
+    expect(data.error.code).toBe("PROVIDER_TYPE_MISMATCH");
   });
 });

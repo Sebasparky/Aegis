@@ -1204,6 +1204,8 @@ export interface Skill {
   sensitivity_level?: SensitivityLevel;
   /** 'active' = discoverable; 'unlisted' = hidden from browse, installs preserved. Defaults to 'active'. */
   listing_status?: 'active' | 'unlisted';
+  /** AegisID of the user who published this skill. Used to derive created_by_you in API responses. */
+  creator_aegis_id?: string;
 }
 
 export interface PublishedSkillVersion {
@@ -2742,10 +2744,10 @@ export interface VerificationProviderSession {
 export type VerifiedClaimValue =
   | { kind: "email_ownership"; email_domain: string }
   | { kind: "phone_ownership"; phone_country_code: string }
-  /** Tier 2 only — country_code and id_type are claim details, not trust signals. */
-  | { kind: "government_id"; country_code: string; id_type: string }
-  | { kind: "student_status"; institution_name: string; enrollment_status: string }
-  | { kind: "military_status"; branch: string }
+  /** Tier 2 only — country_code and id_type are claim details, not trust signals. Provider-handoff claims use status/verification_method/provider/identity_assurance_level instead. */
+  | { kind: "government_id"; country_code?: string; id_type?: string; status?: string; verification_method?: string; provider?: string; identity_assurance_level?: string }
+  | { kind: "student_status"; institution_name: string; enrollment_status?: string; status?: string; verification_method?: string; provider?: string; institution_domain?: string }
+  | { kind: "military_status"; branch?: string; status?: string; verification_method?: string; provider?: string; affiliation?: string }
   | { kind: "business_control"; business_name: string }
   | { kind: "domain_ownership"; domain: string }
   | { kind: "employment_status"; employer_name?: string };
@@ -2830,6 +2832,71 @@ export interface DisclosureReceipt {
     signed_at: string;
     signing_key_id?: string;
   };
+}
+
+// ─── External Verification Provider Handoff ──────────────────────────────────
+
+export type ExternalVerificationProviderName =
+  | "mock_sheerid_student"
+  | "mock_sheerid_military"
+  | "mock_stripe_identity";
+
+export type ExternalVerificationSessionStatus =
+  | "created"
+  | "handoff_ready"
+  | "provider_pending"
+  | "provider_completed"
+  | "card_issued"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+export interface ExternalVerificationProviderDescriptor {
+  provider_name: ExternalVerificationProviderName;
+  display_name: string;
+  supported_types: VerificationType[];
+  provider_category: "affiliation" | "identity";
+  real_provider_family: "sheerid" | "idme" | "stripe_identity" | "persona" | "mock";
+  handoff_mode: "mock_modal" | "redirect" | "embedded";
+  privacy_summary: string[];
+  agent_disclosure_summary: string[];
+}
+
+export interface ExternalVerificationSession {
+  session_id: string;
+  verification_type: VerificationType;
+  provider_name: ExternalVerificationProviderName;
+  user_id: string;
+  status: ExternalVerificationSessionStatus;
+  handoff_url?: string;
+  mock_handoff_token?: string;
+  provider_reference_id?: string;
+  created_at: string;
+  expires_at: string;
+  completed_at?: string;
+  card_id?: string;
+  failure_reason?: string;
+  /** Always the literal false — raw provider payload is never revealed to agents. */
+  raw_provider_payload_revealed_to_agent: false;
+  /** Always the literal false — raw documents are never revealed to agents. */
+  raw_document_revealed_to_agent: false;
+}
+
+export interface ExternalVerificationHandoffView {
+  session_id: string;
+  verification_type: VerificationType;
+  provider_name: ExternalVerificationProviderName;
+  provider_display_name: string;
+  status: ExternalVerificationSessionStatus;
+  title: string;
+  description: string;
+  privacy_guarantees: string[];
+  agent_can_prove: string[];
+  expires_at: string;
+  /** Always the literal false — raw provider payload is never revealed to agents. */
+  raw_provider_payload_revealed_to_agent: false;
+  /** Always the literal false — raw documents are never revealed to agents. */
+  raw_document_revealed_to_agent: false;
 }
 
 /** Lightweight audit log for Tier 1 trust-signal disclosures in active delegation contexts. */

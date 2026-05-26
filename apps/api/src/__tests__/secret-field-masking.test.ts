@@ -30,53 +30,55 @@ let sentMessages: CapturedMsg[] = [];
 let simulateInsertTextFailure = false;
 
 vi.mock("ws", () => {
-  const handlers: Record<string, ((...args: unknown[]) => void)[]> = {};
-
+  // Each FakeWs instance gets its own handler registry so test state does not bleed
+  // across test boundaries (module-level handlers would accumulate across tests).
+  //
+  // Responses are emitted via queueMicrotask so that the ID variable (e.g. insertId = send(...))
+  // is fully assigned before the response handler fires. Emitting synchronously inside send()
+  // would cause the routing check (id === insertId) to evaluate before insertId is set.
   const FakeWs = vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+    const instanceHandlers: Record<string, ((...args: unknown[]) => void)[]> = {};
+
+    const emit = (response: string) => {
+      queueMicrotask(() => {
+        instanceHandlers["message"]?.forEach((h) => h(response));
+      });
+    };
+
     this.send = (raw: string) => {
       const msg = JSON.parse(raw) as CapturedMsg & { method: string };
       sentMessages.push(msg);
 
       if (msg.method === "Target.attachToTarget") {
-        handlers["message"]?.forEach((h) =>
-          h(JSON.stringify({ id: msg.id, result: { sessionId: "mock_session" } })),
-        );
+        emit(JSON.stringify({ id: msg.id, result: { sessionId: "mock_session" } }));
         return;
       }
 
       if (msg.method === "Runtime.evaluate") {
         // Return a success result for all eval phases.
-        handlers["message"]?.forEach((h) =>
-          h(
-            JSON.stringify({
-              id: msg.id,
-              sessionId: "mock_session",
-              result: { result: { type: "object", value: { ok: true } } },
-            }),
-          ),
-        );
+        emit(JSON.stringify({
+          id: msg.id,
+          sessionId: "mock_session",
+          result: { result: { type: "object", value: { ok: true } } },
+        }));
         return;
       }
 
       if (msg.method === "Input.insertText") {
         if (simulateInsertTextFailure) {
           // Return a CDP error so the fallback setter path is taken.
-          handlers["message"]?.forEach((h) =>
-            h(JSON.stringify({ id: msg.id, error: { code: -32601, message: "Method not found" } })),
-          );
+          emit(JSON.stringify({ id: msg.id, error: { code: -32601, message: "Method not found" } }));
         } else {
           // Return empty success result.
-          handlers["message"]?.forEach((h) =>
-            h(JSON.stringify({ id: msg.id, result: {} })),
-          );
+          emit(JSON.stringify({ id: msg.id, result: {} }));
         }
         return;
       }
     };
 
     this.on = (event: string, handler: (...args: unknown[]) => void) => {
-      handlers[event] = handlers[event] ?? [];
-      handlers[event].push(handler);
+      instanceHandlers[event] = instanceHandlers[event] ?? [];
+      instanceHandlers[event].push(handler);
       if (event === "open") setTimeout(() => handler(), 0);
     };
 

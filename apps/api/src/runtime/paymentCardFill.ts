@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { PaymentCardFillRequest, PaymentCardField } from "@aegis/types";
+import { fillOppwaIframeField } from "./paymentIframeFill.js";
 
 // Purchase-control selector patterns — any selector matching these must be rejected at creation time.
 // This is a defence-in-depth validation; the runtime contains no click path.
@@ -72,14 +73,22 @@ export function resolveFieldValue(
  * - No click(), submit(), requestSubmit(), dispatchEvent(MouseEvent), keyboard Enter, or navigation.
  * - card_number and cvv DOM values are masked after fill (same technique as password masking in secretInjection.ts).
  * - resolvedValue flows: KMS/pm → this function → CDP → browser field. It is never logged, returned, or persisted.
- * - If the target element is inside an iframe, returns { success: false, error: "IFRAME_NOT_SUPPORTED" }.
- *   Iframe card fields require a dedicated future implementation; we never attempt broad iframe traversal.
+ * - For card_number and cvv: attempts OPPWA PCI iframe fill first via Target.getTargets.
+ *   Returns with iframeProvider set on success, or { success: false, error: "OPPWA_..." } on failure.
+ *   Falls through to parent-page fill when no OPPWA iframes are detected (not_applicable).
+ * - For non-card fields, iframe detection still returns IFRAME_NOT_SUPPORTED as before.
  */
 export async function executePaymentCardFillViaCDP(
   fillRequest: PaymentCardFillRequest,
   resolvedValue: string,
   cdpUrlOverride?: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{
+  success: boolean;
+  error?: string;
+  iframeProvider?: "oppwa";
+  iframeOrigin?: string;
+  iframePath?: string;
+}> {
   const cdpBase = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
   if (!cdpBase) {
     return {
@@ -100,6 +109,29 @@ export async function executePaymentCardFillViaCDP(
     const browserWsUrl: string = (versionData as Record<string, string>).webSocketDebuggerUrl;
     if (!browserWsUrl) {
       return { success: false, error: "No browser WebSocket debugger URL returned by CDP." };
+    }
+
+    // OPPWA iframe routing — card_number and cvv fields may live inside cross-origin
+    // PCI iframes that are unreachable from the parent page's document context.
+    // Attempt the OPPWA iframe path first; fall through only when not_applicable.
+    if (fillRequest.field === "card_number" || fillRequest.field === "cvv") {
+      const iframeResult = await fillOppwaIframeField({
+        browserWsUrl,
+        field_kind: fillRequest.field,
+        resolvedValue,
+      });
+      if (iframeResult.status === "filled") {
+        return {
+          success: true,
+          iframeProvider: "oppwa",
+          iframeOrigin: iframeResult.iframe_origin,
+          iframePath: iframeResult.iframe_path,
+        };
+      }
+      if (iframeResult.status === "failed") {
+        return { success: false, error: iframeResult.error_code };
+      }
+      // status === "not_applicable" → no OPPWA iframes present; fall through to parent-page fill
     }
 
     const pageTarget = (targets as Array<{ id: string; url: string; type: string }>)
@@ -176,7 +208,13 @@ export async function executePaymentCardFillViaCDP(
       return { ok: true };
     })()`;
 
-    return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+    return await new Promise<{
+      success: boolean;
+      error?: string;
+      iframeProvider?: "oppwa";
+      iframeOrigin?: string;
+      iframePath?: string;
+    }>((resolve) => {
       const ws = new WebSocket(browserWsUrl);
       let msgId = 1;
       let sessionId: string | null = null;

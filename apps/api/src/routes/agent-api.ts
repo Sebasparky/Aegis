@@ -3817,6 +3817,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_values_revealed_to_agent: false,
           purchase_not_authorized: true,
           note: "Antigen injected the card field value directly via CDP. Raw values were never returned to the agent. This does NOT authorize a purchase.",
+          // Iframe metadata — present only when fill was routed through an iframe provider
+          ...(fillResult.iframeProvider ? {
+            iframe_provider: fillResult.iframeProvider,
+            iframe_origin: fillResult.iframeOrigin,
+            iframe_path: fillResult.iframePath,
+          } : {}),
         },
       });
     },

@@ -186,9 +186,8 @@ function deriveVariableLabel(event: SemanticRecordingEvent): string {
   return raw.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim();
 }
 
-/** Returns true when a compiled fill step targets a search-type input. */
-function isSearchFillStep(step: RouteStep): boolean {
-  if (step.action !== "fill") return false;
+/** Returns true when a step's description/intent or locators suggest a search-type element. */
+function isSearchTarget(step: RouteStep): boolean {
   const text = `${step.description} ${step.intent}`.toLowerCase();
   if (/search/i.test(text)) return true;
   const all = [step.target.preferred_locator, ...step.target.fallback_locators];
@@ -196,42 +195,53 @@ function isSearchFillStep(step: RouteStep): boolean {
     (loc) =>
       (loc.type === "placeholder" && /search/i.test(loc.value ?? "")) ||
       (loc.type === "label"       && /search/i.test(loc.name  ?? "")) ||
+      (loc.type === "role"        && /search/i.test(loc.name  ?? "")) ||
       (loc.type === "css"         && (loc.value ?? "").includes('[type="search"]'))
   );
+}
+
+/** Returns true when a compiled fill step targets a search-type input. */
+function isSearchFillStep(step: RouteStep): boolean {
+  return step.action === "fill" && isSearchTarget(step);
 }
 
 /**
  * Post-compilation normalization for search-style routes.
  *
- * Rule 1 — Drop a click step that immediately precedes a search-fill step when
- *           no submit or click follows it. That click was opening/focusing the
- *           search widget, not a meaningful action the route needs to replay.
+ * Rule A — Drop leading search-ish clicks before the first search fill
+ *           (focus/open widget noise; not a meaningful replay action).
+ * Rule B — Drop leading search-ish submits before the first search fill
+ *           (pre-fill form-submit noise fired before the user typed anything).
+ * Rule C — Preserve all steps from the first search fill onward unchanged.
+ * Rule D — Infer a submit step when the last step is a search fill with
+ *           no explicit submit following it (Enter key press not captured).
+ * Rule E — Skip inference when an explicit submit already follows the fill.
+ * Rule F — Renumber all steps sequentially after modifications.
  *
- * Rule 2 — Add an inferred `submit` step when the last step is a search fill
- *           with no following submit (user pressed Enter, which the recorder's
- *           click handler cannot capture).
- *
- * Step orders are renumbered after modifications.
+ * Only search-ish clicks/submits are dropped; non-search preamble steps
+ * (e.g., a login form submit on a different page) are preserved.
  */
 function normalizeSearchRoute(steps: RouteStep[]): RouteStep[] {
   if (steps.length === 0) return steps;
 
-  const result = [...steps];
+  // Guard: only normalize if at least one search fill exists.
+  const firstSearchFillIdx = steps.findIndex(isSearchFillStep);
+  if (firstSearchFillIdx === -1) return steps;
 
-  // Rule 1: drop a click immediately before a search fill when no submit/click follows.
-  for (let i = 0; i < result.length - 1; i++) {
-    const cur  = result[i];
-    const next = result[i + 1];
-    const noSubmitAfter = !result
-      .slice(i + 2)
-      .some((s) => s.action === "click" || s.action === "submit");
-    if (cur.action === "click" && isSearchFillStep(next) && noSubmitAfter) {
-      result.splice(i, 1);
-      i--;
-    }
+  const result: RouteStep[] = [];
+
+  // Rules A & B: scan preamble steps (before the first search fill).
+  for (let i = 0; i < firstSearchFillIdx; i++) {
+    const step = steps[i];
+    if (step.action === "click"  && isSearchTarget(step)) continue; // Rule A
+    if (step.action === "submit" && isSearchTarget(step)) continue; // Rule B
+    result.push(step); // non-search preamble preserved
   }
 
-  // Rule 2: add inferred submit when the last step is a search fill.
+  // Rule C: preserve the first search fill and everything that follows.
+  result.push(...steps.slice(firstSearchFillIdx));
+
+  // Rules D & E: infer submit only when the last step is a search fill.
   const last = result[result.length - 1];
   if (last && isSearchFillStep(last)) {
     result.push({
@@ -251,7 +261,7 @@ function normalizeSearchRoute(steps: RouteStep[]): RouteStep[] {
     });
   }
 
-  // Renumber steps sequentially.
+  // Rule F: renumber steps sequentially.
   result.forEach((s, idx) => { s.order = idx + 1; });
   return result;
 }

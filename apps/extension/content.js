@@ -189,7 +189,9 @@ if (window.__aegisRecorderActive) {
     if (!target) return;
     // Emit fill first so the sequence [fill, submit] is always maintained.
     const value = target.value ? target.value.trim() : '';
-    if (value && !['submit', 'button', 'reset', 'checkbox', 'radio'].includes(target.type || '')) {
+    // Pre-fill focus/open events have no typed value — skip them entirely.
+    if (!value) return;
+    if (!['submit', 'button', 'reset', 'checkbox', 'radio'].includes(target.type || '')) {
       captureEvent('fill', target, { raw_value: value });
     }
     captureEvent('submit', target);

@@ -58,6 +58,19 @@ function submitEvent(url = "https://en.wikipedia.org/"): SemanticRecordingEvent 
   };
 }
 
+function nonSearchSubmitEvent(url = "https://example.com/"): SemanticRecordingEvent {
+  return {
+    type: "submit",
+    url,
+    timestamp: new Date().toISOString(),
+    locators: [{ type: "label", name: "Email" }],
+    element_type: "input",
+    element_role: "textbox",
+    input_type: "email",
+    label_text: "Email",
+  };
+}
+
 function payload(events: SemanticRecordingEvent[]): RecordingPayload {
   return {
     workflow_name: "Test Workflow",
@@ -116,18 +129,17 @@ describe("route compiler – search route normalization", () => {
     expect(route.steps[0].action).toBe("fill");
   });
 
-  it("click opener + fill search + click submit is preserved unchanged (Rule 1 gate)", () => {
-    // noSubmitAfter is false because click_submit follows → click opener NOT dropped
+  it("click opener + fill search + explicit search button click → [fill, click] (opener dropped)", () => {
+    // Leading search-ish click is now always dropped (Rule A); the post-fill click is preserved.
     const route = compileRoute(payload([
       clickEvent("Search"),
       searchFillEvent("Michigan"),
       clickEvent("Search"),
     ]));
 
-    expect(route.steps).toHaveLength(3);
-    expect(route.steps[0].action).toBe("click");
-    expect(route.steps[1].action).toBe("fill");
-    expect(route.steps[2].action).toBe("click");
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[1].action).toBe("click");
   });
 
   it("step orders are renumbered correctly after normalization", () => {
@@ -143,8 +155,96 @@ describe("route compiler – search route normalization", () => {
 
   it("explicit submit event from recorder → [fill, submit] with no duplication", () => {
     // When the recorder emits both fill and submit (from the new submit handler),
-    // the compiler should produce exactly [fill, submit] — Rule 2 must not add another.
+    // the compiler should produce exactly [fill, submit] — Rule D must not add another.
     const route = compileRoute(payload([
+      searchFillEvent("Michigan"),
+      submitEvent(),
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[1].action).toBe("submit");
+  });
+
+  // ── New tests covering pre-fill submit noise (Rules A, B) ────────────────────
+
+  it("click + pre-fill submit + fill + submit → [fill, submit] (Rules A+B drop noise)", () => {
+    // This is the broken Wikipedia recording: click opens widget, submit fires before
+    // user types, user fills, user presses Enter (submit).
+    const route = compileRoute(payload([
+      clickEvent("Search"),
+      submitEvent(),             // pre-fill: target has empty value
+      searchFillEvent("Michigan"),
+      submitEvent(),             // post-fill: real submission
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[0].order).toBe(1);
+    expect(route.steps[1].action).toBe("submit");
+    expect(route.steps[1].order).toBe(2);
+  });
+
+  it("click + pre-fill submit + fill → [fill, inferred submit] (Rules A+B+D)", () => {
+    const route = compileRoute(payload([
+      clickEvent("Search"),
+      submitEvent(),             // pre-fill noise
+      searchFillEvent("Michigan"),
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[1].action).toBe("submit");
+  });
+
+  it("fill + submit → unchanged (Rule C: no preamble to drop)", () => {
+    const route = compileRoute(payload([
+      searchFillEvent("Michigan"),
+      submitEvent(),
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[1].action).toBe("submit");
+  });
+
+  it("fill only → [fill, inferred submit] (Rule D)", () => {
+    const route = compileRoute(payload([
+      searchFillEvent("Michigan"),
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[0].action).toBe("fill");
+    expect(route.steps[1].action).toBe("submit");
+  });
+
+  it("non-search submit before search fill is preserved (Rule B gate)", () => {
+    // A login form submit on a different page must not be dropped.
+    const route = compileRoute(payload([
+      nonSearchSubmitEvent(),
+      searchFillEvent("Michigan"),
+    ]));
+
+    expect(route.steps).toHaveLength(3); // non-search submit + fill + inferred submit
+    expect(route.steps[0].action).toBe("submit");
+    expect(route.steps[1].action).toBe("fill");
+    expect(route.steps[2].action).toBe("submit");
+  });
+
+  it("submit after fill is never dropped (Rule C invariant)", () => {
+    const route = compileRoute(payload([
+      searchFillEvent("Michigan"),
+      submitEvent(),
+    ]));
+
+    expect(route.steps).toHaveLength(2);
+    expect(route.steps[1].action).toBe("submit");
+  });
+
+  it("leading submit alone + fill + submit → [fill, submit] (Rule B)", () => {
+    // Pre-fill search submit (no preceding click) is also noise.
+    const route = compileRoute(payload([
+      submitEvent(),             // pre-fill noise, no click needed
       searchFillEvent("Michigan"),
       submitEvent(),
     ]));

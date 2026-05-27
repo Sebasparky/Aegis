@@ -6,6 +6,7 @@ import {
   type PointerRuntimeState,
   type ElementBox,
 } from "./nativePointerRuntime.js";
+import { pickBestPageTarget } from "./cdpTargetSelection.js";
 
 // In-memory pointer state per injection request — tracks current pointer position
 // so repeated fills in the same session start from a plausible location.
@@ -45,6 +46,7 @@ export async function executeSecretInjectionViaCDP(
   injection: SecretFieldInjection,
   resolvedValue: string,
   cdpUrlOverride?: string,
+  preferredTargetUrl?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const cdpBase = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
   if (!cdpBase) {
@@ -69,20 +71,18 @@ export async function executeSecretInjectionViaCDP(
       return { success: false, error: "No browser WebSocket debugger URL returned by CDP." };
     }
 
-    // Find the page whose hostname matches the injection domain; fall back to last target.
-    const pageTarget = (targets as Array<{ id: string; url: string; type: string }>)
-      .filter((t) => t.type === "page")
-      .find((t) => {
-        try {
-          const h = new URL(t.url).hostname;
-          return h === injection.domain || h.endsWith(`.${injection.domain}`);
-        } catch {
-          return false;
-        }
-      }) ?? (targets as Array<{ id: string; url: string; type: string }>).filter((t) => t.type === "page").at(-1);
+    // Select the active page target. Priority: exact URL > same origin > domain > non-blank > last.
+    const { target: pageTarget, candidates } = pickBestPageTarget(
+      targets as Array<{ id: string; url: string; type: string }>,
+      { domain: injection.domain, preferredUrl: preferredTargetUrl },
+    );
 
     if (!pageTarget) {
-      return { success: false, error: "No page targets found via CDP." };
+      const urls = candidates.map((c) => c.url).join(", ") || "(none)";
+      return {
+        success: false,
+        error: `No page targets found via CDP. Active page target binding failed. Candidates: [${urls}]`,
+      };
     }
 
     // Build a JS selector expression from element_hint, mirroring the Playwright locator logic.

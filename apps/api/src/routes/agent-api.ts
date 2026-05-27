@@ -45,7 +45,7 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -995,6 +995,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       try {
         const result = await connectAndNavigate(session.cdp_url, body.url);
+        // Store the navigated URL so CDP injection can resolve the active page target.
+        setTaskBrowserSessionCurrentUrl(session.browser_session_id, result.current_url);
         return reply.send({
           ok: true,
           data: {
@@ -1611,13 +1613,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // CDP fill — resolvedValue used here and immediately discarded; never returned in response
       // Priority: Aegis-managed task browser session → agent-provided external_cdp_url → AEGIS_PLAYWRIGHT_CDP_URL env
       let cdpUrlOverride: string | undefined;
+      let preferredTargetUrl: string | undefined;
       if (injection.browser_session_id) {
         const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
-        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+        if (bs?.status === "ready") {
+          cdpUrlOverride = bs.cdp_url;
+          preferredTargetUrl = bs.current_url;
+        }
       } else if (injection.external_cdp_url) {
         cdpUrlOverride = injection.external_cdp_url;
       }
-      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride);
+      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride, preferredTargetUrl);
 
       if (fillResult.success) {
         injection.status = "filled";
@@ -1887,14 +1893,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       // Phase 1: CDP fill — same path as execute_secret_field_injection
       let cdpUrlOverride: string | undefined;
+      let preferredTargetUrlHandoff: string | undefined;
       if (injection.browser_session_id) {
         const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
-        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+        if (bs?.status === "ready") {
+          cdpUrlOverride = bs.cdp_url;
+          preferredTargetUrlHandoff = bs.current_url;
+        }
       } else if (injection.external_cdp_url) {
         cdpUrlOverride = injection.external_cdp_url;
       }
 
-      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride);
+      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride, preferredTargetUrlHandoff);
 
       if (!fillResult.success) {
         injection.status = "failed";
@@ -4401,16 +4411,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 500, "KMS_DECRYPT_FAILED", "Failed to decrypt one or more profile field values. No values were revealed.");
       }
 
-      // Determine CDP URL: browser_session_id → TaskBrowserSession.cdp_url, else env var
+      // Determine CDP URL and preferred target: browser_session_id → session, else env var
       let cdpUrl: string | undefined;
+      let preferredTargetUrlProfile: string | undefined;
       if (fillRequest.browser_session_id) {
         const bs = getTaskBrowserSession(fillRequest.browser_session_id, MOCK_USER_ID);
-        if (bs?.status === "ready") cdpUrl = bs.cdp_url;
+        if (bs?.status === "ready") {
+          cdpUrl = bs.cdp_url;
+          preferredTargetUrlProfile = bs.current_url;
+        }
       }
       if (!cdpUrl) cdpUrl = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
 
       // Execute CDP fills
-      const entries = await executeProfileFieldFillViaCDP(fillRequest, resolvedValues, cdpUrl);
+      const entries = await executeProfileFieldFillViaCDP(fillRequest, resolvedValues, cdpUrl, preferredTargetUrlProfile);
       // Discard resolved plaintext values immediately
       resolvedValues.clear();
 

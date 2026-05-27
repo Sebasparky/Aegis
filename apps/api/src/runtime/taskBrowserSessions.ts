@@ -558,6 +558,16 @@ export function getTaskBrowserSession(
   return session;
 }
 
+/** Records the URL most recently navigated to in this session. Used by CDP injection to select
+ *  the active page target rather than falling back to an arbitrary or stale target. */
+export function setTaskBrowserSessionCurrentUrl(id: string, currentUrl: string): void {
+  const session = taskBrowserSessions.get(id);
+  if (session) {
+    session.current_url = currentUrl;
+    taskBrowserSessions.set(id, session);
+  }
+}
+
 export interface TaskBrowserSessionForReuse {
   browser_session_id: string;
   cdp_url: string;

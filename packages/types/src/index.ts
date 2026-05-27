@@ -2342,6 +2342,8 @@ export interface TaskBrowserSession {
   closed_at?: string;
   error?: string;
   cleanup_complete?: boolean;
+  /** Last URL navigated to via navigate_task_browser_session — used for CDP target selection. */
+  current_url?: string;
   /** Distinguishes auto-provisioned runtimes from manually started compatibility sessions. */
   runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
 }

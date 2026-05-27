@@ -6,6 +6,7 @@ import {
   type PointerRuntimeState,
   type ElementBox,
 } from "./nativePointerRuntime.js";
+import { pickBestPageTarget } from "./cdpTargetSelection.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -181,6 +182,7 @@ export async function executeProfileFieldFillViaCDP(
   fillRequest: ProfileFieldFillRequest,
   resolvedValues: Map<ProfileFieldKind, string>,
   cdpUrlOverride?: string,
+  preferredTargetUrl?: string,
 ): Promise<ProfileFieldFillEntry[]> {
   const cdpBase = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
   if (!cdpBase) {
@@ -212,24 +214,20 @@ export async function executeProfileFieldFillViaCDP(
       }));
     }
 
-    const pageTarget = (targets as Array<{ id: string; url: string; type: string }>)
-      .filter((t) => t.type === "page")
-      .find((t) => {
-        try {
-          const h = new URL(t.url).hostname;
-          return h === fillRequest.domain || h.endsWith(`.${fillRequest.domain}`);
-        } catch {
-          return false;
-        }
-      }) ?? (targets as Array<{ id: string; url: string; type: string }>).filter((t) => t.type === "page").at(-1);
+    // Select the active page target. Priority: exact URL > same origin > domain > non-blank > last.
+    const { target: pageTarget, candidates } = pickBestPageTarget(
+      targets as Array<{ id: string; url: string; type: string }>,
+      { domain: fillRequest.domain, preferredUrl: preferredTargetUrl },
+    );
 
     if (!pageTarget) {
+      const urls = candidates.map((c) => c.url).join(", ") || "(none)";
       return fillRequest.requested_fields.map((f) => ({
         key: f.key,
         field_filled: false,
         status: "failed" as const,
         raw_profile_value_revealed_to_agent: false as const,
-        error: "No page targets found via CDP.",
+        error: `No page targets found via CDP. Active page target binding failed. Candidates: [${urls}]`,
       }));
     }
 

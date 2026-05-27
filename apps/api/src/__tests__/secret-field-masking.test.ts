@@ -471,6 +471,29 @@ describe("Pointer debug overlay", () => {
     expect(overlayMsgs.length).toBeGreaterThan(0);
   });
 
+  it("overlay expressions include trail container id", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const trailMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_trail"),
+    );
+    expect(trailMsgs.length).toBeGreaterThan(0);
+  });
+
+  it("overlay released expression schedules 3000ms removal", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const persistMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("setTimeout") &&
+              (m.params.expression as string).includes("3000"),
+    );
+    expect(persistMsgs.length).toBeGreaterThan(0);
+  });
+
   it("overlay Runtime.evaluate expressions do not contain the secret value", async () => {
     process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
     const secret = "OVERLAY_SECRET_SENTINEL";

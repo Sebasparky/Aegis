@@ -69,11 +69,12 @@ const MODE_TIMING: Record<PointerInteractionMode, ModeTiming> = {
 // Injects a visible dot into the page to trace native pointer paths during manual verification.
 // Never includes secret or profile values in evaluated expressions.
 const OVERLAY_DOT_ID = "__aegis_pointer_debug_dot";
+const OVERLAY_TRAIL_ID = "__aegis_pointer_debug_trail";
 
 function ensurePointerDebugOverlay(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
 ): void {
-  const expression = `(function(){if(document.getElementById('${OVERLAY_DOT_ID}'))return;var d=document.createElement('div');d.id='${OVERLAY_DOT_ID}';d.style.cssText='position:fixed;width:16px;height:16px;border-radius:50%;background:rgba(255,80,0,0.85);border:2px solid #fff;pointer-events:none;z-index:2147483647;box-shadow:0 0 6px #000;transform:translate(-50%,-50%);top:0;left:0;';document.body&&document.body.appendChild(d);})()`;
+  const expression = `(function(){if(document.getElementById('${OVERLAY_DOT_ID}'))return;var d=document.createElement('div');d.id='${OVERLAY_DOT_ID}';d.style.cssText='position:fixed;width:24px;height:24px;border-radius:50%;background:rgba(255,80,0,0.9);border:2px solid #fff;pointer-events:none;z-index:2147483647;box-shadow:0 0 10px rgba(0,0,0,0.8),0 0 20px rgba(255,80,0,0.5);transform:translate(-50%,-50%);top:0;left:0;';document.body&&document.body.appendChild(d);var t=document.createElement('div');t.id='${OVERLAY_TRAIL_ID}';t.style.cssText='position:fixed;top:0;left:0;pointer-events:none;z-index:2147483646;';document.body&&document.body.appendChild(t);})()`;
   sendCdp("Runtime.evaluate", { expression });
 }
 
@@ -83,8 +84,17 @@ function updatePointerDebugOverlay(
   y: number,
   eventType: "move" | "pressed" | "released",
 ): void {
-  const bg = eventType === "pressed" ? "rgba(0,180,0,0.9)" : "rgba(255,80,0,0.85)";
-  const expression = `(function(){var d=document.getElementById('${OVERLAY_DOT_ID}');if(!d)return;d.style.left='${x}px';d.style.top='${y}px';d.style.background='${bg}';})()`;
+  if (typeof x !== "number" || typeof y !== "number") return;
+  const bg = eventType === "pressed" ? "rgba(0,200,0,0.95)" : "rgba(255,80,0,0.9)";
+  const scale = eventType === "pressed" ? "1.4" : "1";
+  let expression = `(function(){var d=document.getElementById('${OVERLAY_DOT_ID}');if(!d)return;d.style.left='${x}px';d.style.top='${y}px';d.style.background='${bg}';d.style.transform='translate(-50%,-50%) scale(${scale})';`;
+  if (eventType === "move") {
+    expression += `var t=document.getElementById('${OVERLAY_TRAIL_ID}');if(t){var td=document.createElement('div');td.style.cssText='position:fixed;width:8px;height:8px;border-radius:50%;background:rgba(255,140,0,0.45);pointer-events:none;transform:translate(-50%,-50%);left:${x}px;top:${y}px;';t.appendChild(td);while(t.childNodes.length>15)t.removeChild(t.firstChild);}`;
+  }
+  if (eventType === "released") {
+    expression += `setTimeout(function(){var d2=document.getElementById('${OVERLAY_DOT_ID}');if(d2&&d2.parentNode)d2.parentNode.removeChild(d2);var t2=document.getElementById('${OVERLAY_TRAIL_ID}');if(t2&&t2.parentNode)t2.parentNode.removeChild(t2);},3000);`;
+  }
+  expression += `})()`;
   sendCdp("Runtime.evaluate", { expression });
 }
 
@@ -320,12 +330,14 @@ export async function clickBoxWithPointer(
 ): Promise<void> {
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {
+    console.log("[PointerDebugOverlay] enabled");
     ensurePointerDebugOverlay(sendCdp);
     effectiveSendCdp = (method, params) => {
       if (method === "Input.dispatchMouseEvent") {
         const { type, x, y } = params as { type: string; x?: number; y?: number };
         if (typeof x === "number" && typeof y === "number") {
           const evType = type === "mousePressed" ? "pressed" : type === "mouseReleased" ? "released" : "move";
+          console.log(`[PointerDebugOverlay] update x=${Math.round(x)} y=${Math.round(y)} type=${evType}`);
           updatePointerDebugOverlay(sendCdp, x, y, evType);
         }
       }

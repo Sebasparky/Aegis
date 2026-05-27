@@ -11,10 +11,19 @@
  * hover pause, and risk-aware timing — without skipping states the browser
  * observes during natural interaction.
  *
- * Track B (Pointer Calibration Lab) will supply recorded PointerTrace
- * templates. generatePointerPath accepts an optional template parameter
- * (future v2) that scales a recorded arc into the current coordinate space.
+ * Track B (Pointer Calibration Lab) supplies recorded PointerTrace templates.
+ * generatePointerPath accepts optional templateTraces (v2) that scale a recorded
+ * arc into the current coordinate space. Falls back to Bézier when no match exists.
  */
+
+import {
+  type PointerTrace,
+  type TracePurpose,
+  type PointerTemplateRequest,
+  normalizePointerTrace,
+  selectPointerTraceTemplate,
+  transformNormalizedTemplate,
+} from "./pointerTraceTemplates.js";
 
 export type PointerInteractionMode = "fast" | "native" | "realistic" | "careful";
 
@@ -93,19 +102,46 @@ export function pickTargetPoint(
  * The first point is always start with delay_ms = 0.
  * The last point is always exactly end.
  *
- * v2: will accept an optional `template: PointerTrace` from Track B to scale
- * a recorded human arc into the current coordinate space instead of computing
- * a synthetic curve.
+ * v2: accepts optional `templateTraces` and `purpose` in options. When a suitable
+ * template is found, the recorded arc is normalized and scaled into the current
+ * coordinate space. Falls back to the Bézier path if no match is found.
  */
 export function generatePointerPath(
   start: { x: number; y: number },
   end: { x: number; y: number },
-  options?: { mode?: PointerInteractionMode; random?: () => number },
+  options?: {
+    mode?: PointerInteractionMode;
+    random?: () => number;
+    templateTraces?: PointerTrace[];
+    purpose?: TracePurpose;
+  },
 ): TimedPoint[] {
   const mode = options?.mode ?? "native";
   const rng = options?.random ?? Math.random;
   const timing = MODE_TIMING[mode];
   const n = timing.point_count;
+
+  // v2 template path: use a recorded trace when suitable templates are provided
+  if (options?.templateTraces && options.templateTraces.length > 0) {
+    const dx0 = end.x - start.x;
+    const dy0 = end.y - start.y;
+    const distance_px = Math.sqrt(dx0 * dx0 + dy0 * dy0);
+    const direction_rad = Math.atan2(dy0, dx0);
+    const request: PointerTemplateRequest = {
+      purpose: options.purpose ?? "button_click",
+      distance_px,
+      direction_rad,
+    };
+    const selected = selectPointerTraceTemplate(options.templateTraces, request);
+    if (selected) {
+      const normalized = normalizePointerTrace(selected);
+      if (normalized) {
+        return transformNormalizedTemplate(normalized, start, end, {
+          targetDuration_ms: timing.total_move_ms,
+        });
+      }
+    }
+  }
 
   // Compute a control point for the quadratic Bézier, displaced perpendicular
   // to the start→end vector by a randomized fraction of the path length.

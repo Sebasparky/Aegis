@@ -14,3 +14,4 @@ apps/api/.aegis-artifacts
 .claude/settings.json
 .playwright-mcp/
 apps/web/tsconfig.tsbuildinfo
+dev-artifacts/

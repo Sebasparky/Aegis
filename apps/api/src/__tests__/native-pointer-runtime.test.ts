@@ -15,6 +15,14 @@ import {
   makePointerRuntimeState,
 } from "../runtime/nativePointerRuntime.js";
 import type { ElementBox } from "../runtime/nativePointerRuntime.js";
+import {
+  getMovementPoints,
+  normalizePointerTrace,
+  transformNormalizedTemplate,
+  scorePointerTrace,
+  selectPointerTraceTemplate,
+} from "../runtime/pointerTraceTemplates.js";
+import type { PointerTrace } from "../runtime/pointerTraceTemplates.js";
 
 // ─── Shared fixtures ─────────────────────────────────────────────────────────
 
@@ -249,5 +257,229 @@ describe("makePointerRuntimeState", () => {
     expect(state.current_x).toBe(42);
     expect(state.interaction_mode).toBe("careful");
     expect(state.current_y).toBe(0); // default preserved
+  });
+});
+
+// ─── Pointer trace template helpers (v2) ─────────────────────────────────────
+
+// Synthetic test traces — no real personal pointer data
+function makeHorizontalTrace(overrides?: Partial<PointerTrace>): PointerTrace {
+  return {
+    trace_id: "test-trace-h",
+    purpose: "button_click",
+    start: { x: 0, y: 0 },
+    end: { x: 100, y: 0 },
+    viewport: { width: 1280, height: 800 },
+    duration_ms: 200,
+    distance_px: 100,
+    direction_rad: 0,
+    points: [
+      { x: 0,   y: 0,  t_ms: 0,   event: "move" },
+      { x: 33,  y: 2,  t_ms: 60,  event: "move" },
+      { x: 67,  y: -1, t_ms: 140, event: "move" },
+      { x: 100, y: 0,  t_ms: 200, event: "move" },
+    ],
+    ...overrides,
+  };
+}
+
+describe("normalizePointerTrace", () => {
+  it("first normalized point is (0,0) and last is (1,0)", () => {
+    const trace = makeHorizontalTrace();
+    const result = normalizePointerTrace(trace);
+    expect(result).not.toBeNull();
+    expect(result!.points[0].x).toBeCloseTo(0, 5);
+    expect(result!.points[0].y).toBeCloseTo(0, 5);
+    expect(result!.points[result!.points.length - 1].x).toBeCloseTo(1, 5);
+    expect(result!.points[result!.points.length - 1].y).toBeCloseTo(0, 5);
+  });
+
+  it("excludes down/up/click/scroll events from movement templates", () => {
+    const trace = makeHorizontalTrace({
+      points: [
+        { x: 0,   y: 0, t_ms: 0,   event: "down"  },
+        { x: 0,   y: 0, t_ms: 5,   event: "move"  },
+        { x: 50,  y: 0, t_ms: 100, event: "move"  },
+        { x: 100, y: 0, t_ms: 200, event: "move"  },
+        { x: 100, y: 0, t_ms: 210, event: "up"    },
+        { x: 100, y: 0, t_ms: 215, event: "click" },
+      ],
+    });
+    const movPts = getMovementPoints(trace);
+    expect(movPts.length).toBe(3);
+    const result = normalizePointerTrace(trace);
+    expect(result).not.toBeNull();
+    expect(result!.points.length).toBe(3);
+  });
+
+  it("subtracts initial t_ms so first normalized time is 0", () => {
+    const trace = makeHorizontalTrace({
+      points: [
+        { x: 0,   y: 0, t_ms: 500, event: "move" },
+        { x: 50,  y: 0, t_ms: 600, event: "move" },
+        { x: 100, y: 0, t_ms: 700, event: "move" },
+      ],
+    });
+    const result = normalizePointerTrace(trace);
+    expect(result).not.toBeNull();
+    expect(result!.points[0].t_ms).toBe(0);
+    expect(result!.points[1].t_ms).toBeCloseTo(100);
+    expect(result!.points[2].t_ms).toBeCloseTo(200);
+  });
+
+  it("returns null for traces with too few movement points", () => {
+    const trace = makeHorizontalTrace({
+      points: [{ x: 0, y: 0, t_ms: 0, event: "move" }],
+    });
+    expect(normalizePointerTrace(trace)).toBeNull();
+  });
+
+  it("returns null when movement distance is too small", () => {
+    const trace = makeHorizontalTrace({
+      points: [
+        { x: 0, y: 0, t_ms: 0,  event: "move" },
+        { x: 2, y: 0, t_ms: 50, event: "move" },
+      ],
+    });
+    expect(normalizePointerTrace(trace)).toBeNull();
+  });
+});
+
+describe("transformNormalizedTemplate", () => {
+  function getNormalized() {
+    const trace = makeHorizontalTrace();
+    return normalizePointerTrace(trace)!;
+  }
+
+  it("first returned point equals runtime start exactly", () => {
+    const normalized = getNormalized();
+    const start = { x: 300, y: 400 };
+    const end   = { x: 500, y: 600 };
+    const result = transformNormalizedTemplate(normalized, start, end);
+    expect(result[0].x).toBe(start.x);
+    expect(result[0].y).toBe(start.y);
+  });
+
+  it("last returned point equals runtime end exactly", () => {
+    const normalized = getNormalized();
+    const start = { x: 300, y: 400 };
+    const end   = { x: 500, y: 600 };
+    const result = transformNormalizedTemplate(normalized, start, end);
+    const last = result[result.length - 1];
+    expect(last.x).toBe(end.x);
+    expect(last.y).toBe(end.y);
+  });
+
+  it("all delay_ms values are non-negative", () => {
+    const normalized = getNormalized();
+    const result = transformNormalizedTemplate(normalized, { x: 0, y: 0 }, { x: 200, y: 150 });
+    for (const pt of result) {
+      expect(pt.delay_ms).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("first point has delay_ms of 0", () => {
+    const normalized = getNormalized();
+    const result = transformNormalizedTemplate(normalized, START, END);
+    expect(result[0].delay_ms).toBe(0);
+  });
+});
+
+describe("selectPointerTraceTemplate", () => {
+  it("prefers a trace with matching purpose over a mismatched purpose", () => {
+    const matchingTrace = makeHorizontalTrace({ trace_id: "match", purpose: "button_click" });
+    const mismatchTrace = makeHorizontalTrace({ trace_id: "other", purpose: "input_focus" });
+    const request = {
+      purpose: "button_click" as const,
+      distance_px: 100,
+      direction_rad: 0,
+    };
+    const selected = selectPointerTraceTemplate([mismatchTrace, matchingTrace], request);
+    expect(selected?.trace_id).toBe("match");
+  });
+
+  it("avoids scroll traces when purpose is button_click", () => {
+    const scrollTrace = makeHorizontalTrace({ trace_id: "scroll-one", purpose: "scroll" });
+    const clickTrace  = makeHorizontalTrace({ trace_id: "click-one",  purpose: "button_click" });
+    const request = { purpose: "button_click" as const, distance_px: 100, direction_rad: 0 };
+    const selected = selectPointerTraceTemplate([scrollTrace, clickTrace], request);
+    expect(selected?.trace_id).toBe("click-one");
+  });
+
+  it("avoids drag traces when purpose is input_focus", () => {
+    const dragTrace  = makeHorizontalTrace({ trace_id: "drag-one",  purpose: "drag" });
+    const focusTrace = makeHorizontalTrace({ trace_id: "focus-one", purpose: "input_focus" });
+    const request = { purpose: "input_focus" as const, distance_px: 100, direction_rad: 0 };
+    const selected = selectPointerTraceTemplate([dragTrace, focusTrace], request);
+    expect(selected?.trace_id).toBe("focus-one");
+  });
+
+  it("returns null when all traces are unusable", () => {
+    const scrollTrace = makeHorizontalTrace({ purpose: "scroll" });
+    const request = { purpose: "button_click" as const, distance_px: 100, direction_rad: 0 };
+    expect(selectPointerTraceTemplate([scrollTrace], request)).toBeNull();
+  });
+
+  it("returns null for empty traces array", () => {
+    const request = { purpose: "button_click" as const, distance_px: 100, direction_rad: 0 };
+    expect(selectPointerTraceTemplate([], request)).toBeNull();
+  });
+
+  it("breaks ties deterministically by trace_id", () => {
+    const traceA = makeHorizontalTrace({ trace_id: "aaa", purpose: "button_click" });
+    const traceB = makeHorizontalTrace({ trace_id: "bbb", purpose: "button_click" });
+    const request = { purpose: "button_click" as const, distance_px: 100, direction_rad: 0 };
+    const result1 = selectPointerTraceTemplate([traceA, traceB], request);
+    const result2 = selectPointerTraceTemplate([traceB, traceA], request);
+    expect(result1?.trace_id).toBe("aaa");
+    expect(result2?.trace_id).toBe("aaa");
+  });
+});
+
+describe("generatePointerPath — v2 template path", () => {
+  it("uses template path (point count matches trace movement points) when suitable traces are provided", () => {
+    const trace = makeHorizontalTrace();
+    // Trace has 4 movement points; native Bézier mode uses 12.
+    // Template path preserves the recorded point count.
+    const path = generatePointerPath(START, END, {
+      mode: "native",
+      templateTraces: [trace],
+      purpose: "button_click",
+    });
+    expect(path.length).toBe(4);
+    expect(path[0].x).toBe(START.x);
+    expect(path[0].y).toBe(START.y);
+    expect(path[path.length - 1].x).toBe(END.x);
+    expect(path[path.length - 1].y).toBe(END.y);
+  });
+
+  it("falls back to Bézier when templateTraces is empty", () => {
+    // native mode Bézier uses 12 points; template path would use trace's point count
+    const path = generatePointerPath(START, END, {
+      mode: "native",
+      templateTraces: [],
+      purpose: "button_click",
+    });
+    expect(path.length).toBe(12); // native mode_count
+    expect(path[0].x).toBe(START.x);
+    expect(path[path.length - 1].x).toBe(END.x);
+  });
+
+  it("falls back to Bézier when all template traces are unusable for the requested purpose", () => {
+    const scrollTrace = makeHorizontalTrace({ purpose: "scroll" });
+    const path = generatePointerPath(START, END, {
+      mode: "native",
+      templateTraces: [scrollTrace],
+      purpose: "button_click",
+    });
+    // Scroll trace is rejected for button_click; should fall back to 12-point Bézier
+    expect(path.length).toBe(12);
+  });
+
+  it("existing callers without templateTraces still get Bézier path", () => {
+    const path = generatePointerPath(START, END, { mode: "fast", random: () => 0.5 });
+    expect(path.length).toBe(5); // fast mode point_count
+    expect(path[0].x).toBe(START.x);
+    expect(path[path.length - 1].x).toBe(END.x);
   });
 });

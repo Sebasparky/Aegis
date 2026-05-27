@@ -8,6 +8,83 @@ import {
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
 
+/**
+ * Builds a JS selector expression for a credential field.
+ *
+ * Priority:
+ *   1. selector_hint (direct querySelector — agent-supplied CSS selector)
+ *   2. label (IIFE scanning label elements)
+ *   3. placeholder (input[placeholder=...])
+ *   4. input_type (input[type=...])
+ *   5. field_kind === "username" (ordered candidates: autocomplete > name > type > id)
+ *   6. field_kind === "password" (input[type="password"])
+ *   7. Generic fallback (email/text/no-type)
+ *
+ * The returned expression evaluates to the DOM element or null.
+ * It never contains a resolved secret value — that is the caller's responsibility.
+ */
+export function buildInjectionSelectorExpr(
+  fieldKind: "username" | "password",
+  hint?: { selector_hint?: string; label?: string; placeholder?: string; input_type?: string },
+): string {
+  const { selector_hint, label, placeholder, input_type } = hint ?? {};
+
+  if (selector_hint) {
+    return `document.querySelector(${JSON.stringify(selector_hint)})`;
+  }
+  if (label) {
+    return `(function() {
+        const labels = Array.from(document.querySelectorAll('label'));
+        const lbl = labels.find(l => l.textContent?.trim().toLowerCase().includes(${JSON.stringify(label.toLowerCase())}));
+        if (!lbl) return null;
+        if (lbl.htmlFor) return document.getElementById(lbl.htmlFor);
+        return lbl.querySelector('input');
+      })()`;
+  }
+  if (placeholder) {
+    return `document.querySelector('input[placeholder=${JSON.stringify(placeholder)}]')`;
+  }
+  if (input_type) {
+    return `document.querySelector('input[type=${JSON.stringify(input_type)}]')`;
+  }
+  if (fieldKind === "username") {
+    // Ordered candidates for username/email fields — prefer semantic attributes over structural type.
+    return `(function() {
+        return document.querySelector('input[autocomplete="username"]')
+          || document.querySelector('input[name="email"]')
+          || document.querySelector('input[name="username"]')
+          || document.querySelector('input[type="email"]')
+          || document.querySelector('#email')
+          || document.querySelector('#username')
+          || document.querySelector('input[type="text"]')
+          || document.querySelector('input:not([type])');
+      })()`;
+  }
+  if (fieldKind === "password") {
+    return `document.querySelector('input[type="password"]')`;
+  }
+  return `document.querySelector('input[type="email"],input[type="text"],input:not([type])')`;
+}
+
+/**
+ * Safe page-state diagnostic expression — no secrets, no field values.
+ * Only structural DOM metadata: url, readyState, input element shapes.
+ * Evaluated only when ANTIGEN_CDP_DIAGNOSTICS=true.
+ */
+export const CDP_DIAG_EXPR = `(function(){
+  return {
+    url: location.href,
+    title: document.title,
+    readyState: document.readyState,
+    hasEmailId: !!document.querySelector('#email'),
+    inputSummary: Array.from(document.querySelectorAll('input')).map(function(i){
+      return { id: i.id, name: i.name, type: i.type,
+               placeholder: i.placeholder, autocomplete: i.autocomplete,
+               disabled: i.disabled, readOnly: i.readOnly };
+    })
+  };
+})()`;
+
 // In-memory pointer state per injection request — tracks current pointer position
 // so repeated fills in the same session start from a plausible location.
 const pointerStateByInjection = new Map<string, PointerRuntimeState>();
@@ -85,29 +162,20 @@ export async function executeSecretInjectionViaCDP(
       };
     }
 
-    // Build a JS selector expression from element_hint, mirroring the Playwright locator logic.
-    const { selector_hint, label, placeholder, input_type } = injection.element_hint ?? {};
+    // Build a JS selector expression from element_hint.
+    const selectorExpr = buildInjectionSelectorExpr(injection.field_kind, injection.element_hint);
 
-    let selectorExpr: string;
-    if (selector_hint) {
-      selectorExpr = `document.querySelector(${JSON.stringify(selector_hint)})`;
-    } else if (label) {
-      // Find label by text, then resolve its associated input.
-      selectorExpr = `(function() {
-        const labels = Array.from(document.querySelectorAll('label'));
-        const lbl = labels.find(l => l.textContent?.trim().toLowerCase().includes(${JSON.stringify(label.toLowerCase())}));
-        if (!lbl) return null;
-        if (lbl.htmlFor) return document.getElementById(lbl.htmlFor);
-        return lbl.querySelector('input');
-      })()`;
-    } else if (placeholder) {
-      selectorExpr = `document.querySelector('input[placeholder=${JSON.stringify(placeholder)}]')`;
-    } else if (input_type) {
-      selectorExpr = `document.querySelector('input[type=${JSON.stringify(input_type)}]')`;
-    } else if (injection.field_kind === "password") {
-      selectorExpr = `document.querySelector('input[type="password"]')`;
-    } else {
-      selectorExpr = `document.querySelector('input[type="email"],input[type="text"],input:not([type])')`;
+    const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
+    if (cdpDiagnostics) {
+      const { selector_hint, label, placeholder, input_type } = injection.element_hint ?? {};
+      console.log("[CdpInjection] selector resolution", {
+        field_kind: injection.field_kind,
+        selector_hint: selector_hint ?? null,
+        label_hint: label ?? null,
+        placeholder_hint: placeholder ?? null,
+        input_type_hint: input_type ?? null,
+        selector_expr_summary: selectorExpr.slice(0, 140),
+      });
     }
 
     // Dev-only: ANTIGEN_BROWSER_SLOW_MO_MS adds extra delay per pointer event step for visual verification.
@@ -135,14 +203,16 @@ export async function executeSecretInjectionViaCDP(
     // Phase 1 (focus/clear): locate element, scroll into view, focus, clear existing value.
     // No secret value in this expression.
     const focusExpr = `(function() {
-      var el = ${selectorExpr};
-      if (!el) return { ok: false, reason: 'element not found' };
-      el.scrollIntoView({ block: 'nearest' });
-      el.focus();
-      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, '');
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
-      return { ok: true };
+      try {
+        var el = ${selectorExpr};
+        if (!el) return { ok: false, reason: 'element not found' };
+        el.scrollIntoView({ block: 'nearest' });
+        el.focus();
+        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, '');
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+        return { ok: true };
+      } catch (e) { return { ok: false, reason: String(e) }; }
     })()`;
 
     // Phase 3 (mask/blur): apply password mask if needed, dispatch change/blur, mark filled.
@@ -198,6 +268,7 @@ export async function executeSecretInjectionViaCDP(
 
       // Track each CDP command's message ID so responses can be routed unambiguously.
       let attachId: number;
+      let diagId: number | undefined;
       let boxId: number;
       let focusId: number;
       let insertId: number;
@@ -238,14 +309,36 @@ export async function executeSecretInjectionViaCDP(
         const id = msg.id as number | undefined;
         const result = msg.result as Record<string, unknown> | undefined;
 
-        // Attach response — got a session ID; start phase 0 (element box lookup).
+        // Attach response — got a session ID; start diagnostic (if enabled) or phase 0 (box lookup).
         if (id === attachId) {
           if (!result?.sessionId) {
             finish(false, "CDP attach failed: no sessionId returned.");
             return;
           }
           sessionId = result.sessionId as string;
-          boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId);
+          if (cdpDiagnostics) {
+            diagId = send("Runtime.evaluate", { expression: CDP_DIAG_EXPR, returnByValue: true }, sessionId);
+          } else {
+            boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId);
+          }
+          return;
+        }
+
+        // Diagnostic response — log safe page state, then start phase 0 (box lookup).
+        if (diagId !== undefined && id === diagId) {
+          const diagVal = ((result?.result as Record<string, unknown> | undefined)?.value) as Record<string, unknown> | undefined;
+          if (diagVal) {
+            console.log("[CdpInjection] page diagnostic", {
+              url: diagVal["url"],
+              title: diagVal["title"],
+              readyState: diagVal["readyState"],
+              hasEmailId: diagVal["hasEmailId"],
+              inputSummary: diagVal["inputSummary"],
+            });
+          } else {
+            console.log("[CdpInjection] page diagnostic: eval returned no value");
+          }
+          boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId!);
           return;
         }
 

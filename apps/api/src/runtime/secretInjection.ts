@@ -1,5 +1,24 @@
 import WebSocket from "ws";
 import type { SecretFieldInjection } from "@aegis/types";
+import {
+  makePointerRuntimeState,
+  clickBoxWithPointer,
+  type PointerRuntimeState,
+  type ElementBox,
+} from "./nativePointerRuntime.js";
+
+// In-memory pointer state per injection request — tracks current pointer position
+// so repeated fills in the same session start from a plausible location.
+const pointerStateByInjection = new Map<string, PointerRuntimeState>();
+
+function getOrCreatePointerState(key: string): PointerRuntimeState {
+  let state = pointerStateByInjection.get(key);
+  if (!state) {
+    state = makePointerRuntimeState();
+    pointerStateByInjection.set(key, state);
+  }
+  return state;
+}
 
 /**
  * Fills a protected credential field in the agent's active Playwright browser via raw CDP
@@ -91,6 +110,27 @@ export async function executeSecretInjectionViaCDP(
       selectorExpr = `document.querySelector('input[type="email"],input[type="text"],input:not([type])')`;
     }
 
+    // Dev-only: ANTIGEN_BROWSER_SLOW_MO_MS adds extra delay per pointer event step for visual verification.
+    const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
+
+    // Phase 0 (box lookup): get element bounding box for native pointer focus before text insert.
+    // No secret value in this expression.
+    const boxExpr = `(function() {
+      try {
+        var el = ${selectorExpr};
+        if (!el) return { ok: false, reason: 'element_not_found' };
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        var r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return { ok: false, reason: 'zero_box' };
+        return {
+          ok: true,
+          box: { x: r.left, y: r.top, width: r.width, height: r.height },
+          viewport: { width: window.innerWidth, height: window.innerHeight }
+        };
+      } catch (e) { return { ok: false, reason: String(e) }; }
+    })()`;
+
     // Phase 1 (focus/clear): locate element, scroll into view, focus, clear existing value.
     // No secret value in this expression.
     const focusExpr = `(function() {
@@ -157,6 +197,7 @@ export async function executeSecretInjectionViaCDP(
 
       // Track each CDP command's message ID so responses can be routed unambiguously.
       let attachId: number;
+      let boxId: number;
       let focusId: number;
       let insertId: number;
       let maskId: number;
@@ -196,14 +237,49 @@ export async function executeSecretInjectionViaCDP(
         const id = msg.id as number | undefined;
         const result = msg.result as Record<string, unknown> | undefined;
 
-        // Attach response — got a session ID; start phase 1 (focus/clear).
+        // Attach response — got a session ID; start phase 0 (element box lookup).
         if (id === attachId) {
           if (!result?.sessionId) {
             finish(false, "CDP attach failed: no sessionId returned.");
             return;
           }
           sessionId = result.sessionId as string;
-          focusId = send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId);
+          boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId);
+          return;
+        }
+
+        // Phase 0 result — element box for native pointer focus before text insert.
+        if (id === boxId) {
+          const boxEval = (result?.result as Record<string, unknown> | undefined);
+          const boxVal = boxEval?.value as {
+            ok?: boolean;
+            box?: ElementBox;
+            viewport?: { width: number; height: number };
+          } | undefined;
+
+          const stateKey = injection.injection_request_id ?? "default";
+          const doPointerThenFocus = async () => {
+            if (boxVal?.ok && boxVal?.box) {
+              try {
+                const pointerSend = (method: string, params: Record<string, unknown>) => {
+                  send(method, params, sessionId!);
+                };
+                const state = getOrCreatePointerState(stateKey);
+                if (boxVal.viewport) {
+                  state.viewport_width = boxVal.viewport.width;
+                  state.viewport_height = boxVal.viewport.height;
+                }
+                await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep);
+              } catch {
+                // Native pointer focus failed — proceed to fill without it.
+              }
+            }
+            focusId = send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId!);
+          };
+
+          doPointerThenFocus().catch(() => {
+            focusId = send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId!);
+          });
           return;
         }
 

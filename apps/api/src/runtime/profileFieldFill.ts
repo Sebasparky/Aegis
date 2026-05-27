@@ -1,5 +1,11 @@
 import WebSocket from "ws";
 import type { ProfileFieldFillRequest, ProfileFieldFillEntry, ProfileFieldKind } from "@aegis/types";
+import {
+  makePointerRuntimeState,
+  clickBoxWithPointer,
+  type PointerRuntimeState,
+  type ElementBox,
+} from "./nativePointerRuntime.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -148,6 +154,19 @@ function buildSelectorExpr(selector_hint?: string, label?: string, placeholder?:
   return `document.querySelector('input[type="text"],input[type="email"],input[type="tel"],input:not([type])')`;
 }
 
+// In-memory pointer state per fill session — tracks current pointer position across fields.
+// Keyed by browser_session_id when available, then fill_request_id, then "default".
+const pointerStateByFill = new Map<string, PointerRuntimeState>();
+
+function getOrCreateFillPointerState(key: string): PointerRuntimeState {
+  let state = pointerStateByFill.get(key);
+  if (!state) {
+    state = makePointerRuntimeState();
+    pointerStateByFill.set(key, state);
+  }
+  return state;
+}
+
 /**
  * Fill multiple profile fields in the agent's active browser via a single CDP WebSocket session.
  *
@@ -220,7 +239,7 @@ export async function executeProfileFieldFillViaCDP(
       let fieldIdx = 0;
       let msgId = 1;
       let sessionId: string | null = null;
-      let phase: "attach" | "iframe_check" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
+      let phase: "attach" | "iframe_check" | "input_box_lookup" | "input_pointer" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
 
       // Track CDP command IDs for unambiguous response routing.
       let attachMsgId: number | null = null;
@@ -250,6 +269,10 @@ export async function executeProfileFieldFillViaCDP(
         ws.send(JSON.stringify(msg));
         return id;
       };
+
+      // Dev-only: ANTIGEN_BROWSER_SLOW_MO_MS adds extra delay per pointer event for visual verification.
+      const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+      const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
       const recordFilled = (rawValue: string) => {
         const field = fields[fieldIdx];
@@ -411,21 +434,73 @@ export async function executeProfileFieldFillViaCDP(
               phase = "select_fill";
               send("Runtime.evaluate", { expression: selectFillExpr, returnByValue: true }, sessionId);
             } else {
-              // INPUT element — realistic 3-phase fill: focus/clear → Input.insertText → blur.
+              // INPUT element — get element box for native pointer focus before typing.
               // No secret in this expression.
-              const focusExpr = `(function() {
-                var el = ${selectorExpr};
-                if (!el) return { ok: false, reason: 'element not found' };
-                el.scrollIntoView({ block: 'nearest' });
-                el.focus();
-                var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(el, '');
-                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
-                return { ok: true };
+              const boxLookupExpr = `(function() {
+                try {
+                  var el = ${selectorExpr};
+                  if (!el) return { ok: false, reason: 'element_not_found' };
+                  el.scrollIntoView({ block: 'center', inline: 'center' });
+                  var r = el.getBoundingClientRect();
+                  if (r.width === 0 && r.height === 0) return { ok: false, reason: 'zero_box' };
+                  return {
+                    ok: true,
+                    box: { x: r.left, y: r.top, width: r.width, height: r.height },
+                    viewport: { width: window.innerWidth, height: window.innerHeight }
+                  };
+                } catch (e) { return { ok: false, reason: String(e) }; }
               })()`;
-              phase = "input_focus";
-              send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId);
+              phase = "input_box_lookup";
+              send("Runtime.evaluate", { expression: boxLookupExpr, returnByValue: true }, sessionId);
             }
+            return;
+          }
+
+          if (phase === "input_box_lookup") {
+            const boxVal = val as {
+              ok?: boolean;
+              box?: ElementBox;
+              viewport?: { width: number; height: number };
+            } | undefined;
+
+            const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+            const focusExpr = `(function() {
+              var el = ${selectorExpr};
+              if (!el) return { ok: false, reason: 'element not found' };
+              el.scrollIntoView({ block: 'nearest' });
+              el.focus();
+              var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              setter.call(el, '');
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+              return { ok: true };
+            })()`;
+
+            const stateKey = fillRequest.browser_session_id ?? fillRequest.fill_request_id ?? "default";
+            const doPointerThenFocus = async () => {
+              if (boxVal?.ok && boxVal?.box) {
+                try {
+                  const pointerSend = (method: string, params: Record<string, unknown>) => {
+                    send(method, params, sessionId!);
+                  };
+                  const state = getOrCreateFillPointerState(stateKey);
+                  if (boxVal.viewport) {
+                    state.viewport_width = boxVal.viewport.width;
+                    state.viewport_height = boxVal.viewport.height;
+                  }
+                  phase = "input_pointer"; // guard against stray CDP errors during pointer dispatch
+                  await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep);
+                } catch {
+                  // Native pointer focus failed — proceed to fill without it.
+                }
+              }
+              phase = "input_focus";
+              send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId!);
+            };
+
+            doPointerThenFocus().catch(() => {
+              phase = "input_focus";
+              send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId!);
+            });
             return;
           }
 
@@ -463,6 +538,9 @@ export async function executeProfileFieldFillViaCDP(
         }
 
         if (msg.error) {
+          // Ignore CDP errors during async pointer dispatch — these are from fire-and-forget
+          // Input.dispatchMouseEvent calls and must not fail the field fill.
+          if (phase === "input_pointer") return;
           const field = fields[fieldIdx];
           if (field) {
             recordFailed(`CDP error: ${JSON.stringify(msg.error)}`);

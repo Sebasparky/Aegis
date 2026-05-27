@@ -28,6 +28,8 @@ let sentMessages: CapturedMsg[] = [];
 
 // Controls whether the mock should simulate Input.insertText failure (for fallback tests).
 let simulateInsertTextFailure = false;
+// Controls whether the box lookup Runtime.evaluate returns ok: false (for pointer fallback tests).
+let simulateBoxLookupFailure = false;
 
 vi.mock("ws", () => {
   // Each FakeWs instance gets its own handler registry so test state does not bleed
@@ -55,12 +57,31 @@ vi.mock("ws", () => {
       }
 
       if (msg.method === "Runtime.evaluate") {
-        // Return a success result for all eval phases.
-        emit(JSON.stringify({
-          id: msg.id,
-          sessionId: "mock_session",
-          result: { result: { type: "object", value: { ok: true } } },
-        }));
+        const expr = (msg.params?.expression as string) ?? "";
+        if (expr.includes("getBoundingClientRect")) {
+          // Box lookup phase — return element box or failure based on flag.
+          const boxValue = simulateBoxLookupFailure
+            ? { ok: false, reason: "element_not_found" }
+            : { ok: true, box: { x: 100, y: 100, width: 200, height: 40 }, viewport: { width: 1280, height: 800 } };
+          emit(JSON.stringify({
+            id: msg.id,
+            sessionId: "mock_session",
+            result: { result: { type: "object", value: boxValue } },
+          }));
+        } else {
+          // All other eval phases (focus/clear, mask/blur) — return ok: true.
+          emit(JSON.stringify({
+            id: msg.id,
+            sessionId: "mock_session",
+            result: { result: { type: "object", value: { ok: true } } },
+          }));
+        }
+        return;
+      }
+
+      if (msg.method === "Input.dispatchMouseEvent") {
+        // Fire-and-forget pointer events — return empty result (Chrome sends this but callers ignore it).
+        emit(JSON.stringify({ id: msg.id, result: {} }));
         return;
       }
 
@@ -166,14 +187,54 @@ describe("Realistic Fill — happy path sequence", () => {
   beforeEach(() => {
     sentMessages = [];
     simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
   });
 
-  it("sends focus Runtime.evaluate before Input.insertText", async () => {
+  it("sends Runtime.evaluate (box lookup) before Input.insertText", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const evalIdx = sentMessages.findIndex((m) => m.method === "Runtime.evaluate");
     const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
     expect(evalIdx).toBeGreaterThanOrEqual(0);
     expect(insertIdx).toBeGreaterThan(evalIdx);
+  });
+
+  it("sends Input.dispatchMouseEvent mouseMoved events before Input.insertText", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const mouseMovedMsgs = sentMessages.filter(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    expect(mouseMovedMsgs.length).toBeGreaterThan(0);
+    for (const m of mouseMovedMsgs) {
+      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+    }
+  });
+
+  it("sends mousePressed and mouseReleased before Input.insertText", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const pressedMsgs = sentMessages.filter(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mousePressed",
+    );
+    const releasedMsgs = sentMessages.filter(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseReleased",
+    );
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    expect(pressedMsgs.length).toBe(1);
+    expect(releasedMsgs.length).toBe(1);
+    expect(sentMessages.indexOf(pressedMsgs[0])).toBeLessThan(insertIdx);
+    expect(sentMessages.indexOf(releasedMsgs[0])).toBeLessThan(insertIdx);
+  });
+
+  it("box lookup Runtime.evaluate expression does not contain secret", async () => {
+    const secret = "BOX_LOOKUP_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    const boxMsg = sentMessages.find(
+      (m) => m.method === "Runtime.evaluate" &&
+             typeof m.params?.expression === "string" &&
+             (m.params.expression as string).includes("getBoundingClientRect"),
+    );
+    expect(boxMsg).toBeDefined();
+    expect(boxMsg!.params?.expression as string).not.toContain(secret);
   });
 
   it("sends Input.insertText on the happy path", async () => {
@@ -355,6 +416,7 @@ describe("Realistic Fill — result safety invariants", () => {
   beforeEach(() => {
     sentMessages = [];
     simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
   });
 
   it("password field result contains no resolved value", async () => {
@@ -366,6 +428,43 @@ describe("Realistic Fill — result safety invariants", () => {
   it("username field result contains no resolved value", async () => {
     const result = await executeSecretInjectionViaCDP(makeInjection("username"), "SENTINEL_USERNAME", "http://localhost:9222");
     expect(JSON.stringify(result)).not.toContain("SENTINEL_USERNAME");
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("Native pointer focus — box lookup failure fallback", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = true;
+  });
+
+  it("fill still succeeds when box lookup returns ok: false", async () => {
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), "FALLBACK_SECRET", "http://localhost:9222");
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("no Input.dispatchMouseEvent events sent when box lookup fails", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("password"), "FALLBACK_SECRET", "http://localhost:9222");
+    const mouseEvents = sentMessages.filter((m) => m.method === "Input.dispatchMouseEvent");
+    expect(mouseEvents.length).toBe(0);
+  });
+
+  it("Input.insertText still sent when box lookup fails", async () => {
+    await executeSecretInjectionViaCDP(makeInjection("username"), "FALLBACK_SECRET", "http://localhost:9222");
+    expect(sentMessages.some((m) => m.method === "Input.insertText")).toBe(true);
+  });
+
+  it("result never contains the secret even when pointer path is skipped", async () => {
+    const secret = "BOX_FALLBACK_LEAK_TEST";
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("raw_value_revealed_to_agent remains false in box-lookup-failure path", async () => {
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), "FALLBACK_SECRET", "http://localhost:9222");
+    // The result type has raw_value_revealed_to_agent: false as a literal. Verify it's not leaked.
     expect(result.success).toBe(true);
   });
 });

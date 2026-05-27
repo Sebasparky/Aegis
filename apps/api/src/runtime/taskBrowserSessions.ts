@@ -342,7 +342,9 @@ async function launchChrome(
     );
   }
 
-  const debug_visible = opts.debug_visible === true;
+  // Dev-only: ANTIGEN_BROWSER_HEADLESS=false launches a visible browser for manual verification.
+  // Production default remains headless. Do not expose this setting via agent tools or API responses.
+  const debug_visible = opts.debug_visible === true || process.env.ANTIGEN_BROWSER_HEADLESS === "false";
   const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
   const userId = opts.user_id ?? MOCK_USER_ID;
   const browser_session_id = newId("tbsess");
@@ -450,7 +452,7 @@ export const ALL_CDP_PORTS = [DEFAULT_CDP_PORT, ...ALTERNATE_CDP_PORTS];
 export async function createTaskBrowserSession(
   opts: CreateTaskBrowserOptions = {},
 ): Promise<CreateTaskBrowserResult> {
-  const debug_visible = opts.debug_visible === true;
+  const debug_visible = opts.debug_visible === true || process.env.ANTIGEN_BROWSER_HEADLESS === "false";
   const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
 
   // Sweep expired/terminal sessions and kill any lingering processes before scanning ports.

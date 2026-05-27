@@ -10,7 +10,7 @@
  * No real Chrome needed — exercises CDP message sequences and expression strings.
  */
 
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // ─── Mocks required to load secretInjection.ts without side effects ────────────
 
@@ -30,6 +30,8 @@ let sentMessages: CapturedMsg[] = [];
 let simulateInsertTextFailure = false;
 // Controls whether the box lookup Runtime.evaluate returns ok: false (for pointer fallback tests).
 let simulateBoxLookupFailure = false;
+// Controls whether overlay Runtime.evaluate calls return a CDP error (for overlay failure tests).
+let simulateOverlayFailure = false;
 
 vi.mock("ws", () => {
   // Each FakeWs instance gets its own handler registry so test state does not bleed
@@ -68,8 +70,11 @@ vi.mock("ws", () => {
             sessionId: "mock_session",
             result: { result: { type: "object", value: boxValue } },
           }));
+        } else if (expr.includes("__aegis_pointer_debug_dot") && simulateOverlayFailure) {
+          // Simulate overlay injection failure — fill must still succeed (fire-and-forget).
+          emit(JSON.stringify({ id: msg.id, error: { code: -32603, message: "Internal error" } }));
         } else {
-          // All other eval phases (focus/clear, mask/blur) — return ok: true.
+          // All other eval phases (focus/clear, mask/blur, overlay) — return ok: true.
           emit(JSON.stringify({
             id: msg.id,
             sessionId: "mock_session",
@@ -428,6 +433,76 @@ describe("Realistic Fill — result safety invariants", () => {
   it("username field result contains no resolved value", async () => {
     const result = await executeSecretInjectionViaCDP(makeInjection("username"), "SENTINEL_USERNAME", "http://localhost:9222");
     expect(JSON.stringify(result)).not.toContain("SENTINEL_USERNAME");
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("Pointer debug overlay", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
+    simulateOverlayFailure = false;
+  });
+  afterEach(() => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    simulateOverlayFailure = false;
+  });
+
+  it("default path sends no overlay Runtime.evaluate calls", async () => {
+    // ANTIGEN_POINTER_DEBUG_OVERLAY not set — no overlay expressions should appear.
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const overlayMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_dot"),
+    );
+    expect(overlayMsgs).toHaveLength(0);
+  });
+
+  it("ANTIGEN_POINTER_DEBUG_OVERLAY=true sends overlay Runtime.evaluate calls", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const overlayMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_dot"),
+    );
+    expect(overlayMsgs.length).toBeGreaterThan(0);
+  });
+
+  it("overlay Runtime.evaluate expressions do not contain the secret value", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    const secret = "OVERLAY_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    const overlayMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_dot"),
+    );
+    expect(overlayMsgs.length).toBeGreaterThan(0);
+    for (const m of overlayMsgs) {
+      expect(m.params?.expression as string).not.toContain(secret);
+    }
+  });
+
+  it("mouse events still occur before Input.insertText with overlay enabled", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const mouseMovedMsgs = sentMessages.filter(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    expect(mouseMovedMsgs.length).toBeGreaterThan(0);
+    for (const m of mouseMovedMsgs) {
+      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+    }
+  });
+
+  it("fill still succeeds when overlay injection fails", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    simulateOverlayFailure = true;
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), "SECRET", "http://localhost:9222");
     expect(result.success).toBe(true);
   });
 });

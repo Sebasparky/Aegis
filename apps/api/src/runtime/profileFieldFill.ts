@@ -272,6 +272,7 @@ export async function executeProfileFieldFillViaCDP(
 
       // Dev-only: ANTIGEN_BROWSER_SLOW_MO_MS adds extra delay per pointer event for visual verification.
       const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+      const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
       const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
       const recordFilled = (rawValue: string) => {
@@ -488,7 +489,7 @@ export async function executeProfileFieldFillViaCDP(
                     state.viewport_height = boxVal.viewport.height;
                   }
                   phase = "input_pointer"; // guard against stray CDP errors during pointer dispatch
-                  await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep);
+                  await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, { debugOverlay });
                 } catch {
                   // Native pointer focus failed — proceed to fill without it.
                 }

@@ -112,6 +112,7 @@ export async function executeSecretInjectionViaCDP(
 
     // Dev-only: ANTIGEN_BROWSER_SLOW_MO_MS adds extra delay per pointer event step for visual verification.
     const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+    const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
     // Phase 0 (box lookup): get element bounding box for native pointer focus before text insert.
@@ -269,7 +270,7 @@ export async function executeSecretInjectionViaCDP(
                   state.viewport_width = boxVal.viewport.width;
                   state.viewport_height = boxVal.viewport.height;
                 }
-                await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep);
+                await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, { debugOverlay });
               } catch {
                 // Native pointer focus failed — proceed to fill without it.
               }

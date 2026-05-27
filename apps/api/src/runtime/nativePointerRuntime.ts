@@ -65,6 +65,29 @@ const MODE_TIMING: Record<PointerInteractionMode, ModeTiming> = {
   careful:   { point_count: 28, total_move_ms: 750,  hover_ms: 300, click_gap_ms: 150 },
 };
 
+// Dev-only pointer debug overlay — controlled by ANTIGEN_POINTER_DEBUG_OVERLAY=true.
+// Injects a visible dot into the page to trace native pointer paths during manual verification.
+// Never includes secret or profile values in evaluated expressions.
+const OVERLAY_DOT_ID = "__aegis_pointer_debug_dot";
+
+function ensurePointerDebugOverlay(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+): void {
+  const expression = `(function(){if(document.getElementById('${OVERLAY_DOT_ID}'))return;var d=document.createElement('div');d.id='${OVERLAY_DOT_ID}';d.style.cssText='position:fixed;width:16px;height:16px;border-radius:50%;background:rgba(255,80,0,0.85);border:2px solid #fff;pointer-events:none;z-index:2147483647;box-shadow:0 0 6px #000;transform:translate(-50%,-50%);top:0;left:0;';document.body&&document.body.appendChild(d);})()`;
+  sendCdp("Runtime.evaluate", { expression });
+}
+
+function updatePointerDebugOverlay(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  x: number,
+  y: number,
+  eventType: "move" | "pressed" | "released",
+): void {
+  const bg = eventType === "pressed" ? "rgba(0,180,0,0.9)" : "rgba(255,80,0,0.85)";
+  const expression = `(function(){var d=document.getElementById('${OVERLAY_DOT_ID}');if(!d)return;d.style.left='${x}px';d.style.top='${y}px';d.style.background='${bg}';})()`;
+  sendCdp("Runtime.evaluate", { expression });
+}
+
 export function makePointerRuntimeState(overrides?: Partial<PointerRuntimeState>): PointerRuntimeState {
   return {
     current_x: 0,
@@ -282,17 +305,36 @@ export async function movePointerToBox(
 /**
  * High-level helper: moves the pointer to an interior point of the target box,
  * clicks, and updates the state to reflect the new pointer position.
+ *
+ * When options.debugOverlay is true (ANTIGEN_POINTER_DEBUG_OVERLAY=true), injects a
+ * visible dot into the page that tracks the pointer path for manual verification.
+ * The overlay uses fire-and-forget Runtime.evaluate — if injection fails, the fill
+ * proceeds normally. No secret or profile values appear in overlay expressions.
  */
 export async function clickBoxWithPointer(
   state: PointerRuntimeState,
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean },
 ): Promise<void> {
+  let effectiveSendCdp = sendCdp;
+  if (options?.debugOverlay) {
+    ensurePointerDebugOverlay(sendCdp);
+    effectiveSendCdp = (method, params) => {
+      if (method === "Input.dispatchMouseEvent") {
+        const { type, x, y } = params as { type: string; x?: number; y?: number };
+        if (typeof x === "number" && typeof y === "number") {
+          const evType = type === "mousePressed" ? "pressed" : type === "mouseReleased" ? "released" : "move";
+          updatePointerDebugOverlay(sendCdp, x, y, evType);
+        }
+      }
+      sendCdp(method, params);
+    };
+  }
   const mode = options?.mode ?? state.interaction_mode;
-  const target = await movePointerToBox(state, box, sendCdp, sleep, options);
-  await clickAtPoint(sendCdp, target, mode, sleep);
+  const target = await movePointerToBox(state, box, effectiveSendCdp, sleep, options);
+  await clickAtPoint(effectiveSendCdp, target, mode, sleep);
   state.current_x = target.x;
   state.current_y = target.y;
   state.last_action_at = new Date().toISOString();

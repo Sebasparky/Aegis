@@ -7,6 +7,10 @@ import {
   type ElementBox,
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
+import {
+  getTaskBrowserSessionPointerState,
+  setTaskBrowserSessionPointerState,
+} from "./taskBrowserSessions.js";
 
 /**
  * Builds a JS selector expression for a credential field.
@@ -124,6 +128,7 @@ export async function executeSecretInjectionViaCDP(
   resolvedValue: string,
   cdpUrlOverride?: string,
   preferredTargetUrl?: string,
+  browserSessionId?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const cdpBase = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
   if (!cdpBase) {
@@ -399,7 +404,7 @@ export async function executeSecretInjectionViaCDP(
             });
           }
 
-          const stateKey = injection.injection_request_id ?? "default";
+          const stateKey = browserSessionId ?? injection.injection_request_id ?? "default";
           const pointerDiag = cdpDiagnostics || debugOverlay;
           const doPointerThenFocus = async () => {
             if (boxVal?.ok && boxVal?.box) {
@@ -415,6 +420,45 @@ export async function executeSecretInjectionViaCDP(
                   send(method, params, sessionId!);
                 };
                 const state = getOrCreatePointerState(stateKey);
+
+                // Sync from session — load latest saved position for this task browser session.
+                if (browserSessionId) {
+                  const saved = getTaskBrowserSessionPointerState(browserSessionId, injection.user_id);
+                  if (saved?.initialized) {
+                    state.current_x = saved.x;
+                    state.current_y = saved.y;
+                    console.log("[PointerState] loaded", {
+                      browser_session_id: browserSessionId,
+                      x: saved.x,
+                      y: saved.y,
+                      initialized: true,
+                    });
+                  }
+                }
+
+                // Initialize from viewport center if pointer is still at origin.
+                if (state.current_x === 0 && state.current_y === 0) {
+                  if (boxVal.viewport) {
+                    state.current_x = Math.round(boxVal.viewport.width * 0.5);
+                    state.current_y = Math.round(boxVal.viewport.height * 0.5);
+                    console.log("[PointerState] initialized", {
+                      browser_session_id: browserSessionId ?? null,
+                      x: state.current_x,
+                      y: state.current_y,
+                      source: "viewport_center",
+                    });
+                  } else {
+                    state.current_x = 80;
+                    state.current_y = 80;
+                    console.log("[PointerState] initialized", {
+                      browser_session_id: browserSessionId ?? null,
+                      x: state.current_x,
+                      y: state.current_y,
+                      source: "fallback",
+                    });
+                  }
+                }
+
                 if (boxVal.viewport) {
                   state.viewport_width = boxVal.viewport.width;
                   state.viewport_height = boxVal.viewport.height;
@@ -423,6 +467,21 @@ export async function executeSecretInjectionViaCDP(
                   debugOverlay,
                   debugLabel: "secret",
                 });
+
+                // Persist final pointer position back to the task browser session.
+                if (browserSessionId) {
+                  setTaskBrowserSessionPointerState(browserSessionId, injection.user_id, {
+                    x: state.current_x,
+                    y: state.current_y,
+                    initialized: true,
+                    updated_at: new Date().toISOString(),
+                  });
+                  console.log("[PointerState] saved", {
+                    browser_session_id: browserSessionId,
+                    x: state.current_x,
+                    y: state.current_y,
+                  });
+                }
               } catch {
                 // Native pointer focus failed — proceed to fill without it.
               }

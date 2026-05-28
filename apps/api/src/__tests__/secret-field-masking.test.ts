@@ -22,6 +22,22 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
+// ─── Pointer state persistence mock ───────────────────────────────────────────
+// Allows tests to seed saved session pointer state and assert on saves.
+
+const mockPointerStateStore = new Map<string, { x: number; y: number; initialized: boolean; updated_at?: string }>();
+const capturedPointerStateSaves: Array<{ id: string; userId: string; state: { x: number; y: number; initialized: boolean; updated_at?: string } }> = [];
+
+vi.mock("../runtime/taskBrowserSessions.js", () => ({
+  getTaskBrowserSessionPointerState: vi.fn().mockImplementation((id: string, _userId: string) => {
+    return mockPointerStateStore.get(id);
+  }),
+  setTaskBrowserSessionPointerState: vi.fn().mockImplementation((id: string, userId: string, state: { x: number; y: number; initialized: boolean; updated_at?: string }) => {
+    mockPointerStateStore.set(id, state);
+    capturedPointerStateSaves.push({ id, userId, state });
+  }),
+}));
+
 // Capture ALL CDP commands sent over the WebSocket so tests can assert on sequence and content.
 type CapturedMsg = { id: number; method: string; params?: Record<string, unknown>; sessionId?: string };
 let sentMessages: CapturedMsg[] = [];
@@ -77,7 +93,7 @@ vi.mock("ws", () => {
             sessionId: "mock_session",
             result: { result: { type: "object", value: boxValue } },
           }));
-        } else if (expr.includes("__aegis_pointer_debug_dot") && simulateOverlayFailure) {
+        } else if ((expr.includes("__aegis_pointer_debug_dot") || expr.includes("__aegis_pointer_debug_path")) && simulateOverlayFailure) {
           // Simulate overlay injection failure — fill must still succeed (fire-and-forget).
           emit(JSON.stringify({ id: msg.id, error: { code: -32603, message: "Internal error" } }));
         } else {
@@ -489,14 +505,14 @@ describe("Pointer debug overlay", () => {
     expect(trailMsgs.length).toBeGreaterThan(0);
   });
 
-  it("overlay released expression schedules 3000ms removal", async () => {
+  it("overlay released expression schedules 8000ms removal", async () => {
     process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const persistMsgs = sentMessages.filter(
       (m) => m.method === "Runtime.evaluate" &&
               typeof m.params?.expression === "string" &&
               (m.params.expression as string).includes("setTimeout") &&
-              (m.params.expression as string).includes("3000"),
+              (m.params.expression as string).includes("8000"),
     );
     expect(persistMsgs.length).toBeGreaterThan(0);
   });
@@ -534,6 +550,56 @@ describe("Pointer debug overlay", () => {
     simulateOverlayFailure = true;
     const result = await executeSecretInjectionViaCDP(makeInjection("password"), "SECRET", "http://localhost:9222");
     expect(result.success).toBe(true);
+  });
+
+  it("overlay path render expression includes START label", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const pathMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_path"),
+    );
+    expect(pathMsgs.length).toBeGreaterThan(0);
+    expect(pathMsgs.some((m) => (m.params?.expression as string).includes("START"))).toBe(true);
+  });
+
+  it("overlay path render expression includes END label", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const pathMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_path"),
+    );
+    expect(pathMsgs.some((m) => (m.params?.expression as string).includes("END"))).toBe(true);
+  });
+
+  it("overlay path render expression includes svg and polyline elements", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const pathMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_path"),
+    );
+    expect(pathMsgs.some((m) => (m.params?.expression as string).includes("polyline"))).toBe(true);
+    expect(pathMsgs.some((m) => (m.params?.expression as string).includes("createElementNS"))).toBe(true);
+  });
+
+  it("overlay path render expressions contain no secret value", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    const secret = "PATH_RENDER_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    const pathMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_path"),
+    );
+    expect(pathMsgs.length).toBeGreaterThan(0);
+    for (const m of pathMsgs) {
+      expect(m.params?.expression as string).not.toContain(secret);
+    }
   });
 });
 
@@ -687,5 +753,150 @@ describe("CDP_DIAG_EXPR safety — no input field value reads", () => {
 
   it("CDP_DIAG_EXPR does not contain password-related value extraction", () => {
     expect(CDP_DIAG_EXPR).not.toMatch(/i\.value|el\.value|input\.value/);
+  });
+});
+
+describe("Persistent pointer state", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
+    simulateOverlayFailure = false;
+    mockPointerStateStore.clear();
+    capturedPointerStateSaves.length = 0;
+  });
+  afterEach(() => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+  });
+
+  it("uses stored session pointer state as path start", async () => {
+    // Seed a saved pointer state at (120, 90) for a task browser session.
+    mockPointerStateStore.set("bs_ptr_start_test", { x: 120, y: 90, initialized: true });
+    await executeSecretInjectionViaCDP(
+      makeInjection("password"), "PLACEHOLDER", "http://localhost:9222",
+      undefined, "bs_ptr_start_test",
+    );
+    // path[0] = { x: state.current_x, y: state.current_y } = exactly (120, 90).
+    const firstMove = sentMessages.find(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    expect(firstMove).toBeDefined();
+    expect(firstMove!.params!.x as number).toBeCloseTo(120, 0);
+    expect(firstMove!.params!.y as number).toBeCloseTo(90, 0);
+  });
+
+  it("persists final pointer state to session after injection", async () => {
+    await executeSecretInjectionViaCDP(
+      makeInjection("username"), "PLACEHOLDER", "http://localhost:9222",
+      undefined, "bs_ptr_save_test",
+    );
+    expect(capturedPointerStateSaves.length).toBeGreaterThan(0);
+    const save = capturedPointerStateSaves[capturedPointerStateSaves.length - 1];
+    expect(save.id).toBe("bs_ptr_save_test");
+    expect(save.state.initialized).toBe(true);
+    expect(typeof save.state.x).toBe("number");
+    expect(typeof save.state.y).toBe("number");
+    // Saved coordinates must be within the mock element box (x:100–300, y:100–140).
+    expect(save.state.x).toBeGreaterThanOrEqual(100);
+    expect(save.state.x).toBeLessThanOrEqual(300);
+    expect(save.state.y).toBeGreaterThanOrEqual(100);
+    expect(save.state.y).toBeLessThanOrEqual(140);
+  });
+
+  it("second injection starts from first injection end position", async () => {
+    // First injection — no saved state; will initialize from viewport center (640, 400).
+    await executeSecretInjectionViaCDP(
+      makeInjection("username"), "PLACEHOLDER", "http://localhost:9222",
+      undefined, "bs_ptr_seq_test",
+    );
+    const firstSave = capturedPointerStateSaves[capturedPointerStateSaves.length - 1];
+    expect(firstSave).toBeDefined();
+
+    // Reset messages; session mock already has the saved state from the first injection.
+    sentMessages = [];
+    capturedPointerStateSaves.length = 0;
+
+    // Second injection — should start from firstSave.state position.
+    await executeSecretInjectionViaCDP(
+      makeInjection("password"), "PLACEHOLDER2", "http://localhost:9222",
+      undefined, "bs_ptr_seq_test",
+    );
+    const firstMove = sentMessages.find(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    expect(firstMove).toBeDefined();
+    expect(firstMove!.params!.x as number).toBeCloseTo(firstSave.state.x, 0);
+    expect(firstMove!.params!.y as number).toBeCloseTo(firstSave.state.y, 0);
+  });
+
+  it("without stored session state, initializes pointer from viewport center", async () => {
+    // mockPointerStateStore is empty — no saved state for this session.
+    // Mock box lookup returns viewport 1280×800; center = (640, 400).
+    await executeSecretInjectionViaCDP(
+      makeInjection("password"), "PLACEHOLDER", "http://localhost:9222",
+      undefined, "bs_ptr_viewport_init",
+    );
+    const firstMove = sentMessages.find(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    expect(firstMove).toBeDefined();
+    expect(firstMove!.params!.x as number).toBeCloseTo(640, 0);
+    expect(firstMove!.params!.y as number).toBeCloseTo(400, 0);
+  });
+
+  it("overlay released timer removes trail but not dot", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    // The "released" update generates a Runtime.evaluate with an 8000ms cleanup timer.
+    // The expression also moves the dot (position update), but the cleanup timer must only
+    // remove the trail — not the dot.
+    const releasedTimerMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("8000") &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_trail") &&
+              !(m.params.expression as string).includes("__aegis_pointer_debug_path"),
+    );
+    expect(releasedTimerMsgs.length).toBeGreaterThan(0);
+    for (const m of releasedTimerMsgs) {
+      const expr = m.params?.expression as string;
+      // Extract only the setTimeout body to check what the cleanup timer actually removes.
+      const setTimeoutIdx = expr.indexOf("setTimeout(");
+      expect(setTimeoutIdx).toBeGreaterThanOrEqual(0);
+      const setTimeoutContent = expr.slice(setTimeoutIdx);
+      expect(setTimeoutContent).toContain("__aegis_pointer_debug_trail"); // trail IS removed
+      expect(setTimeoutContent).not.toContain("__aegis_pointer_debug_dot"); // dot is NOT removed
+    }
+  });
+
+  it("path/trail cleanup timer still fires after timeout", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    // renderPointerDebugPath produces a Runtime.evaluate with an 8000ms timer for the SVG path.
+    const pathCleanupMsgs = sentMessages.filter(
+      (m) => m.method === "Runtime.evaluate" &&
+              typeof m.params?.expression === "string" &&
+              (m.params.expression as string).includes("__aegis_pointer_debug_path") &&
+              (m.params.expression as string).includes("8000"),
+    );
+    expect(pathCleanupMsgs.length).toBeGreaterThan(0);
+  });
+
+  it("pointer state logs contain no secret or resolved values", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const secret = "POINTER_STATE_LOG_SECRET_SENTINEL";
+      mockPointerStateStore.set("bs_ptr_log_test", { x: 120, y: 90, initialized: true });
+      await executeSecretInjectionViaCDP(
+        makeInjection("password"), secret, "http://localhost:9222",
+        undefined, "bs_ptr_log_test",
+      );
+      const logCalls = consoleSpy.mock.calls;
+      for (const call of logCalls) {
+        expect(JSON.stringify(call)).not.toContain(secret);
+      }
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });

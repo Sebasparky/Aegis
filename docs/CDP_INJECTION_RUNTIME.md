@@ -39,3 +39,60 @@ Logs to look for:
 ```
 
 No secrets, selectors, page content, or field values appear in any diagnostic log.
+
+## Persistent pointer state
+
+Aegis-managed task browser sessions maintain a `pointer_state` on the `TaskBrowserSession` record. This represents the browser-internal CDP pointer position — coordinates only, no secrets.
+
+**Key properties:**
+- CDP `Input.dispatchMouseEvent` does not move the macOS OS cursor. The debug overlay is an in-page representation of the browser-internal pointer.
+- On each fill (`execute_secret_field_injection`, profile field fill), the saved `pointer_state` is loaded first. The next pointer movement starts from the last saved position.
+- After `clickBoxWithPointer` completes, the final `x/y` is persisted back to `TaskBrowserSession.pointer_state`.
+- If no saved state exists yet, the pointer is initialized to viewport center (`Math.round(viewport.width * 0.5), Math.round(viewport.height * 0.5)`) rather than `(0, 0)`. Fallback is `(80, 80)` if viewport dimensions are unavailable.
+- **`browser_session_id` is required** for persistent pointer continuity. Without it (`external_cdp_url` or env fallback mode), state is per-request and not persisted across fills.
+
+**Debug overlay behavior:**
+- The cursor dot (`__aegis_pointer_debug_dot`) persists at the final position after each action — it is NOT removed on release.
+- The trail (`__aegis_pointer_debug_trail`) and SVG path (`__aegis_pointer_debug_path`) are temporary evidence for calibration and are removed after 8 seconds.
+- On the next fill, the dot moves from its last position to the new target, showing path continuity.
+
+**Logs to look for:**
+```
+[PointerState] loaded   { browser_session_id, x, y, initialized }
+[PointerState] initialized { browser_session_id, x, y, source: "viewport_center" | "fallback" }
+[PointerState] saved    { browser_session_id, x, y }
+[PointerFocus] dispatch start { path, mode, generator: "bezier_fallback", point_count, start_x, start_y, end_x, end_y, distance_px, duration_ms }
+```
+
+## Pointer Coverage v1 — navigate_task_browser_session
+
+Starting with Pointer Coverage v1, `navigate_task_browser_session` participates in the same persistent pointer continuity as secret/profile field injection.
+
+**What happens during navigation:**
+1. The session's saved `pointer_state` is loaded (or initialized from viewport center if none exists).
+2. The pointer moves to a page-level navigation marker at `{ x: viewportWidth/2, y: 24 }` using `clickPointWithPointer`.
+3. `page.goto(url)` performs the actual navigation.
+4. After navigation, the debug cursor is rehydrated at the nav marker position on the new page (DOM overlays are destroyed on navigation).
+5. The nav marker coordinates are saved back to `TaskBrowserSession.pointer_state`.
+6. Subsequent fill actions (secret injection, profile fill) start from the nav marker — not from `(0, 0)` or viewport center.
+
+**Why we can't click the Chrome address bar:**
+`Input.dispatchMouseEvent` targets the page viewport coordinate space. Chrome's browser UI (address bar, tabs, toolbar) is rendered outside the page viewport and cannot be controlled by page-level CDP events. V1 uses a viewport nav marker as an honest approximation.
+
+**`nav_mode` field:**
+- `"page_level_nav_marker_direct_goto"` — pointer moved to the nav marker successfully; `final_pointer` is set and saved.
+- `"direct_fallback"` — pointer prep failed (CDP session creation error, etc.); `page.goto` still ran and navigation succeeded, but `final_pointer` is absent and pointer state is not updated.
+
+`page.goto` failures are never swallowed by the pointer try/catch — `NAVIGATION_FAILED` propagates normally regardless of pointer state.
+
+**`generator: "bezier_fallback"` in `[PointerFocus]` logs:**
+Every pointer dispatch currently uses Bézier path generation. The `generator` field marks which path source was used. When calibrated template traces are wired in (Track B), the field will show `"template_trace"` for recorded arcs and `"bezier_fallback"` for generated ones, making it easy to distinguish in logs.
+
+**Logs to look for during navigation:**
+```
+[PointerState] loaded/initialized { browser_session_id, x, y, surface: "navigation" }
+[PointerNav] pointer pre-navigation marker { browser_session_id, x, y, url }
+[PointerFocus] dispatch start { path: "nav_marker", mode, generator: "bezier_fallback", point_count, ... }
+[PointerState] saved { browser_session_id, x, y, surface: "navigation" }
+[PointerDebugOverlay] cursor rehydrated { x, y, label: "post_nav" }
+```

@@ -70,6 +70,7 @@ const MODE_TIMING: Record<PointerInteractionMode, ModeTiming> = {
 // Never includes secret or profile values in evaluated expressions.
 const OVERLAY_DOT_ID = "__aegis_pointer_debug_dot";
 const OVERLAY_TRAIL_ID = "__aegis_pointer_debug_trail";
+const OVERLAY_PATH_ID = "__aegis_pointer_debug_path";
 
 function ensurePointerDebugOverlay(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
@@ -92,9 +93,64 @@ function updatePointerDebugOverlay(
     expression += `var t=document.getElementById('${OVERLAY_TRAIL_ID}');if(t){var td=document.createElement('div');td.style.cssText='position:fixed;width:8px;height:8px;border-radius:50%;background:rgba(255,140,0,0.45);pointer-events:none;transform:translate(-50%,-50%);left:${x}px;top:${y}px;';t.appendChild(td);while(t.childNodes.length>15)t.removeChild(t.firstChild);}`;
   }
   if (eventType === "released") {
-    expression += `setTimeout(function(){var d2=document.getElementById('${OVERLAY_DOT_ID}');if(d2&&d2.parentNode)d2.parentNode.removeChild(d2);var t2=document.getElementById('${OVERLAY_TRAIL_ID}');if(t2&&t2.parentNode)t2.parentNode.removeChild(t2);},3000);`;
+    // Keep the dot visible at final position — only remove the trail after 8s.
+    expression += `setTimeout(function(){var t2=document.getElementById('${OVERLAY_TRAIL_ID}');if(t2&&t2.parentNode)t2.parentNode.removeChild(t2);},8000);`;
   }
   expression += `})()`;
+  sendCdp("Runtime.evaluate", { expression });
+}
+
+function renderPointerDebugPath(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  path: TimedPoint[],
+): void {
+  if (path.length < 2) return;
+  const start = path[0];
+  const end = path[path.length - 1];
+  const startX = Math.round(start.x);
+  const startY = Math.round(start.y);
+  const endX   = Math.round(end.x);
+  const endY   = Math.round(end.y);
+  const pointsStr = path.map(p => `${Math.round(p.x)},${Math.round(p.y)}`).join(" ");
+
+  console.log("[PointerDebugOverlay] path render", {
+    point_count: path.length,
+    start_x: startX,
+    start_y: startY,
+    end_x: endX,
+    end_y: endY,
+  });
+
+  const expression = `(function(){`
+    + `var old=document.getElementById('${OVERLAY_PATH_ID}');if(old&&old.parentNode)old.parentNode.removeChild(old);`
+    + `var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');`
+    + `svg.id='${OVERLAY_PATH_ID}';`
+    + `svg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483645;overflow:visible;';`
+    + `var pl=document.createElementNS('http://www.w3.org/2000/svg','polyline');`
+    + `pl.setAttribute('points','${pointsStr}');`
+    + `pl.setAttribute('fill','none');pl.setAttribute('stroke','rgba(255,140,0,0.85)');`
+    + `pl.setAttribute('stroke-width','3');pl.setAttribute('stroke-linecap','round');pl.setAttribute('stroke-linejoin','round');`
+    + `svg.appendChild(pl);`
+    + `var sc=document.createElementNS('http://www.w3.org/2000/svg','circle');`
+    + `sc.setAttribute('cx','${startX}');sc.setAttribute('cy','${startY}');sc.setAttribute('r','10');`
+    + `sc.setAttribute('fill','rgba(0,200,255,0.9)');sc.setAttribute('stroke','#fff');sc.setAttribute('stroke-width','2');`
+    + `svg.appendChild(sc);`
+    + `var st=document.createElementNS('http://www.w3.org/2000/svg','text');`
+    + `st.setAttribute('x','${startX + 14}');st.setAttribute('y','${startY - 6}');`
+    + `st.setAttribute('fill','rgba(0,200,255,1)');st.setAttribute('font-size','13');st.setAttribute('font-weight','bold');st.setAttribute('font-family','monospace');`
+    + `st.textContent='START';svg.appendChild(st);`
+    + `var ec=document.createElementNS('http://www.w3.org/2000/svg','circle');`
+    + `ec.setAttribute('cx','${endX}');ec.setAttribute('cy','${endY}');ec.setAttribute('r','12');`
+    + `ec.setAttribute('fill','rgba(255,80,0,0.9)');ec.setAttribute('stroke','#fff');ec.setAttribute('stroke-width','2');`
+    + `svg.appendChild(ec);`
+    + `var et=document.createElementNS('http://www.w3.org/2000/svg','text');`
+    + `et.setAttribute('x','${endX + 16}');et.setAttribute('y','${endY - 6}');`
+    + `et.setAttribute('fill','rgba(255,80,0,1)');et.setAttribute('font-size','13');et.setAttribute('font-weight','bold');et.setAttribute('font-family','monospace');`
+    + `et.textContent='END';svg.appendChild(et);`
+    + `document.body&&document.body.appendChild(svg);`
+    + `setTimeout(function(){if(svg.parentNode)svg.parentNode.removeChild(svg);},8000);`
+    + `})()`;
+
   sendCdp("Runtime.evaluate", { expression });
 }
 
@@ -299,12 +355,15 @@ export async function movePointerToBox(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode; debugLabel?: string },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugLabel?: string; onPathReady?: (path: TimedPoint[]) => void },
 ): Promise<{ x: number; y: number }> {
   const mode = options?.mode ?? state.interaction_mode;
+  // Capture start before path generation — state.current_x/y is the pre-move position.
+  const startX = state.current_x;
+  const startY = state.current_y;
   const target = pickTargetPoint(box, { random: options?.random });
   const path = generatePointerPath(
-    { x: state.current_x, y: state.current_y },
+    { x: startX, y: startY },
     target,
     { mode, random: options?.random },
   );
@@ -312,12 +371,26 @@ export async function movePointerToBox(
     options?.debugLabel &&
     (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true")
   ) {
+    const pathStart = path[0];
+    const pathEnd = path[path.length - 1];
+    const dx = (pathEnd?.x ?? target.x) - (pathStart?.x ?? startX);
+    const dy = (pathEnd?.y ?? target.y) - (pathStart?.y ?? startY);
+    const distance_px = Math.round(Math.sqrt(dx * dx + dy * dy));
+    const timing = MODE_TIMING[mode];
+    const duration_ms = timing.total_move_ms + timing.hover_ms + timing.click_gap_ms;
     console.log("[PointerFocus] dispatch start", {
       path: options.debugLabel,
       mode,
       point_count: path.length,
+      start_x: Math.round(pathStart?.x ?? startX),
+      start_y: Math.round(pathStart?.y ?? startY),
+      end_x: Math.round(pathEnd?.x ?? target.x),
+      end_y: Math.round(pathEnd?.y ?? target.y),
+      distance_px,
+      duration_ms,
     });
   }
+  options?.onPathReady?.(path);
   await dispatchPointerMovePath(sendCdp, path, sleep);
   return target;
 }
@@ -355,9 +428,120 @@ export async function clickBoxWithPointer(
     };
   }
   const mode = options?.mode ?? state.interaction_mode;
-  const target = await movePointerToBox(state, box, effectiveSendCdp, sleep, options);
+  const target = await movePointerToBox(state, box, effectiveSendCdp, sleep, {
+    ...options,
+    ...(options?.debugOverlay
+      ? { onPathReady: (path: TimedPoint[]) => renderPointerDebugPath(sendCdp, path) }
+      : {}),
+  });
   await clickAtPoint(effectiveSendCdp, target, mode, sleep);
   state.current_x = target.x;
   state.current_y = target.y;
   state.last_action_at = new Date().toISOString();
+}
+
+/**
+ * Point-level click: moves the pointer from its current position to an explicit
+ * {x, y} coordinate, clicks, and mutates state to the final point.
+ *
+ * Mirrors clickBoxWithPointer but targets an arbitrary point instead of a box.
+ * Used for nav-marker movement and other non-element pointer actions.
+ *
+ * generator: "bezier_fallback" is logged with every dispatch — future template-trace
+ * wiring will replace this with "template_trace" when a recorded arc is selected.
+ */
+export async function clickPointWithPointer(
+  state: PointerRuntimeState,
+  point: { x: number; y: number },
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  sleep: (ms: number) => Promise<void>,
+  options?: {
+    mode?: PointerInteractionMode;
+    random?: () => number;
+    debugOverlay?: boolean;
+    debugLabel?: string;
+  },
+): Promise<{ x: number; y: number }> {
+  const mode = options?.mode ?? state.interaction_mode;
+  let effectiveSendCdp = sendCdp;
+  if (options?.debugOverlay) {
+    ensurePointerDebugOverlay(sendCdp);
+    effectiveSendCdp = (method, params) => {
+      if (method === "Input.dispatchMouseEvent") {
+        const { type, x, y } = params as { type: string; x?: number; y?: number };
+        if (typeof x === "number" && typeof y === "number") {
+          const evType = type === "mousePressed" ? "pressed" : type === "mouseReleased" ? "released" : "move";
+          updatePointerDebugOverlay(sendCdp, x, y, evType);
+        }
+      }
+      sendCdp(method, params);
+    };
+  }
+  const startX = state.current_x;
+  const startY = state.current_y;
+  const path = generatePointerPath(
+    { x: startX, y: startY },
+    point,
+    { mode, random: options?.random },
+  );
+  if (
+    options?.debugLabel &&
+    (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true")
+  ) {
+    const pathStart = path[0];
+    const pathEnd = path[path.length - 1];
+    const dx = (pathEnd?.x ?? point.x) - (pathStart?.x ?? startX);
+    const dy = (pathEnd?.y ?? point.y) - (pathStart?.y ?? startY);
+    const distance_px = Math.round(Math.sqrt(dx * dx + dy * dy));
+    const timing = MODE_TIMING[mode];
+    const duration_ms = timing.total_move_ms + timing.hover_ms + timing.click_gap_ms;
+    console.log("[PointerFocus] dispatch start", {
+      path: options.debugLabel,
+      mode,
+      generator: "bezier_fallback",
+      point_count: path.length,
+      start_x: Math.round(pathStart?.x ?? startX),
+      start_y: Math.round(pathStart?.y ?? startY),
+      end_x: Math.round(pathEnd?.x ?? point.x),
+      end_y: Math.round(pathEnd?.y ?? point.y),
+      distance_px,
+      duration_ms,
+    });
+  }
+  if (options?.debugOverlay) {
+    renderPointerDebugPath(sendCdp, path);
+  }
+  await dispatchPointerMovePath(effectiveSendCdp, path, sleep);
+  await clickAtPoint(effectiveSendCdp, point, mode, sleep);
+  state.current_x = point.x;
+  state.current_y = point.y;
+  state.last_action_at = new Date().toISOString();
+  return point;
+}
+
+/**
+ * Rehydrates the persistent debug cursor dot at the given position on the current page.
+ * DOM overlays are destroyed on page navigation, so this must be called after page.goto
+ * to restore visual continuity of the pointer position.
+ *
+ * Fire-and-forget via Runtime.evaluate — if the page is not ready, the call silently
+ * fails without affecting navigation outcome.
+ */
+export function renderPersistentPointerCursor(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  point: { x: number; y: number },
+  options?: { label?: string },
+): void {
+  ensurePointerDebugOverlay(sendCdp);
+  updatePointerDebugOverlay(sendCdp, point.x, point.y, "released");
+  if (
+    process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" ||
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true"
+  ) {
+    console.log("[PointerDebugOverlay] cursor rehydrated", {
+      x: Math.round(point.x),
+      y: Math.round(point.y),
+      ...(options?.label ? { label: options.label } : {}),
+    });
+  }
 }

@@ -45,8 +45,8 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
-import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
+import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -995,9 +995,30 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
 
       try {
-        const result = await connectAndNavigate(session.cdp_url, body.url);
+        const pointerState = getTaskBrowserSessionPointerState(session.browser_session_id, session.user_id);
+        const result = await connectAndNavigateWithPointer(session.cdp_url, body.url, {
+          pointer_state: pointerState,
+          browser_session_id: session.browser_session_id,
+          debug_overlay: process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true",
+        });
         // Store the navigated URL so CDP injection can resolve the active page target.
         setTaskBrowserSessionCurrentUrl(session.browser_session_id, result.current_url);
+        if (result.final_pointer) {
+          setTaskBrowserSessionPointerState(session.browser_session_id, session.user_id, {
+            x: result.final_pointer.x,
+            y: result.final_pointer.y,
+            initialized: true,
+            updated_at: new Date().toISOString(),
+          });
+          if (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true") {
+            console.log("[PointerState] saved", {
+              browser_session_id: session.browser_session_id,
+              x: Math.round(result.final_pointer.x),
+              y: Math.round(result.final_pointer.y),
+              surface: "navigation",
+            });
+          }
+        }
         return reply.send({
           ok: true,
           data: {
@@ -1647,8 +1668,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         });
       }
 
+      const resolvedBrowserSessionId: string | undefined =
+        cdpResolution.source === "body_browser_session_id" ? bodyBsId :
+        cdpResolution.source === "stored_browser_session_id" ? injection.browser_session_id :
+        undefined;
+
       const fillResult = await executeSecretInjectionViaCDP(
         injection, resolvedValue, cdpResolution.cdpUrlOverride, cdpResolution.preferredTargetUrl,
+        resolvedBrowserSessionId,
       );
 
       if (fillResult.success) {
@@ -1930,7 +1957,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         cdpUrlOverride = injection.external_cdp_url;
       }
 
-      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride, preferredTargetUrlHandoff);
+      const fillResult = await executeSecretInjectionViaCDP(
+        injection, resolvedValue, cdpUrlOverride, preferredTargetUrlHandoff, injection.browser_session_id,
+      );
 
       if (!fillResult.success) {
         injection.status = "failed";

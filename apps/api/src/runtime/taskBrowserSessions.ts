@@ -568,6 +568,29 @@ export function setTaskBrowserSessionCurrentUrl(id: string, currentUrl: string):
   }
 }
 
+/** Returns the saved browser-internal pointer position for this session, or undefined if
+ *  the session does not exist, does not belong to the user, or has no saved pointer state. */
+export function getTaskBrowserSessionPointerState(
+  id: string,
+  userId: string,
+): TaskBrowserSession["pointer_state"] {
+  const session = taskBrowserSessions.get(id);
+  if (!session || session.user_id !== userId) return undefined;
+  return session.pointer_state;
+}
+
+/** Persists the browser-internal pointer position for this session. Coordinates only — no secrets. */
+export function setTaskBrowserSessionPointerState(
+  id: string,
+  userId: string,
+  pointerState: NonNullable<TaskBrowserSession["pointer_state"]>,
+): void {
+  const session = taskBrowserSessions.get(id);
+  if (!session || session.user_id !== userId) return;
+  session.pointer_state = pointerState;
+  taskBrowserSessions.set(id, session);
+}
+
 export interface TaskBrowserSessionForReuse {
   browser_session_id: string;
   cdp_url: string;

@@ -2344,6 +2344,13 @@ export interface TaskBrowserSession {
   cleanup_complete?: boolean;
   /** Last URL navigated to via navigate_task_browser_session — used for CDP target selection. */
   current_url?: string;
+  /** Browser-internal pointer position for this session — coordinates only, no secrets. */
+  pointer_state?: {
+    x: number;
+    y: number;
+    initialized: boolean;
+    updated_at?: string;
+  };
   /** Distinguishes auto-provisioned runtimes from manually started compatibility sessions. */
   runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
 }

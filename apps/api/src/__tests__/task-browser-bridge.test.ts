@@ -12,6 +12,7 @@ vi.mock("../store/persistence.js", () => ({
 // Mock taskBrowserControl — we don't want real CDP connections in tests.
 const controlMock = {
   navigateError: null as null | { code: string; message: string },
+  pointerNavFallback: false as boolean,
   observeError: null as null | { code: string; message: string },
   clickError: null as null | { code: string; message: string },
 };
@@ -23,13 +24,16 @@ const MOCK_SNAPSHOT = {
   forms_detected: 1,
 };
 vi.mock("../runtime/taskBrowserControl.js", () => ({
-  connectAndNavigate: vi.fn().mockImplementation(() => {
+  connectAndNavigateWithPointer: vi.fn().mockImplementation(() => {
     if (controlMock.navigateError) {
       const e = new Error(controlMock.navigateError.message) as Error & { code: string };
       e.code = controlMock.navigateError.code;
       return Promise.reject(e);
     }
-    return Promise.resolve({ current_url: "https://example.com/after-nav", snapshot: MOCK_SNAPSHOT });
+    if (controlMock.pointerNavFallback) {
+      return Promise.resolve({ current_url: "https://example.com/after-nav", snapshot: MOCK_SNAPSHOT, nav_mode: "direct_fallback" });
+    }
+    return Promise.resolve({ current_url: "https://example.com/after-nav", snapshot: MOCK_SNAPSHOT, final_pointer: { x: 640, y: 24 }, pointer_source: "viewport_center", nav_mode: "page_level_nav_marker_direct_goto" });
   }),
   connectAndObserve: vi.fn().mockImplementation(() => {
     if (controlMock.observeError) {
@@ -135,7 +139,7 @@ import type { PassWithToken } from "../store/index.js";
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
-import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
+import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 
 let server: FastifyInstance;
 
@@ -157,6 +161,7 @@ beforeEach(() => {
   taskBrowserSessions.clear();
   cdpMock.success = true;
   controlMock.navigateError = null;
+  controlMock.pointerNavFallback = false;
   controlMock.observeError = null;
   controlMock.clickError = null;
   vi.clearAllMocks();
@@ -789,5 +794,96 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
     expect(bodyStr).not.toContain("mock-password");
     expect(bodyStr).not.toContain("test-password");
     expect(body.data?.raw_value_revealed_to_agent).toBe(false);
+  });
+});
+
+// ─── Pointer state continuity through navigation ──────────────────────────────
+
+describe("navigate — pointer state continuity", () => {
+  it("initializes pointer_state when session has none", async () => {
+    seedDelegation();
+    seedReadySession(); // no pointer_state
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const s = taskBrowserSessions.get(SESSION_ID);
+    expect(s?.pointer_state).toBeDefined();
+    expect(s?.pointer_state?.initialized).toBe(true);
+    expect(s?.pointer_state?.x).toBeGreaterThan(0);
+  });
+
+  it("preserves current_url behavior after navigation", async () => {
+    seedDelegation();
+    seedReadySession();
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.current_url).toBe("https://example.com/after-nav");
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe("https://example.com/after-nav");
+  });
+
+  it("passes saved pointer_state to connectAndNavigateWithPointer", async () => {
+    seedDelegation();
+    seedReadySession({ pointer_state: { x: 300, y: 200, initialized: true } });
+    await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    const calls = vi.mocked(connectAndNavigateWithPointer).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const opts = calls[calls.length - 1][2];
+    expect(opts?.pointer_state).toEqual({ x: 300, y: 200, initialized: true });
+  });
+
+  it("saves nav marker position (y=24) as pointer_state after navigation", async () => {
+    seedDelegation();
+    seedReadySession();
+    await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    const s = taskBrowserSessions.get(SESSION_ID);
+    expect(s?.pointer_state?.y).toBe(24);
+    expect(s?.pointer_state?.initialized).toBe(true);
+    expect(s?.pointer_state?.updated_at).toBeDefined();
+  });
+
+  it("does not save pointer_state when nav returns direct_fallback", async () => {
+    seedDelegation();
+    seedReadySession();
+    controlMock.pointerNavFallback = true;
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200); // fallback still navigates successfully
+    const s = taskBrowserSessions.get(SESSION_ID);
+    expect(s?.pointer_state).toBeUndefined(); // no state saved on fallback
+  });
+
+  it("routes navigate through connectAndNavigateWithPointer (not connectAndNavigate)", async () => {
+    seedDelegation();
+    seedReadySession();
+    await server.inject({
+      method: "POST",
+      url: `/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`,
+      payload: { url: "https://example.com" },
+      headers: { authorization: `Bearer ${BEARER_TOKEN}` },
+    });
+    expect(vi.mocked(connectAndNavigateWithPointer)).toHaveBeenCalledOnce();
   });
 });

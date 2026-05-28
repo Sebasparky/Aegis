@@ -7,6 +7,10 @@ import {
   type ElementBox,
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
+import {
+  getTaskBrowserSessionPointerState,
+  setTaskBrowserSessionPointerState,
+} from "./taskBrowserSessions.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -482,12 +486,66 @@ export async function executeProfileFieldFillViaCDP(
                     send(method, params, sessionId!);
                   };
                   const state = getOrCreateFillPointerState(stateKey);
+
+                  // Sync from session — load latest saved position for this task browser session.
+                  if (fillRequest.browser_session_id) {
+                    const saved = getTaskBrowserSessionPointerState(fillRequest.browser_session_id, fillRequest.user_id);
+                    if (saved?.initialized) {
+                      state.current_x = saved.x;
+                      state.current_y = saved.y;
+                      console.log("[PointerState] loaded", {
+                        browser_session_id: fillRequest.browser_session_id,
+                        x: saved.x,
+                        y: saved.y,
+                        initialized: true,
+                      });
+                    }
+                  }
+
+                  // Initialize from viewport center if pointer is still at origin.
+                  if (state.current_x === 0 && state.current_y === 0) {
+                    if (boxVal.viewport) {
+                      state.current_x = Math.round(boxVal.viewport.width * 0.5);
+                      state.current_y = Math.round(boxVal.viewport.height * 0.5);
+                      console.log("[PointerState] initialized", {
+                        browser_session_id: fillRequest.browser_session_id ?? null,
+                        x: state.current_x,
+                        y: state.current_y,
+                        source: "viewport_center",
+                      });
+                    } else {
+                      state.current_x = 80;
+                      state.current_y = 80;
+                      console.log("[PointerState] initialized", {
+                        browser_session_id: fillRequest.browser_session_id ?? null,
+                        x: state.current_x,
+                        y: state.current_y,
+                        source: "fallback",
+                      });
+                    }
+                  }
+
                   if (boxVal.viewport) {
                     state.viewport_width = boxVal.viewport.width;
                     state.viewport_height = boxVal.viewport.height;
                   }
                   phase = "input_pointer"; // guard against stray CDP errors during pointer dispatch
                   await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, { debugOverlay });
+
+                  // Persist final pointer position back to the task browser session.
+                  if (fillRequest.browser_session_id) {
+                    setTaskBrowserSessionPointerState(fillRequest.browser_session_id, fillRequest.user_id, {
+                      x: state.current_x,
+                      y: state.current_y,
+                      initialized: true,
+                      updated_at: new Date().toISOString(),
+                    });
+                    console.log("[PointerState] saved", {
+                      browser_session_id: fillRequest.browser_session_id,
+                      x: state.current_x,
+                      y: state.current_y,
+                    });
+                  }
                 } catch {
                   // Native pointer focus failed — proceed to fill without it.
                 }

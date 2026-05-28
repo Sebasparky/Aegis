@@ -216,22 +216,50 @@ export function generatePointerPath(
     const dy0 = end.y - start.y;
     const distance_px = Math.sqrt(dx0 * dx0 + dy0 * dy0);
     const direction_rad = Math.atan2(dy0, dx0);
-    const request: PointerTemplateRequest = {
-      purpose: options.purpose ?? "button_click",
-      distance_px,
-      direction_rad,
-    };
-    const selected = selectPointerTraceTemplate(options.templateTraces, request);
-    if (selected) {
+    const purpose = options.purpose ?? "button_click";
+    const traces = options.templateTraces;
+
+    let fallbackReason = "no_matching_template";
+    const tryTemplate = (p: TracePurpose) => {
+      const selected = selectPointerTraceTemplate(traces, {
+        purpose: p,
+        distance_px,
+        direction_rad,
+      });
+      if (!selected) return null;
       const normalized = normalizePointerTrace(selected);
-      if (normalized) {
-        return {
-          path: transformNormalizedTemplate(normalized, start, end, {
-            targetDuration_ms: timing.total_move_ms,
-          }),
-          generator: "template_trace",
-        };
+      if (!normalized) {
+        fallbackReason = "template_transform_failed";
+        return null;
       }
+      return {
+        path: transformNormalizedTemplate(normalized, start, end, {
+          targetDuration_ms: timing.total_move_ms,
+        }),
+        generator: "template_trace" as const,
+      };
+    };
+
+    const result =
+      tryTemplate(purpose) ??
+      (purpose === "input_focus" ? tryTemplate("button_click") : null);
+
+    if (result) return result;
+
+    if (
+      process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" ||
+      process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true"
+    ) {
+      console.log("[PointerProfile] template fallback", {
+        purpose,
+        trace_count: traces.length,
+        start_x: Math.round(start.x),
+        start_y: Math.round(start.y),
+        end_x: Math.round(end.x),
+        end_y: Math.round(end.y),
+        distance_px: Math.round(distance_px),
+        reason: fallbackReason,
+      });
     }
   }
 

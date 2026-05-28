@@ -5,7 +5,7 @@
  * sleep and sendCdp are injected mocks so tests run without real-time delays.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   pickTargetPoint,
   generatePointerPath,
@@ -24,6 +24,11 @@ import {
   selectPointerTraceTemplate,
 } from "../runtime/pointerTraceTemplates.js";
 import type { PointerTrace } from "../runtime/pointerTraceTemplates.js";
+import {
+  loadPointerTraces,
+  resolveProfilePath,
+  getLoadedPointerTraces,
+} from "../runtime/pointerProfileLoader.js";
 
 // ─── Shared fixtures ─────────────────────────────────────────────────────────
 
@@ -556,5 +561,88 @@ describe("clickPointWithPointer — template trace wiring", () => {
       ([, p]) => (p as Record<string, unknown>).type === "mouseMoved",
     );
     expect(movedEvents.length).toBe(12); // native mode Bézier
+  });
+});
+
+// ─── pointerProfileLoader ─────────────────────────────────────────────────────
+
+describe("pointerProfileLoader", () => {
+  const ORIG_ENV = process.env.ANTIGEN_POINTER_PROFILE_PATH;
+
+  afterEach(() => {
+    if (ORIG_ENV === undefined) {
+      delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    } else {
+      process.env.ANTIGEN_POINTER_PROFILE_PATH = ORIG_ENV;
+    }
+  });
+
+  it("returns [] when env is empty string (disabled)", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = "";
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("returns [] when env is 'false' (disabled)", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = "false";
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("returns [] when explicit env path does not exist", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = "/tmp/__nonexistent_pointer_profile_aegis__.json";
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("resolves repo-root dev-artifacts profile from apps/api cwd", () => {
+    delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    // When running from apps/api, the ../../ candidate resolves to repo root.
+    const resolved = resolveProfilePath();
+    expect(resolved).not.toBeNull();
+    expect(resolved).toContain("dev-artifacts");
+  });
+
+  it("loads non-empty traces from repo-root when no env override", () => {
+    delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    const traces = loadPointerTraces();
+    expect(traces.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── generatePointerPath — input_focus purpose fallback ──────────────────────
+
+describe("generatePointerPath — input_focus purpose fallback", () => {
+  it("selects a button_click trace when purpose is input_focus and only button_click traces exist", () => {
+    const buttonTrace = makeHorizontalTrace(); // purpose: "button_click"
+    const { generator } = generatePointerPath(
+      { x: 0, y: 0 },
+      { x: 200, y: 0 },
+      { templateTraces: [buttonTrace], purpose: "input_focus", random: () => 0.5 },
+    );
+    expect(generator).toBe("template_trace");
+  });
+
+  it("returns template_trace when both input_focus and button_click traces are present", () => {
+    const buttonTrace = makeHorizontalTrace({ trace_id: "btn-1", purpose: "button_click" });
+    const inputTrace = makeHorizontalTrace({ trace_id: "inp-1", purpose: "input_focus" });
+    const { generator } = generatePointerPath(
+      { x: 0, y: 0 },
+      { x: 200, y: 0 },
+      { templateTraces: [buttonTrace, inputTrace], purpose: "input_focus", random: () => 0.5 },
+    );
+    expect(generator).toBe("template_trace");
+  });
+});
+
+// ─── generatePointerPath with real loaded profile ─────────────────────────────
+
+describe("generatePointerPath with real loaded profile", () => {
+  it("returns template_trace when calibrated profile is loaded", () => {
+    const traces = getLoadedPointerTraces();
+    if (traces.length === 0) return; // CI without local fixture — skip gracefully
+    const { generator } = generatePointerPath(
+      { x: 100, y: 100 },
+      { x: 500, y: 300 },
+      { templateTraces: traces, purpose: "button_click" },
+    );
+    expect(generator).toBe("template_trace");
   });
 });

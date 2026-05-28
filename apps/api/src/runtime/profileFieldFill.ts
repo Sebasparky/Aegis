@@ -11,6 +11,7 @@ import {
   getTaskBrowserSessionPointerState,
   setTaskBrowserSessionPointerState,
 } from "./taskBrowserSessions.js";
+import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -530,7 +531,11 @@ export async function executeProfileFieldFillViaCDP(
                     state.viewport_height = boxVal.viewport.height;
                   }
                   phase = "input_pointer"; // guard against stray CDP errors during pointer dispatch
-                  await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, { debugOverlay });
+                  await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, {
+                    debugOverlay,
+                    templateTraces: getLoadedPointerTraces(),
+                    purpose: "input_focus",
+                  });
 
                   // Persist final pointer position back to the task browser session.
                   if (fillRequest.browser_session_id) {

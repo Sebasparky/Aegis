@@ -12,7 +12,13 @@ vi.mock("../store/persistence.js", () => ({
 // Mock taskBrowserControl — no real CDP connections.
 const MOCK_SNAPSHOT = vi.hoisted(() => ({ page_title: "Test Page", headings: [], links_sample: [], buttons_sample: [], forms_detected: 0 }));
 vi.mock("../runtime/taskBrowserControl.js", () => ({
-  connectAndNavigate: vi.fn().mockResolvedValue({ current_url: "https://github.com/login", snapshot: MOCK_SNAPSHOT }),
+  connectAndNavigateWithPointer: vi.fn().mockResolvedValue({
+    current_url: "https://github.com/login",
+    snapshot: MOCK_SNAPSHOT,
+    final_pointer: { x: 640, y: 24 },
+    pointer_source: "viewport_center",
+    nav_mode: "page_level_nav_marker_direct_goto",
+  }),
   connectAndObserve:  vi.fn().mockResolvedValue({ current_url: "https://github.com/login", snapshot: MOCK_SNAPSHOT }),
   connectAndClick:    vi.fn().mockResolvedValue({ current_url: "https://github.com/", snapshot: MOCK_SNAPSHOT }),
 }));
@@ -106,7 +112,7 @@ import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { requireAgentToken } from "../routes/agent-api.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
-import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
+import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 
 let server: FastifyInstance;
 
@@ -430,7 +436,13 @@ describe("Controlled Browser Bridge — agent_browser_mode label", () => {
     const del = seedDelegation();
     mockDelegation(del);
     seedReadySession();
-    vi.mocked(connectAndNavigate).mockResolvedValueOnce({ current_url: "https://github.com/", snapshot: MOCK_SNAPSHOT });
+    vi.mocked(connectAndNavigateWithPointer).mockResolvedValueOnce({
+      current_url: "https://github.com/",
+      snapshot: MOCK_SNAPSHOT,
+      final_pointer: { x: 640, y: 24 },
+      pointer_source: "viewport_center",
+      nav_mode: "page_level_nav_marker_direct_goto",
+    });
     const res = await injectPost(`/api/agent/v1/task-browser-sessions/${SESSION_ID}/navigate`, { url: "https://github.com/" });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.agent_browser_mode).toBe("controlled_browser_bridge");

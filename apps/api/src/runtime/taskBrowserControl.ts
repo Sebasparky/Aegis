@@ -7,6 +7,7 @@ import {
   clickPointWithPointer,
   renderPersistentPointerCursor,
 } from "./nativePointerRuntime.js";
+import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 
 export interface TaskBrowserControlResult {
   current_url: string;
@@ -159,6 +160,8 @@ export async function connectAndNavigateWithPointer(
       await clickPointWithPointer(state, navMarker, sendCdp, sleep, {
         debugOverlay: pointerOpts?.debug_overlay,
         debugLabel: "nav_marker",
+        templateTraces: getLoadedPointerTraces(),
+        purpose: "button_click",
       });
 
       if (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true") {

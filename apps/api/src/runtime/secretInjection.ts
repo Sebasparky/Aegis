@@ -11,6 +11,7 @@ import {
   getTaskBrowserSessionPointerState,
   setTaskBrowserSessionPointerState,
 } from "./taskBrowserSessions.js";
+import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 
 /**
  * Builds a JS selector expression for a credential field.
@@ -466,6 +467,8 @@ export async function executeSecretInjectionViaCDP(
                 await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, {
                   debugOverlay,
                   debugLabel: "secret",
+                  templateTraces: getLoadedPointerTraces(),
+                  purpose: "input_focus",
                 });
 
                 // Persist final pointer position back to the task browser session.

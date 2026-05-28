@@ -12,6 +12,7 @@ import {
   dispatchPointerMovePath,
   clickAtPoint,
   clickBoxWithPointer,
+  clickPointWithPointer,
   makePointerRuntimeState,
 } from "../runtime/nativePointerRuntime.js";
 import type { ElementBox } from "../runtime/nativePointerRuntime.js";
@@ -70,33 +71,33 @@ describe("pickTargetPoint", () => {
 
 describe("generatePointerPath", () => {
   it("first point equals start exactly", () => {
-    const path = generatePointerPath(START, END, { random: () => 0.5 });
+    const { path } = generatePointerPath(START, END, { random: () => 0.5 });
     expect(path[0].x).toBe(START.x);
     expect(path[0].y).toBe(START.y);
   });
 
   it("last point equals end exactly", () => {
-    const path = generatePointerPath(START, END, { random: () => 0.5 });
+    const { path } = generatePointerPath(START, END, { random: () => 0.5 });
     const last = path[path.length - 1];
     expect(last.x).toBe(END.x);
     expect(last.y).toBe(END.y);
   });
 
   it("first point has delay_ms of 0", () => {
-    const path = generatePointerPath(START, END, { random: () => 0.4 });
+    const { path } = generatePointerPath(START, END, { random: () => 0.4 });
     expect(path[0].delay_ms).toBe(0);
   });
 
   it("all delay_ms values are non-negative (cumulative time is monotonically non-decreasing)", () => {
-    const path = generatePointerPath(START, END, { random: () => 0.4 });
+    const { path } = generatePointerPath(START, END, { random: () => 0.4 });
     for (const pt of path) {
       expect(pt.delay_ms).toBeGreaterThanOrEqual(0);
     }
   });
 
   it("careful mode has substantially more total delay than fast mode", () => {
-    const fastPath    = generatePointerPath(START, END, { mode: "fast",    random: () => 0.5 });
-    const carefulPath = generatePointerPath(START, END, { mode: "careful", random: () => 0.5 });
+    const { path: fastPath }    = generatePointerPath(START, END, { mode: "fast",    random: () => 0.5 });
+    const { path: carefulPath } = generatePointerPath(START, END, { mode: "careful", random: () => 0.5 });
     const fastTotal    = fastPath.reduce((s, pt) => s + pt.delay_ms, 0);
     const carefulTotal = carefulPath.reduce((s, pt) => s + pt.delay_ms, 0);
     expect(carefulTotal).toBeGreaterThan(fastTotal);
@@ -104,14 +105,14 @@ describe("generatePointerPath", () => {
 
   it("is deterministic with a fixed random source", () => {
     const rng = () => 0.42;
-    const path1 = generatePointerPath(START, END, { random: rng });
-    const path2 = generatePointerPath(START, END, { random: rng });
+    const { path: path1 } = generatePointerPath(START, END, { random: rng });
+    const { path: path2 } = generatePointerPath(START, END, { random: rng });
     expect(path1).toEqual(path2);
   });
 
   it("produces more points for careful mode than for fast mode", () => {
-    const fastPath    = generatePointerPath(START, END, { mode: "fast",    random: () => 0.5 });
-    const carefulPath = generatePointerPath(START, END, { mode: "careful", random: () => 0.5 });
+    const { path: fastPath }    = generatePointerPath(START, END, { mode: "fast",    random: () => 0.5 });
+    const { path: carefulPath } = generatePointerPath(START, END, { mode: "careful", random: () => 0.5 });
     expect(carefulPath.length).toBeGreaterThan(fastPath.length);
   });
 });
@@ -145,7 +146,7 @@ describe("dispatchPointerMovePath", () => {
 
   it("never sends mousePressed or mouseReleased", async () => {
     const sendCdp = vi.fn();
-    const path = generatePointerPath(START, END, { mode: "fast", random: () => 0.5 });
+    const { path } = generatePointerPath(START, END, { mode: "fast", random: () => 0.5 });
     await dispatchPointerMovePath(sendCdp, path, mockSleep);
     const types = sendCdp.mock.calls.map(([, p]) => (p as Record<string, unknown>).type);
     expect(types).not.toContain("mousePressed");
@@ -437,15 +438,16 @@ describe("selectPointerTraceTemplate", () => {
 });
 
 describe("generatePointerPath — v2 template path", () => {
-  it("uses template path (point count matches trace movement points) when suitable traces are provided", () => {
+  it("uses template path and returns generator: template_trace when suitable traces are provided", () => {
     const trace = makeHorizontalTrace();
     // Trace has 4 movement points; native Bézier mode uses 12.
     // Template path preserves the recorded point count.
-    const path = generatePointerPath(START, END, {
+    const { path, generator } = generatePointerPath(START, END, {
       mode: "native",
       templateTraces: [trace],
       purpose: "button_click",
     });
+    expect(generator).toBe("template_trace");
     expect(path.length).toBe(4);
     expect(path[0].x).toBe(START.x);
     expect(path[0].y).toBe(START.y);
@@ -453,13 +455,14 @@ describe("generatePointerPath — v2 template path", () => {
     expect(path[path.length - 1].y).toBe(END.y);
   });
 
-  it("falls back to Bézier when templateTraces is empty", () => {
+  it("falls back to Bézier and returns generator: bezier_fallback when templateTraces is empty", () => {
     // native mode Bézier uses 12 points; template path would use trace's point count
-    const path = generatePointerPath(START, END, {
+    const { path, generator } = generatePointerPath(START, END, {
       mode: "native",
       templateTraces: [],
       purpose: "button_click",
     });
+    expect(generator).toBe("bezier_fallback");
     expect(path.length).toBe(12); // native mode_count
     expect(path[0].x).toBe(START.x);
     expect(path[path.length - 1].x).toBe(END.x);
@@ -467,19 +470,91 @@ describe("generatePointerPath — v2 template path", () => {
 
   it("falls back to Bézier when all template traces are unusable for the requested purpose", () => {
     const scrollTrace = makeHorizontalTrace({ purpose: "scroll" });
-    const path = generatePointerPath(START, END, {
+    const { path, generator } = generatePointerPath(START, END, {
       mode: "native",
       templateTraces: [scrollTrace],
       purpose: "button_click",
     });
     // Scroll trace is rejected for button_click; should fall back to 12-point Bézier
+    expect(generator).toBe("bezier_fallback");
     expect(path.length).toBe(12);
   });
 
   it("existing callers without templateTraces still get Bézier path", () => {
-    const path = generatePointerPath(START, END, { mode: "fast", random: () => 0.5 });
+    const { path, generator } = generatePointerPath(START, END, { mode: "fast", random: () => 0.5 });
+    expect(generator).toBe("bezier_fallback");
     expect(path.length).toBe(5); // fast mode point_count
     expect(path[0].x).toBe(START.x);
     expect(path[path.length - 1].x).toBe(END.x);
+  });
+});
+
+// ─── clickBoxWithPointer — template trace wiring ──────────────────────────────
+
+describe("clickBoxWithPointer — template trace wiring", () => {
+  it("uses template path when templateTraces are provided: mouseMoved count matches trace point count", async () => {
+    const sendCdp = vi.fn();
+    const state = makePointerRuntimeState({ current_x: 0, current_y: 0, interaction_mode: "native" });
+    // makeHorizontalTrace has 4 movement points — native Bézier would produce 12.
+    const trace = makeHorizontalTrace();
+
+    await clickBoxWithPointer(state, BOX, sendCdp, mockSleep, {
+      random: () => 0.5,
+      templateTraces: [trace],
+      purpose: "button_click",
+    });
+
+    const movedEvents = sendCdp.mock.calls.filter(
+      ([, p]) => (p as Record<string, unknown>).type === "mouseMoved",
+    );
+    // Template has 4 movement points → 4 mouseMoved events (not the native 12)
+    expect(movedEvents.length).toBe(4);
+  });
+
+  it("falls back to Bézier when no templateTraces are provided", async () => {
+    const sendCdp = vi.fn();
+    const state = makePointerRuntimeState({ current_x: 0, current_y: 0, interaction_mode: "native" });
+
+    await clickBoxWithPointer(state, BOX, sendCdp, mockSleep, { random: () => 0.5 });
+
+    const movedEvents = sendCdp.mock.calls.filter(
+      ([, p]) => (p as Record<string, unknown>).type === "mouseMoved",
+    );
+    expect(movedEvents.length).toBe(12); // native mode Bézier
+  });
+});
+
+// ─── clickPointWithPointer — template trace wiring ───────────────────────────
+
+describe("clickPointWithPointer — template trace wiring", () => {
+  it("uses template path when templateTraces are provided: mouseMoved count matches trace point count", async () => {
+    const sendCdp = vi.fn();
+    const state = makePointerRuntimeState({ current_x: 0, current_y: 0, interaction_mode: "native" });
+    const trace = makeHorizontalTrace();
+    const target = { x: 200, y: 150 };
+
+    await clickPointWithPointer(state, target, sendCdp, mockSleep, {
+      templateTraces: [trace],
+      purpose: "button_click",
+    });
+
+    const movedEvents = sendCdp.mock.calls.filter(
+      ([, p]) => (p as Record<string, unknown>).type === "mouseMoved",
+    );
+    // Template has 4 movement points → 4 mouseMoved events
+    expect(movedEvents.length).toBe(4);
+  });
+
+  it("falls back to Bézier when no templateTraces are provided", async () => {
+    const sendCdp = vi.fn();
+    const state = makePointerRuntimeState({ current_x: 0, current_y: 0, interaction_mode: "native" });
+    const target = { x: 200, y: 150 };
+
+    await clickPointWithPointer(state, target, sendCdp, mockSleep);
+
+    const movedEvents = sendCdp.mock.calls.filter(
+      ([, p]) => (p as Record<string, unknown>).type === "mouseMoved",
+    );
+    expect(movedEvents.length).toBe(12); // native mode Bézier
   });
 });

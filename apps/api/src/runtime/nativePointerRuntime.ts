@@ -204,7 +204,7 @@ export function generatePointerPath(
     templateTraces?: PointerTrace[];
     purpose?: TracePurpose;
   },
-): TimedPoint[] {
+): { path: TimedPoint[]; generator: "template_trace" | "bezier_fallback" } {
   const mode = options?.mode ?? "native";
   const rng = options?.random ?? Math.random;
   const timing = MODE_TIMING[mode];
@@ -225,9 +225,12 @@ export function generatePointerPath(
     if (selected) {
       const normalized = normalizePointerTrace(selected);
       if (normalized) {
-        return transformNormalizedTemplate(normalized, start, end, {
-          targetDuration_ms: timing.total_move_ms,
-        });
+        return {
+          path: transformNormalizedTemplate(normalized, start, end, {
+            targetDuration_ms: timing.total_move_ms,
+          }),
+          generator: "template_trace",
+        };
       }
     }
   }
@@ -287,7 +290,7 @@ export function generatePointerPath(
   points[0] = { x: start.x, y: start.y, delay_ms: 0 };
   points[n - 1] = { x: end.x, y: end.y, delay_ms: points[n - 1].delay_ms };
 
-  return points;
+  return { path: points, generator: "bezier_fallback" };
 }
 
 /**
@@ -355,17 +358,17 @@ export async function movePointerToBox(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode; debugLabel?: string; onPathReady?: (path: TimedPoint[]) => void },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugLabel?: string; onPathReady?: (path: TimedPoint[]) => void; templateTraces?: PointerTrace[]; purpose?: TracePurpose },
 ): Promise<{ x: number; y: number }> {
   const mode = options?.mode ?? state.interaction_mode;
   // Capture start before path generation — state.current_x/y is the pre-move position.
   const startX = state.current_x;
   const startY = state.current_y;
   const target = pickTargetPoint(box, { random: options?.random });
-  const path = generatePointerPath(
+  const { path, generator } = generatePointerPath(
     { x: startX, y: startY },
     target,
-    { mode, random: options?.random },
+    { mode, random: options?.random, templateTraces: options?.templateTraces, purpose: options?.purpose },
   );
   if (
     options?.debugLabel &&
@@ -381,6 +384,7 @@ export async function movePointerToBox(
     console.log("[PointerFocus] dispatch start", {
       path: options.debugLabel,
       mode,
+      generator,
       point_count: path.length,
       start_x: Math.round(pathStart?.x ?? startX),
       start_y: Math.round(pathStart?.y ?? startY),
@@ -409,7 +413,7 @@ export async function clickBoxWithPointer(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean; debugLabel?: string },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean; debugLabel?: string; templateTraces?: PointerTrace[]; purpose?: TracePurpose },
 ): Promise<void> {
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {
@@ -447,8 +451,7 @@ export async function clickBoxWithPointer(
  * Mirrors clickBoxWithPointer but targets an arbitrary point instead of a box.
  * Used for nav-marker movement and other non-element pointer actions.
  *
- * generator: "bezier_fallback" is logged with every dispatch — future template-trace
- * wiring will replace this with "template_trace" when a recorded arc is selected.
+ * generator: "template_trace" when a recorded arc is selected, "bezier_fallback" otherwise.
  */
 export async function clickPointWithPointer(
   state: PointerRuntimeState,
@@ -460,6 +463,8 @@ export async function clickPointWithPointer(
     random?: () => number;
     debugOverlay?: boolean;
     debugLabel?: string;
+    templateTraces?: PointerTrace[];
+    purpose?: TracePurpose;
   },
 ): Promise<{ x: number; y: number }> {
   const mode = options?.mode ?? state.interaction_mode;
@@ -479,10 +484,10 @@ export async function clickPointWithPointer(
   }
   const startX = state.current_x;
   const startY = state.current_y;
-  const path = generatePointerPath(
+  const { path, generator } = generatePointerPath(
     { x: startX, y: startY },
     point,
-    { mode, random: options?.random },
+    { mode, random: options?.random, templateTraces: options?.templateTraces, purpose: options?.purpose },
   );
   if (
     options?.debugLabel &&
@@ -498,7 +503,7 @@ export async function clickPointWithPointer(
     console.log("[PointerFocus] dispatch start", {
       path: options.debugLabel,
       mode,
-      generator: "bezier_fallback",
+      generator,
       point_count: path.length,
       start_x: Math.round(pathStart?.x ?? startX),
       start_y: Math.round(pathStart?.y ?? startY),

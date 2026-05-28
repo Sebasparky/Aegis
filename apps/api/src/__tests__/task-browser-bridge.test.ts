@@ -734,6 +734,7 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
       expect.any(String),
       undefined, // cdpUrlOverride — env fallback
       undefined, // preferredTargetUrl
+      undefined, // browserSessionId
     );
   });
 
@@ -755,6 +756,7 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
       expect.any(String),
       "http://localhost:9222", // cdpUrlOverride from session
       undefined,               // preferredTargetUrl (bs.current_url is unset in this seed)
+      "tbs_bridge_001",        // browserSessionId
     );
   });
 
@@ -776,6 +778,7 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
       expect.any(String),
       undefined, // cdpUrlOverride — env fallback
       undefined, // preferredTargetUrl
+      undefined, // browserSessionId
     );
   });
 

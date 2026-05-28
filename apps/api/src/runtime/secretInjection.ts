@@ -261,6 +261,32 @@ export async function executeSecretInjectionViaCDP(
       return { ok: true };
     })()`;
 
+    // Build a richer box lookup expression used only when ANTIGEN_CDP_DIAGNOSTICS=true.
+    // Returns the same ok/box/viewport fields as boxExpr (for downstream compatibility)
+    // plus selector_found, url, title, reason, and inputSummary (structural metadata only —
+    // id, name, type, autocomplete, placeholder, disabled, readOnly — never .value).
+    const buildBoxDiagExpr = (sel: string): string => `(function(){
+      try {
+        var el = ${sel};
+        var inputs = Array.from(document.querySelectorAll("input")).map(function(i){
+          return { id: i.id, name: i.name, type: i.type, autocomplete: i.autocomplete,
+                   placeholder: i.placeholder, disabled: i.disabled, readOnly: i.readOnly };
+        });
+        if (!el) return { ok: false, reason: "element_not_found", url: location.href,
+                          title: document.title, selector_found: false, inputSummary: inputs };
+        el.scrollIntoView({ block: "center", inline: "center" });
+        var r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return { ok: false, reason: "zero_box", url: location.href,
+          title: document.title, selector_found: true, inputSummary: inputs };
+        return { ok: true, reason: "box_found", url: location.href, title: document.title,
+                 selector_found: true, box: { x: r.left, y: r.top, width: r.width, height: r.height },
+                 viewport: { width: window.innerWidth, height: window.innerHeight },
+                 inputSummary: inputs };
+      } catch (e) { return { ok: false, reason: "exception", url: location.href,
+                             title: document.title, selector_found: false }; }
+    })()`;
+    const activeBoxExpr = cdpDiagnostics ? buildBoxDiagExpr(selectorExpr) : boxExpr;
+
     return await new Promise<{ success: boolean; error?: string }>((resolve, reject) => {
       const ws = new WebSocket(browserWsUrl);
       let msgId = 1;
@@ -307,6 +333,15 @@ export async function executeSecretInjectionViaCDP(
         }
 
         const id = msg.id as number | undefined;
+
+        // CDP event notifications carry no `id` field. Without this guard, uninitialized
+        // numeric `let` vars (undefined) would match `id === boxId` and prematurely fire
+        // the box phase before the attach response has arrived.
+        if (id === undefined) {
+          if (msg.error) finish(false, `CDP error: ${JSON.stringify(msg.error)}`);
+          return;
+        }
+
         const result = msg.result as Record<string, unknown> | undefined;
 
         // Attach response — got a session ID; start diagnostic (if enabled) or phase 0 (box lookup).
@@ -319,7 +354,7 @@ export async function executeSecretInjectionViaCDP(
           if (cdpDiagnostics) {
             diagId = send("Runtime.evaluate", { expression: CDP_DIAG_EXPR, returnByValue: true }, sessionId);
           } else {
-            boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId);
+            boxId = send("Runtime.evaluate", { expression: activeBoxExpr, returnByValue: true }, sessionId);
           }
           return;
         }
@@ -338,7 +373,7 @@ export async function executeSecretInjectionViaCDP(
           } else {
             console.log("[CdpInjection] page diagnostic: eval returned no value");
           }
-          boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId!);
+          boxId = send("Runtime.evaluate", { expression: activeBoxExpr, returnByValue: true }, sessionId!);
           return;
         }
 
@@ -350,6 +385,19 @@ export async function executeSecretInjectionViaCDP(
             box?: ElementBox;
             viewport?: { width: number; height: number };
           } | undefined;
+
+          if (cdpDiagnostics) {
+            const bv = boxEval?.value as Record<string, unknown> | undefined;
+            console.log("[CdpInjection] box lookup result", {
+              path: "secret",
+              eval_url: bv?.url ?? null,
+              selector_found: bv?.selector_found ?? false,
+              rect_width: (bv?.box as Record<string, unknown> | undefined)?.width ?? null,
+              rect_height: (bv?.box as Record<string, unknown> | undefined)?.height ?? null,
+              reason: bv?.reason ?? null,
+              inputSummary: bv?.inputSummary ?? [],
+            });
+          }
 
           const stateKey = injection.injection_request_id ?? "default";
           const pointerDiag = cdpDiagnostics || debugOverlay;
@@ -433,9 +481,6 @@ export async function executeSecretInjectionViaCDP(
           return;
         }
 
-        if (msg.error && !id) {
-          finish(false, `CDP error: ${JSON.stringify(msg.error)}`);
-        }
       });
 
       ws.on("error", (err) => {

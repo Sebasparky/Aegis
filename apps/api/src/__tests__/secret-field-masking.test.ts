@@ -32,6 +32,8 @@ let simulateInsertTextFailure = false;
 let simulateBoxLookupFailure = false;
 // Controls whether overlay Runtime.evaluate calls return a CDP error (for overlay failure tests).
 let simulateOverlayFailure = false;
+// Controls whether a no-id CDP notification is emitted before the attach response (regression test).
+let simulateEarlyNotification = false;
 
 vi.mock("ws", () => {
   // Each FakeWs instance gets its own handler registry so test state does not bleed
@@ -54,6 +56,11 @@ vi.mock("ws", () => {
       sentMessages.push(msg);
 
       if (msg.method === "Target.attachToTarget") {
+        if (simulateEarlyNotification) {
+          // Emit a no-id CDP notification (e.g. Target.attachedToTarget) before the response.
+          // This tests that the undefined-id guard prevents premature box phase execution.
+          emit(JSON.stringify({ method: "Target.attachedToTarget", params: { sessionId: "mock_session" } }));
+        }
         emit(JSON.stringify({ id: msg.id, result: { sessionId: "mock_session" } }));
         return;
       }
@@ -134,7 +141,7 @@ global.fetch = vi.fn().mockImplementation((url: string) => {
 // ─── Imports ──────────────────────────────────────────────────────────────────
 
 import type { SecretFieldInjection } from "@aegis/types";
-import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
+import { executeSecretInjectionViaCDP, CDP_DIAG_EXPR } from "../runtime/secretInjection.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -530,6 +537,48 @@ describe("Pointer debug overlay", () => {
   });
 });
 
+describe("CDP notification event guard — no-id messages must not trigger box phase", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
+    simulateEarlyNotification = false;
+  });
+  afterEach(() => {
+    simulateEarlyNotification = false;
+  });
+
+  it("fill still succeeds when a no-id CDP notification arrives before the attach response", async () => {
+    simulateEarlyNotification = true;
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), "SECRET", "http://localhost:9222");
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("no Runtime.evaluate is sent without a valid sessionId when an early notification arrives", async () => {
+    simulateEarlyNotification = true;
+    await executeSecretInjectionViaCDP(makeInjection("password"), "SECRET", "http://localhost:9222");
+    const evalMsgs = sentMessages.filter((m) => m.method === "Runtime.evaluate");
+    expect(evalMsgs.length).toBeGreaterThan(0);
+    for (const m of evalMsgs) {
+      expect(m.sessionId).toBe("mock_session");
+    }
+  });
+
+  it("mouse events still precede Input.insertText with an early notification present", async () => {
+    simulateEarlyNotification = true;
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const mouseMoved = sentMessages.filter(
+      (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
+    );
+    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    expect(mouseMoved.length).toBeGreaterThan(0);
+    for (const m of mouseMoved) {
+      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+    }
+  });
+});
+
 describe("Native pointer focus — box lookup failure fallback", () => {
   beforeEach(() => {
     sentMessages = [];
@@ -564,5 +613,79 @@ describe("Native pointer focus — box lookup failure fallback", () => {
     const result = await executeSecretInjectionViaCDP(makeInjection("password"), "FALLBACK_SECRET", "http://localhost:9222");
     // The result type has raw_value_revealed_to_agent: false as a literal. Verify it's not leaked.
     expect(result.success).toBe(true);
+  });
+});
+
+describe("ANTIGEN_CDP_DIAGNOSTICS — phase ordering and expression safety", () => {
+  beforeEach(() => {
+    sentMessages = [];
+    simulateInsertTextFailure = false;
+    simulateBoxLookupFailure = false;
+    simulateEarlyNotification = false;
+  });
+  afterEach(() => {
+    delete process.env.ANTIGEN_CDP_DIAGNOSTICS;
+  });
+
+  it("page diagnostic Runtime.evaluate runs before box lookup when ANTIGEN_CDP_DIAGNOSTICS=true", async () => {
+    process.env.ANTIGEN_CDP_DIAGNOSTICS = "true";
+    await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    const diagIdx = sentMessages.findIndex(
+      (m) =>
+        m.method === "Runtime.evaluate" &&
+        typeof m.params?.expression === "string" &&
+        (m.params.expression as string).includes("readyState"),
+    );
+    const boxIdx = sentMessages.findIndex(
+      (m) =>
+        m.method === "Runtime.evaluate" &&
+        typeof m.params?.expression === "string" &&
+        (m.params.expression as string).includes("getBoundingClientRect"),
+    );
+    expect(diagIdx).toBeGreaterThanOrEqual(0);
+    expect(boxIdx).toBeGreaterThan(diagIdx);
+  });
+
+  it("box diagnostic expression includes inputSummary keys but never reads .value", async () => {
+    process.env.ANTIGEN_CDP_DIAGNOSTICS = "true";
+    const secret = "DIAG_SECRET_SENTINEL";
+    await executeSecretInjectionViaCDP(makeInjection("password"), secret, "http://localhost:9222");
+    const boxMsg = sentMessages.find(
+      (m) =>
+        m.method === "Runtime.evaluate" &&
+        typeof m.params?.expression === "string" &&
+        (m.params.expression as string).includes("getBoundingClientRect"),
+    );
+    expect(boxMsg).toBeDefined();
+    const expr = boxMsg!.params!.expression as string;
+    expect(expr).toContain("inputSummary");
+    expect(expr).toContain("selector_found");
+    expect(expr).not.toContain(".value");
+    expect(expr).not.toContain(secret);
+  });
+
+  it("fill still succeeds when ANTIGEN_CDP_DIAGNOSTICS=true", async () => {
+    process.env.ANTIGEN_CDP_DIAGNOSTICS = "true";
+    const result = await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+});
+
+describe("CDP_DIAG_EXPR safety — no input field value reads", () => {
+  it("CDP_DIAG_EXPR contains inputSummary structural keys", () => {
+    expect(CDP_DIAG_EXPR).toContain("inputSummary");
+    expect(CDP_DIAG_EXPR).toContain("readyState");
+    expect(CDP_DIAG_EXPR).toContain("hasEmailId");
+  });
+
+  it("CDP_DIAG_EXPR never reads .value from input elements", () => {
+    // The diagnostic must only collect structural metadata — id, name, type, placeholder,
+    // autocomplete, disabled, readOnly. Reading i.value would leak typed content.
+    expect(CDP_DIAG_EXPR).not.toContain(".value");
+  });
+
+  it("CDP_DIAG_EXPR does not contain password-related value extraction", () => {
+    expect(CDP_DIAG_EXPR).not.toMatch(/i\.value|el\.value|input\.value/);
   });
 });

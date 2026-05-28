@@ -2,6 +2,11 @@ import { spawn, execSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir, tmpdir } from "os";
+import {
+  computeProfileKey,
+  persistentProfileExists,
+  ensurePersistentProfileDir,
+} from "./browserProfilePersistence.js";
 import { createServer } from "net";
 import type { TaskBrowserSession, TaskBrowserSessionStatus } from "@aegis/types";
 import { newId, MOCK_USER_ID } from "../store/index.js";
@@ -300,7 +305,9 @@ export async function closeAllTaskBrowserSessions(): Promise<void> {
           }
         }
         taskBrowserProcesses.delete(id);
-        safeCleanupDir(session.user_data_dir);
+        if (!session.persistent_profile_enabled) {
+          safeCleanupDir(session.user_data_dir);
+        }
         session.status = "expired";
         session.closed_at = new Date().toISOString();
         taskBrowserSessions.set(id, session);
@@ -318,6 +325,14 @@ export interface CreateTaskBrowserOptions {
   delegation_id?: string;
   debug_visible?: boolean;
   runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
+  /** Opt-in: preserve the profile directory across session close/reopen. Default: false (ephemeral). */
+  persistent_profile?: boolean;
+}
+
+interface LaunchChromeProfileOpts {
+  persistent_profile_enabled: boolean;
+  profile_key?: string;
+  profile_state?: "fresh" | "reused";
 }
 
 export interface CreateTaskBrowserResult {
@@ -333,6 +348,7 @@ export interface CreateTaskBrowserResult {
 async function launchChrome(
   opts: CreateTaskBrowserOptions,
   cdpPort: number,
+  profileOpts: LaunchChromeProfileOpts = { persistent_profile_enabled: false },
 ): Promise<TaskBrowserSession> {
   const chromeBin = findChromeBinary();
   if (!chromeBin) {
@@ -348,7 +364,15 @@ async function launchChrome(
   const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
   const userId = opts.user_id ?? MOCK_USER_ID;
   const browser_session_id = newId("tbsess");
-  const user_data_dir = join(tmpdir(), `aegis-agent-browser-${browser_session_id}`);
+
+  // Persistent sessions reuse a stable profile dir scoped to user+delegation.
+  // Ephemeral sessions use a fresh /tmp dir deleted on close.
+  // Note: ephemeral: true refers to the browser PROCESS (always killed on close).
+  // persistent_profile_enabled refers to the profile DIRECTORY (optionally preserved).
+  const user_data_dir = (profileOpts.persistent_profile_enabled && profileOpts.profile_key)
+    ? ensurePersistentProfileDir(profileOpts.profile_key)
+    : join(tmpdir(), `aegis-agent-browser-${browser_session_id}`);
+
   const cdp_url = `http://localhost:${cdpPort}`;
   const now = new Date();
 
@@ -366,12 +390,19 @@ async function launchChrome(
     created_at: now.toISOString(),
     expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
     ...(opts.runtime_mode ? { runtime_mode: opts.runtime_mode } : {}),
+    persistent_profile_enabled: profileOpts.persistent_profile_enabled,
+    ...(profileOpts.profile_state !== undefined ? { profile_state: profileOpts.profile_state } : {}),
   };
   taskBrowserSessions.set(browser_session_id, session);
 
   try {
-    mkdirSync(join(user_data_dir, "Default"), { recursive: true });
+    // For ephemeral sessions, create the dir now.
+    // For persistent sessions, ensurePersistentProfileDir already created Default/.
+    if (!profileOpts.persistent_profile_enabled) {
+      mkdirSync(join(user_data_dir, "Default"), { recursive: true });
+    }
 
+    // ALWAYS write Preferences — enforces no-save policy on both fresh and reused profiles.
     const prefs = {
       profile: { password_manager_enabled: false },
       credentials_enable_service: false,
@@ -414,7 +445,10 @@ async function launchChrome(
           current.error = "Chrome process exited unexpectedly";
           taskBrowserSessions.set(browser_session_id, current);
         }
-        safeCleanupDir(user_data_dir);
+        // Preserve persistent profile dirs even on crash — cookies/storage should survive.
+        if (!profileOpts.persistent_profile_enabled) {
+          safeCleanupDir(user_data_dir);
+        }
       }
       taskBrowserProcesses.delete(browser_session_id);
     });
@@ -434,7 +468,10 @@ async function launchChrome(
       try { proc.kill("SIGTERM"); } catch { /* ignore */ }
       taskBrowserProcesses.delete(browser_session_id);
     }
-    safeCleanupDir(user_data_dir);
+    // Only clean up ephemeral profiles on launch failure.
+    if (!profileOpts.persistent_profile_enabled) {
+      safeCleanupDir(user_data_dir);
+    }
 
     throw err;
   }
@@ -455,6 +492,22 @@ export async function createTaskBrowserSession(
   const debug_visible = opts.debug_visible === true || process.env.ANTIGEN_BROWSER_HEADLESS === "false";
   const mode: "headless" | "visible" = debug_visible ? "visible" : "headless";
 
+  // Resolve persistent profile opts before launching Chrome.
+  // Persistence is opt-in (persistent_profile: true). Default is ephemeral.
+  const persistent_profile_enabled = opts.persistent_profile === true;
+  let profileOpts: LaunchChromeProfileOpts;
+  if (persistent_profile_enabled) {
+    const userId = opts.user_id ?? MOCK_USER_ID;
+    const profileKey = computeProfileKey(userId, opts.delegation_id);
+    profileOpts = {
+      persistent_profile_enabled: true,
+      profile_key: profileKey,
+      profile_state: persistentProfileExists(profileKey) ? "reused" : "fresh",
+    };
+  } else {
+    profileOpts = { persistent_profile_enabled: false };
+  }
+
   // Sweep expired/terminal sessions and kill any lingering processes before scanning ports.
   const killed = sweepTerminalSessions();
   if (killed > 0) {
@@ -465,7 +518,7 @@ export async function createTaskBrowserSession(
   const portBusy = await isPortInUse(DEFAULT_CDP_PORT);
 
   if (!portBusy) {
-    const session = await launchChrome(opts, DEFAULT_CDP_PORT);
+    const session = await launchChrome(opts, DEFAULT_CDP_PORT, profileOpts);
     return { session, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
@@ -490,7 +543,7 @@ export async function createTaskBrowserSession(
 
     const freed = await waitForPortFree(DEFAULT_CDP_PORT, 1500);
     if (freed) {
-      const session = await launchChrome(opts, DEFAULT_CDP_PORT);
+      const session = await launchChrome(opts, DEFAULT_CDP_PORT, profileOpts);
       return { session, user_message: "Started a fresh Antigen task browser session.", mode };
     }
     // Port still busy after recycle — fall through to alternate ports below
@@ -505,7 +558,7 @@ export async function createTaskBrowserSession(
   // Use recycle-aware scan so alternate ports held by terminal sessions can be freed.
   const altPort = await findAvailablePortWithRecycle(ALTERNATE_CDP_PORTS);
   if (altPort !== null) {
-    const session = await launchChrome(opts, altPort);
+    const session = await launchChrome(opts, altPort, profileOpts);
     return { session, port_auto_selected: true, requires_browser_reconnect: true, user_message: "Started a fresh Antigen task browser session.", mode };
   }
 
@@ -515,7 +568,7 @@ export async function createTaskBrowserSession(
 
   const retryPort = await findAvailablePortWithRecycle(ALL_CDP_PORTS);
   if (retryPort !== null) {
-    const session = await launchChrome(opts, retryPort);
+    const session = await launchChrome(opts, retryPort, profileOpts);
     const altSelected = retryPort !== DEFAULT_CDP_PORT;
     return {
       session,
@@ -660,9 +713,15 @@ export async function closeTaskBrowserSession(id: string, userId: string): Promi
 
     taskBrowserProcesses.delete(id);
 
-    // Clean profile directory (best-effort).
-    safeCleanupDir(session.user_data_dir);
-    const dirStillExists = existsSync(session.user_data_dir);
+    // Persistent profile dirs are intentionally preserved across close — cookies/storage survive.
+    // Ephemeral profile dirs are deleted (best-effort).
+    if (!session.persistent_profile_enabled) {
+      safeCleanupDir(session.user_data_dir);
+    }
+    // For persistent sessions, dir stays by design — treat as clean (not a cleanup failure).
+    const dirStillExists = session.persistent_profile_enabled
+      ? false
+      : existsSync(session.user_data_dir);
 
     // Set cleanup_complete only when the endpoint is actually gone and the profile is deleted.
     session.status = "closed";
@@ -697,7 +756,9 @@ export function expireInactiveTaskBrowserSessions(): void {
           try { proc.kill("SIGTERM"); } catch { /* ignore */ }
           taskBrowserProcesses.delete(session.browser_session_id);
         }
-        safeCleanupDir(session.user_data_dir);
+        if (!session.persistent_profile_enabled) {
+          safeCleanupDir(session.user_data_dir);
+        }
         session.status = "expired";
         session.cleanup_complete = true;
         taskBrowserSessions.set(session.browser_session_id, session);

@@ -2368,6 +2368,15 @@ export interface TaskBrowserSession {
   };
   /** Distinguishes auto-provisioned runtimes from manually started compatibility sessions. */
   runtime_mode?: "local_runtime_endpoint" | "compatibility_bridge";
+  /**
+   * Whether this session uses a persistent browser profile directory that survives session close.
+   * ephemeral: true refers to the browser PROCESS (always killed on close).
+   * persistent_profile_enabled refers to the profile DIRECTORY (optionally preserved).
+   * These are independent: the process can be ephemeral while the profile persists.
+   */
+  persistent_profile_enabled?: boolean;
+  /** Diagnostics: "fresh" = new profile dir; "reused" = prior session's cookies/storage carried over. */
+  profile_state?: "fresh" | "reused";
 }
 
 // ─── Payment Card Fill Handoff v1 ────────────────────────────────────────────

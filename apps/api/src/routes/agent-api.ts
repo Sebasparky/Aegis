@@ -3337,8 +3337,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
 
-    const body = (req.body ?? {}) as { mode?: string };
+    const body = (req.body ?? {}) as { mode?: string; persistent_profile?: boolean };
     const debug_visible = body.mode === "visible";
+    const persistent_profile = body.persistent_profile === true;
 
     // Return an existing ready session for this delegation rather than provisioning a duplicate.
     const existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
@@ -3354,6 +3355,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           reused_existing: true,
           port_auto_selected: false,
           expires_at: existing.expires_at,
+          persistent_profile_enabled: existing.persistent_profile_enabled ?? false,
+          ...(existing.profile_state !== undefined ? { profile_state: existing.profile_state } : {}),
           protection: {
             raw_cookies_revealed_to_agent: false as const,
             raw_storage_revealed_to_agent: false as const,
@@ -3369,6 +3372,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         delegation_id: delegation.id,
         debug_visible,
         runtime_mode: "local_runtime_endpoint",
+        persistent_profile,
       });
     } catch (err: unknown) {
       const e = err as Error & { code?: string; occupied_port_range?: string; tracked_occupied_sessions?: unknown[] };
@@ -3399,6 +3403,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         reused_existing: false,
         port_auto_selected: result.port_auto_selected === true,
         expires_at: session.expires_at,
+        persistent_profile_enabled: session.persistent_profile_enabled ?? false,
+        ...(session.profile_state !== undefined ? { profile_state: session.profile_state } : {}),
         protection: {
           raw_cookies_revealed_to_agent: false as const,
           raw_storage_revealed_to_agent: false as const,

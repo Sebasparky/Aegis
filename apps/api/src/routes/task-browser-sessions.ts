@@ -32,6 +32,8 @@ function safeSessionView(session: ReturnType<typeof getTaskBrowserSession>) {
     mode: session.mode,
     debug_visible: session.debug_visible,
     runtime_mode: session.runtime_mode,
+    persistent_profile_enabled: session.persistent_profile_enabled ?? false,
+    ...(session.profile_state !== undefined ? { profile_state: session.profile_state } : {}),
     created_at: session.created_at,
     expires_at: session.expires_at,
     closed_at: session.closed_at,
@@ -50,13 +52,15 @@ export async function taskBrowserSessionRoutes(server: FastifyInstance): Promise
     if (!delegation) return;
 
     try {
-      const body = (req.body ?? {}) as { debug_visible?: boolean };
+      const body = (req.body ?? {}) as { debug_visible?: boolean; persistent_profile?: boolean };
       const debug_visible = body.debug_visible === true;
+      const persistent_profile = body.persistent_profile === true;
 
       const result: CreateTaskBrowserResult = await createTaskBrowserSession({
         user_id: MOCK_USER_ID,
         delegation_id: delegation.id,
         debug_visible,
+        persistent_profile,
       });
       const { session, reused_existing, port_auto_selected, requires_browser_reconnect, user_message, mode } = result;
       const meta: Record<string, unknown> = { user_message, mode };

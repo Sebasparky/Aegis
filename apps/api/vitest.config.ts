@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: false,
+    setupFiles: ["src/__tests__/setup.ts"],
     include: ["src/__tests__/**/*.test.ts"],
     // All tests share the same in-memory store Maps — must run in one process
     pool: "forks",

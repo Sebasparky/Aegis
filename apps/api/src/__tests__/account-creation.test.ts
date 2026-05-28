@@ -272,7 +272,10 @@ describe("POST /api/agent/v1/account-access-resolutions — vault lookup hit", (
     expect(body.data.pass_id).toBeTruthy();
     expect(body.data.raw_password_revealed_to_agent).toBe(false);
     expect(body.data.otp_revealed_to_agent).toBe(false);
-    expect(body.data.next_action).toBe("request_secret_field_injection");
+    expect(body.data.next_action).toBe("observe_page_then_proceed");
+    expect(body.data.guidance).toContain("Observe the current visible page");
+    expect(body.data.guidance).toContain("request_secret_field_injection");
+    expect(body.data.guidance).toContain("report_security_challenge");
     // No account creation request should have been created.
     expect(accountCreationRequests.size).toBe(0);
     assertSafeFlags(res.body);

@@ -66,10 +66,11 @@ Workspaces are the shared, permissioned coordination layer for multiple collar-b
 
 ## Candidate Next Milestones
 
-1. **Workspace MCP tools** — expose manifest, task claim/complete, artifact create/read as MCP tools
-2. **Workspace UI / monitoring surface** — task list, artifact viewer, participant status for workspace owners
-3. **Production KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS
-4. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
+1. **Typing Speed / Input Realism v1** — field-kind-aware input realism layer for sensitive-field handoff; CDP key events preferred over direct assignment; secret-safe diagnostics; lifecycle-compatible with `executing_at`/`filled_at`; not bot evasion. See `docs/TYPING_INPUT_REALISM.md`.
+2. **Workspace MCP tools** — expose manifest, task claim/complete, artifact create/read as MCP tools
+3. **Workspace UI / monitoring surface** — task list, artifact viewer, participant status for workspace owners
+4. **Production KMS Provider v1** — swap `LocalDevKmsProvider` for a real cloud KMS
+5. **External Agent OAuth/App Registration v1** — durable agent identity beyond single-token delegations
 
 See `docs/NEXT_SESSION_PROMPT.md` for the full completed increment list.
 See `docs/RAILS_ARCHITECTURE.md` for the full technical architecture.

@@ -100,6 +100,8 @@ Key architecture notes:
 | Agent Task v0 | `AgentTask` type and `AgentTaskStatus` added to `packages/types`; `agentTasks` Map added to store; tasks persist to `apps/api/.data/aegis-store.json` and survive restart; routes: `GET /api/tasks`, `GET /api/tasks/:taskId`, `POST /api/tasks` (auto-creates pass, returns `launch_token` once), `POST /api/tasks/:taskId/cancel`, `POST /api/tasks/:taskId/create-session` (validates token, launches browser, updates status to `in_progress` on success or `failed` on error); frontend at `/tasks` with create form, one-time token display with copy button, task list with constraints, and in-memory Create Session button; **launch_token shown once only — not stored in AgentTask; local/demo only** |
 | Delegation Token / Agent Runtime v0 | `AgentDelegation`, `AgentDelegationStatus`, `AgentDelegationChannel` added to `packages/types`; `agentDelegations` Map added to store and persisted; routes: `GET /api/delegations`, `GET /api/delegations/:delegationId`, `POST /api/delegations` (creates underlying pass, returns `delegation_token` once), `POST /api/delegations/:delegationId/revoke` (revokes delegation + underlying pass — existing MCP tools stop working immediately); v0 uses normal pass tokens under the hood, no new agent endpoint needed; frontend at `/delegations` with create form (agent name, platform, channel, collar, expiry), one-time token display with copy-paste instructions, delegation list with revoke button; **token shown once only — not stored in AgentDelegation; local/demo only; no real Slack/OpenClaw integration** |
 | Email OTP Delivery v1 | Real email verification via Resend from `noreply@verify.antigenlabs.ai` (`verify.antigenlabs.ai` verified sending domain). `email_otp` is the live provider; `local_email` is the dev console fallback; `mock_email` is the test/mock provider. `VerificationCard` stores `email_domain` only — full email address and raw OTP are never persisted or returned. Rate limits: 3 sends/15 min, 60 s cooldown, 5 failed attempts per session. Google OAuth and inbound email receiving are not in v1. |
+| Pointer Profile Runtime v1 | Calibrated template traces for pointer movement. Persistent pointer state per `browser_session_id`. `generator: "template_trace"` log field confirms trace-based dispatch. Navigation participates in pointer continuity via page-level nav marker. Bézier fallback (`"bezier_fallback"`) retained when no matching template. |
+| Credential Injection Lifecycle Observability v1 | `executing_at` timestamp added to `SecretFieldInjection`. `injectionLifecycleLog.ts` records structured lifecycle events (started, filled, failed) with `injection_request_id`, `field_kind`, `domain`, `duration_ms`. Raw values never appear in lifecycle logs. |
 
 ---
 
@@ -202,7 +204,9 @@ These lines capture the product thesis and should not be contradicted by impleme
 
 In order of priority:
 
-**A. Agent Bridge** — Document and/or add a UI page explaining how a real outside agent (ChatGPT, Claude, custom) would call Aegis endpoints. This is the most important missing piece for external demo credibility.
+**A. Typing Speed / Input Realism v1** — Add a field-kind-aware input realism layer for sensitive-field handoff. CDP key events preferred over direct value assignment. Field-kind profiles (`secret_password`, `username_email`, `otp_code`, `profile_text`, `payment_card`) control per-character timing. Secret-safe diagnostics only. Lifecycle-compatible with `executing_at`/`filled_at`. Not bot evasion. See `docs/TYPING_INPUT_REALISM.md` for the full spec.
+
+**B. Agent Bridge** — Document and/or add a UI page explaining how a real outside agent (ChatGPT, Claude, custom) would call Aegis endpoints. This is the most important missing piece for external demo credibility.
 
 **B. Local persistence** — Add SQLite or Supabase now that the MCP wrapper is validated. Prevents data loss on restart.
 

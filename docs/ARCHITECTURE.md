@@ -461,6 +461,31 @@ Core line:
 
 > Agents request outcomes. Aegis controls authority.
 
+### Input Realism
+
+Input realism is the runtime layer between pointer focus and field-value verification in a sensitive handoff.
+
+When Antigen fills a credential, OTP, profile value, or payment field, value insertion should feel intentional and legible — not instantaneous or mechanical. This is an execution quality concern for the user, not an attempt to defeat bot detection or impersonate a human.
+
+Sequencing within a sensitive-field fill:
+
+1. Pointer moves to the field (pointer realism — calibrated trace)
+2. Field receives focus (click via CDP)
+3. Value is inserted at a controlled, field-kind-aware cadence (input realism)
+4. Antigen verifies the field accepted input
+5. Lifecycle status (`executing_at`, `filled_at`) is recorded; control returns to the agent
+
+Input realism must not:
+
+- log raw characters or reconstructable partial values
+- produce per-character diagnostic payloads
+- expose the raw secret to the external agent at any point
+- bypass approval gates or alter the existing lifecycle state machine
+
+Field-kind profiles (`secret_password`, `username_email`, `otp_code`, `profile_text`, `payment_card`) govern per-character timing. These are starting points, not final constants.
+
+See `docs/TYPING_INPUT_REALISM.md` for goals, non-goals, input classes, safety invariants, diagnostics spec, failure modes, phased implementation plan, and acceptance criteria.
+
 ## Component 9: Receipts
 
 Receipts are records of trust-relevant events.

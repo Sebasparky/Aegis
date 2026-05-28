@@ -15,3 +15,4 @@ apps/api/.aegis-artifacts
 .playwright-mcp/
 apps/web/tsconfig.tsbuildinfo
 dev-artifacts/
+tmp-pointer-test/

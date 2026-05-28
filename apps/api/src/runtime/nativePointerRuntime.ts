@@ -299,7 +299,7 @@ export async function movePointerToBox(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugLabel?: string },
 ): Promise<{ x: number; y: number }> {
   const mode = options?.mode ?? state.interaction_mode;
   const target = pickTargetPoint(box, { random: options?.random });
@@ -308,6 +308,16 @@ export async function movePointerToBox(
     target,
     { mode, random: options?.random },
   );
+  if (
+    options?.debugLabel &&
+    (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true")
+  ) {
+    console.log("[PointerFocus] dispatch start", {
+      path: options.debugLabel,
+      mode,
+      point_count: path.length,
+    });
+  }
   await dispatchPointerMovePath(sendCdp, path, sleep);
   return target;
 }
@@ -326,7 +336,7 @@ export async function clickBoxWithPointer(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean },
+  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean; debugLabel?: string },
 ): Promise<void> {
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {

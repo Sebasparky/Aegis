@@ -1833,11 +1833,18 @@ async function getSecretInjectionStatus({ injection_request_id } = {}) {
   return res.data;
 }
 
-async function executeSecretFieldInjection({ injection_request_id } = {}) {
+async function executeSecretFieldInjection({ injection_request_id, browser_session_id, external_cdp_url } = {}) {
   if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
   let res;
   try {
-    res = await request("POST", `/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}/execute`);
+    res = await request(
+      "POST",
+      `/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}/execute`,
+      {
+        ...(browser_session_id ? { browser_session_id } : {}),
+        ...(external_cdp_url ? { external_cdp_url } : {}),
+      },
+    );
   } catch (err) {
     return { error: "NETWORK_ERROR", message: err.message };
   }
@@ -3778,6 +3785,21 @@ const TOOLS = [
         injection_request_id: {
           type: "string",
           description: "The injection_request_id returned by request_secret_field_injection.",
+        },
+        browser_session_id: {
+          type: "string",
+          description:
+            "Execute-time override: Aegis-managed task browser session ID. Takes precedence over any " +
+            "browser_session_id stored at request time. Use when the active session differs from the one " +
+            "passed to request_secret_field_injection. Preferred over external_cdp_url because it carries " +
+            "both the CDP URL and the current page URL for accurate target selection.",
+        },
+        external_cdp_url: {
+          type: "string",
+          description:
+            "Execute-time override: explicit CDP base URL (e.g. 'http://localhost:9222'). Use only when " +
+            "you own the browser and no browser_session_id is available. Must be a localhost URL. " +
+            "Ignored if browser_session_id is provided.",
         },
       },
       required: ["injection_request_id"],

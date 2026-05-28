@@ -352,8 +352,16 @@ export async function executeSecretInjectionViaCDP(
           } | undefined;
 
           const stateKey = injection.injection_request_id ?? "default";
+          const pointerDiag = cdpDiagnostics || debugOverlay;
           const doPointerThenFocus = async () => {
             if (boxVal?.ok && boxVal?.box) {
+              if (pointerDiag) {
+                console.log("[PointerFocus] box found", {
+                  path: "secret",
+                  width: boxVal.box.width,
+                  height: boxVal.box.height,
+                });
+              }
               try {
                 const pointerSend = (method: string, params: Record<string, unknown>) => {
                   send(method, params, sessionId!);
@@ -363,9 +371,16 @@ export async function executeSecretInjectionViaCDP(
                   state.viewport_width = boxVal.viewport.width;
                   state.viewport_height = boxVal.viewport.height;
                 }
-                await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, { debugOverlay });
+                await clickBoxWithPointer(state, boxVal.box, pointerSend, sleep, {
+                  debugOverlay,
+                  debugLabel: "secret",
+                });
               } catch {
                 // Native pointer focus failed — proceed to fill without it.
+              }
+            } else {
+              if (pointerDiag) {
+                console.log("[PointerFocus] skipped", { path: "secret", reason: "box_lookup_failed" });
               }
             }
             focusId = send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, sessionId!);

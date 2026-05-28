@@ -727,7 +727,8 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
     expect(vi.mocked(executeSecretInjectionViaCDP)).toHaveBeenCalledWith(
       expect.objectContaining({ injection_request_id: injId }),
       expect.any(String),
-      undefined,
+      undefined, // cdpUrlOverride — env fallback
+      undefined, // preferredTargetUrl
     );
   });
 
@@ -743,10 +744,12 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
       headers: { authorization: `Bearer ${BEARER_TOKEN}` },
     });
 
+    // Session has no current_url set, so preferredTargetUrl is undefined
     expect(vi.mocked(executeSecretInjectionViaCDP)).toHaveBeenCalledWith(
       expect.objectContaining({ injection_request_id: injId }),
       expect.any(String),
-      "http://localhost:9222",
+      "http://localhost:9222", // cdpUrlOverride from session
+      undefined,               // preferredTargetUrl (bs.current_url is unset in this seed)
     );
   });
 
@@ -762,11 +765,12 @@ describe("POST /api/agent/v1/injections/:id/execute — CDP URL resolution", () 
       headers: { authorization: `Bearer ${BEARER_TOKEN}` },
     });
 
-    // Session is expired so cdpUrl falls back to undefined (env var path)
+    // Session is expired — stored browser_session_id skipped, falls to env fallback
     expect(vi.mocked(executeSecretInjectionViaCDP)).toHaveBeenCalledWith(
       expect.objectContaining({ injection_request_id: injId }),
       expect.any(String),
-      undefined,
+      undefined, // cdpUrlOverride — env fallback
+      undefined, // preferredTargetUrl
     );
   });
 

@@ -48,6 +48,7 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigate, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
+import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
 import { executeProfileFieldFillViaCDP, validateProfileFillSelector } from "../runtime/profileFieldFill.js";
 import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
@@ -1447,7 +1448,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   );
 
   // POST /api/agent/v1/injections/:injectionId/execute — CDP fill trigger
-  server.post<{ Params: { injectionId: string } }>(
+  server.post<{
+    Params: { injectionId: string };
+    Body: { browser_session_id?: string; external_cdp_url?: string };
+  }>(
     "/api/agent/v1/injections/:injectionId/execute",
     async (req, reply) => {
       const delegation = await requireAgentToken(req, reply);
@@ -1611,19 +1615,41 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
 
       // CDP fill — resolvedValue used here and immediately discarded; never returned in response
-      // Priority: Aegis-managed task browser session → agent-provided external_cdp_url → AEGIS_PLAYWRIGHT_CDP_URL env
-      let cdpUrlOverride: string | undefined;
-      let preferredTargetUrl: string | undefined;
-      if (injection.browser_session_id) {
-        const bs = getTaskBrowserSession(injection.browser_session_id, MOCK_USER_ID);
-        if (bs?.status === "ready") {
-          cdpUrlOverride = bs.cdp_url;
-          preferredTargetUrl = bs.current_url;
-        }
-      } else if (injection.external_cdp_url) {
-        cdpUrlOverride = injection.external_cdp_url;
+      // Precedence: body.browser_session_id → stored browser_session_id →
+      //             body.external_cdp_url → stored external_cdp_url → AEGIS_PLAYWRIGHT_CDP_URL env
+      const bodyBsId = typeof req.body?.browser_session_id === "string"
+        ? req.body.browser_session_id.trim() : undefined;
+      const bodyExtCdp = typeof req.body?.external_cdp_url === "string"
+        ? req.body.external_cdp_url.trim() : undefined;
+
+      const cdpResolution = resolveSecretInjectionCdpEndpoint(
+        injection,
+        bodyBsId,
+        bodyExtCdp,
+        (id) => getTaskBrowserSession(id, MOCK_USER_ID),
+        validateExternalCdpUrl,
+      );
+
+      if (cdpResolution.error) {
+        injection.status = "failed";
+        injection.error = cdpResolution.error.message;
+        secretFieldInjections.set(injection.injection_request_id, injection);
+        schedulePersist();
+        return sendError(reply, 400, cdpResolution.error.code, cdpResolution.error.message);
       }
-      const fillResult = await executeSecretInjectionViaCDP(injection, resolvedValue, cdpUrlOverride, preferredTargetUrl);
+
+      if (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true") {
+        console.log("[CdpInjection] endpoint selection", {
+          path: "secret",
+          source: cdpResolution.source,
+          cdp_url: cdpResolution.cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL ?? null,
+          preferred_target_url: cdpResolution.preferredTargetUrl ?? null,
+        });
+      }
+
+      const fillResult = await executeSecretInjectionViaCDP(
+        injection, resolvedValue, cdpResolution.cdpUrlOverride, cdpResolution.preferredTargetUrl,
+      );
 
       if (fillResult.success) {
         injection.status = "filled";

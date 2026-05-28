@@ -113,6 +113,11 @@ vi.mock("ws", () => {
         return;
       }
 
+      if (msg.method === "Input.dispatchKeyEvent") {
+        // Fire-and-forget key events — no response needed; callers never await acks.
+        return;
+      }
+
       if (msg.method === "Input.insertText") {
         if (simulateInsertTextFailure) {
           // Return a CDP error so the fallback setter path is taken.
@@ -218,27 +223,32 @@ describe("Realistic Fill — happy path sequence", () => {
     simulateBoxLookupFailure = false;
   });
 
-  it("sends Runtime.evaluate (box lookup) before Input.insertText", async () => {
+  it("sends Runtime.evaluate (box lookup) before key events", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
-    const evalIdx = sentMessages.findIndex((m) => m.method === "Runtime.evaluate");
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const evalIdx = sentMessages.findIndex(
+      (m) => m.method === "Runtime.evaluate" &&
+             typeof m.params?.expression === "string" &&
+             (m.params.expression as string).includes("getBoundingClientRect"),
+    );
+    const firstKeyEventIdx = sentMessages.findIndex((m) => m.method === "Input.dispatchKeyEvent");
     expect(evalIdx).toBeGreaterThanOrEqual(0);
-    expect(insertIdx).toBeGreaterThan(evalIdx);
+    expect(firstKeyEventIdx).toBeGreaterThan(evalIdx);
   });
 
-  it("sends Input.dispatchMouseEvent mouseMoved events before Input.insertText", async () => {
+  it("sends Input.dispatchMouseEvent mouseMoved events before key events", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const mouseMovedMsgs = sentMessages.filter(
       (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
     );
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const firstKeyEventIdx = sentMessages.findIndex((m) => m.method === "Input.dispatchKeyEvent");
     expect(mouseMovedMsgs.length).toBeGreaterThan(0);
+    expect(firstKeyEventIdx).toBeGreaterThan(0);
     for (const m of mouseMovedMsgs) {
-      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+      expect(sentMessages.indexOf(m)).toBeLessThan(firstKeyEventIdx);
     }
   });
 
-  it("sends mousePressed and mouseReleased before Input.insertText", async () => {
+  it("sends mousePressed and mouseReleased before key events", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const pressedMsgs = sentMessages.filter(
       (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mousePressed",
@@ -246,11 +256,12 @@ describe("Realistic Fill — happy path sequence", () => {
     const releasedMsgs = sentMessages.filter(
       (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseReleased",
     );
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const firstKeyEventIdx = sentMessages.findIndex((m) => m.method === "Input.dispatchKeyEvent");
     expect(pressedMsgs.length).toBe(1);
     expect(releasedMsgs.length).toBe(1);
-    expect(sentMessages.indexOf(pressedMsgs[0])).toBeLessThan(insertIdx);
-    expect(sentMessages.indexOf(releasedMsgs[0])).toBeLessThan(insertIdx);
+    expect(firstKeyEventIdx).toBeGreaterThan(0);
+    expect(sentMessages.indexOf(pressedMsgs[0])).toBeLessThan(firstKeyEventIdx);
+    expect(sentMessages.indexOf(releasedMsgs[0])).toBeLessThan(firstKeyEventIdx);
   });
 
   it("box lookup Runtime.evaluate expression does not contain secret", async () => {
@@ -265,17 +276,19 @@ describe("Realistic Fill — happy path sequence", () => {
     expect(boxMsg!.params?.expression as string).not.toContain(secret);
   });
 
-  it("sends Input.insertText on the happy path", async () => {
-    await executeSecretInjectionViaCDP(makeInjection("username"), "PLACEHOLDER", "http://localhost:9222");
-    expect(sentMessages.some((m) => m.method === "Input.insertText")).toBe(true);
+  it("sends Input.dispatchKeyEvent events (one per char) on the happy path", async () => {
+    const value = "PLACEHOLDER";
+    await executeSecretInjectionViaCDP(makeInjection("username"), value, "http://localhost:9222");
+    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
+    expect(keyEvents.length).toBe(value.length);
   });
 
-  it("Input.insertText params.text contains the resolved value", async () => {
+  it("Input.dispatchKeyEvent events reconstruct the resolved value when concatenated", async () => {
     const secret = "UNIQUE_SECRET_SENTINEL";
     await executeSecretInjectionViaCDP(makeInjection("username"), secret, "http://localhost:9222");
-    const insertMsg = sentMessages.find((m) => m.method === "Input.insertText");
-    expect(insertMsg).toBeDefined();
-    expect(insertMsg!.params?.text).toBe(secret);
+    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
+    const reconstructed = keyEvents.map((m) => m.params?.text as string).join("");
+    expect(reconstructed).toBe(secret);
   });
 
   it("no Runtime.evaluate expression contains the resolved value on the happy path", async () => {
@@ -300,22 +313,28 @@ describe("Realistic Fill — happy path sequence", () => {
     }
   });
 
-  it("sends a mask/blur Runtime.evaluate after Input.insertText for password", async () => {
+  it("sends a mask/blur Runtime.evaluate after key events for password", async () => {
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
-    const afterInsert = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
-    expect(afterInsert.length).toBeGreaterThan(0);
-    const maskExpr = afterInsert[afterInsert.length - 1].params?.expression as string;
+    const lastKeyEventIdx = sentMessages.reduce(
+      (last, m, i) => (m.method === "Input.dispatchKeyEvent" ? i : last), -1,
+    );
+    expect(lastKeyEventIdx).toBeGreaterThan(0);
+    const afterKeyEvents = sentMessages.slice(lastKeyEventIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    expect(afterKeyEvents.length).toBeGreaterThan(0);
+    const maskExpr = afterKeyEvents[afterKeyEvents.length - 1].params?.expression as string;
     expect(maskExpr).toContain("Object.defineProperty");
     expect(maskExpr).toContain("blur");
   });
 
-  it("sends a blur Runtime.evaluate after Input.insertText for username (no mask)", async () => {
+  it("sends a blur Runtime.evaluate after key events for username (no mask)", async () => {
     await executeSecretInjectionViaCDP(makeInjection("username"), "PLACEHOLDER", "http://localhost:9222");
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
-    const afterInsert = sentMessages.slice(insertIdx + 1).filter((m) => m.method === "Runtime.evaluate");
-    expect(afterInsert.length).toBeGreaterThan(0);
-    const blurExpr = afterInsert[afterInsert.length - 1].params?.expression as string;
+    const lastKeyEventIdx = sentMessages.reduce(
+      (last, m, i) => (m.method === "Input.dispatchKeyEvent" ? i : last), -1,
+    );
+    expect(lastKeyEventIdx).toBeGreaterThan(0);
+    const afterKeyEvents = sentMessages.slice(lastKeyEventIdx + 1).filter((m) => m.method === "Runtime.evaluate");
+    expect(afterKeyEvents.length).toBeGreaterThan(0);
+    const blurExpr = afterKeyEvents[afterKeyEvents.length - 1].params?.expression as string;
     expect(blurExpr).not.toContain("Object.defineProperty");
     expect(blurExpr).toContain("blur");
   });
@@ -332,6 +351,13 @@ describe("Realistic Fill — fallback setter path", () => {
   beforeEach(() => {
     sentMessages = [];
     simulateInsertTextFailure = true;
+    // Force fast/direct mode so Input.insertText is used as the primary path;
+    // with simulateInsertTextFailure=true this triggers the setter fallback.
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "fast");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("falls back to setter Runtime.evaluate when Input.insertText fails", async () => {
@@ -532,16 +558,17 @@ describe("Pointer debug overlay", () => {
     }
   });
 
-  it("mouse events still occur before Input.insertText with overlay enabled", async () => {
+  it("mouse events still occur before key events with overlay enabled", async () => {
     process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const mouseMovedMsgs = sentMessages.filter(
       (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
     );
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const firstKeyEventIdx = sentMessages.findIndex((m) => m.method === "Input.dispatchKeyEvent");
     expect(mouseMovedMsgs.length).toBeGreaterThan(0);
+    expect(firstKeyEventIdx).toBeGreaterThan(0);
     for (const m of mouseMovedMsgs) {
-      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+      expect(sentMessages.indexOf(m)).toBeLessThan(firstKeyEventIdx);
     }
   });
 
@@ -631,16 +658,17 @@ describe("CDP notification event guard — no-id messages must not trigger box p
     }
   });
 
-  it("mouse events still precede Input.insertText with an early notification present", async () => {
+  it("mouse events still precede key events with an early notification present", async () => {
     simulateEarlyNotification = true;
     await executeSecretInjectionViaCDP(makeInjection("password"), "PLACEHOLDER", "http://localhost:9222");
     const mouseMoved = sentMessages.filter(
       (m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved",
     );
-    const insertIdx = sentMessages.findIndex((m) => m.method === "Input.insertText");
+    const firstKeyEventIdx = sentMessages.findIndex((m) => m.method === "Input.dispatchKeyEvent");
     expect(mouseMoved.length).toBeGreaterThan(0);
+    expect(firstKeyEventIdx).toBeGreaterThan(0);
     for (const m of mouseMoved) {
-      expect(sentMessages.indexOf(m)).toBeLessThan(insertIdx);
+      expect(sentMessages.indexOf(m)).toBeLessThan(firstKeyEventIdx);
     }
   });
 });
@@ -664,9 +692,11 @@ describe("Native pointer focus — box lookup failure fallback", () => {
     expect(mouseEvents.length).toBe(0);
   });
 
-  it("Input.insertText still sent when box lookup fails", async () => {
+  it("Input.dispatchKeyEvent events still sent when box lookup fails", async () => {
     await executeSecretInjectionViaCDP(makeInjection("username"), "FALLBACK_SECRET", "http://localhost:9222");
-    expect(sentMessages.some((m) => m.method === "Input.insertText")).toBe(true);
+    // Pointer focus is skipped on box lookup failure, but typing realism still fires.
+    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
+    expect(keyEvents.length).toBe("FALLBACK_SECRET".length);
   });
 
   it("result never contains the secret even when pointer path is skipped", async () => {

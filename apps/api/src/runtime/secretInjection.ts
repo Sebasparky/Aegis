@@ -12,6 +12,10 @@ import {
   setTaskBrowserSessionPointerState,
 } from "./taskBrowserSessions.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
+import {
+  getInputRealismMode,
+  typeCharsViaCDP,
+} from "./inputRealismTyper.js";
 
 /**
  * Builds a JS selector expression for a credential field.
@@ -242,6 +246,14 @@ export async function executeSecretInjectionViaCDP(
       return { ok: true };
     })()`;
 
+    // Post-typing verification — checks the field has a non-empty value after
+    // realistic key event dispatch. Never reads or returns the value itself.
+    const typingVerifyExpr = `(function() {
+      var el = ${selectorExpr};
+      if (!el) return { ok: false, reason: 'element_not_found' };
+      return { ok: el.value.length > 0, reason: el.value.length > 0 ? 'value_present' : 'empty_after_typing' };
+    })()`;
+
     // Fallback setter fill (used only if Input.insertText fails).
     // Secret appears JSON-encoded in the expression — same as the original implementation.
     // React/Vue/Angular capture the value during the input event; masking after is safe for
@@ -303,6 +315,7 @@ export async function executeSecretInjectionViaCDP(
       let diagId: number | undefined;
       let boxId: number;
       let focusId: number;
+      let typingVerifyId: number | undefined;
       let insertId: number;
       let maskId: number;
       let fallbackId: number;
@@ -506,11 +519,83 @@ export async function executeSecretInjectionViaCDP(
         if (id === focusId) {
           const val = (result?.result as Record<string, unknown> | undefined);
           const evalVal = val?.value as { ok?: boolean; reason?: string } | undefined;
-          if (evalVal?.ok) {
-            // Focus succeeded — phase 2: type via Input.insertText (secret in params, not in JS).
-            insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
-          } else {
+          if (!evalVal?.ok) {
             finish(false, `CDP evaluate (focus): ${evalVal?.reason ?? "element not found"}`);
+            return;
+          }
+
+          // Phase 2: input realism for username/password fields only.
+          // Other field kinds keep the existing insertText/direct path.
+          const realismMode = getInputRealismMode();
+          const fieldSupportsRealism =
+            injection.field_kind === "username" || injection.field_kind === "password";
+
+          if (realismMode === "direct" || !fieldSupportsRealism) {
+            // Env override or unsupported field kind — skip realism, use insertText directly.
+            insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+            return;
+          }
+
+          // Realistic path: fire-and-forget key events per character, then verify.
+          const sendForTyping = (method: string, params: Record<string, unknown>) => {
+            send(method, params, sessionId!);
+          };
+
+          const doTypingThenVerify = async () => {
+            const typingResult = await typeCharsViaCDP(sendForTyping, sleep, {
+              value: resolvedValue,
+              fieldKind: injection.field_kind as "username" | "password",
+              injectionRequestId: injection.injection_request_id,
+              domain: injection.domain,
+            });
+            if (typingResult.success) {
+              typingVerifyId = send(
+                "Runtime.evaluate",
+                { expression: typingVerifyExpr, returnByValue: true },
+                sessionId!,
+              );
+            } else {
+              // Synchronous send failure inside typeCharsViaCDP — fall back to insertText.
+              console.log("[InputRealism] fallback_to_direct_assignment", {
+                injection_request_id: injection.injection_request_id,
+                field_kind: injection.field_kind,
+                domain: injection.domain,
+                reason: typingResult.failure_reason ?? "typing_failed",
+              });
+              insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+            }
+          };
+
+          doTypingThenVerify().catch(() => {
+            console.log("[InputRealism] fallback_to_direct_assignment", {
+              injection_request_id: injection.injection_request_id,
+              field_kind: injection.field_kind,
+              domain: injection.domain,
+              reason: "typing_exception",
+            });
+            insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+          });
+          return;
+        }
+
+        // Post-typing verification result — check whether the field has a value.
+        if (typingVerifyId !== undefined && id === typingVerifyId) {
+          const verifyVal = ((result?.result as Record<string, unknown> | undefined)
+            ?.value) as { ok?: boolean; reason?: string } | undefined;
+          if (verifyVal?.ok) {
+            // Field has a value — proceed to mask/blur (phase 3).
+            maskId = send("Runtime.evaluate",
+              { expression: maskBlurExpr, returnByValue: true }, sessionId!);
+          } else {
+            // Field is empty after typing (page may ignore synthetic key events).
+            // Fall back to insertText, which triggers the existing mask path.
+            console.log("[InputRealism] fallback_to_direct_assignment", {
+              injection_request_id: injection.injection_request_id,
+              field_kind: injection.field_kind,
+              domain: injection.domain,
+              reason: verifyVal?.reason ?? "empty_after_typing",
+            });
+            insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
           }
           return;
         }

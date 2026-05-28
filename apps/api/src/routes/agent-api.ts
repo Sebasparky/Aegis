@@ -106,6 +106,7 @@ import { resolveEffectiveCollar } from "../lib/collarPolicy.js";
 import { classifyLoginOutcome, storeDiagnostic } from "../lib/loginDiagnostics.js";
 import { normalizeAccountDomain, accountCreationNextAction, accountCreationPassIdForAgent } from "./account-creation.js";
 import { createAndStoreVaultPass } from "./vault-passes.js";
+import { logInjectionLifecycle, logAuthLifecycle } from "../lib/injectionLifecycleLog.js";
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -1363,6 +1364,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           use_counts: { username: 0, password: 0 },
         };
         credentialUseAuthorizations.set(auth.authorization_id, auth);
+        logAuthLifecycle("auth_created", auth);
         injectionStatus = "pending_approval";
       }
 
@@ -1386,6 +1388,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       };
       secretFieldInjections.set(injection.injection_request_id, injection);
       schedulePersist();
+      logInjectionLifecycle("injection_created", injection);
 
       const authCovered = injectionStatus === "pending_approval";
       const remainingUses = auth.allowed_field_kinds.reduce(
@@ -1434,6 +1437,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           injection.status = "expired";
           secretFieldInjections.set(injection.injection_request_id, injection);
           schedulePersist();
+          logInjectionLifecycle("injection_expired", injection);
         } else if (injection.status === "pending_approval" && injection.authorization_id) {
           const auth = credentialUseAuthorizations.get(injection.authorization_id);
           if (auth) {
@@ -1442,10 +1446,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               injection.approved_at = auth.approved_at;
               secretFieldInjections.set(injection.injection_request_id, injection);
               schedulePersist();
+              logInjectionLifecycle("injection_approved_via_poll", injection);
             } else if (["denied", "expired", "fulfilled", "revoked"].includes(auth.status)) {
               injection.status = auth.status === "fulfilled" ? "denied" : auth.status as any;
               secretFieldInjections.set(injection.injection_request_id, injection);
               schedulePersist();
+              logInjectionLifecycle("injection_denied", injection);
             }
           }
         }
@@ -1494,6 +1500,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.status = "expired";
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_expired", injection);
         return sendError(reply, 400, "INJECTION_EXPIRED", "Injection has expired. Request a new injection.");
       }
 
@@ -1506,6 +1513,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             auth.status = "expired";
             credentialUseAuthorizations.set(auth.authorization_id, auth);
             schedulePersist();
+            logAuthLifecycle("auth_expired_lazy", auth);
           }
           // Promote pending injection to approved if auth is now approved
           if (
@@ -1517,6 +1525,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             injection.approved_at = auth.approved_at;
             secretFieldInjections.set(injection.injection_request_id, injection);
             schedulePersist();
+            logInjectionLifecycle("injection_approved_via_execute", injection);
           }
           // Block if authorization is fulfilled (all uses exhausted)
           if (auth.status === "fulfilled") {
@@ -1582,6 +1591,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = "Vault pass not found or access denied.";
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         return sendError(reply, 404, "PASS_NOT_FOUND", "Vault pass not found.");
       }
 
@@ -1632,6 +1642,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = msg;
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         return sendError(reply, 500, "CREDENTIAL_RESOLVE_FAILED", msg);
       }
 
@@ -1656,6 +1667,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = cdpResolution.error.message;
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         return sendError(reply, 400, cdpResolution.error.code, cdpResolution.error.message);
       }
 
@@ -1672,6 +1684,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         cdpResolution.source === "body_browser_session_id" ? bodyBsId :
         cdpResolution.source === "stored_browser_session_id" ? injection.browser_session_id :
         undefined;
+
+      // Set executing_at immediately before CDP fill — marks when the fill attempt began
+      if (!injection.executing_at) {
+        injection.executing_at = new Date().toISOString();
+        secretFieldInjections.set(injection.injection_request_id, injection);
+      }
+      logInjectionLifecycle("injection_executing", injection);
 
       const fillResult = await executeSecretInjectionViaCDP(
         injection, resolvedValue, cdpResolution.cdpUrlOverride, cdpResolution.preferredTargetUrl,
@@ -1703,6 +1722,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               activeGrant.status = "consumed";
               activeGrant.consumed_at = now;
               sensitiveGrants.set(activeGrant.grant_id, activeGrant);
+              logAuthLifecycle("auth_fulfilled", auth);
             }
             credentialUseAuthorizations.set(auth.authorization_id, auth);
           }
@@ -1713,6 +1733,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }
       secretFieldInjections.set(injection.injection_request_id, injection);
       schedulePersist();
+      logInjectionLifecycle(fillResult.success ? "injection_filled" : "injection_failed", injection);
 
       if (!fillResult.success) {
         return sendError(reply, 500, "CDP_FILL_FAILED", fillResult.error ?? "CDP fill failed");
@@ -1860,6 +1881,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = "Vault pass not found or access denied.";
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         return sendError(reply, 404, "PASS_NOT_FOUND", "Vault pass not found.");
       }
 
@@ -1906,6 +1928,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = msg;
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         return sendError(reply, 500, "CREDENTIAL_RESOLVE_FAILED", msg);
       }
 
@@ -1957,6 +1980,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         cdpUrlOverride = injection.external_cdp_url;
       }
 
+      // Set executing_at immediately before CDP fill — marks when the fill attempt began
+      if (!injection.executing_at) {
+        injection.executing_at = new Date().toISOString();
+        secretFieldInjections.set(injection.injection_request_id, injection);
+      }
+      logInjectionLifecycle("injection_executing", injection);
+
       const fillResult = await executeSecretInjectionViaCDP(
         injection, resolvedValue, cdpUrlOverride, preferredTargetUrlHandoff, injection.browser_session_id,
       );
@@ -1966,6 +1996,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         injection.error = fillResult.error ?? "CDP fill failed";
         secretFieldInjections.set(injection.injection_request_id, injection);
         schedulePersist();
+        logInjectionLifecycle("injection_failed", injection);
         const handoffId = newId("csh");
         const completedAt = new Date().toISOString();
         credentialStepHandoffs.set(handoffId, {
@@ -2018,12 +2049,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             activeGrant.status = "consumed";
             activeGrant.consumed_at = now;
             sensitiveGrants.set(activeGrant.grant_id, activeGrant);
+            logAuthLifecycle("auth_fulfilled", auth);
           }
           credentialUseAuthorizations.set(auth.authorization_id, auth);
         }
       }
       secretFieldInjections.set(injection.injection_request_id, injection);
       schedulePersist();
+      logInjectionLifecycle("injection_filled", injection);
 
       // Phase 2: Submit + Wait — resolvedValue is discarded, never returned
       resolvedValue = "";
@@ -2095,6 +2128,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         auth.status = "expired";
         credentialUseAuthorizations.set(auth.authorization_id, auth);
         schedulePersist();
+        logAuthLifecycle("auth_expired_lazy", auth);
       }
 
       const remainingUses = auth.allowed_field_kinds.reduce(

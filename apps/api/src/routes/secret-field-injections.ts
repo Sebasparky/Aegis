@@ -4,6 +4,7 @@ import { MOCK_USER_ID, secretFieldInjections, credentialUseAuthorizations, userA
 import { schedulePersist } from "../store/persistence.js";
 import { buildSignedUserApprovalReceipt } from "../lib/userApprovalReceiptSigning.js";
 import { buildSensitiveGrant } from "../lib/sensitiveGrants.js";
+import { logInjectionLifecycle, logAuthLifecycle } from "../lib/injectionLifecycleLog.js";
 
 /**
  * Create a UserApprovalReceipt + SensitiveGrant for a credential injection approval.
@@ -127,6 +128,7 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
       auth.status = "approved";
       auth.approved_at = approvedAt;
       credentialUseAuthorizations.set(auth.authorization_id, auth);
+      logAuthLifecycle("auth_approved", auth);
 
       // Promote all linked pending injections
       for (const inj of secretFieldInjections.values()) {
@@ -134,6 +136,7 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
           inj.status = "approved";
           inj.approved_at = auth.approved_at;
           secretFieldInjections.set(inj.injection_request_id, inj);
+          logInjectionLifecycle("injection_approved_via_auth", inj);
         }
       }
 
@@ -155,12 +158,14 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
 
       auth.status = "denied";
       credentialUseAuthorizations.set(auth.authorization_id, auth);
+      logAuthLifecycle("auth_denied", auth);
 
       // Mark all linked pending injections as denied
       for (const inj of secretFieldInjections.values()) {
         if (inj.authorization_id === auth.authorization_id && inj.status === "pending_approval") {
           inj.status = "denied";
           secretFieldInjections.set(inj.injection_request_id, inj);
+          logInjectionLifecycle("injection_denied_via_auth", inj);
         }
       }
 
@@ -199,6 +204,7 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
         created_at: i.created_at,
         expires_at: i.expires_at,
         approved_at: i.approved_at,
+        executing_at: i.executing_at,
         filled_at: i.filled_at,
         error: i.error,
       })),
@@ -225,6 +231,7 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
       injection.approved_at = new Date().toISOString();
       secretFieldInjections.set(injection.injection_request_id, injection);
       schedulePersist();
+      logInjectionLifecycle("injection_approved_standalone", injection);
       return reply.send({ ok: true, data: { injection_request_id: injection.injection_request_id, status: injection.status } });
     },
   );
@@ -242,7 +249,121 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
       injection.status = "denied";
       secretFieldInjections.set(injection.injection_request_id, injection);
       schedulePersist();
+      logInjectionLifecycle("injection_denied_standalone", injection);
       return reply.send({ ok: true, data: { injection_request_id: injection.injection_request_id, status: injection.status } });
+    },
+  );
+
+  // ─── Lifecycle diagnostic endpoint ───────────────────────────────────────────
+
+  // Read-only: no writes, no secrets, no DOM values, no pass_id
+  server.get<{ Params: { injectionId: string } }>(
+    "/api/internal/injection-lifecycle/:injectionId",
+    async (req, reply) => {
+      const injection = secretFieldInjections.get(req.params.injectionId);
+      if (!injection) return sendError(reply, 404, "NOT_FOUND", "Injection not found.");
+      if (injection.user_id !== MOCK_USER_ID) return sendError(reply, 403, "FORBIDDEN", "Forbidden.");
+
+      // Derive lifecycle_stage from current status — status remains the source of truth
+      const STAGE_MAP: Record<string, string> = {
+        pending_approval: "pending_user_approval",
+        approved: "ready_for_agent_execute",
+        executing: "executing",
+        filled: "filled",
+        failed: "failed",
+        denied: "denied",
+        expired: "expired_stale",
+      };
+      const lifecycle_stage = STAGE_MAP[injection.status] ?? injection.status;
+
+      // Elapsed time between lifecycle stages
+      const nowMs = Date.now();
+      const createdMs = new Date(injection.created_at).getTime();
+      const approvedMs = injection.approved_at ? new Date(injection.approved_at).getTime() : null;
+      const executingMs = injection.executing_at ? new Date(injection.executing_at).getTime() : null;
+      const filledMs = injection.filled_at ? new Date(injection.filled_at).getTime() : null;
+
+      const elapsed = {
+        created_to_approved_ms: approvedMs !== null ? approvedMs - createdMs : null,
+        approved_to_executing_ms:
+          approvedMs !== null && executingMs !== null ? executingMs - approvedMs : null,
+        executing_to_filled_ms:
+          executingMs !== null && filledMs !== null ? filledMs - executingMs : null,
+        total_elapsed_ms: nowMs - createdMs,
+      };
+
+      // Stale detection — purely advisory, no writes
+      const TERMINAL = new Set(["filled", "denied", "failed", "expired"]);
+      const expiresMs = new Date(injection.expires_at).getTime();
+      const expiresInMs = expiresMs - nowMs;
+
+      let is_stale = false;
+      let stale_reason: string | null = null;
+
+      if (injection.status === "approved" && executingMs === null) {
+        const approvedAgeSec = approvedMs !== null ? (nowMs - approvedMs) / 1000 : 0;
+        if (approvedAgeSec > 30) {
+          is_stale = true;
+          stale_reason = "approved_but_not_executing_for_over_30s";
+        }
+      } else if (injection.status === "executing" && filledMs === null) {
+        const executingAgeSec = executingMs !== null ? (nowMs - executingMs) / 1000 : 0;
+        if (executingAgeSec > 60) {
+          is_stale = true;
+          stale_reason = "executing_but_not_filled_for_over_60s";
+        }
+      } else if (injection.status === "pending_approval" && expiresInMs < 60_000) {
+        is_stale = true;
+        stale_reason = "pending_approval_expiring_within_60s";
+      }
+
+      const stale = {
+        is_stale,
+        stale_reason,
+        expires_in_ms: TERMINAL.has(injection.status) ? null : expiresInMs,
+      };
+
+      // Linked auth summary — aggregate metadata only, no pass_id or labels
+      let auth_summary: object | null = null;
+      if (injection.authorization_id) {
+        const auth = credentialUseAuthorizations.get(injection.authorization_id);
+        if (auth) {
+          const remainingUses: Record<string, number> = {};
+          for (const fk of auth.allowed_field_kinds) {
+            remainingUses[fk] = (auth.max_uses_per_field[fk] ?? 1) - (auth.use_counts[fk] ?? 0);
+          }
+          auth_summary = {
+            authorization_id: auth.authorization_id,
+            status: auth.status,
+            used_field_kinds: auth.used_field_kinds,
+            remaining_uses: remainingUses,
+            expires_at: auth.expires_at,
+          };
+        }
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          injection_request_id: injection.injection_request_id,
+          domain: injection.domain,
+          field_kind: injection.field_kind,
+          page_url: injection.page_url,
+          reason: injection.reason,
+          status: injection.status,
+          lifecycle_stage,
+          raw_value_revealed_to_agent: false as const,
+          created_at: injection.created_at,
+          expires_at: injection.expires_at,
+          approved_at: injection.approved_at,
+          executing_at: injection.executing_at,
+          filled_at: injection.filled_at,
+          error: injection.error,
+          elapsed,
+          stale,
+          auth_summary,
+        },
+      });
     },
   );
 }

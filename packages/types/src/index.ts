@@ -2112,6 +2112,7 @@ export interface SecretFieldInjection {
   created_at: string;
   expires_at: string;
   approved_at?: string;
+  executing_at?: string;
   filled_at?: string;
   error?: string;
 }

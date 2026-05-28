@@ -1414,9 +1414,11 @@ async function injectChallengeEmailCode({ resolution_id } = {}) {
 
 // ─── Task Browser Lifecycle handlers ─────────────────────────────────────────
 
-async function getRuntimeBrowserEndpoint({ mode } = {}) {
+async function getRuntimeBrowserEndpoint({ mode, persistent_profile } = {}) {
   const body = {};
   if (mode === "visible") body.mode = "visible";
+  // Persistent Browser Profile v1: opt-in only. Omitted/false => ephemeral default (backward compatible).
+  if (persistent_profile === true) body.persistent_profile = true;
   let res;
   try {
     res = await request("POST", "/api/agent/v1/runtime/browser-endpoint", body);
@@ -1459,8 +1461,14 @@ async function getRuntimeBrowserEndpoint({ mode } = {}) {
     reused_existing: reused,
     port_auto_selected: autoPort,
     expires_at: d.expires_at,
-    raw_cookies_revealed_to_agent: false,
-    raw_storage_revealed_to_agent: false,
+    persistent_profile_enabled: d.persistent_profile_enabled === true,
+    ...(d.profile_state !== undefined ? { profile_state: d.profile_state } : {}),
+    protection: {
+      // Pass through the API's protection flags. Never expose raw cookies/storage,
+      // user_data_dir, or profile_key — only these boolean assurances are surfaced.
+      raw_cookies_revealed_to_agent: d.protection?.raw_cookies_revealed_to_agent === true,
+      raw_storage_revealed_to_agent: d.protection?.raw_storage_revealed_to_agent === true,
+    },
     next_action,
   };
 }
@@ -3411,6 +3419,10 @@ const TOOLS = [
       "Call this once at task start. If a ready runtime already exists for this delegation it is returned immediately (reused_existing=true). " +
       "Otherwise Aegis provisions a fresh ephemeral Chrome session with no-save policy enforced. " +
       "When port_auto_selected=true, reconnect your browser adapter to the returned cdp_url before navigating.\n\n" +
+      "Set persistent_profile: true to enable cookie/storage continuity across sessions for this delegation: " +
+      "the response then includes persistent_profile_enabled and profile_state ('fresh' on first use, 'reused' on reopen). " +
+      "Persistence never exposes cookies, localStorage, user_data_dir, or profile_key to the agent — " +
+      "protection.raw_cookies_revealed_to_agent and protection.raw_storage_revealed_to_agent remain false.\n\n" +
       "Pass the returned browser_runtime_id as browser_session_id in:\n" +
       "- request_secret_field_injection (credential fields)\n" +
       "- request_payment_card_fill (each card field fill request)\n" +
@@ -3426,6 +3438,10 @@ const TOOLS = [
           type: "string",
           enum: ["headless", "visible"],
           description: "Optional. Default 'headless'. Set to 'visible' ONLY when the user explicitly requests a visible Chrome window for local debugging.",
+        },
+        persistent_profile: {
+          type: "boolean",
+          description: "Optional. Default false (ephemeral). When true, the browser profile directory persists across close/reopen for this delegation, so cookies and localStorage written by sites survive into the next runtime session (profile_state becomes 'reused'). The runtime is still process-ephemeral and raw cookies/storage are never revealed to the agent.",
         },
       },
       required: [],

@@ -3092,8 +3092,10 @@ export interface ProfileMemoryRequest {
 // ─── Account Access Resolution v1 ────────────────────────────────────────────
 // Created when an agent reaches a login/signup wall and calls
 // request_account_access_resolution. If a vault credential exists for the domain,
-// the response is credential_available and the agent proceeds with
-// request_secret_field_injection. If no credential exists, an AccountCreationRequest
+// the response is credential_available and the agent should observe the current
+// visible page first, then choose the appropriate handoff (request_secret_field_injection
+// for a password field, request_account_creation_step for email/username, or
+// report_security_challenge for OTP). If no credential exists, an AccountCreationRequest
 // is created (pending_user) and the user approves it in /route-run-approvals.
 // Antigen generates a strong password and stores it in the vault at approval time.
 // The raw generated password is never returned to any caller or logged.

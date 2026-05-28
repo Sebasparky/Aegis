@@ -4570,7 +4570,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   // POST /api/agent/v1/account-access-resolutions
   // Called when the agent reaches a login/signup wall. Checks the vault for an existing
   // credential for the domain. If found, returns credential_available and the agent should
-  // call request_secret_field_injection. If not found, creates a pending AccountCreationRequest
+  // observe the current page first, then choose the appropriate handoff:
+  // request_secret_field_injection (password field), request_account_creation_step (email/username
+  // field), or report_security_challenge (OTP/verification). If not found, creates a pending AccountCreationRequest
   // and returns pending_user — the user approves in /route-run-approvals.
   server.post<{
     Body: {

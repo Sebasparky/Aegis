@@ -433,7 +433,7 @@ export function accountCreationNextAction(status: string): string {
     case "credential_generated":
       return "Credential created and stored in vault. Navigate to the signup form. Call request_secret_field_injection with the pass_id for the email and password fields. Do not type credentials directly — Antigen injects via CDP.";
     case "completed":
-      return "Account creation completed. Credential is saved in vault for future logins. Subsequent logins should use request_secret_field_injection directly.";
+      return "Account creation completed. Credential is saved in vault for future logins. For subsequent logins, call request_account_access_resolution; if the response is credential_available, observe the page first and choose the appropriate handoff.";
     case "denied":
       return "User denied account creation. Do not retry without explicit user direction.";
     case "expired":

@@ -16,6 +16,7 @@ import {
   getInputRealismMode,
   typeCharsViaCDP,
 } from "./inputRealismTyper.js";
+import { logInputRealismLifecycle } from "../lib/inputRealismLifecycleLog.js";
 
 /**
  * Builds a JS selector expression for a credential field.
@@ -530,25 +531,73 @@ export async function executeSecretInjectionViaCDP(
           const fieldSupportsRealism =
             injection.field_kind === "username" || injection.field_kind === "password";
 
+          logInputRealismLifecycle("input_realism_mode_selected", {
+            injection_request_id: injection.injection_request_id,
+            field_kind: injection.field_kind,
+            domain: injection.domain,
+            mode: realismMode === "direct" || !fieldSupportsRealism ? "direct" : realismMode,
+          });
+
           if (realismMode === "direct" || !fieldSupportsRealism) {
             // Env override or unsupported field kind — skip realism, use insertText directly.
+            logInputRealismLifecycle("input_realism_direct_mode", {
+              injection_request_id: injection.injection_request_id,
+              field_kind: injection.field_kind,
+              domain: injection.domain,
+              mode: "direct",
+              strategy: "direct_assignment",
+            });
+            injection.input_realism = { mode: "direct", strategy: "direct_assignment" };
             insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
             return;
           }
 
           // Realistic path: fire-and-forget key events per character, then verify.
+          injection.input_realism = { mode: "realistic", started_at: new Date().toISOString() };
+
           const sendForTyping = (method: string, params: Record<string, unknown>) => {
             send(method, params, sessionId!);
           };
 
           const doTypingThenVerify = async () => {
+            logInputRealismLifecycle("input_realism_typing_started", {
+              injection_request_id: injection.injection_request_id,
+              field_kind: injection.field_kind,
+              domain: injection.domain,
+              mode: "realistic",
+            });
+
             const typingResult = await typeCharsViaCDP(sendForTyping, sleep, {
               value: resolvedValue,
               fieldKind: injection.field_kind as "username" | "password",
               injectionRequestId: injection.injection_request_id,
               domain: injection.domain,
             });
+
+            Object.assign(injection.input_realism!, {
+              strategy: typingResult.strategy,
+              duration_ms: typingResult.duration_ms,
+              char_count_bucket: typingResult.char_count_bucket,
+            });
+
             if (typingResult.success) {
+              logInputRealismLifecycle("input_realism_typing_completed", {
+                injection_request_id: injection.injection_request_id,
+                field_kind: injection.field_kind,
+                domain: injection.domain,
+                strategy: typingResult.strategy,
+                duration_ms: typingResult.duration_ms,
+                char_count_bucket: typingResult.char_count_bucket,
+                success: true,
+              });
+
+              injection.input_realism!.verify_started_at = new Date().toISOString();
+              logInputRealismLifecycle("input_realism_verify_started", {
+                injection_request_id: injection.injection_request_id,
+                field_kind: injection.field_kind,
+                domain: injection.domain,
+              });
+
               typingVerifyId = send(
                 "Runtime.evaluate",
                 { expression: typingVerifyExpr, returnByValue: true },
@@ -556,22 +605,30 @@ export async function executeSecretInjectionViaCDP(
               );
             } else {
               // Synchronous send failure inside typeCharsViaCDP — fall back to insertText.
-              console.log("[InputRealism] fallback_to_direct_assignment", {
+              injection.input_realism!.fallback_used = true;
+              injection.input_realism!.fallback_reason = typingResult.failure_reason ?? "typing_failed";
+              logInputRealismLifecycle("input_realism_fallback_to_direct", {
                 injection_request_id: injection.injection_request_id,
                 field_kind: injection.field_kind,
                 domain: injection.domain,
-                reason: typingResult.failure_reason ?? "typing_failed",
+                fallback_used: true,
+                fallback_reason: typingResult.failure_reason ?? "typing_failed",
               });
               insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
             }
           };
 
           doTypingThenVerify().catch(() => {
-            console.log("[InputRealism] fallback_to_direct_assignment", {
+            if (injection.input_realism) {
+              injection.input_realism.fallback_used = true;
+              injection.input_realism.fallback_reason = "typing_exception";
+            }
+            logInputRealismLifecycle("input_realism_fallback_to_direct", {
               injection_request_id: injection.injection_request_id,
               field_kind: injection.field_kind,
               domain: injection.domain,
-              reason: "typing_exception",
+              fallback_used: true,
+              fallback_reason: "typing_exception",
             });
             insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
           });
@@ -584,16 +641,33 @@ export async function executeSecretInjectionViaCDP(
             ?.value) as { ok?: boolean; reason?: string } | undefined;
           if (verifyVal?.ok) {
             // Field has a value — proceed to mask/blur (phase 3).
+            if (injection.input_realism) {
+              injection.input_realism.verify_completed_at = new Date().toISOString();
+              injection.input_realism.completed_at = new Date().toISOString();
+              injection.input_realism.success = true;
+            }
+            logInputRealismLifecycle("input_realism_verify_completed", {
+              injection_request_id: injection.injection_request_id,
+              field_kind: injection.field_kind,
+              domain: injection.domain,
+              success: true,
+            });
             maskId = send("Runtime.evaluate",
               { expression: maskBlurExpr, returnByValue: true }, sessionId!);
           } else {
             // Field is empty after typing (page may ignore synthetic key events).
             // Fall back to insertText, which triggers the existing mask path.
-            console.log("[InputRealism] fallback_to_direct_assignment", {
+            if (injection.input_realism) {
+              injection.input_realism.fallback_used = true;
+              injection.input_realism.fallback_reason = verifyVal?.reason ?? "empty_after_typing";
+              injection.input_realism.strategy = "direct_assignment";
+            }
+            logInputRealismLifecycle("input_realism_fallback_to_direct", {
               injection_request_id: injection.injection_request_id,
               field_kind: injection.field_kind,
               domain: injection.domain,
-              reason: verifyVal?.reason ?? "empty_after_typing",
+              fallback_used: true,
+              fallback_reason: verifyVal?.reason ?? "empty_after_typing",
             });
             insertId = send("Input.insertText", { text: resolvedValue }, sessionId!);
           }

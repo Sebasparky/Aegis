@@ -2114,6 +2114,20 @@ export interface SecretFieldInjection {
   approved_at?: string;
   executing_at?: string;
   filled_at?: string;
+  input_realism?: {
+    mode?: "realistic" | "direct";
+    strategy?: "key_events" | "direct_assignment";
+    started_at?: string;
+    completed_at?: string;
+    verify_started_at?: string;
+    verify_completed_at?: string;
+    duration_ms?: number;
+    char_count_bucket?: string;
+    success?: boolean;
+    fallback_used?: boolean;
+    fallback_reason?: string;
+    failure_reason?: string;
+  };
   error?: string;
 }
 

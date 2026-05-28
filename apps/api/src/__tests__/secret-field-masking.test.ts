@@ -883,7 +883,7 @@ describe("Persistent pointer state", () => {
     const releasedTimerMsgs = sentMessages.filter(
       (m) => m.method === "Runtime.evaluate" &&
               typeof m.params?.expression === "string" &&
-              (m.params.expression as string).includes("8000") &&
+              (m.params.expression as string).includes("setTimeout(") &&
               (m.params.expression as string).includes("__aegis_pointer_debug_trail") &&
               !(m.params.expression as string).includes("__aegis_pointer_debug_path"),
     );

@@ -342,6 +342,23 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
         }
       }
 
+      const input_realism = injection.input_realism
+        ? {
+            mode: injection.input_realism.mode,
+            strategy: injection.input_realism.strategy,
+            char_count_bucket: injection.input_realism.char_count_bucket,
+            duration_ms: injection.input_realism.duration_ms,
+            success: injection.input_realism.success,
+            fallback_used: injection.input_realism.fallback_used,
+            fallback_reason: injection.input_realism.fallback_reason,
+            failure_reason: injection.input_realism.failure_reason,
+            started_at: injection.input_realism.started_at,
+            completed_at: injection.input_realism.completed_at,
+            verify_started_at: injection.input_realism.verify_started_at,
+            verify_completed_at: injection.input_realism.verify_completed_at,
+          }
+        : null;
+
       return reply.send({
         ok: true,
         data: {
@@ -362,6 +379,7 @@ export async function secretFieldInjectionRoutes(server: FastifyInstance): Promi
           elapsed,
           stale,
           auth_summary,
+          input_realism,
         },
       });
     },

@@ -86,14 +86,6 @@ export async function typeCharsViaCDP(
   const charCountBucket = getCharCountBucket(value.length);
   const startMs = Date.now();
 
-  console.log("[InputRealism] typing_started", {
-    injection_request_id: injectionRequestId,
-    field_kind: fieldKind,
-    domain,
-    strategy: "key_events",
-    char_count_bucket: charCountBucket,
-  });
-
   // Brief pause after focus before first keystroke — matches natural human onset.
   await sleep(50);
 
@@ -104,16 +96,6 @@ export async function typeCharsViaCDP(
       // Synchronous send failure (e.g., WebSocket closed mid-typing).
       // Return failure so the caller can fall back to direct assignment.
       const duration_ms = Date.now() - startMs;
-      console.log("[InputRealism] typing_failed", {
-        injection_request_id: injectionRequestId,
-        field_kind: fieldKind,
-        domain,
-        strategy: "key_events",
-        duration_ms,
-        char_count_bucket: charCountBucket,
-        success: false,
-        failure_reason: "send_failed",
-      });
       return {
         strategy: "key_events",
         duration_ms,
@@ -127,16 +109,6 @@ export async function typeCharsViaCDP(
   }
 
   const duration_ms = Date.now() - startMs;
-  console.log("[InputRealism] typing_completed", {
-    injection_request_id: injectionRequestId,
-    field_kind: fieldKind,
-    domain,
-    strategy: "key_events",
-    duration_ms,
-    char_count_bucket: charCountBucket,
-    success: true,
-  });
-
   return {
     strategy: "key_events",
     duration_ms,

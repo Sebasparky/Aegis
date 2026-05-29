@@ -47,6 +47,7 @@ import {
 } from "../runtime/authenticatedSessions.js";
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
+import { realisticClickByDescription, realisticTypeTextViaCDP } from "../runtime/realisticBrowserActions.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3410,6 +3411,87 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_storage_revealed_to_agent: false as const,
         },
       },
+    });
+  });
+
+  // ─── Realistic Browser Actions — visible browsing path ───────────────────────
+  // CDP-backed realistic pointer movement and per-character typing for ordinary
+  // agent browsing (browser_click, browser_fill). Non-credential path — no KMS,
+  // no secret resolution, no credential authorization. Caller falls back to
+  // @playwright/mcp on any non-2xx response.
+
+  server.post("/api/agent/v1/runtime/browser-click", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (!body.element_description || typeof body.element_description !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "element_description is required and must be a non-empty string.");
+    }
+
+    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
+    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+
+    const result = await realisticClickByDescription({
+      cdpUrl: session.cdp_url,
+      elementDescription: body.element_description,
+      sessionId: session.browser_session_id,
+    });
+
+    if (!result.success) {
+      const code =
+        result.error === "ELEMENT_NOT_FOUND" ? "ELEMENT_NOT_FOUND"
+        : result.error === "AMBIGUOUS_ELEMENT" ? "AMBIGUOUS_ELEMENT"
+        : result.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
+        : "REALISTIC_CLICK_FAILED";
+      return reply.status(422).send({ ok: false, error: { code, message: result.error ?? "Realistic click failed." } });
+    }
+
+    return reply.send({ ok: true, data: { mode: "realistic_pointer_click" } });
+  });
+
+  server.post("/api/agent/v1/runtime/browser-type", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; text?: unknown };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (body.text === undefined || body.text === null || typeof body.text !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "text is required and must be a string.");
+    }
+
+    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
+    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+
+    // text is never logged beyond char_count_bucket — see realisticBrowserActions.ts invariants
+    const result = await realisticTypeTextViaCDP({
+      cdpUrl: session.cdp_url,
+      text: body.text,
+      sessionId: session.browser_session_id,
+    });
+
+    if (!result.success) {
+      return reply.status(422).send({
+        ok: false,
+        error: { code: result.error ?? "REALISTIC_TYPE_FAILED", message: "Realistic typing failed." },
+        data: { char_count_bucket: result.char_count_bucket, duration_ms: result.duration_ms },
+      });
+    }
+
+    return reply.send({
+      ok: true,
+      data: { char_count_bucket: result.char_count_bucket, duration_ms: result.duration_ms },
     });
   });
 

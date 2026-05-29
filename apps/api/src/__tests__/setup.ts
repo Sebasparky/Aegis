@@ -10,6 +10,8 @@ const DEBUG_PREFIXES = [
   "[InjectionLifecycle]",
   "[AuthLifecycle]",
   "[CdpTargetSelection]",
+  "[RealisticClick]",
+  "[RealisticType]",
 ];
 
 const _origLog = console.log;

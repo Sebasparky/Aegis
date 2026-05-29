@@ -48,25 +48,38 @@ export interface RealisticTypeResult {
 
 /**
  * Builds the JS IIFE expression for Runtime.evaluate that finds a visible
- * interactive element by description and returns its bounding box or a sentinel.
+ * interactive element and returns its bounding box or a sentinel.
  *
- * elementDescription is always JSON.stringify-encoded before embedding — never
- * interpolated as raw string.
+ * All string inputs are JSON.stringify-encoded before embedding — never
+ * interpolated as raw strings.
+ *
+ * When selectorHint is provided (a CSS/aria selector from the MCP tool call),
+ * it is tried first via document.querySelector. On match, the element is
+ * returned directly without text-scan. On failure the expression falls through
+ * to description-based matching so the caller always gets a best-effort result.
  *
  * Returns (inside the browser):
- *   null       — no match (ELEMENT_NOT_FOUND)
- *   "AMBIGUOUS" — multiple matches (AMBIGUOUS_ELEMENT)
+ *   null        — no match (ELEMENT_NOT_FOUND)
+ *   "AMBIGUOUS" — multiple text-scan matches (AMBIGUOUS_ELEMENT)
  *   { x, y, width, height, vw, vh } — matched element's bounding rect + viewport
  *
  * Matching priority:
- *   1. Exact case-insensitive match on aria-label, placeholder, or title
- *   2. Exact case-insensitive match on trimmed textContent
- *   3. Contains match on any of the above fields
+ *   1. querySelector(selectorHint) if provided and visible
+ *   2. Exact case-insensitive match on aria-label, placeholder, title, name attr
+ *   3. Exact case-insensitive match on trimmed textContent
+ *   4. Contains match on any of the above fields
  * Only considers visible (non-zero bounding box) interactive elements.
  */
-export function buildElementFindExpr(elementDescription: string): string {
+export function buildElementFindExpr(elementDescription: string, selectorHint?: string): string {
   const desc = JSON.stringify(elementDescription);
-  return `(function(){
+
+  // Selector-first block: injected only when a hint is available.
+  // Wrapped in try/catch so an invalid selector never throws to the caller.
+  const selectorBlock = selectorHint
+    ? `try{var sh=document.querySelector(${JSON.stringify(selectorHint)});if(sh){var shr=sh.getBoundingClientRect();if(shr.width>0||shr.height>0){sh.scrollIntoView({block:'center',inline:'center'});shr=sh.getBoundingClientRect();return {x:shr.left,y:shr.top,width:shr.width,height:shr.height,vw:window.innerWidth,vh:window.innerHeight};}}}catch(se){}`
+    : "";
+
+  return `(function(){${selectorBlock}
     var desc=${desc};
     var descLower=desc.toLowerCase();
     function vis(el){try{var r=el.getBoundingClientRect();return r.width>0||r.height>0;}catch(e){return false;}}
@@ -76,6 +89,7 @@ export function buildElementFindExpr(elementDescription: string): string {
       (el.getAttribute('aria-label')||'').trim().toLowerCase(),
       (el.getAttribute('placeholder')||'').trim().toLowerCase(),
       (el.getAttribute('title')||'').trim().toLowerCase(),
+      (el.getAttribute('name')||'').trim().toLowerCase(),
       (el.textContent||'').trim().toLowerCase()
     ].filter(function(f){return f!=='';});}
     var exact=q.filter(function(el){return fields(el).some(function(f){return f===descLower;});});
@@ -121,8 +135,13 @@ export async function dispatchTextCharsViaCDP(
 }
 
 /**
- * Finds a visible interactive element by description and performs a realistic
- * pointer movement + click via CDP Input.dispatchMouseEvent events.
+ * Finds a visible interactive element and performs a realistic pointer movement
+ * + click via CDP Input.dispatchMouseEvent events.
+ *
+ * When selectorHint is provided (a CSS/aria selector extracted from the MCP tool
+ * call's `target` argument), the element lookup tries querySelector(selectorHint)
+ * first before falling back to text-description matching. This improves hit rates
+ * on pages where element text does not cleanly match the agent's description.
  *
  * Returns ELEMENT_NOT_FOUND or AMBIGUOUS_ELEMENT on lookup failures so the
  * caller can fall back to @playwright/mcp's native click.
@@ -131,12 +150,13 @@ export async function realisticClickByDescription(params: {
   cdpUrl: string;
   elementDescription: string;
   sessionId?: string;
+  selectorHint?: string;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, elementDescription, sessionId } = params;
+  const { cdpUrl, elementDescription, sessionId, selectorHint } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -158,7 +178,10 @@ export async function realisticClickByDescription(params: {
   const { target: pageTarget } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
 
-  const findExpr = buildElementFindExpr(elementDescription);
+  const findExpr = buildElementFindExpr(elementDescription, selectorHint);
+  if (cdpDiagnostics && selectorHint) {
+    console.log("[RealisticClick] selector_hint provided — trying querySelector first", { surface: "browser_click" });
+  }
 
   return new Promise<RealisticClickResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);

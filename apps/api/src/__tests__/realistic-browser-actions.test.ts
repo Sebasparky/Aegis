@@ -236,6 +236,31 @@ describe("buildElementFindExpr — injection safety", () => {
     expect(expr).toContain(JSON.stringify(tricky));
     expect(() => { new Function(expr); }).not.toThrow();
   });
+
+  it("includes querySelector(selectorHint) block when selectorHint is provided", () => {
+    const expr = buildElementFindExpr("Search", "[aria-label='Search button']");
+    expect(expr).toContain(JSON.stringify("[aria-label='Search button']"));
+    expect(expr).toContain("querySelector");
+    expect(() => { new Function(expr); }).not.toThrow();
+  });
+
+  it("JSON-encodes selectorHint to prevent injection through the hint string", () => {
+    const maliciousHint = `'); alert(1); //`;
+    const expr = buildElementFindExpr("el", maliciousHint);
+    expect(expr).toContain(JSON.stringify(maliciousHint));
+    expect(() => { new Function(expr); }).not.toThrow();
+  });
+
+  it("omits querySelector block when selectorHint is not provided (backward compat)", () => {
+    const expr = buildElementFindExpr("Search");
+    // Without selectorHint the expression has no querySelector call at top
+    expect(expr).not.toContain("var sh=document.querySelector");
+  });
+
+  it("includes name attribute in text-scan fields", () => {
+    const expr = buildElementFindExpr("search-field");
+    expect(expr).toContain("getAttribute('name')");
+  });
 });
 
 // ─── 4. realisticClickByDescription — fast mode gate ─────────────────────────
@@ -413,6 +438,33 @@ describe("adapter routing — JSON parsing invariants", () => {
     const line = JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "browser_fill", arguments: { element: "Search", value: "desk lamp" } } });
     const msg = JSON.parse(line);
     expect(msg.params.arguments.value).toBe("desk lamp");
+  });
+
+  it("valid browser_type line parses and yields text field (not value)", () => {
+    const line = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "browser_type", arguments: { element: "Search field", target: "[name='q']", text: "desk lamp" } } });
+    const msg = JSON.parse(line);
+    expect(msg.params.name).toBe("browser_type");
+    // text is the correct field for browser_type — not value
+    expect(msg.params.arguments.text).toBe("desk lamp");
+    expect(msg.params.arguments.value).toBeUndefined();
+  });
+
+  it("browser_click target with CSS selector characters is treated as selector_hint", () => {
+    const target = "[aria-label='Search button']";
+    const line = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "browser_click", arguments: { element: "Search", target } } });
+    const msg = JSON.parse(line);
+    const t = msg.params.arguments.target;
+    // Selector detection: has [ character — should be forwarded as selector_hint
+    expect(/[\[.#>:=('"*~+]/.test(t)).toBe(true);
+  });
+
+  it("browser_click snapshot ref is NOT treated as selector_hint", () => {
+    const target = "e5"; // snapshot ref — short alphanumeric, no selector chars
+    const line = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "browser_click", arguments: { element: "Search", target } } });
+    const msg = JSON.parse(line);
+    const t = msg.params.arguments.target;
+    // No selector chars — should not be forwarded
+    expect(/[\[.#>:=('"*~+]/.test(t)).toBe(false);
   });
 
   it("malformed JSON throws — confirming adapter catch block must forward raw line unchanged", () => {

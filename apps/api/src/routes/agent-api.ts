@@ -3424,7 +3424,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
 
-    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown };
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown; selector_hint?: unknown };
 
     if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
       return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
@@ -3438,10 +3438,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
+    const selectorHint = typeof body.selector_hint === "string" && body.selector_hint.length > 0
+      ? body.selector_hint
+      : undefined;
+
     const result = await realisticClickByDescription({
       cdpUrl: session.cdp_url,
       elementDescription: body.element_description,
       sessionId: session.browser_session_id,
+      selectorHint,
     });
 
     if (!result.success) {

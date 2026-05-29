@@ -91,9 +91,30 @@ const INTERCEPTION_ENABLED =
   !!browser_runtime_id;
 
 if (INTERCEPTION_ENABLED) {
-  process.stderr.write("[antigen-browser] Realistic-input interception ENABLED (browser_click → realistic pointer, browser_fill → per-char typing)\n");
+  process.stderr.write("[antigen-browser] Realistic-input interception ENABLED (browser_click → realistic pointer, browser_fill/browser_type → per-char typing)\n");
 } else {
   process.stderr.write("[antigen-browser] Realistic-input interception DISABLED — all MCP traffic passed through to @playwright/mcp\n");
+}
+
+/**
+ * Returns true if the string looks like a CSS / ARIA selector rather than a
+ * snapshot element reference. Snapshot refs are short alphanumeric strings like
+ * "e5" or "a12". Real selectors contain CSS syntax characters.
+ * Only selector-like strings are forwarded as selector_hint to the Aegis API.
+ */
+function looksLikeSelector(s) {
+  return typeof s === "string" && s.length > 0 && /[\[.#>:=('"*~+]/.test(s);
+}
+
+/**
+ * Maps text length to a coarse bucket for diagnostic logging.
+ * Never logs the raw length or text value.
+ */
+function charCountBucket(len) {
+  if (len <= 4) return "1-4";
+  if (len <= 8) return "5-8";
+  if (len <= 16) return "9-16";
+  return "17+";
 }
 
 // ─── Spawn @playwright/mcp ────────────────────────────────────────────────────
@@ -195,24 +216,37 @@ async function handleLine(line) {
     const elementDescription = msg?.params?.arguments?.element ?? "";
     const requestId = msg.id;
 
+    // Forward target as selector_hint only when it looks like a CSS/ARIA selector.
+    // Snapshot refs ("e5", "a12") are short alphanumeric and are not forwarded.
+    const targetArg = msg?.params?.arguments?.target ?? "";
+    const selectorHint = looksLikeSelector(targetArg) ? targetArg : undefined;
+
+    process.stderr.write(
+      `[antigen-browser] realistic_click_attempt` +
+      (selectorHint ? " hint=selector" : " hint=none") + "\n"
+    );
+
     try {
+      const reqBody = { browser_runtime_id, element_description: elementDescription };
+      if (selectorHint) reqBody.selector_hint = selectorHint;
+
       const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-click`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ browser_runtime_id, element_description: elementDescription }),
+        body: JSON.stringify(reqBody),
       });
 
       if (apiRes.ok) {
-        process.stderr.write(`[antigen-browser] Realistic click dispatched for: "${elementDescription}"\n`);
+        process.stderr.write("[antigen-browser] realistic_click_success\n");
         writeSyntheticResponse(requestId, "Pointer moved and clicked.");
         return;
       }
       // Non-2xx (ELEMENT_NOT_FOUND, AMBIGUOUS, etc.) → fall through to @playwright/mcp.
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? apiRes.status;
-      process.stderr.write(`[antigen-browser] Realistic click fallback (${errCode}) — forwarding to @playwright/mcp\n`);
+      process.stderr.write(`[antigen-browser] realistic_click_fallback reason=${errCode}\n`);
     } catch (err) {
-      process.stderr.write(`[antigen-browser] Realistic click intercept failed (${err.message}) — forwarding to @playwright/mcp\n`);
+      process.stderr.write(`[antigen-browser] realistic_click_fallback reason=INTERCEPT_ERROR(${err.message})\n`);
     }
 
     // Fallback: forward original message to @playwright/mcp.
@@ -224,6 +258,9 @@ async function handleLine(line) {
   if (toolName === "browser_fill") {
     const fillText = msg?.params?.arguments?.value ?? "";
     const requestId = msg.id;
+    const bucket = charCountBucket(fillText.length);
+
+    process.stderr.write(`[antigen-browser] realistic_type_attempt source=browser_fill char_count_bucket=${bucket}\n`);
 
     try {
       const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-type`, {
@@ -234,18 +271,55 @@ async function handleLine(line) {
 
       if (apiRes.ok) {
         const resBody = await apiRes.json().catch(() => ({}));
-        const bucket = resBody?.data?.char_count_bucket ?? "?";
-        // Never log fillText — only char_count_bucket.
-        process.stderr.write(`[antigen-browser] Realistic fill dispatched (char_count_bucket=${bucket})\n`);
+        const resBucket = resBody?.data?.char_count_bucket ?? bucket;
+        process.stderr.write(`[antigen-browser] realistic_type_success source=browser_fill char_count_bucket=${resBucket}\n`);
         writeSyntheticResponse(requestId, "Text typed character by character.");
         return;
       }
       // Non-2xx → fall through to @playwright/mcp's browser_fill.
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? apiRes.status;
-      process.stderr.write(`[antigen-browser] Realistic fill fallback (${errCode}) — forwarding to @playwright/mcp\n`);
+      process.stderr.write(`[antigen-browser] realistic_type_fallback reason=${errCode} source=browser_fill\n`);
     } catch (err) {
-      process.stderr.write(`[antigen-browser] Realistic fill intercept failed (${err.message}) — forwarding to @playwright/mcp\n`);
+      process.stderr.write(`[antigen-browser] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_fill\n`);
+    }
+
+    // Fallback: forward original message to @playwright/mcp.
+    child.stdin.write(line);
+    return;
+  }
+
+  // ── browser_type interception ────────────────────────────────────────────
+  // @playwright/mcp uses browser_type with arguments.text for typing into the
+  // focused element (e.g. pressSequentially). We intercept it and route through
+  // the same Aegis per-character CDP typing path used by browser_fill.
+  if (toolName === "browser_type") {
+    const typeText = msg?.params?.arguments?.text ?? "";
+    const requestId = msg.id;
+    const bucket = charCountBucket(typeText.length);
+
+    process.stderr.write(`[antigen-browser] realistic_type_attempt source=browser_type char_count_bucket=${bucket}\n`);
+
+    try {
+      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-type`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ browser_runtime_id, text: typeText }),
+      });
+
+      if (apiRes.ok) {
+        const resBody = await apiRes.json().catch(() => ({}));
+        const resBucket = resBody?.data?.char_count_bucket ?? bucket;
+        process.stderr.write(`[antigen-browser] realistic_type_success source=browser_type char_count_bucket=${resBucket}\n`);
+        writeSyntheticResponse(requestId, "Text typed character by character.");
+        return;
+      }
+      // Non-2xx → fall through to @playwright/mcp's browser_type.
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? apiRes.status;
+      process.stderr.write(`[antigen-browser] realistic_type_fallback reason=${errCode} source=browser_type\n`);
+    } catch (err) {
+      process.stderr.write(`[antigen-browser] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_type\n`);
     }
 
     // Fallback: forward original message to @playwright/mcp.

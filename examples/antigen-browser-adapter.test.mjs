@@ -193,3 +193,270 @@ describe("D. Adapter lazy init", () => {
     mockServer.close();
   });
 });
+
+// ─── E. Pre-init gate — MCP startup traffic must not trigger browser-endpoint ──
+// These tests send real MCP messages and verify no side effects until a
+// browser_ tools/call is received.
+
+function spawnAdapterWithMockServer() {
+  let callCount = 0;
+
+  const mockServer = createServer((req, res) => {
+    if (req.url === "/api/agent/v1/runtime/browser-endpoint" && req.method === "POST") {
+      callCount++;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      data: {
+        cdp_url: "http://127.0.0.1:19999",
+        browser_runtime_id: "test_runtime_001",
+        runtime_mode: "local_runtime_endpoint",
+        reused_existing: false,
+      },
+    }));
+  });
+
+  const serverReady = new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+
+  return { mockServer, serverReady, getCallCount: () => callCount };
+}
+
+const MCP_INIT_MSG = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "test-client", version: "0.0.1" },
+  },
+}) + "\n";
+
+describe("E. Pre-init gate", () => {
+  test("sending initialize does not call browser-endpoint and receives valid response", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady, getCallCount } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(getCallCount(), 0, `browser-endpoint called ${getCallCount()} times after initialize`);
+
+    const lines = stdoutBuf.split("\n").filter((l) => l.trim());
+    assert.ok(lines.length > 0, "adapter should respond to initialize");
+    const initResponse = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m) => m?.id === 1);
+    assert.ok(initResponse, "response should match id=1");
+    assert.ok(initResponse.result?.serverInfo, "initialize response should include serverInfo");
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("sending notifications/initialized does not call browser-endpoint", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady, getCallCount } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(getCallCount(), 0, `browser-endpoint called ${getCallCount()} times after notifications/initialized`);
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("sending tools/list does not call browser-endpoint and returns browser tools", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady, getCallCount } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(getCallCount(), 0, `browser-endpoint called ${getCallCount()} times after tools/list`);
+
+    const lines = stdoutBuf.split("\n").filter((l) => l.trim());
+    const toolsResponse = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m) => m?.id === 2);
+    assert.ok(toolsResponse, "adapter should respond to tools/list with id=2");
+    assert.ok(Array.isArray(toolsResponse?.result?.tools), "result.tools should be an array");
+    assert.ok(
+      toolsResponse.result.tools.some((t) => t.name === "browser_snapshot"),
+      "tools list should include browser_snapshot",
+    );
+    assert.ok(
+      toolsResponse.result.tools.some((t) => t.name === "browser_navigate"),
+      "tools list should include browser_navigate",
+    );
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("tools/call for non-browser tool does not call browser-endpoint", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady, getCallCount } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    adapter.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "aegis_get_identity", arguments: {} } }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(getCallCount(), 0, `browser-endpoint called ${getCallCount()} times for non-browser tool`);
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("tools/call browser_snapshot triggers browser-endpoint exactly once", { timeout: 4000 }, async () => {
+    const { mockServer, serverReady, getCallCount } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    // Send init first (MCP protocol requirement), then the browser tool call.
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 100));
+    adapter.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } }) + "\n"
+    );
+
+    // Wait enough for the API call to complete (mock server is fast).
+    // The child spawn + handshake may still be in progress — we only verify the API call.
+    await new Promise((r) => setTimeout(r, 1000));
+
+    assert.equal(getCallCount(), 1, `browser-endpoint should be called exactly once, got ${getCallCount()}`);
+
+    adapter.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 100));
+    mockServer.close();
+  });
+
+  test("stderr preinit_message diagnostic appears for tools/list", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderrBuf = "";
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.ok(
+      stderrBuf.includes("preinit_message method=tools/list"),
+      `expected preinit_message for tools/list in stderr: ${stderrBuf}`,
+    );
+    assert.ok(
+      stderrBuf.includes("action=no_runtime"),
+      `expected action=no_runtime in stderr: ${stderrBuf}`,
+    );
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("stderr preinit_message for browser_snapshot shows action=ensure_runtime", { timeout: 4000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderrBuf = "";
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 50));
+    adapter.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+
+    assert.ok(
+      stderrBuf.includes("name=browser_snapshot") && stderrBuf.includes("action=ensure_runtime"),
+      `expected preinit_message with ensure_runtime for browser_snapshot: ${stderrBuf}`,
+    );
+
+    adapter.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 100));
+    mockServer.close();
+  });
+
+  test("stdout contains only valid JSON-RPC for pre-init messages (no diagnostic text)", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 4, method: "resources/list", params: {} }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 400));
+
+    const lines = stdoutBuf.split("\n").filter((l) => l.trim() !== "");
+    assert.ok(lines.length > 0, "adapter should respond to pre-init messages");
+    for (const line of lines) {
+      let parsed;
+      try { parsed = JSON.parse(line); } catch {
+        assert.fail(`stdout line is not valid JSON: ${line}`);
+      }
+      assert.equal(parsed.jsonrpc, "2.0", `response should have jsonrpc: "2.0": ${line}`);
+    }
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+});

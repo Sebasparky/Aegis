@@ -3,8 +3,9 @@
  * antigen-browser-adapter.mjs
  *
  * Lazily resolves the Antigen local browser runtime CDP endpoint on the first
- * MCP tool call, then spawns @playwright/mcp with the correct --cdp-endpoint.
- * MCP protocol traffic on stdin/stdout is piped to/from the child process.
+ * browser MCP tool call, then spawns @playwright/mcp with the correct
+ * --cdp-endpoint. MCP protocol traffic on stdin/stdout is piped to/from the
+ * child process.
  *
  * In visible + realistic-input mode, intercepts browser_click, browser_fill,
  * and browser_type tool calls and routes them through the Aegis realistic-input
@@ -13,12 +14,17 @@
  * INVARIANTS:
  * - Never write non-JSON-RPC text to stdout — stdout is the MCP protocol stream.
  * - Never silently drop a JSON-RPC message. Parse failures and intercept failures
- *   always forward the original line to child.stdin.
+ *   always forward the original line to child.stdin (if child exists).
  * - Never log text field values (browser_fill value, browser_type text).
  *   Diagnostics only to stderr.
  * - cdp_url is permitted for internal runtime use; never forward to agent output.
- * - Browser runtime is initialized lazily on the first tool call — no browser
- *   session or Chrome process is created at adapter startup.
+ * - Browser runtime is initialized lazily on the first browser tools/call —
+ *   no browser session, @playwright/mcp process, or Chrome is created at startup
+ *   or in response to initialize / tools/list / notifications/initialized.
+ * - Pre-init MCP handshake (initialize, tools/list, resources/list, prompts/list,
+ *   ping) is handled by the adapter itself with synthetic responses.
+ * - Child MCP handshake is performed internally before piping child.stdout to
+ *   process.stdout; the child's init response is never forwarded to Claude.
  *
  * Required env vars:
  *   AEGIS_API_BASE    — e.g. http://localhost:4000
@@ -46,8 +52,6 @@ if (!TOKEN) fatal("AEGIS_AGENT_TOKEN is not set. Set it in the antigen-browser M
 if (!BASE) fatal("AEGIS_API_BASE is not set. Set it in the antigen-browser MCP server env.");
 
 // ─── Interception gate (env-only portion, known at startup) ───────────────────
-// browser_runtime_id is not yet known — that requires the lazy API call.
-// VISIBLE_REALISM_REQUESTED captures the env-side conditions only.
 const HEADLESS_ENV = (process.env.ANTIGEN_BROWSER_HEADLESS ?? "true").toLowerCase();
 const REALISM_ENV  = (process.env.ANTIGEN_INPUT_REALISM ?? "").toLowerCase();
 const VISIBLE_REALISM_REQUESTED =
@@ -60,11 +64,280 @@ process.stderr.write(
   ` interception_will_be=${VISIBLE_REALISM_REQUESTED ? "ENABLED_pending_runtime" : "DISABLED"}\n`
 );
 
+// ─── Static browser tool list (served without spawning a child) ───────────────
+// Schemas approximate @playwright/mcp@latest. The child validates actual args;
+// these schemas exist so Claude generates correct tool calls before runtime init.
+const STATIC_BROWSER_TOOLS = [
+  {
+    name: "browser_snapshot",
+    description: "Capture accessibility snapshot of the current page, this is better than screenshot",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_navigate",
+    description: "Navigate to a URL",
+    inputSchema: {
+      type: "object",
+      properties: { url: { type: "string", description: "The URL to navigate to" } },
+      required: ["url"],
+    },
+  },
+  {
+    name: "browser_navigate_back",
+    description: "Go back to the previous page",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_click",
+    description: "Click left mouse button on an element on the page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description for action logging" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+      },
+    },
+  },
+  {
+    name: "browser_type",
+    description: "Type text into editable element",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+        text: { type: "string", description: "Text to type into the element" },
+        slowly: { type: "boolean", description: "Whether to type character-by-character. Useful for triggering auto-complete" },
+        submit: { type: "boolean", description: "Whether to submit the form after typing. Equivalent to pressing Enter" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "browser_fill",
+    description: "Fill an input field with text",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+        value: { type: "string", description: "Value to fill into the input field" },
+      },
+      required: ["value"],
+    },
+  },
+  {
+    name: "browser_press_key",
+    description: "Press a keyboard key",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Name of the key to press, e.g. 'ArrowLeft', 'Enter', 'Tab'" },
+      },
+      required: ["key"],
+    },
+  },
+  {
+    name: "browser_hover",
+    description: "Hover mouse over an element on the page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+      },
+    },
+  },
+  {
+    name: "browser_drag",
+    description: "Drag and drop an element to another location",
+    inputSchema: {
+      type: "object",
+      properties: {
+        startElement: { type: "string", description: "Human-readable source element description" },
+        startRef: { type: "string", description: "Exact source element reference from the page snapshot" },
+        endElement: { type: "string", description: "Human-readable target element description" },
+        endRef: { type: "string", description: "Exact target element reference from the page snapshot" },
+      },
+    },
+  },
+  {
+    name: "browser_drop",
+    description: "Drop data or files onto an element",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable target element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+      },
+    },
+  },
+  {
+    name: "browser_select_option",
+    description: "Select an option in a dropdown list",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+        values: {
+          type: "array",
+          items: { type: "string" },
+          description: "Values to select in the dropdown",
+        },
+      },
+      required: ["values"],
+    },
+  },
+  {
+    name: "browser_fill_form",
+    description: "Fill out multiple form fields at once",
+    inputSchema: {
+      type: "object",
+      properties: {
+        formData: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              ref: { type: "string", description: "Element reference from snapshot" },
+              value: { type: "string", description: "Value to fill" },
+            },
+          },
+          description: "Array of field references and their values",
+        },
+      },
+      required: ["formData"],
+    },
+  },
+  {
+    name: "browser_handle_dialog",
+    description: "Handle a dialog box (alert, confirm, prompt)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        accept: { type: "boolean", description: "Whether to accept the dialog" },
+        promptText: { type: "string", description: "Text to enter in prompt dialog" },
+      },
+      required: ["accept"],
+    },
+  },
+  {
+    name: "browser_take_screenshot",
+    description: "Take a screenshot of the current page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description (for element screenshot)" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+      },
+    },
+  },
+  {
+    name: "browser_evaluate",
+    description: "Evaluate a JavaScript expression in the browser context",
+    inputSchema: {
+      type: "object",
+      properties: {
+        function: { type: "string", description: "A JavaScript function body to evaluate" },
+      },
+      required: ["function"],
+    },
+  },
+  {
+    name: "browser_console_messages",
+    description: "Get browser console messages from the current page",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_network_requests",
+    description: "Get all network requests made since page load",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_network_request",
+    description: "Make an HTTP network request from the browser context",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL for the request" },
+        method: { type: "string", description: "HTTP method (GET, POST, etc.)" },
+        headers: { type: "object", description: "Request headers" },
+        body: { type: "string", description: "Request body" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "browser_wait_for",
+    description: "Wait for an element or text to appear on the page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to wait for on the page" },
+        textGone: { type: "string", description: "Text to wait until it disappears" },
+        time: { type: "number", description: "Time to wait in milliseconds" },
+      },
+    },
+  },
+  {
+    name: "browser_resize",
+    description: "Resize the browser viewport",
+    inputSchema: {
+      type: "object",
+      properties: {
+        width: { type: "number", description: "New viewport width in pixels" },
+        height: { type: "number", description: "New viewport height in pixels" },
+      },
+      required: ["width", "height"],
+    },
+  },
+  {
+    name: "browser_tabs",
+    description: "List or manage browser tabs",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_close",
+    description: "Close the page",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_run_code_unsafe",
+    description: "Execute JavaScript code in the browser context (unsafe — use with caution)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "JavaScript code to execute" },
+      },
+      required: ["code"],
+    },
+  },
+  {
+    name: "browser_file_upload",
+    description: "Upload files to a file input element",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "File paths to upload",
+        },
+      },
+      required: ["paths"],
+    },
+  },
+];
+
 // ─── Lazy runtime state ────────────────────────────────────────────────────────
 let child = null;
 let browser_runtime_id = null;
 let INTERCEPTION_ENABLED = false; // set after successful lazy init
 let _initPromise = null;
+let runtimeInitDone = false; // true after child handshake + stdout piped
 
 async function ensureRuntime() {
   if (!_initPromise) {
@@ -74,6 +347,59 @@ async function ensureRuntime() {
     });
   }
   return _initPromise;
+}
+
+// Performs the MCP initialize handshake with the child process.
+// Sends initialize, discards the child's response (we already responded to Claude),
+// sends notifications/initialized, then resolves. stdout is NOT piped yet —
+// the caller sets up the pipe after this resolves.
+async function doChildInitHandshake() {
+  return new Promise((resolve, reject) => {
+    const INIT_ID = "__antigen_init__";
+    let lineBuf = "";
+    let timer = null;
+
+    function onData(chunk) {
+      lineBuf += chunk.toString();
+      let idx;
+      while ((idx = lineBuf.indexOf("\n")) !== -1) {
+        const responseLine = lineBuf.slice(0, idx + 1);
+        lineBuf = lineBuf.slice(idx + 1);
+        let parsed;
+        try { parsed = JSON.parse(responseLine.trim()); } catch { continue; }
+        if (parsed?.id === INIT_ID) {
+          clearTimeout(timer);
+          child.stdout.off("data", onData);
+          // Child responded to init — now send notifications/initialized and resolve
+          child.stdin.write(
+            JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"
+          );
+          resolve();
+          return;
+        }
+      }
+    }
+
+    child.stdout.on("data", onData);
+
+    timer = setTimeout(() => {
+      child.stdout.off("data", onData);
+      reject(new Error("Child MCP init handshake timed out after 5s"));
+    }, 5000);
+
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        id: INIT_ID,
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "antigen-browser-adapter", version: ADAPTER_VERSION },
+        },
+      }) + "\n"
+    );
+  });
 }
 
 async function _doInitRuntime() {
@@ -139,7 +465,14 @@ async function _doInitRuntime() {
   );
 
   child.stderr.pipe(process.stderr);
+
+  // Perform MCP init handshake with child BEFORE piping stdout.
+  // This prevents the child's init response from being forwarded to Claude.
+  await doChildInitHandshake();
+
+  // Handshake complete — now safe to pipe child responses to Claude.
   child.stdout.pipe(process.stdout);
+  runtimeInitDone = true;
 
   process.on("SIGINT",  () => child.kill("SIGINT"));
   process.on("SIGTERM", () => child.kill("SIGTERM"));
@@ -154,10 +487,62 @@ async function _doInitRuntime() {
   });
 }
 
+// ─── Pre-init message handlers (no child, no API call) ────────────────────────
+// Handles the MCP startup protocol so @playwright/mcp is never spawned until
+// an actual browser tools/call arrives.
+
+function writePreInitResponse(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+
+function handlePreInitMessage(msg) {
+  const { method, id } = msg;
+
+  if (method === "initialize") {
+    writePreInitResponse(id, {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: { name: "antigen-browser-adapter", version: ADAPTER_VERSION },
+    });
+    return;
+  }
+
+  if (method === "notifications/initialized") {
+    // Notification — no response expected.
+    return;
+  }
+
+  if (method === "tools/list") {
+    writePreInitResponse(id, { tools: STATIC_BROWSER_TOOLS });
+    return;
+  }
+
+  if (method === "resources/list") {
+    writePreInitResponse(id, { resources: [] });
+    return;
+  }
+
+  if (method === "prompts/list") {
+    writePreInitResponse(id, { prompts: [] });
+    return;
+  }
+
+  if (method === "ping") {
+    writePreInitResponse(id, {});
+    return;
+  }
+
+  // Unknown pre-init message — log and do not respond.
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] preinit_message` +
+    ` method=${method ?? "unknown"} name=none action=no_runtime\n`
+  );
+}
+
 // ─── MCP protocol routing ─────────────────────────────────────────────────────
-// All stdin is line-buffered through a sequential processing queue so that
-// ensureRuntime() can block the first line (and any concurrent lines) until
-// the child process is ready. Lines are always processed in arrival order.
+// stdin is line-buffered through a sequential processing queue.
+// ensureRuntime() is called ONLY for browser tools/call messages.
+// All other pre-init traffic is handled with synthetic responses.
 
 let lineBuffer = "";
 let processingQueue = Promise.resolve();
@@ -185,7 +570,6 @@ process.stdin.on("end", () => {
     enqueueLine(lineBuffer);
     lineBuffer = "";
   }
-  // End child.stdin after all queued lines are fully processed.
   processingQueue.then(() => {
     if (child) child.stdin.end();
   });
@@ -207,30 +591,59 @@ function writeSyntheticResponse(requestId, text) {
 
 /**
  * Routes a single JSON-RPC line.
- * Calls ensureRuntime() on first invocation (lazy browser init).
- * Intercepts browser_click/browser_fill/browser_type in visible+realistic mode.
- * Falls back to forwarding to child.stdin on any failure.
- * Never silently drops a line.
+ *
+ * Gate: ensureRuntime() is called ONLY when method === "tools/call" and
+ * params.name starts with "browser_". All other messages are handled locally
+ * (pre-init) or forwarded to the child (post-init).
+ *
+ * Never silently drops a line that can be handled.
  */
 async function handleLine(line) {
-  await ensureRuntime();
-
   let msg;
   try {
     msg = JSON.parse(line.trim());
   } catch {
-    // Malformed JSON — forward raw bytes unchanged.
-    child.stdin.write(line);
+    // Malformed JSON — forward to child if ready, otherwise drop.
+    if (child) {
+      child.stdin.write(line);
+    } else {
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] preinit_malformed_json action=dropped\n`);
+    }
     return;
   }
 
-  // Only intercept tools/call requests.
-  if (msg?.method !== "tools/call" || !msg?.params?.name) {
-    child.stdin.write(line);
+  const method = msg?.method;
+  const name = msg?.params?.name;
+  const isBrowserToolCall =
+    method === "tools/call" &&
+    typeof name === "string" &&
+    name.startsWith("browser_");
+
+  // Emit a diagnostic for every message processed before runtime is ready.
+  if (!runtimeInitDone) {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] preinit_message` +
+      ` method=${method ?? "unknown"}` +
+      ` name=${name ?? "none"}` +
+      ` action=${isBrowserToolCall ? "ensure_runtime" : "no_runtime"}\n`
+    );
+  }
+
+  if (!isBrowserToolCall) {
+    if (runtimeInitDone) {
+      // Child is ready — pass non-browser messages through.
+      child.stdin.write(line);
+    } else {
+      // Pre-init: handle with synthetic MCP responses, no side effects.
+      handlePreInitMessage(msg);
+    }
     return;
   }
 
-  const toolName = msg.params.name;
+  // ── Browser tools/call — init runtime if not yet done ─────────────────────
+  await ensureRuntime();
+
+  const toolName = name;
 
   // ── browser_click interception ────────────────────────────────────────────
   if (INTERCEPTION_ENABLED && toolName === "browser_click") {
@@ -360,6 +773,6 @@ async function handleLine(line) {
     return;
   }
 
-  // All other tools (or interception disabled): forward to @playwright/mcp unchanged.
+  // All other browser tools (or interception disabled): forward to @playwright/mcp unchanged.
   child.stdin.write(line);
 }

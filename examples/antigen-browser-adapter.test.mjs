@@ -134,6 +134,47 @@ describe("C. buildSyntheticSuccessText", () => {
   });
 });
 
+// ─── F. buildSyntheticSuccessText — browser_type focused/submitted fields ────
+
+describe("F. buildSyntheticSuccessText — browser_type focused/submitted", () => {
+  const V = "2026-05-29";
+
+  test("browser_type with focused=true includes focused=true", () => {
+    const text = buildSyntheticSuccessText("browser_type", { bucket: "9-16", focused: true, version: V });
+    assert.ok(text.includes("focused=true"), `expected focused=true: ${text}`);
+  });
+
+  test("browser_type with submitted=true includes submitted=true", () => {
+    const text = buildSyntheticSuccessText("browser_type", { bucket: "9-16", submitted: true, version: V });
+    assert.ok(text.includes("submitted=true"), `expected submitted=true: ${text}`);
+  });
+
+  test("browser_type with focused=true submitted=true includes both", () => {
+    const text = buildSyntheticSuccessText("browser_type", { bucket: "5-8", focused: true, submitted: true, version: V });
+    assert.ok(text.includes("focused=true"), `expected focused=true: ${text}`);
+    assert.ok(text.includes("submitted=true"), `expected submitted=true: ${text}`);
+  });
+
+  test("browser_type without focused/submitted does not add those fields", () => {
+    const text = buildSyntheticSuccessText("browser_type", { bucket: "1-4", version: V });
+    assert.ok(!text.includes("focused="), `unexpected focused= in: ${text}`);
+    assert.ok(!text.includes("submitted="), `unexpected submitted= in: ${text}`);
+  });
+
+  test("browser_fill not affected by focused/submitted params", () => {
+    const text = buildSyntheticSuccessText("browser_fill", { bucket: "5-8", focused: true, submitted: true, version: V });
+    assert.ok(text.includes("char_count_bucket=5-8"), `missing bucket: ${text}`);
+    assert.ok(!text.includes("focused="), `browser_fill should not include focused=: ${text}`);
+    assert.ok(!text.includes("submitted="), `browser_fill should not include submitted=: ${text}`);
+  });
+
+  test("source field appears at the end of browser_type with focused/submitted", () => {
+    const text = buildSyntheticSuccessText("browser_type", { bucket: "9-16", focused: true, submitted: true, version: V });
+    assert.ok(text.includes(`source=antigen-browser-adapter@${V}`), `missing source: ${text}`);
+    assert.ok(text.endsWith(`source=antigen-browser-adapter@${V}`), `source should be last: ${text}`);
+  });
+});
+
 // ─── D. Adapter startup — lazy init (no browser-endpoint call before first tool call) ───
 
 describe("D. Adapter lazy init", () => {

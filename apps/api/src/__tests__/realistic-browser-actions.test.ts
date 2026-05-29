@@ -103,10 +103,12 @@ vi.mock("ws", () => {
 // ─── Module imports (after mock declarations) ─────────────────────────────────
 import {
   dispatchTextCharsViaCDP,
+  dispatchEnterViaCDP,
   buildElementFindExpr,
   realisticClickByDescription,
   realisticTypeTextViaCDP,
   GENERAL_TYPING_PROFILE,
+  ACTIVE_ELEMENT_CHECK_EXPR,
 } from "../runtime/realisticBrowserActions.js";
 
 // ─── fetch mock helpers ───────────────────────────────────────────────────────
@@ -352,6 +354,7 @@ describe("realisticTypeTextViaCDP — per-character dispatch", () => {
     vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
     vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
     vi.useFakeTimers();
+    mockState.nextEvalResponse = true; // simulate focused active element for active-element check
   });
 
   it("dispatches one Input.dispatchKeyEvent per character of 'desk lamp'", async () => {
@@ -388,6 +391,7 @@ describe("realisticTypeTextViaCDP — log safety", () => {
     vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
     vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
     vi.useFakeTimers();
+    mockState.nextEvalResponse = true; // simulate focused active element for active-element check
   });
 
   it("never logs the raw text value in any console.log call", async () => {
@@ -486,5 +490,263 @@ describe("adapter routing — JSON parsing invariants", () => {
     // Confirm response text does not contain any sensitive content
     expect(response.result.content[0].text).not.toContain("password");
     expect(response.result.content[0].text).not.toContain("cookie");
+  });
+});
+
+// ─── 13. realisticTypeTextViaCDP — focus + type (with elementDescription) ────
+
+describe("realisticTypeTextViaCDP — focus + type (with elementDescription)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = { x: 100, y: 50, width: 200, height: 40, vw: 1280, vh: 800 };
+  });
+
+  it("Runtime.evaluate is sent before any Input.dispatchKeyEvent", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Search field",
+    });
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    const parsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
+    const evalIdx = parsed.findIndex((m) => m?.method === "Runtime.evaluate");
+    const firstKeyIdx = parsed.findIndex((m) => m?.method === "Input.dispatchKeyEvent");
+    expect(evalIdx).toBeGreaterThanOrEqual(0);
+    expect(firstKeyIdx).toBeGreaterThan(evalIdx);
+  });
+
+  it("Input.dispatchMouseEvent events appear between Runtime.evaluate and Input.dispatchKeyEvent", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hi",
+      elementDescription: "Username",
+    });
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    const parsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
+    const evalIdx = parsed.findIndex((m) => m?.method === "Runtime.evaluate");
+    const firstMouseIdx = parsed.findIndex((m) => m?.method === "Input.dispatchMouseEvent");
+    const firstKeyIdx = parsed.findIndex((m) => m?.method === "Input.dispatchKeyEvent");
+    expect(firstMouseIdx).toBeGreaterThan(evalIdx);
+    expect(firstKeyIdx).toBeGreaterThan(firstMouseIdx);
+  });
+
+  it("result.focused is true when element is found and clicked", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "test",
+      elementDescription: "Email",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.success).toBe(true);
+    expect(result.focused).toBe(true);
+  });
+});
+
+// ─── 14. realisticTypeTextViaCDP — element not found ─────────────────────────
+
+describe("realisticTypeTextViaCDP — element not found (with elementDescription)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    mockState.nextEvalResponse = null;
+  });
+
+  it("returns ELEMENT_NOT_FOUND when Runtime.evaluate returns null", async () => {
+    const result = await realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Nonexistent field",
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("ELEMENT_NOT_FOUND");
+  });
+
+  it("no Input.dispatchKeyEvent messages are sent when element not found", async () => {
+    await realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Nonexistent",
+    });
+    const keyEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchKeyEvent");
+    expect(keyEvents).toHaveLength(0);
+  });
+
+  it("returns AMBIGUOUS_ELEMENT when Runtime.evaluate returns 'AMBIGUOUS'", async () => {
+    mockState.nextEvalResponse = "AMBIGUOUS";
+    const result = await realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Search",
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("AMBIGUOUS_ELEMENT");
+  });
+});
+
+// ─── 15. realisticTypeTextViaCDP — submit:true ────────────────────────────────
+
+describe("realisticTypeTextViaCDP — submit:true dispatches Enter after chars", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = true; // active element present
+  });
+
+  it("dispatches Enter keyDown + keyUp after text chars when submit=true", async () => {
+    const text = "hi";
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text,
+      submit: true,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.submitted).toBe(true);
+
+    const parsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
+    const keyEvents = parsed.filter((m) => m?.method === "Input.dispatchKeyEvent");
+    const charEvents = keyEvents.filter((m) => m.params?.type === "char");
+    const enterEvents = keyEvents.filter((m) => m.params?.key === "Return");
+
+    expect(charEvents).toHaveLength(text.length);
+    expect(enterEvents).toHaveLength(2); // keyDown + keyUp
+    expect(enterEvents[0].params.type).toBe("keyDown");
+    expect(enterEvents[1].params.type).toBe("keyUp");
+
+    // All Enter events appear after all char events
+    const allParsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
+    const lastCharIdx = allParsed.map((m, i) => m?.params?.type === "char" ? i : -1).filter((i) => i >= 0).at(-1) ?? -1;
+    const firstEnterIdx = allParsed.findIndex((m) => m?.params?.key === "Return");
+    expect(firstEnterIdx).toBeGreaterThan(lastCharIdx);
+  });
+
+  it("result.submitted is false when submit is not set", async () => {
+    const resultPromise = realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text: "hi" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.submitted).toBe(false);
+  });
+
+  it("no Enter events when submit is not set", async () => {
+    const resultPromise = realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text: "hi" });
+    await vi.runAllTimersAsync();
+    await resultPromise;
+    const enterEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.params?.key === "Return");
+    expect(enterEvents).toHaveLength(0);
+  });
+});
+
+// ─── 16. realisticTypeTextViaCDP — no target, no active element ──────────────
+
+describe("realisticTypeTextViaCDP — no target, no active element", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    mockState.nextEvalResponse = null; // no focused element
+  });
+
+  it("returns NO_FOCUSABLE_ACTIVE_ELEMENT when active element check returns null", async () => {
+    const result = await realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text: "hello" });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("NO_FOCUSABLE_ACTIVE_ELEMENT");
+  });
+
+  it("no Input.dispatchKeyEvent messages are sent when no active element", async () => {
+    await realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text: "hello" });
+    const keyEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchKeyEvent");
+    expect(keyEvents).toHaveLength(0);
+  });
+});
+
+// ─── 17. dispatchEnterViaCDP — correct key events ────────────────────────────
+
+describe("dispatchEnterViaCDP — dispatches keyDown then keyUp for Return", () => {
+  it("sends keyDown then keyUp for Return key", async () => {
+    const mockSend = vi.fn();
+    const mockSleep = vi.fn().mockResolvedValue(undefined);
+    await dispatchEnterViaCDP(mockSend, mockSleep);
+
+    const calls = mockSend.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual(["Input.dispatchKeyEvent", {
+      type: "keyDown", key: "Return", code: "Enter",
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    }]);
+    expect(calls[1]).toEqual(["Input.dispatchKeyEvent", {
+      type: "keyUp", key: "Return", code: "Enter",
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    }]);
+  });
+
+  it("Enter key params never include text-content fields", async () => {
+    const mockSend = vi.fn();
+    await dispatchEnterViaCDP(mockSend, vi.fn().mockResolvedValue(undefined));
+    for (const [, params] of mockSend.mock.calls) {
+      for (const forbidden of ["text", "value", "raw_value", "password", "secret"]) {
+        expect(Object.keys(params)).not.toContain(forbidden);
+      }
+    }
+  });
+});
+
+// ─── 18. realisticTypeTextViaCDP — log safety with diagnostics ───────────────
+
+describe("realisticTypeTextViaCDP — log safety with browser_type diagnostics enabled", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.stubEnv("ANTIGEN_CDP_DIAGNOSTICS", "true");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = true;
+  });
+
+  it("no forbidden keys in any diagnostic log objects (submit path)", async () => {
+    const loggedObjs: Record<string, unknown>[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      args.forEach((a) => { if (a && typeof a === "object") loggedObjs.push(a as Record<string, unknown>); });
+    });
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hunter2secure",
+      submit: true,
+    });
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    for (const obj of loggedObjs) {
+      for (const key of ["text", "value", "raw_value", "char", "chars", "password", "secret"]) {
+        expect(Object.keys(obj)).not.toContain(key);
+      }
+    }
+  });
+});
+
+// ─── 19. ACTIVE_ELEMENT_CHECK_EXPR — is valid JS ─────────────────────────────
+
+describe("ACTIVE_ELEMENT_CHECK_EXPR — structural checks", () => {
+  it("is a valid JS expression (can be parsed by Function constructor)", () => {
+    expect(() => new Function(`return ${ACTIVE_ELEMENT_CHECK_EXPR}`)).not.toThrow();
+  });
+
+  it("wraps logic in an IIFE", () => {
+    expect(ACTIVE_ELEMENT_CHECK_EXPR.trim().startsWith("(function(){")).toBe(true);
+    expect(ACTIVE_ELEMENT_CHECK_EXPR.trim().endsWith("})()")).toBe(true);
   });
 });

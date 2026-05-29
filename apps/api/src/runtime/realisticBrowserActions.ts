@@ -34,6 +34,17 @@ const browsingPointerState = new Map<string, { x: number; y: number }>();
 
 export const GENERAL_TYPING_PROFILE = { min_ms: 30, max_ms: 80 } as const;
 
+// JS IIFE that checks whether the active element is a focusable input/textarea/contenteditable.
+// Returns true if focusable and visible, null otherwise.
+// Exported for unit testing.
+export const ACTIVE_ELEMENT_CHECK_EXPR = `(function(){
+  var el=document.activeElement;if(!el)return null;
+  var tag=el.tagName.toLowerCase();
+  var r=el.getBoundingClientRect();
+  if((r.width>0||r.height>0)&&(tag==='input'||tag==='textarea'||el.isContentEditable))return true;
+  return null;
+})()`;
+
 export interface RealisticClickResult {
   success: boolean;
   error?: string;
@@ -44,6 +55,8 @@ export interface RealisticTypeResult {
   error?: string;
   char_count_bucket: string;
   duration_ms: number;
+  focused?: boolean;    // true if this call performed a click to focus the target field
+  submitted?: boolean;  // true if Enter was dispatched after typing
 }
 
 /**
@@ -135,6 +148,27 @@ export async function dispatchTextCharsViaCDP(
 }
 
 /**
+ * Dispatches an Enter key press (keyDown + keyUp) via CDP.
+ * Used after typing when submit:true is requested.
+ * Exported for unit testing with injected sendCdp / sleep.
+ */
+export async function dispatchEnterViaCDP(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  sendCdp("Input.dispatchKeyEvent", {
+    type: "keyDown", key: "Return", code: "Enter",
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+  });
+  await sleep(50);
+  sendCdp("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Return", code: "Enter",
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+  });
+  await sleep(100);
+}
+
+/**
  * Finds a visible interactive element and performs a realistic pointer movement
  * + click via CDP Input.dispatchMouseEvent events.
  *
@@ -165,8 +199,8 @@ export async function realisticClickByDescription(params: {
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json()),
-      fetch(`${cdpUrl}/json/list`).then((r) => r.json()),
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
     return { success: false, error: `CDP_FETCH_FAILED: ${(err as Error).message}` };
@@ -304,16 +338,26 @@ export async function realisticClickByDescription(params: {
 }
 
 /**
- * Types text character-by-character into the currently focused element via CDP
- * Input.dispatchKeyEvent. General-purpose (non-credential) — no field masking.
+ * Types text character-by-character into a target element via CDP.
  *
- * Assumes the target field is already focused (e.g., by a preceding click).
+ * When elementDescription is provided, first finds the element via Runtime.evaluate,
+ * then performs a realistic pointer click (focus), then types. Pointer overlay appears
+ * for the focus click just as it does for browser_click.
+ *
+ * When elementDescription is absent, verifies that there is already a focusable active
+ * element before dispatching key events. Returns NO_FOCUSABLE_ACTIVE_ELEMENT if not.
+ *
+ * When submit is true, dispatches Enter after typing.
+ *
  * The text value is never logged or returned to the caller.
  */
 export async function realisticTypeTextViaCDP(params: {
   cdpUrl: string;
   text: string;
   sessionId?: string;
+  elementDescription?: string;
+  selectorHint?: string;
+  submit?: boolean;
 }): Promise<RealisticTypeResult> {
   const charCountBucket = getCharCountBucket(params.text.length);
 
@@ -321,16 +365,17 @@ export async function realisticTypeTextViaCDP(params: {
     return { success: false, error: "REALISM_DISABLED", char_count_bucket: charCountBucket, duration_ms: 0 };
   }
 
-  const { cdpUrl, text } = params;
+  const { cdpUrl, text, elementDescription, selectorHint, submit, sessionId } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
+  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json()),
-      fetch(`${cdpUrl}/json/list`).then((r) => r.json()),
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
     return {
@@ -356,6 +401,10 @@ export async function realisticTypeTextViaCDP(params: {
     let msgId = 1;
     let cdpSessionId: string | null = null;
     let attachId: number;
+    // evalId: used when elementDescription provided — lookup + focus path
+    let evalId: number | null = null;
+    // activeCheckId: used when no elementDescription — verify active element
+    let activeCheckId: number | null = null;
     const startMs = Date.now();
 
     const timer = setTimeout(() => {
@@ -363,9 +412,9 @@ export async function realisticTypeTextViaCDP(params: {
       resolve({ success: false, error: "Realistic type timed out after 15 seconds.", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
     }, 15_000);
 
-    const sendMsg = (method: string, params: Record<string, unknown> = {}, sid?: string): number => {
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
       const id = msgId++;
-      const msg: Record<string, unknown> = { id, method, params };
+      const msg: Record<string, unknown> = { id, method, params: p };
       if (sid) msg.sessionId = sid;
       ws.send(JSON.stringify(msg));
       return id;
@@ -393,6 +442,7 @@ export async function realisticTypeTextViaCDP(params: {
       if (id === undefined) return;
       const result = msg.result as Record<string, unknown> | undefined;
 
+      // ── Stage 1: attach response ──────────────────────────────────────────────
       if (id === attachId) {
         if (!result?.sessionId) {
           finish({ success: false, error: "CDP attach failed.", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
@@ -400,34 +450,144 @@ export async function realisticTypeTextViaCDP(params: {
         }
         cdpSessionId = result.sessionId as string;
 
+        if (cdpDiagnostics) {
+          console.log("[RealisticType] attempt", {
+            surface: "browser_type",
+            has_target: !!elementDescription,
+            submit: !!submit,
+            char_count_bucket: charCountBucket,
+          });
+        }
+
+        if (elementDescription) {
+          // Focus path: find element, click to focus, then type
+          const findExpr = buildElementFindExpr(elementDescription, selectorHint);
+          evalId = sendMsg("Runtime.evaluate", { expression: findExpr, returnByValue: true }, cdpSessionId);
+        } else {
+          // No-target path: verify there is an active focusable element
+          activeCheckId = sendMsg("Runtime.evaluate", { expression: ACTIVE_ELEMENT_CHECK_EXPR, returnByValue: true }, cdpSessionId);
+        }
+        return;
+      }
+
+      // ── Stage 2a: element lookup (with elementDescription) ────────────────────
+      if (evalId !== null && id === evalId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value;
+
+        if (val === null || val === undefined) {
+          if (cdpDiagnostics) console.log("[RealisticType] focus_fallback", { surface: "browser_type", reason: "ELEMENT_NOT_FOUND" });
+          finish({ success: false, error: "ELEMENT_NOT_FOUND", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          return;
+        }
+        if (val === "AMBIGUOUS") {
+          if (cdpDiagnostics) console.log("[RealisticType] focus_fallback", { surface: "browser_type", reason: "AMBIGUOUS_ELEMENT" });
+          finish({ success: false, error: "AMBIGUOUS_ELEMENT", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          return;
+        }
+
+        const boxVal = val as { x: number; y: number; width: number; height: number; vw?: number; vh?: number };
+        const vw = boxVal.vw ?? 1280;
+        const vh = boxVal.vh ?? 800;
+        const box: ElementBox = { x: boxVal.x, y: boxVal.y, width: boxVal.width, height: boxVal.height };
+
+        if (cdpDiagnostics) {
+          console.log("[RealisticType] focus_success", {
+            surface: "browser_type",
+            box_width: Math.round(box.width),
+            box_height: Math.round(box.height),
+          });
+        }
+
+        const localState = sessionId ? browsingPointerState.get(sessionId) : undefined;
+        const state = makePointerRuntimeState({
+          current_x: localState?.x ?? vw / 2,
+          current_y: localState?.y ?? vh / 2,
+          viewport_width: vw,
+          viewport_height: vh,
+          browser_session_id: sessionId,
+          interaction_mode: "realistic",
+        });
+
         const sendCdp = (method: string, p: Record<string, unknown>) => {
           void sendMsg(method, p, cdpSessionId!);
         };
         const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
-        if (cdpDiagnostics) {
-          console.log("[RealisticType] dispatching general text input", {
-            surface: "general_typing",
-            char_count_bucket: charCountBucket,
-            mode: "realistic",
-          });
-        }
-
         void (async () => {
           try {
+            await clickBoxWithPointer(state, box, sendCdp, sleep, {
+              debugOverlay,
+              debugLabel: "type_focus",
+              templateTraces: getLoadedPointerTraces(),
+              purpose: "input_focus",
+            });
+            if (sessionId) {
+              browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+            }
             const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
+            let submitted = false;
+            if (submit) {
+              await dispatchEnterViaCDP(sendCdp, sleep);
+              submitted = true;
+              if (cdpDiagnostics) console.log("[RealisticType] submit_success", { surface: "browser_type" });
+            }
             if (cdpDiagnostics) {
               console.log("[RealisticType] complete", {
-                surface: "general_typing",
+                surface: "browser_type",
                 char_count_bucket: typing.char_count_bucket,
                 duration_ms: typing.duration_ms,
+                focused: true,
+                submitted,
               });
             }
-            finish({ success: true, char_count_bucket: typing.char_count_bucket, duration_ms: typing.duration_ms });
+            finish({ success: true, char_count_bucket: typing.char_count_bucket, duration_ms: typing.duration_ms, focused: true, submitted });
           } catch (err) {
             finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
           }
         })();
+        return;
+      }
+
+      // ── Stage 2b: active element check (no elementDescription) ───────────────
+      if (activeCheckId !== null && id === activeCheckId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value;
+
+        if (val === null || val === undefined) {
+          finish({ success: false, error: "NO_FOCUSABLE_ACTIVE_ELEMENT", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          return;
+        }
+
+        const sendCdp = (method: string, p: Record<string, unknown>) => {
+          void sendMsg(method, p, cdpSessionId!);
+        };
+        const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
+
+        void (async () => {
+          try {
+            const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
+            let submitted = false;
+            if (submit) {
+              await dispatchEnterViaCDP(sendCdp, sleep);
+              submitted = true;
+              if (cdpDiagnostics) console.log("[RealisticType] submit_success", { surface: "browser_type" });
+            }
+            if (cdpDiagnostics) {
+              console.log("[RealisticType] complete", {
+                surface: "browser_type",
+                char_count_bucket: typing.char_count_bucket,
+                duration_ms: typing.duration_ms,
+                focused: false,
+                submitted,
+              });
+            }
+            finish({ success: true, char_count_bucket: typing.char_count_bucket, duration_ms: typing.duration_ms, focused: false, submitted });
+          } catch (err) {
+            finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          }
+        })();
+        return;
       }
     });
 

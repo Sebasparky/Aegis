@@ -733,32 +733,56 @@ async function handleLine(line) {
 
   // ── browser_type interception ──────────────────────────────────────────────
   // @playwright/mcp uses browser_type with arguments.text for pressSequentially.
-  // We intercept and route through the same Aegis per-character CDP typing path.
+  // We intercept and route through the Aegis realistic-input path, which now:
+  //   1. finds the target element by element_description and clicks to focus it
+  //   2. dispatches characters via CDP
+  //   3. dispatches Enter if submit:true
+  // Falls back to @playwright/mcp if element lookup fails or no target found.
   if (INTERCEPTION_ENABLED && toolName === "browser_type") {
-    const typeText  = msg?.params?.arguments?.text ?? "";
-    const argKeys   = Object.keys(msg?.params?.arguments ?? {}).join(",");
-    const requestId = msg.id;
-    const bucket    = charCountBucket(typeText.length);
+    const typeText    = msg?.params?.arguments?.text ?? "";
+    const typeElement = msg?.params?.arguments?.element ?? "";
+    const typeRef     = msg?.params?.arguments?.ref ?? "";
+    const typeSubmit  = msg?.params?.arguments?.submit === true;
+    const argKeys     = Object.keys(msg?.params?.arguments ?? {}).join(",");
+    const requestId   = msg.id;
+    const bucket      = charCountBucket(typeText.length);
+    const hasTarget   = typeElement.length > 0;
+    const selectorHint = looksLikeSelector(typeRef) ? typeRef : undefined;
 
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] realistic_type_attempt source=browser_type` +
-      ` arg_keys=${argKeys} char_count_bucket=${bucket}\n`
+      ` arg_keys=${argKeys} char_count_bucket=${bucket}` +
+      ` has_target=${hasTarget} submit=${typeSubmit}\n`
     );
 
     try {
+      const reqBody = { browser_runtime_id, text: typeText, submit: typeSubmit };
+      if (hasTarget) reqBody.element_description = typeElement;
+      if (selectorHint) reqBody.selector_hint = selectorHint;
+
       const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-type`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ browser_runtime_id, text: typeText }),
+        body: JSON.stringify(reqBody),
       });
 
       if (apiRes.ok) {
-        const resBody   = await apiRes.json().catch(() => ({}));
-        const resBucket = resBody?.data?.char_count_bucket ?? bucket;
-        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_type char_count_bucket=${resBucket}\n`);
+        const resBody      = await apiRes.json().catch(() => ({}));
+        const resBucket    = resBody?.data?.char_count_bucket ?? bucket;
+        const resFocused   = resBody?.data?.focused;
+        const resSubmitted = resBody?.data?.submitted;
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_type` +
+          ` char_count_bucket=${resBucket} has_target=${hasTarget} submit=${typeSubmit}\n`
+        );
         writeSyntheticResponse(
           requestId,
-          buildSyntheticSuccessText("browser_type", { bucket: resBucket, version: ADAPTER_VERSION }),
+          buildSyntheticSuccessText("browser_type", {
+            bucket: resBucket,
+            focused: resFocused,
+            submitted: resSubmitted,
+            version: ADAPTER_VERSION,
+          }),
         );
         return;
       }

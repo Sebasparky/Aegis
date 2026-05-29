@@ -3465,7 +3465,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
 
-    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; text?: unknown };
+    const body = (req.body ?? {}) as {
+      browser_runtime_id?: unknown;
+      text?: unknown;
+      element_description?: unknown;
+      selector_hint?: unknown;
+      submit?: unknown;
+    };
 
     if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
       return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
@@ -3479,11 +3485,24 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
+    const elementDescription =
+      typeof body.element_description === "string" && body.element_description.trim()
+        ? body.element_description.trim()
+        : undefined;
+    const selectorHint =
+      typeof body.selector_hint === "string" && body.selector_hint.trim()
+        ? body.selector_hint.trim()
+        : undefined;
+    const submitFlag = body.submit === true;
+
     // text is never logged beyond char_count_bucket — see realisticBrowserActions.ts invariants
     const result = await realisticTypeTextViaCDP({
       cdpUrl: session.cdp_url,
       text: body.text,
       sessionId: session.browser_session_id,
+      elementDescription,
+      selectorHint,
+      submit: submitFlag,
     });
 
     if (!result.success) {
@@ -3496,7 +3515,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     return reply.send({
       ok: true,
-      data: { char_count_bucket: result.char_count_bucket, duration_ms: result.duration_ms },
+      data: {
+        char_count_bucket: result.char_count_bucket,
+        duration_ms: result.duration_ms,
+        ...(result.focused !== undefined ? { focused: result.focused } : {}),
+        ...(result.submitted !== undefined ? { submitted: result.submitted } : {}),
+      },
     });
   });
 

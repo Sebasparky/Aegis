@@ -9,12 +9,16 @@
  *
  * In visible + realistic-input mode, intercepts browser_click, browser_fill,
  * and browser_type tool calls and routes them through the Aegis realistic-input
- * API. Any intercept failure falls back to @playwright/mcp unchanged.
+ * API. browser_click and browser_fill fall back to @playwright/mcp on failure.
+ * browser_type is adapter-owned: any failure returns a clean MCP error response
+ * and is never forwarded to @playwright/mcp (@playwright/mcp requires a "target"
+ * field that our schema does not advertise; forwarding always Zod-errors).
  *
  * INVARIANTS:
  * - Never write non-JSON-RPC text to stdout — stdout is the MCP protocol stream.
- * - Never silently drop a JSON-RPC message. Parse failures and intercept failures
- *   always forward the original line to child.stdin (if child exists).
+ * - Never silently drop a JSON-RPC message. Parse failures and non-browser_type
+ *   intercept failures forward the original line to child.stdin (if child exists).
+ * - browser_type is NEVER forwarded to child.stdin — it is adapter-owned.
  * - Never log text field values (browser_fill value, browser_type text).
  *   Diagnostics only to stderr.
  * - cdp_url is permitted for internal runtime use; never forward to agent output.
@@ -590,6 +594,24 @@ function writeSyntheticResponse(requestId, text) {
 }
 
 /**
+ * Writes a synthetic MCP tools/call error response to stdout.
+ * Used when browser_type cannot be handled by the Antigen adapter.
+ * stdout is MCP protocol only — never write diagnostics here.
+ * Never includes: raw text values, cdp_url, cookies, storage, or selectors.
+ */
+function writeSyntheticErrorResponse(requestId, code, message) {
+  const response = JSON.stringify({
+    jsonrpc: "2.0",
+    id: requestId,
+    result: {
+      content: [{ type: "text", text: `Antigen browser_type unavailable: code=${code}; ${message}` }],
+      isError: true,
+    },
+  });
+  process.stdout.write(response + "\n");
+}
+
+/**
  * Routes a single JSON-RPC line.
  *
  * Gate: ensureRuntime() is called ONLY when method === "tools/call" and
@@ -731,14 +753,12 @@ async function handleLine(line) {
     return;
   }
 
-  // ── browser_type interception ──────────────────────────────────────────────
-  // @playwright/mcp uses browser_type with arguments.text for pressSequentially.
-  // We intercept and route through the Aegis realistic-input path, which now:
-  //   1. finds the target element by element_description and clicks to focus it
-  //   2. dispatches characters via CDP
-  //   3. dispatches Enter if submit:true
-  // Falls back to @playwright/mcp if element lookup fails or no target found.
-  if (INTERCEPTION_ENABLED && toolName === "browser_type") {
+  // ── browser_type: adapter-owned — never forwarded to @playwright/mcp ─────
+  // @playwright/mcp's real schema requires a "target" field that our static
+  // schema does not advertise. Forwarding browser_type to @playwright/mcp
+  // always produces a Zod validation error (path: ["target"]). The adapter
+  // is the sole handler: realistic success or a clear MCP error. No fallthrough.
+  if (toolName === "browser_type") {
     const typeText    = msg?.params?.arguments?.text ?? "";
     const typeElement = msg?.params?.arguments?.element ?? "";
     const typeRef     = msg?.params?.arguments?.ref ?? "";
@@ -748,6 +768,19 @@ async function handleLine(line) {
     const bucket      = charCountBucket(typeText.length);
     const hasTarget   = typeElement.length > 0;
     const selectorHint = looksLikeSelector(typeRef) ? typeRef : undefined;
+
+    if (!INTERCEPTION_ENABLED) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_type_unavailable` +
+        ` reason=interception_disabled arg_keys=${argKeys}\n`
+      );
+      writeSyntheticErrorResponse(
+        requestId,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        "Antigen realistic browser_type requires ANTIGEN_BROWSER_HEADLESS=false and a valid Aegis browser session.",
+      );
+      return;
+    }
 
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] realistic_type_attempt source=browser_type` +
@@ -786,14 +819,27 @@ async function handleLine(line) {
         );
         return;
       }
-      const errBody = await apiRes.json().catch(() => ({}));
-      const errCode = errBody?.error?.code ?? apiRes.status;
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=${errCode} source=browser_type\n`);
-    } catch (err) {
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_type\n`);
-    }
 
-    child.stdin.write(line);
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=${errCode} source=browser_type\n`
+      );
+      writeSyntheticErrorResponse(
+        requestId,
+        errCode,
+        `Antigen realistic browser_type failed (${errCode}).`,
+      );
+    } catch (_err) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=INTERCEPT_ERROR source=browser_type\n`
+      );
+      writeSyntheticErrorResponse(
+        requestId,
+        "ANTIGEN_TYPE_INTERCEPT_ERROR",
+        "Antigen realistic browser_type encountered a network error.",
+      );
+    }
     return;
   }
 

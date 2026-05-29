@@ -17,6 +17,8 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import {
   looksLikeSelector,
@@ -499,5 +501,279 @@ describe("E. Pre-init gate", () => {
 
     adapter.kill("SIGTERM");
     mockServer.close();
+  });
+});
+
+// ─── G. browser_type adapter-owned — no @playwright/mcp fallthrough ───────────
+// browser_type is now fully owned by the adapter. When INTERCEPTION_ENABLED=false,
+// or when the Aegis API returns non-200, or when the network fails, the adapter
+// returns a clean MCP error response. It never forwards browser_type to child.stdin.
+//
+// Test infrastructure:
+//   createFakeMcpBin() — creates a temp dir with a fake "npx" wrapper that runs
+//     a minimal MCP stub (responds to initialize, stays alive). Prepend binPath to
+//     PATH so the adapter finds the fake npx before the real one.
+//   createMockApiServer(opts) — starts an HTTP server handling browser-endpoint
+//     and optionally browser-type with configurable status/body/destroy.
+
+// Inline MCP stub source — responds to initialize, ignores all other messages.
+const FAKE_MCP_STUB_SRC = `
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  try {
+    const msg = JSON.parse(line.trim());
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id: msg.id,
+        result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "fake-mcp", version: "0" } }
+      }) + "\\n");
+    }
+  } catch {}
+});
+process.stdin.resume();
+`;
+
+function createFakeMcpBin() {
+  const tmpDir = mkdtempSync(join(tmpdir(), "antigen-mcp-"));
+  const fakeMcpPath = join(tmpDir, "fake-mcp.mjs");
+  writeFileSync(fakeMcpPath, FAKE_MCP_STUB_SRC, "utf8");
+
+  // Shell wrapper named "npx" — adapter spawns "npx ..."; this fake intercepts it.
+  const fakeNpxPath = join(tmpDir, "npx");
+  writeFileSync(fakeNpxPath, `#!/bin/sh\nexec ${process.execPath} ${fakeMcpPath}\n`, "utf8");
+  chmodSync(fakeNpxPath, 0o755);
+
+  return {
+    binPath: tmpDir,
+    cleanup() { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+async function createMockApiServer(opts = {}) {
+  const { browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false } = opts;
+
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          data: {
+            cdp_url: "http://127.0.0.1:19999",
+            browser_runtime_id: "test_runtime_001",
+            runtime_mode: "test_mode",
+            reused_existing: false,
+          },
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-type") {
+        if (browserTypeDestroy) { req.socket.destroy(); return; }
+        const responseBody = browserTypeBody ?? {
+          ok: true,
+          data: { char_count_bucket: "5-8", duration_ms: 120, focused: true, submitted: false },
+        };
+        res.writeHead(browserTypeStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
+      res.writeHead(404);
+      res.end("{}");
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, port: server.address().port };
+}
+
+function parseMcpResponse(stdoutBuf, id) {
+  const lines = stdoutBuf.split("\n").filter((l) => l.trim());
+  return lines
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .find((m) => m?.id === id) ?? null;
+}
+
+describe("G. browser_type adapter-owned — no Playwright fallthrough", () => {
+
+  test("INTERCEPTION_ENABLED=false: returns clean MCP error with ANTIGEN_REALISM_UNAVAILABLE", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",   // visible mode OFF → INTERCEPTION_ENABLED=false
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    // Send browser_type after a short delay — ensureRuntime fires on first browser call.
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 42, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", ref: "e32", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 42);
+    assert.ok(resp, `expected response for id=42, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_REALISM_UNAVAILABLE"), `expected ANTIGEN_REALISM_UNAVAILABLE in: ${text}`);
+
+    // No Zod target error
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+    assert.ok(!stdoutBuf.includes('"path": ["target"]'), `Zod target error leaked to stdout`);
+
+    // No raw typed text
+    assert.ok(!stdoutBuf.includes("desk lamp"), `raw text value leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, API 422: returns clean MCP error with error code", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 422,
+      browserTypeBody: {
+        ok: false,
+        error: { code: "ELEMENT_NOT_FOUND", message: "Element not found." },
+        data: { char_count_bucket: "5-8", duration_ms: 0 },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 43, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", ref: "e32", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 43);
+    assert.ok(resp, `expected response for id=43, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ELEMENT_NOT_FOUND"), `expected ELEMENT_NOT_FOUND in: ${text}`);
+
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("desk lamp"), `raw text value leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, network error: returns clean MCP error with ANTIGEN_TYPE_INTERCEPT_ERROR", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({ browserTypeDestroy: true });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 44, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search", ref: "e5", text: "table", submit: false } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 44);
+    assert.ok(resp, `expected response for id=44, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_TYPE_INTERCEPT_ERROR"), `expected ANTIGEN_TYPE_INTERCEPT_ERROR in: ${text}`);
+
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("table"), `raw text value leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, API success: returns synthetic success text with no raw text", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: { ok: true, data: { char_count_bucket: "5-8", duration_ms: 150, focused: true, submitted: true } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 45, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search", ref: "e5", text: "sofa chair", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 45);
+    assert.ok(resp, `expected response for id=45, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success (no isError), got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
+    assert.ok(text.includes("char_count_bucket=5-8"), `expected bucket in: ${text}`);
+    assert.ok(text.includes("focused=true"), `expected focused=true in: ${text}`);
+    assert.ok(text.includes("submitted=true"), `expected submitted=true in: ${text}`);
+    assert.ok(!stdoutBuf.includes("sofa chair"), `raw text value leaked to stdout`);
   });
 });

@@ -55,8 +55,9 @@ export interface RealisticTypeResult {
   error?: string;
   char_count_bucket: string;
   duration_ms: number;
-  focused?: boolean;    // true if this call performed a click to focus the target field
-  submitted?: boolean;  // true if Enter was dispatched after typing
+  focused?: boolean;             // true if this call performed a click to focus the target field
+  submitted?: boolean;           // true if Enter was dispatched after typing
+  pointer_path_point_count?: number; // number of pointer movement points in the focus click path; present when focused=true
 }
 
 /**
@@ -83,8 +84,9 @@ export interface RealisticTypeResult {
  *   4. Contains match on any of the above fields
  * Only considers visible (non-zero bounding box) interactive elements.
  */
-export function buildElementFindExpr(elementDescription: string, selectorHint?: string): string {
+export function buildElementFindExpr(elementDescription: string, selectorHint?: string, intent?: "type" | "click"): string {
   const desc = JSON.stringify(elementDescription);
+  const intentVal = JSON.stringify(intent ?? "click");
 
   // Selector-first block: injected only when a hint is available.
   // Wrapped in try/catch so an invalid selector never throws to the caller.
@@ -95,6 +97,7 @@ export function buildElementFindExpr(elementDescription: string, selectorHint?: 
   return `(function(){${selectorBlock}
     var desc=${desc};
     var descLower=desc.toLowerCase();
+    var intent=${intentVal};
     function vis(el){try{var r=el.getBoundingClientRect();return r.width>0||r.height>0;}catch(e){return false;}}
     var q=Array.from(document.querySelectorAll('a,button,[role=button],[role=link],input,select,textarea,[tabindex],[role=combobox],[role=searchbox]'));
     q=q.filter(function(el){return vis(el);});
@@ -110,9 +113,26 @@ export function buildElementFindExpr(elementDescription: string, selectorHint?: 
       if(lby){var lbyText=lby.split(' ').map(function(id){var le=document.getElementById(id);return le?(le.textContent||'').trim():''}).filter(Boolean).join(' ').toLowerCase();if(lbyText)f.push(lbyText);}
       if(el.labels&&el.labels.length>0){var lt=(el.labels[0].textContent||'').trim().toLowerCase();if(lt)f.push(lt);}
       return f.filter(function(s){return s!='';});}
-    var exact=q.filter(function(el){return fields(el).some(function(f){return f===descLower;});});
-    var pool=exact.length>0?exact:q.filter(function(el){return fields(el).some(function(f){return f.includes(descLower);});});
+    function descriptionAliases(d){
+      var a=[d];
+      if(d.includes('search')&&(d.includes('box')||d.includes('field')||d.includes('input')||d.includes('bar'))){a.push('search');}
+      return a.filter(function(v,i,arr){return arr.indexOf(v)===i;});}
+    function isTypeable(el){
+      var tag=el.tagName.toLowerCase();
+      var role=(el.getAttribute('role')||'').toLowerCase();
+      if(tag==='input'||tag==='textarea'){return !el.disabled&&!el.readOnly;}
+      if(el.isContentEditable&&el.contentEditable!=='false'){return true;}
+      if(role==='combobox'||role==='searchbox'||role==='textbox'){return el.getAttribute('aria-disabled')!=='true';}
+      return false;}
+    var aliases=descriptionAliases(descLower);
+    var exact=q.filter(function(el){return fields(el).some(function(f){return aliases.some(function(a){return f===a;});});});
+    var pool=exact.length>0?exact:q.filter(function(el){return fields(el).some(function(f){return aliases.some(function(a){return f.includes(a);});});});
     if(pool.length===0)return null;
+    if(intent==='type'&&pool.length>1){
+      var typeable=pool.filter(isTypeable);
+      if(typeable.length===1){pool=typeable;}
+      else if(typeable.length>1){return 'AMBIGUOUS';}
+    }
     if(pool.length>1)return 'AMBIGUOUS';
     var el=pool[0];
     el.scrollIntoView({block:'center',inline:'center'});
@@ -461,7 +481,7 @@ export async function realisticTypeTextViaCDP(params: {
       if (diagEvalFired) return;
       diagEvalFired = true;
       if (diagFallbackTimerId !== null) clearTimeout(diagFallbackTimerId);
-      evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription!, selectorHint), returnByValue: true }, cdpSessionId!);
+      evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription!, selectorHint, "type"), returnByValue: true }, cdpSessionId!);
     };
 
     ws.on("open", () => {
@@ -505,7 +525,7 @@ export async function realisticTypeTextViaCDP(params: {
             diagFallbackTimerId = setTimeout(fireEvalIdOnce, 1000);
           } else {
             // Non-diagnostic path: fire findExpr directly
-            evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription, selectorHint), returnByValue: true }, cdpSessionId);
+            evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription, selectorHint, "type"), returnByValue: true }, cdpSessionId);
           }
         } else {
           // No-target path: verify there is an active focusable element
@@ -585,11 +605,13 @@ export async function realisticTypeTextViaCDP(params: {
 
         void (async () => {
           try {
+            let focusPathCount: number | undefined;
             await clickBoxWithPointer(state, box, sendCdp, sleep, {
               debugOverlay,
               debugLabel: "type_focus",
               templateTraces: getLoadedPointerTraces(),
               purpose: "input_focus",
+              onFocusComplete: (info) => { focusPathCount = info.path_point_count; },
             });
             if (sessionId) {
               browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
@@ -610,7 +632,14 @@ export async function realisticTypeTextViaCDP(params: {
                 submitted,
               });
             }
-            finish({ success: true, char_count_bucket: typing.char_count_bucket, duration_ms: typing.duration_ms, focused: true, submitted });
+            finish({
+              success: true,
+              char_count_bucket: typing.char_count_bucket,
+              duration_ms: typing.duration_ms,
+              focused: true,
+              submitted,
+              ...(focusPathCount !== undefined ? { pointer_path_point_count: focusPathCount } : {}),
+            });
           } catch (err) {
             finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
           }

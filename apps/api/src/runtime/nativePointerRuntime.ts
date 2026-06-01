@@ -103,6 +103,7 @@ function updatePointerDebugOverlay(
 function renderPointerDebugPath(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   path: TimedPoint[],
+  label?: string,
 ): void {
   if (path.length < 2) return;
   const start = path[0];
@@ -147,6 +148,13 @@ function renderPointerDebugPath(
     + `et.setAttribute('x','${endX + 16}');et.setAttribute('y','${endY - 6}');`
     + `et.setAttribute('fill','rgba(255,80,0,1)');et.setAttribute('font-size','13');et.setAttribute('font-weight','bold');et.setAttribute('font-family','monospace');`
     + `et.textContent='END';svg.appendChild(et);`
+    + (label
+      ? `var lt=document.createElementNS('http://www.w3.org/2000/svg','text');`
+        + `lt.setAttribute('x','${endX + 16}');lt.setAttribute('y','${endY + 30}');`
+        + `lt.setAttribute('fill','rgba(255,255,255,0.9)');lt.setAttribute('font-size','12');lt.setAttribute('font-family','monospace');`
+        + `lt.setAttribute('paint-order','stroke');lt.setAttribute('stroke','rgba(0,0,0,0.8)');lt.setAttribute('stroke-width','3');`
+        + `lt.textContent='Antigen ${label}';svg.appendChild(lt);`
+      : ``)
     + `document.body&&document.body.appendChild(svg);`
     + `setTimeout(function(){if(svg.parentNode)svg.parentNode.removeChild(svg);},8000);`
     + `})()`;
@@ -441,7 +449,15 @@ export async function clickBoxWithPointer(
   box: ElementBox,
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   sleep: (ms: number) => Promise<void>,
-  options?: { random?: () => number; mode?: PointerInteractionMode; debugOverlay?: boolean; debugLabel?: string; templateTraces?: PointerTrace[]; purpose?: TracePurpose },
+  options?: {
+    random?: () => number;
+    mode?: PointerInteractionMode;
+    debugOverlay?: boolean;
+    debugLabel?: string;
+    templateTraces?: PointerTrace[];
+    purpose?: TracePurpose;
+    onFocusComplete?: (info: { path_point_count: number }) => void;
+  },
 ): Promise<void> {
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {
@@ -460,16 +476,23 @@ export async function clickBoxWithPointer(
     };
   }
   const mode = options?.mode ?? state.interaction_mode;
+  let capturedPathCount: number | undefined;
   const target = await movePointerToBox(state, box, effectiveSendCdp, sleep, {
     ...options,
-    ...(options?.debugOverlay
-      ? { onPathReady: (path: TimedPoint[]) => renderPointerDebugPath(sendCdp, path) }
-      : {}),
+    onPathReady: (path: TimedPoint[]) => {
+      capturedPathCount = path.length;
+      if (options?.debugOverlay) {
+        renderPointerDebugPath(sendCdp, path, options?.debugLabel);
+      }
+    },
   });
   await clickAtPoint(effectiveSendCdp, target, mode, sleep);
   state.current_x = target.x;
   state.current_y = target.y;
   state.last_action_at = new Date().toISOString();
+  if (options?.onFocusComplete !== undefined && capturedPathCount !== undefined) {
+    options.onFocusComplete({ path_point_count: capturedPathCount });
+  }
 }
 
 /**

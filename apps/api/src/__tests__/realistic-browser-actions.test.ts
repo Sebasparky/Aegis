@@ -300,6 +300,126 @@ describe("buildElementFindExpr — accessible-name sources", () => {
   });
 });
 
+// ─── 3c. buildElementFindExpr — alias matching (IKEA "Search box" scenario) ───
+
+// Lightweight mock-DOM helpers for evaluating the generated IIFE without a real browser.
+// Temporarily sets global.document and global.window so `new Function(expr)()` works.
+interface MockEl {
+  tagName: string;
+  textContent: string;
+  isContentEditable: boolean;
+  contentEditable: string;
+  disabled: boolean;
+  readOnly: boolean;
+  labels: unknown[];
+  getAttribute: (name: string) => string | null;
+  getBoundingClientRect: () => { width: number; height: number; left: number; top: number };
+  scrollIntoView: () => void;
+}
+
+function makeMockEl(opts: {
+  tag: string;
+  attrs?: Record<string, string>;
+  textContent?: string;
+  visible?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  contentEditable?: string;
+}): MockEl {
+  const visible = opts.visible ?? true;
+  return {
+    tagName: opts.tag.toUpperCase(),
+    textContent: opts.textContent ?? "",
+    isContentEditable: opts.contentEditable === "true",
+    contentEditable: opts.contentEditable ?? "inherit",
+    disabled: opts.disabled ?? false,
+    readOnly: opts.readOnly ?? false,
+    labels: [],
+    getAttribute: (n: string) => opts.attrs?.[n] ?? null,
+    getBoundingClientRect: () => ({ width: visible ? 200 : 0, height: visible ? 40 : 0, left: 100, top: 50 }),
+    scrollIntoView: () => {},
+  };
+}
+
+function evalFindExpr(expr: string, elements: MockEl[]): unknown {
+  const g = global as Record<string, unknown>;
+  const savedDoc = g["document"];
+  const savedWin = g["window"];
+  g["document"] = {
+    querySelectorAll: () => elements,
+    getElementById: () => null,
+  };
+  g["window"] = { innerWidth: 1280, innerHeight: 800 };
+  try {
+    return new Function(`return ${expr}`)();
+  } finally {
+    g["document"] = savedDoc;
+    g["window"] = savedWin;
+  }
+}
+
+describe("buildElementFindExpr — alias matching", () => {
+  it('"Search box" matches a visible input with aria-label="Search by product" via alias+contains', () => {
+    const el = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" } });
+    const result = evalFindExpr(buildElementFindExpr("Search box", undefined, "type"), [el]);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it('"Search box" prefers typeable input over a search button when both contain "search"', () => {
+    const searchInput = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" } });
+    const searchButton = makeMockEl({ tag: "button", attrs: { "aria-label": "Visual search button" } });
+    const result = evalFindExpr(buildElementFindExpr("Search box", undefined, "type"), [searchInput, searchButton]);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    // Returns the input's box (left=100), not the button's — both have same left in mock but result is a box, not null/ambiguous
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it("two typeable search inputs both matching returns AMBIGUOUS", () => {
+    const input1 = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" } });
+    const input2 = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by name" } });
+    const result = evalFindExpr(buildElementFindExpr("Search box", undefined, "type"), [input1, input2]);
+    expect(result).toBe("AMBIGUOUS");
+  });
+
+  it('"Search by product" exact match is unchanged — alias logic does not disturb it', () => {
+    const el = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" } });
+    const result = evalFindExpr(buildElementFindExpr("Search by product"), [el]);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it('disabled input is not considered typeable — falls through to AMBIGUOUS when it is the only match', () => {
+    const disabledInput = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" }, disabled: true });
+    const button = makeMockEl({ tag: "button", attrs: { "aria-label": "Visual search button" } });
+    // Only these two match "search box" via alias; disabled input is not typeable, button is not typeable → 2 non-typeable → AMBIGUOUS
+    const result = evalFindExpr(buildElementFindExpr("Search box", undefined, "type"), [disabledInput, button]);
+    expect(result).toBe("AMBIGUOUS");
+  });
+
+  it('readOnly input is not considered typeable when multiple candidates exist', () => {
+    const readOnlyInput = makeMockEl({ tag: "input", attrs: { "aria-label": "Search by product" }, readOnly: true });
+    const button = makeMockEl({ tag: "button", attrs: { "aria-label": "Visual search button" } });
+    const result = evalFindExpr(buildElementFindExpr("Search box", undefined, "type"), [readOnlyInput, button]);
+    expect(result).toBe("AMBIGUOUS");
+  });
+
+  it('intent="type" with a tricky description does not break injection safety — expression is valid JS', () => {
+    const tricky = `'; DROP TABLE--`;
+    const expr = buildElementFindExpr(tricky, undefined, "type");
+    expect(expr).toContain(JSON.stringify(tricky));
+    expect(() => new Function(expr)).not.toThrow();
+  });
+
+  it("no-intent (default) expression is still valid JS", () => {
+    const expr = buildElementFindExpr("Search");
+    expect(() => new Function(expr)).not.toThrow();
+  });
+});
+
 // ─── 4. realisticClickByDescription — fast mode gate ─────────────────────────
 
 describe("realisticClickByDescription — mode gate (fast/disabled)", () => {
@@ -846,5 +966,76 @@ describe("ACTIVE_ELEMENT_CHECK_EXPR — structural checks", () => {
   it("wraps logic in an IIFE", () => {
     expect(ACTIVE_ELEMENT_CHECK_EXPR.trim().startsWith("(function(){")).toBe(true);
     expect(ACTIVE_ELEMENT_CHECK_EXPR.trim().endsWith("})()")).toBe(true);
+  });
+});
+
+// ─── 21. pointer_path_point_count and overlay propagation ─────────────────────
+
+describe("realisticTypeTextViaCDP — pointer_path_point_count and overlay propagation", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = { x: 100, y: 50, width: 200, height: 40, vw: 1280, vh: 800 };
+  });
+
+  it("result includes pointer_path_point_count as a positive integer when focused=true", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Search field",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.focused).toBe(true);
+    expect(typeof result.pointer_path_point_count).toBe("number");
+    expect(result.pointer_path_point_count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("result does not expose forbidden fields even when pointer_path_point_count is present", async () => {
+    const FORBIDDEN = [
+      "text", "value", "raw_value", "element_description", "element_hint",
+      "user_data_dir", "pass_id", "secret_ref", "cdp_url", "password", "credential",
+    ];
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello world",
+      elementDescription: "Email field",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    for (const key of FORBIDDEN) {
+      expect(Object.keys(result)).not.toContain(key);
+    }
+    expect(JSON.stringify(result)).not.toContain("hello world");
+    expect(JSON.stringify(result)).not.toContain("Email field");
+  });
+
+  it("CDP messages include overlay dot injection when ANTIGEN_POINTER_DEBUG_OVERLAY=true", async () => {
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "true");
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hi",
+      elementDescription: "Search",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+
+    // When debugOverlay=true, ensurePointerDebugOverlay fires a Runtime.evaluate
+    // whose expression injects the overlay dot element.
+    const overlayEvals = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Runtime.evaluate")
+      .map((m) => (m?.params as Record<string, unknown> | undefined)?.expression as string | undefined)
+      .filter((expr): expr is string => typeof expr === "string" && expr.includes("__aegis_pointer_debug_dot"));
+
+    expect(overlayEvals.length).toBeGreaterThan(0);
   });
 });

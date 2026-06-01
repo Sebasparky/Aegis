@@ -100,6 +100,31 @@ vi.mock("ws", () => {
   return { default: MockWs };
 });
 
+// ─── taskBrowserSessions mock ────────────────────────────────────────────────
+// Provides a mutable in-memory pointer store so tests can seed saved state and
+// verify that it was read/written correctly by the browsing action functions.
+const taskMockState = vi.hoisted(() => ({
+  pointerStore: new Map<string, { x: number; y: number; initialized: boolean; updated_at?: string }>(),
+  setCalls: [] as Array<{ id: string; userId: string; x: number; y: number }>,
+  reset() {
+    this.pointerStore.clear();
+    this.setCalls = [];
+  },
+}));
+
+vi.mock("../runtime/taskBrowserSessions.js", () => ({
+  getTaskBrowserSessionPointerState: (id: string, _userId: string) =>
+    taskMockState.pointerStore.get(id),
+  setTaskBrowserSessionPointerState: (
+    id: string,
+    userId: string,
+    ps: { x: number; y: number; initialized: boolean; updated_at?: string },
+  ) => {
+    taskMockState.pointerStore.set(id, ps);
+    taskMockState.setCalls.push({ id, userId, x: ps.x, y: ps.y });
+  },
+}));
+
 // ─── Module imports (after mock declarations) ─────────────────────────────────
 import {
   dispatchTextCharsViaCDP,
@@ -127,6 +152,7 @@ function makeFetchMock(versionResp: unknown, listResp: unknown) {
 
 beforeEach(() => {
   mockState.reset();
+  taskMockState.reset();
   vi.unstubAllEnvs();
 });
 
@@ -1037,5 +1063,240 @@ describe("realisticTypeTextViaCDP — pointer_path_point_count and overlay propa
       .filter((expr): expr is string => typeof expr === "string" && expr.includes("__aegis_pointer_debug_dot"));
 
     expect(overlayEvals.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── 22. Persistent pointer continuity — taskBrowserSessions integration ──────
+//
+// Verifies that browser_type and browser_click:
+//   - load saved pointer state from taskBrowserSessions when sessionId + userId are provided
+//   - fall back to viewport center when no state is saved
+//   - persist final pointer position back to taskBrowserSessions after each action
+//   - share the same pointer store so cross-action continuity works
+//   - never expose raw coordinates or forbidden fields in result objects
+
+describe("Persistent pointer continuity — taskBrowserSessions integration", () => {
+  const SESSION_ID = "tbsess_test_001";
+  const USER_ID = "user_test_001";
+  const BOX_RESP = { x: 100, y: 200, width: 80, height: 40, vw: 1280, vh: 800 };
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = BOX_RESP;
+  });
+
+  // Test 1 — browser_type first action with no stored state
+  it("browser_type: no stored state → viewport_center start, state persisted", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Search field",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("viewport_center");
+    expect(result.pointer_state_persisted).toBe(true);
+    expect(result.focused).toBe(true);
+    expect(typeof result.pointer_path_point_count).toBe("number");
+    expect(result.pointer_path_point_count).toBeGreaterThanOrEqual(1);
+    // State should now be saved so next action can load it
+    expect(taskMockState.setCalls).toHaveLength(1);
+    expect(taskMockState.setCalls[0].id).toBe(SESSION_ID);
+    expect(taskMockState.setCalls[0].userId).toBe(USER_ID);
+  });
+
+  // Test 2 — browser_type second action in same session uses saved state
+  it("browser_type: saved state present → session start, first mouseMoved near saved coords", async () => {
+    // Seed a position that is far from viewport center (640, 400)
+    taskMockState.pointerStore.set(SESSION_ID, { x: 450, y: 300, initialized: true });
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "second",
+      elementDescription: "Search field",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("session");
+
+    // Find all mouseMoved events dispatched to verify starting position
+    const mouseMovedEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved")
+      .map((m) => m.params as { x: number; y: number });
+
+    expect(mouseMovedEvents.length).toBeGreaterThan(0);
+    // First mouseMoved should be closer to the saved position (450, 300) than to
+    // viewport center (640, 400). Threshold: within 50px of saved start.
+    const first = mouseMovedEvents[0];
+    expect(Math.abs(first.x - 450)).toBeLessThan(50);
+    expect(Math.abs(first.y - 300)).toBeLessThan(50);
+  });
+
+  // Test 3 — browser_click uses the same saved pointer state as browser_type
+  it("browser_click: saved state from browser_type → session start", async () => {
+    taskMockState.pointerStore.set(SESSION_ID, { x: 350, y: 250, initialized: true });
+
+    const resultPromise = realisticClickByDescription({
+      cdpUrl: "http://localhost:9222",
+      elementDescription: "Submit button",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("session");
+    expect(result.pointer_state_persisted).toBe(true);
+    expect(typeof result.pointer_path_point_count).toBe("number");
+    expect(result.pointer_path_point_count).toBeGreaterThanOrEqual(1);
+
+    const mouseMovedEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved")
+      .map((m) => m.params as { x: number; y: number });
+
+    expect(mouseMovedEvents.length).toBeGreaterThan(0);
+    const first = mouseMovedEvents[0];
+    expect(Math.abs(first.x - 350)).toBeLessThan(50);
+    expect(Math.abs(first.y - 250)).toBeLessThan(50);
+  });
+
+  // Test 4 — browser_type after browser_click starts from browser_click final position
+  it("browser_type after browser_click: starts from browser_click saved position", async () => {
+    // Simulate browser_click having run and saved its final position
+    taskMockState.pointerStore.set(SESSION_ID, { x: 520, y: 180, initialized: true });
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "followup",
+      elementDescription: "Text field",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("session");
+
+    const mouseMovedEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseMoved")
+      .map((m) => m.params as { x: number; y: number });
+
+    const first = mouseMovedEvents[0];
+    expect(Math.abs(first.x - 520)).toBeLessThan(50);
+    expect(Math.abs(first.y - 180)).toBeLessThan(50);
+  });
+
+  // Test 5 — no-session path: viewport-center fallback, no persistence attempted
+  it("no sessionId/userId: falls back to viewport center, does not persist", async () => {
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hello",
+      elementDescription: "Search",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("viewport_center");
+    expect(result.pointer_state_persisted).toBe(false);
+    // setTaskBrowserSessionPointerState must not have been called
+    expect(taskMockState.setCalls).toHaveLength(0);
+  });
+
+  it("browser_click no sessionId/userId: falls back to viewport center, does not persist", async () => {
+    const resultPromise = realisticClickByDescription({
+      cdpUrl: "http://localhost:9222",
+      elementDescription: "Button",
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.pointer_start_source).toBe("viewport_center");
+    expect(result.pointer_state_persisted).toBe(false);
+    expect(taskMockState.setCalls).toHaveLength(0);
+  });
+
+  // Test 6 — result objects must not expose coordinates or forbidden fields
+  it("browser_type result does not expose coordinates or forbidden fields", async () => {
+    const FORBIDDEN_KEYS = [
+      "current_x", "current_y", "target_x", "target_y",
+      "pointer_start_x", "pointer_start_y", "x", "y",
+      "text", "value", "raw_value", "element_description",
+      "cdp_url", "user_data_dir", "pass_id", "secret_ref",
+      "password", "cookies", "localStorage", "sessionStorage",
+    ];
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "safe text",
+      elementDescription: "Field",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    for (const key of FORBIDDEN_KEYS) {
+      expect(Object.keys(result)).not.toContain(key);
+    }
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("safe text");
+    expect(serialized).not.toContain("Field");
+  });
+
+  it("browser_click result does not expose coordinates or forbidden fields", async () => {
+    const FORBIDDEN_KEYS = [
+      "current_x", "current_y", "target_x", "target_y",
+      "pointer_start_x", "pointer_start_y", "x", "y",
+      "element_description", "cdp_url", "user_data_dir",
+      "pass_id", "secret_ref", "password",
+    ];
+
+    const resultPromise = realisticClickByDescription({
+      cdpUrl: "http://localhost:9222",
+      elementDescription: "Submit button",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    for (const key of FORBIDDEN_KEYS) {
+      expect(Object.keys(result)).not.toContain(key);
+    }
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("Submit button");
+  });
+
+  // Test 7 — browser_click emits pointer_path_point_count
+  it("browser_click: pointer_path_point_count is a positive integer in success result", async () => {
+    const resultPromise = realisticClickByDescription({
+      cdpUrl: "http://localhost:9222",
+      elementDescription: "Add to cart",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(typeof result.pointer_path_point_count).toBe("number");
+    expect(result.pointer_path_point_count).toBeGreaterThanOrEqual(1);
   });
 });

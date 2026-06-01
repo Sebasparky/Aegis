@@ -26,10 +26,14 @@ import {
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
 import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
+import {
+  getTaskBrowserSessionPointerState,
+  setTaskBrowserSessionPointerState,
+} from "./taskBrowserSessions.js";
 
-// Module-level general browsing pointer state — tracks position between actions
-// in the same browser session. Keyed by browser_runtime_id.
-// Separate from credential injection pointer state to avoid cross-contamination.
+// Module-level general browsing pointer state — fast in-process fallback when
+// userId is unavailable. Keyed by browser_session_id. When userId is known,
+// taskBrowserSessions is used as the shared cross-path store instead.
 const browsingPointerState = new Map<string, { x: number; y: number }>();
 
 export const GENERAL_TYPING_PROFILE = { min_ms: 30, max_ms: 80 } as const;
@@ -48,6 +52,9 @@ export const ACTIVE_ELEMENT_CHECK_EXPR = `(function(){
 export interface RealisticClickResult {
   success: boolean;
   error?: string;
+  pointer_start_source?: "session" | "viewport_center";
+  pointer_path_point_count?: number;
+  pointer_state_persisted?: boolean;
 }
 
 export interface RealisticTypeResult {
@@ -57,7 +64,9 @@ export interface RealisticTypeResult {
   duration_ms: number;
   focused?: boolean;             // true if this call performed a click to focus the target field
   submitted?: boolean;           // true if Enter was dispatched after typing
-  pointer_path_point_count?: number; // number of pointer movement points in the focus click path; present when focused=true
+  pointer_path_point_count?: number; // present when focused=true
+  pointer_start_source?: "session" | "viewport_center";
+  pointer_state_persisted?: boolean;
 }
 
 /**
@@ -216,13 +225,14 @@ export async function realisticClickByDescription(params: {
   cdpUrl: string;
   elementDescription: string;
   sessionId?: string;
+  userId?: string;
   selectorHint?: string;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, elementDescription, sessionId, selectorHint } = params;
+  const { cdpUrl, elementDescription, sessionId, userId, selectorHint } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -329,10 +339,19 @@ export async function realisticClickByDescription(params: {
           });
         }
 
-        const localState = sessionId ? browsingPointerState.get(sessionId) : undefined;
+        // Two-tier pointer state load: taskBrowserSessions (shared cross-path store)
+        // preferred when userId is available; browsingPointerState as fast fallback.
+        let savedClickState: { x: number; y: number } | undefined;
+        if (sessionId && userId) {
+          const saved = getTaskBrowserSessionPointerState(sessionId, userId);
+          if (saved?.initialized) savedClickState = { x: saved.x, y: saved.y };
+        }
+        if (!savedClickState && sessionId) savedClickState = browsingPointerState.get(sessionId);
+        const clickPointerStartSource: "session" | "viewport_center" = savedClickState ? "session" : "viewport_center";
+
         const state = makePointerRuntimeState({
-          current_x: localState?.x ?? vw / 2,
-          current_y: localState?.y ?? vh / 2,
+          current_x: savedClickState?.x ?? vw / 2,
+          current_y: savedClickState?.y ?? vh / 2,
           viewport_width: vw,
           viewport_height: vh,
           browser_session_id: sessionId,
@@ -346,16 +365,33 @@ export async function realisticClickByDescription(params: {
 
         void (async () => {
           try {
+            let clickPathCount: number | undefined;
             await clickBoxWithPointer(state, box, sendCdp, sleep, {
               debugOverlay,
               debugLabel: "general_click",
               templateTraces: getLoadedPointerTraces(),
               purpose: "button_click",
+              onFocusComplete: (info) => { clickPathCount = info.path_point_count; },
             });
+            let clickStatePersisted = false;
             if (sessionId) {
               browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+              if (userId) {
+                setTaskBrowserSessionPointerState(sessionId, userId, {
+                  x: state.current_x,
+                  y: state.current_y,
+                  initialized: true,
+                  updated_at: new Date().toISOString(),
+                });
+                clickStatePersisted = true;
+              }
             }
-            finish({ success: true });
+            finish({
+              success: true,
+              pointer_start_source: clickPointerStartSource,
+              ...(clickPathCount !== undefined ? { pointer_path_point_count: clickPathCount } : {}),
+              pointer_state_persisted: clickStatePersisted,
+            });
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }
@@ -387,6 +423,7 @@ export async function realisticTypeTextViaCDP(params: {
   cdpUrl: string;
   text: string;
   sessionId?: string;
+  userId?: string;
   elementDescription?: string;
   selectorHint?: string;
   submit?: boolean;
@@ -397,7 +434,7 @@ export async function realisticTypeTextViaCDP(params: {
     return { success: false, error: "REALISM_DISABLED", char_count_bucket: charCountBucket, duration_ms: 0 };
   }
 
-  const { cdpUrl, text, elementDescription, selectorHint, submit, sessionId } = params;
+  const { cdpUrl, text, elementDescription, selectorHint, submit, sessionId, userId } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -588,10 +625,19 @@ export async function realisticTypeTextViaCDP(params: {
           });
         }
 
-        const localState = sessionId ? browsingPointerState.get(sessionId) : undefined;
+        // Two-tier pointer state load: taskBrowserSessions preferred when userId is
+        // available; browsingPointerState as fast in-process fallback.
+        let savedTypeState: { x: number; y: number } | undefined;
+        if (sessionId && userId) {
+          const saved = getTaskBrowserSessionPointerState(sessionId, userId);
+          if (saved?.initialized) savedTypeState = { x: saved.x, y: saved.y };
+        }
+        if (!savedTypeState && sessionId) savedTypeState = browsingPointerState.get(sessionId);
+        const typePointerStartSource: "session" | "viewport_center" = savedTypeState ? "session" : "viewport_center";
+
         const state = makePointerRuntimeState({
-          current_x: localState?.x ?? vw / 2,
-          current_y: localState?.y ?? vh / 2,
+          current_x: savedTypeState?.x ?? vw / 2,
+          current_y: savedTypeState?.y ?? vh / 2,
           viewport_width: vw,
           viewport_height: vh,
           browser_session_id: sessionId,
@@ -613,8 +659,18 @@ export async function realisticTypeTextViaCDP(params: {
               purpose: "input_focus",
               onFocusComplete: (info) => { focusPathCount = info.path_point_count; },
             });
+            let typeStatePersisted = false;
             if (sessionId) {
               browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+              if (userId) {
+                setTaskBrowserSessionPointerState(sessionId, userId, {
+                  x: state.current_x,
+                  y: state.current_y,
+                  initialized: true,
+                  updated_at: new Date().toISOString(),
+                });
+                typeStatePersisted = true;
+              }
             }
             const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
             let submitted = false;
@@ -639,6 +695,8 @@ export async function realisticTypeTextViaCDP(params: {
               focused: true,
               submitted,
               ...(focusPathCount !== undefined ? { pointer_path_point_count: focusPathCount } : {}),
+              pointer_start_source: typePointerStartSource,
+              pointer_state_persisted: typeStatePersisted,
             });
           } catch (err) {
             finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });

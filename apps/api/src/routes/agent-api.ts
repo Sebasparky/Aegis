@@ -3446,6 +3446,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       cdpUrl: session.cdp_url,
       elementDescription: body.element_description,
       sessionId: session.browser_session_id,
+      userId: MOCK_USER_ID,
       selectorHint,
     });
 
@@ -3458,7 +3459,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.status(422).send({ ok: false, error: { code, message: result.error ?? "Realistic click failed." } });
     }
 
-    return reply.send({ ok: true, data: { mode: "realistic_pointer_click" } });
+    return reply.send({
+      ok: true,
+      data: {
+        mode: "realistic_pointer_click",
+        ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
+        ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
+        ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
+      },
+    });
   });
 
   server.post("/api/agent/v1/runtime/browser-type", async (req, reply) => {
@@ -3500,6 +3509,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       cdpUrl: session.cdp_url,
       text: body.text,
       sessionId: session.browser_session_id,
+      userId: MOCK_USER_ID,
       elementDescription,
       selectorHint,
       submit: submitFlag,
@@ -3521,6 +3531,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(result.focused !== undefined ? { focused: result.focused } : {}),
         ...(result.submitted !== undefined ? { submitted: result.submitted } : {}),
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
+        ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
+        ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
       },
     });
   });

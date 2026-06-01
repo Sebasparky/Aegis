@@ -863,6 +863,7 @@ async function handleLine(line) {
         const resBucket              = resBody?.data?.char_count_bucket ?? bucket;
         const resFocused             = resBody?.data?.focused;
         const resSubmitted           = resBody?.data?.submitted;
+        const resSubmitMethod        = resBody?.data?.submit_method;
         const resPointerCount        = resBody?.data?.pointer_path_point_count;
         const resPointerStartSource  = resBody?.data?.pointer_start_source;
         const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;
@@ -876,6 +877,7 @@ async function handleLine(line) {
             bucket: resBucket,
             focused: resFocused,
             submitted: resSubmitted,
+            submitMethod: resSubmitMethod,
             pointerPathPointCount: resPointerCount,
             pointerStartSource: resPointerStartSource,
             pointerStatePersisted: resPointerStatePersisted,

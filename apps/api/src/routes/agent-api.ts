@@ -3530,6 +3530,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         duration_ms: result.duration_ms,
         ...(result.focused !== undefined ? { focused: result.focused } : {}),
         ...(result.submitted !== undefined ? { submitted: result.submitted } : {}),
+        ...(result.submit_method !== undefined ? { submit_method: result.submit_method } : {}),
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
         ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
         ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),

@@ -677,6 +677,181 @@ describe("H. pointer_path_point_count surfacing", () => {
   });
 });
 
+// ─── I. submit_method surfacing ───────────────────────────────────────────────
+
+describe("I. submit_method surfacing", () => {
+  const V = "2026-05-29";
+
+  test("buildSyntheticSuccessText includes submit_method=enter when provided", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", submitted: true, submitMethod: "enter", version: V,
+    });
+    assert.ok(text.includes("submit_method=enter"), `missing submit_method=enter: ${text}`);
+    assert.ok(text.includes("submitted=true"), `missing submitted=true: ${text}`);
+  });
+
+  test("buildSyntheticSuccessText includes submit_method=button_fallback when provided", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", submitted: true, submitMethod: "button_fallback", version: V,
+    });
+    assert.ok(text.includes("submit_method=button_fallback"), `missing submit_method=button_fallback: ${text}`);
+  });
+
+  test("buildSyntheticSuccessText omits submit_method when not provided", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", submitted: true, version: V,
+    });
+    assert.ok(!text.includes("submit_method="), `unexpected submit_method in: ${text}`);
+  });
+
+  test("submit_method appears after submitted in the output string", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", submitted: true, submitMethod: "enter", version: V,
+    });
+    const subIdx = text.indexOf("submitted=");
+    const smIdx = text.indexOf("submit_method=");
+    assert.ok(smIdx > subIdx, `submit_method should appear after submitted: ${text}`);
+  });
+
+  test("browser_fill is not affected by submitMethod param", () => {
+    const text = buildSyntheticSuccessText("browser_fill", {
+      bucket: "5-8", submitMethod: "enter", version: V,
+    });
+    assert.ok(!text.includes("submit_method="), `browser_fill should not include submit_method: ${text}`);
+  });
+
+  test("adapter emits submit_method=enter in browser_type success text", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: true, submit_method: "enter" },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 60, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 60);
+    assert.ok(resp, `expected response for id=60, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("submit_method=enter"), `missing submit_method=enter: ${text}`);
+    assert.ok(text.includes("submitted=true"), `missing submitted=true: ${text}`);
+    assert.ok(text.includes("path=realistic_success"), `missing path=realistic_success: ${text}`);
+  });
+
+  test("adapter emits submit_method=button_fallback in browser_type success text", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 200, focused: true, submitted: true, submit_method: "button_fallback" },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 61, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 61);
+    assert.ok(resp, `expected response for id=61, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("submit_method=button_fallback"), `missing submit_method=button_fallback: ${text}`);
+    assert.ok(text.includes("submitted=true"), `missing submitted=true: ${text}`);
+  });
+
+  test("success text contains no forbidden fields regardless of submit_method", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: true, submit_method: "button_fallback" },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 62, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", text: "secret_value_xyz", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    assert.ok(!stdoutBuf.includes("secret_value_xyz"), `raw typed text leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("cdp_url"), `cdp_url leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("user_data_dir"), `user_data_dir leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("secret_ref"), `secret_ref leaked to stdout`);
+  });
+});
+
 // ─── G. browser_type adapter-owned — no @playwright/mcp fallthrough ───────────
 // browser_type is now fully owned by the adapter. When INTERCEPTION_ENABLED=false,
 // or when the Aegis API returns non-200, or when the network fails, the adapter

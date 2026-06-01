@@ -49,6 +49,19 @@ export const ACTIVE_ELEMENT_CHECK_EXPR = `(function(){
   return null;
 })()`;
 
+// JS IIFE that finds a visible search/submit button.
+// Returns { x, y, width, height, vw, vh } or null. Used by the submit fallback path
+// when Enter does not trigger navigation. Returns only box geometry — no text or hrefs.
+export const SEARCH_BUTTON_FIND_EXPR = "(function(){"
+  + "var selectors=['button[type=submit]','input[type=submit]',"
+  + "'button[aria-label*=\"search\" i]','[role=\"button\"][aria-label*=\"search\" i]'];"
+  + "for(var i=0;i<selectors.length;i++){"
+  + "var el=document.querySelector(selectors[i]);"
+  + "if(!el)continue;"
+  + "var r=el.getBoundingClientRect();"
+  + "if(r.width>0&&r.height>0)return{x:r.left,y:r.top,width:r.width,height:r.height,vw:window.innerWidth,vh:window.innerHeight};}"
+  + "return null;})()";
+
 export interface RealisticClickResult {
   success: boolean;
   error?: string;
@@ -64,6 +77,7 @@ export interface RealisticTypeResult {
   duration_ms: number;
   focused?: boolean;             // true if this call performed a click to focus the target field
   submitted?: boolean;           // true if Enter was dispatched after typing
+  submit_method?: "enter" | "button_fallback"; // present when submitted=true
   pointer_path_point_count?: number; // present when focused=true
   pointer_start_source?: "session" | "viewport_center";
   pointer_state_persisted?: boolean;
@@ -526,6 +540,10 @@ export async function realisticTypeTextViaCDP(params: {
     let diagEvalFired = false;
     let diagFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
     const startMs = Date.now();
+    // One-time CDP response handlers for sendAndWait calls inside Stage 2a/2b IIFEs.
+    // Checked before all named stage handlers in ws.on("message", ...).
+    const oneTimeHandlers = new Map<number, (result: Record<string, unknown> | undefined) => void>();
+    let finishCalled = false;
 
     const timer = setTimeout(() => {
       ws.terminate();
@@ -541,6 +559,8 @@ export async function realisticTypeTextViaCDP(params: {
     };
 
     const finish = (result: RealisticTypeResult) => {
+      if (finishCalled) return;
+      finishCalled = true;
       clearTimeout(timer);
       if (diagFallbackTimerId !== null) clearTimeout(diagFallbackTimerId);
       ws.close();
@@ -571,6 +591,14 @@ export async function realisticTypeTextViaCDP(params: {
       const id = msg.id as number | undefined;
       if (id === undefined) return;
       const result = msg.result as Record<string, unknown> | undefined;
+
+      // Dispatch one-time handlers (sendAndWait) before named stage handlers.
+      if (oneTimeHandlers.has(id)) {
+        const handler = oneTimeHandlers.get(id)!;
+        oneTimeHandlers.delete(id);
+        handler(result);
+        return;
+      }
 
       // ── Stage 1: attach response ──────────────────────────────────────────────
       if (id === attachId) {
@@ -686,6 +714,12 @@ export async function realisticTypeTextViaCDP(params: {
 
         void (async () => {
           try {
+            const sendAndWait = (method: string, p: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+              new Promise((resolve) => {
+                const id = sendMsg(method, p, cdpSessionId!);
+                oneTimeHandlers.set(id, resolve);
+              });
+
             let focusPathCount: number | undefined;
             await clickBoxWithPointer(state, box, sendCdp, sleep, {
               debugOverlay,
@@ -707,13 +741,58 @@ export async function realisticTypeTextViaCDP(params: {
                 typeStatePersisted = true;
               }
             }
+
+            // Capture URL before typing — only when submit=true, for post-Enter navigation check.
+            let urlBefore: string | null = null;
+            if (submit) {
+              const r = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+              urlBefore = (r?.result as Record<string, unknown>)?.value as string ?? null;
+            }
+
             const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
             let submitted = false;
+            let submitMethod: "enter" | "button_fallback" | undefined;
             if (submit) {
               await dispatchEnterViaCDP(sendCdp, sleep);
               submitted = true;
               if (cdpDiagnostics) console.log("[RealisticType] submit_success", { surface: "browser_type" });
+              submitMethod = "enter";
+
+              // Fallback: if Enter did not navigate, try a visible search/submit button.
+              if (urlBefore !== null) {
+                await sleep(300);
+                const r2 = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+                const urlAfter = (r2?.result as Record<string, unknown>)?.value as string ?? null;
+                if (urlAfter !== null && urlAfter === urlBefore) {
+                  const r3 = await sendAndWait("Runtime.evaluate", { expression: SEARCH_BUTTON_FIND_EXPR, returnByValue: true });
+                  const btn = (r3?.result as Record<string, unknown>)?.value as { x: number; y: number; width: number; height: number; vw: number; vh: number } | null | undefined;
+                  if (btn && btn.width > 0 && btn.height > 0) {
+                    // state already holds pointer at search-input position — fallback click moves naturally from there.
+                    const fallbackBox: ElementBox = { x: btn.x, y: btn.y, width: btn.width, height: btn.height };
+                    await clickBoxWithPointer(state, fallbackBox, sendCdp, sleep, {
+                      debugOverlay,
+                      debugLabel: "submit_button_fallback",
+                      templateTraces: getLoadedPointerTraces(),
+                      purpose: "button_click",
+                    });
+                    if (sessionId) {
+                      browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+                      if (userId) {
+                        setTaskBrowserSessionPointerState(sessionId, userId, {
+                          x: state.current_x,
+                          y: state.current_y,
+                          initialized: true,
+                          updated_at: new Date().toISOString(),
+                        });
+                      }
+                    }
+                    submitMethod = "button_fallback";
+                    if (cdpDiagnostics) console.log("[RealisticType] submit_button_fallback", { surface: "browser_type" });
+                  }
+                }
+              }
             }
+
             if (cdpDiagnostics) {
               console.log("[RealisticType] complete", {
                 surface: "browser_type",
@@ -721,6 +800,7 @@ export async function realisticTypeTextViaCDP(params: {
                 duration_ms: typing.duration_ms,
                 focused: true,
                 submitted,
+                ...(submitMethod !== undefined ? { submit_method: submitMethod } : {}),
               });
             }
             finish({
@@ -729,6 +809,7 @@ export async function realisticTypeTextViaCDP(params: {
               duration_ms: typing.duration_ms,
               focused: true,
               submitted,
+              ...(submitMethod !== undefined ? { submit_method: submitMethod } : {}),
               ...(focusPathCount !== undefined ? { pointer_path_point_count: focusPathCount } : {}),
               pointer_start_source: typePointerStartSource,
               pointer_state_persisted: typeStatePersisted,
@@ -757,13 +838,74 @@ export async function realisticTypeTextViaCDP(params: {
 
         void (async () => {
           try {
+            const sendAndWait = (method: string, p: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+              new Promise((resolve) => {
+                const id = sendMsg(method, p, cdpSessionId!);
+                oneTimeHandlers.set(id, resolve);
+              });
+
+            let urlBefore: string | null = null;
+            if (submit) {
+              const r = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+              urlBefore = (r?.result as Record<string, unknown>)?.value as string ?? null;
+            }
+
             const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
             let submitted = false;
+            let submitMethod: "enter" | "button_fallback" | undefined;
             if (submit) {
               await dispatchEnterViaCDP(sendCdp, sleep);
               submitted = true;
               if (cdpDiagnostics) console.log("[RealisticType] submit_success", { surface: "browser_type" });
+              submitMethod = "enter";
+
+              if (urlBefore !== null) {
+                await sleep(300);
+                const r2 = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+                const urlAfter = (r2?.result as Record<string, unknown>)?.value as string ?? null;
+                if (urlAfter !== null && urlAfter === urlBefore) {
+                  const r3 = await sendAndWait("Runtime.evaluate", { expression: SEARCH_BUTTON_FIND_EXPR, returnByValue: true });
+                  const btn = (r3?.result as Record<string, unknown>)?.value as { x: number; y: number; width: number; height: number; vw: number; vh: number } | null | undefined;
+                  if (btn && btn.width > 0 && btn.height > 0) {
+                    let savedFallbackState: { x: number; y: number } | undefined;
+                    if (sessionId && userId) {
+                      const saved = getTaskBrowserSessionPointerState(sessionId, userId);
+                      if (saved?.initialized) savedFallbackState = { x: saved.x, y: saved.y };
+                    }
+                    if (!savedFallbackState && sessionId) savedFallbackState = browsingPointerState.get(sessionId);
+                    const fallbackState = makePointerRuntimeState({
+                      current_x: savedFallbackState?.x ?? btn.vw / 2,
+                      current_y: savedFallbackState?.y ?? btn.vh / 2,
+                      viewport_width: btn.vw,
+                      viewport_height: btn.vh,
+                      browser_session_id: sessionId,
+                      interaction_mode: "realistic",
+                    });
+                    const fallbackBox: ElementBox = { x: btn.x, y: btn.y, width: btn.width, height: btn.height };
+                    await clickBoxWithPointer(fallbackState, fallbackBox, sendCdp, sleep, {
+                      debugOverlay,
+                      debugLabel: "submit_button_fallback",
+                      templateTraces: getLoadedPointerTraces(),
+                      purpose: "button_click",
+                    });
+                    if (sessionId) {
+                      browsingPointerState.set(sessionId, { x: fallbackState.current_x, y: fallbackState.current_y });
+                      if (userId) {
+                        setTaskBrowserSessionPointerState(sessionId, userId, {
+                          x: fallbackState.current_x,
+                          y: fallbackState.current_y,
+                          initialized: true,
+                          updated_at: new Date().toISOString(),
+                        });
+                      }
+                    }
+                    submitMethod = "button_fallback";
+                    if (cdpDiagnostics) console.log("[RealisticType] submit_button_fallback", { surface: "browser_type" });
+                  }
+                }
+              }
             }
+
             if (cdpDiagnostics) {
               console.log("[RealisticType] complete", {
                 surface: "browser_type",
@@ -771,9 +913,17 @@ export async function realisticTypeTextViaCDP(params: {
                 duration_ms: typing.duration_ms,
                 focused: false,
                 submitted,
+                ...(submitMethod !== undefined ? { submit_method: submitMethod } : {}),
               });
             }
-            finish({ success: true, char_count_bucket: typing.char_count_bucket, duration_ms: typing.duration_ms, focused: false, submitted });
+            finish({
+              success: true,
+              char_count_bucket: typing.char_count_bucket,
+              duration_ms: typing.duration_ms,
+              focused: false,
+              submitted,
+              ...(submitMethod !== undefined ? { submit_method: submitMethod } : {}),
+            });
           } catch (err) {
             finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
           }

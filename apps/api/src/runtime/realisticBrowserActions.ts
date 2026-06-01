@@ -96,15 +96,20 @@ export function buildElementFindExpr(elementDescription: string, selectorHint?: 
     var desc=${desc};
     var descLower=desc.toLowerCase();
     function vis(el){try{var r=el.getBoundingClientRect();return r.width>0||r.height>0;}catch(e){return false;}}
-    var q=Array.from(document.querySelectorAll('a,button,[role=button],[role=link],input,select,textarea,[tabindex]'));
+    var q=Array.from(document.querySelectorAll('a,button,[role=button],[role=link],input,select,textarea,[tabindex],[role=combobox],[role=searchbox]'));
     q=q.filter(function(el){return vis(el);});
-    function fields(el){return [
-      (el.getAttribute('aria-label')||'').trim().toLowerCase(),
-      (el.getAttribute('placeholder')||'').trim().toLowerCase(),
-      (el.getAttribute('title')||'').trim().toLowerCase(),
-      (el.getAttribute('name')||'').trim().toLowerCase(),
-      (el.textContent||'').trim().toLowerCase()
-    ].filter(function(f){return f!=='';});}
+    function fields(el){
+      var f=[
+        (el.getAttribute('aria-label')||'').trim().toLowerCase(),
+        (el.getAttribute('placeholder')||'').trim().toLowerCase(),
+        (el.getAttribute('title')||'').trim().toLowerCase(),
+        (el.getAttribute('name')||'').trim().toLowerCase(),
+        (el.textContent||'').trim().toLowerCase()
+      ];
+      var lby=el.getAttribute('aria-labelledby');
+      if(lby){var lbyText=lby.split(' ').map(function(id){var le=document.getElementById(id);return le?(le.textContent||'').trim():''}).filter(Boolean).join(' ').toLowerCase();if(lbyText)f.push(lbyText);}
+      if(el.labels&&el.labels.length>0){var lt=(el.labels[0].textContent||'').trim().toLowerCase();if(lt)f.push(lt);}
+      return f.filter(function(s){return s!='';});}
     var exact=q.filter(function(el){return fields(el).some(function(f){return f===descLower;});});
     var pool=exact.length>0?exact:q.filter(function(el){return fields(el).some(function(f){return f.includes(descLower);});});
     if(pool.length===0)return null;
@@ -396,6 +401,13 @@ export async function realisticTypeTextViaCDP(params: {
     return { success: false, error: "No page targets found via CDP.", char_count_bucket: charCountBucket, duration_ms: 0 };
   }
 
+  if (cdpDiagnostics) {
+    const pageCandidates = targets
+      .filter((t) => t.type === "page")
+      .map((t) => ({ url: t.url, chosen: t.id === pageTarget.id }));
+    console.log("[RealisticType] target_candidates", { surface: "browser_type", candidates: pageCandidates });
+  }
+
   return new Promise<RealisticTypeResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);
     let msgId = 1;
@@ -405,6 +417,15 @@ export async function realisticTypeTextViaCDP(params: {
     let evalId: number | null = null;
     // activeCheckId: used when no elementDescription — verify active element
     let activeCheckId: number | null = null;
+    // Diagnostic state: href + selector checks fired before the findExpr eval when cdpDiagnostics=true
+    let hrefCheckId: number | null = null;
+    let selectorCheckId: number | null = null;
+    let diagHrefDone = false;
+    let diagSelectorDone = false;
+    let diagHref: string | null = null;
+    let diagSelectorFound: boolean | null = null;
+    let diagEvalFired = false;
+    let diagFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
     const startMs = Date.now();
 
     const timer = setTimeout(() => {
@@ -422,8 +443,18 @@ export async function realisticTypeTextViaCDP(params: {
 
     const finish = (result: RealisticTypeResult) => {
       clearTimeout(timer);
+      if (diagFallbackTimerId !== null) clearTimeout(diagFallbackTimerId);
       ws.close();
       resolve(result);
+    };
+
+    // Fires the findExpr eval exactly once — called when both diag checks complete or
+    // when the fallback timer fires (guards against a hung CDP eval stalling the flow).
+    const fireEvalIdOnce = () => {
+      if (diagEvalFired) return;
+      diagEvalFired = true;
+      if (diagFallbackTimerId !== null) clearTimeout(diagFallbackTimerId);
+      evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription!, selectorHint), returnByValue: true }, cdpSessionId!);
     };
 
     ws.on("open", () => {
@@ -460,13 +491,37 @@ export async function realisticTypeTextViaCDP(params: {
         }
 
         if (elementDescription) {
-          // Focus path: find element, click to focus, then type
-          const findExpr = buildElementFindExpr(elementDescription, selectorHint);
-          evalId = sendMsg("Runtime.evaluate", { expression: findExpr, returnByValue: true }, cdpSessionId);
+          if (cdpDiagnostics) {
+            // Fire href + querySelector checks first; evalId fires after both return (or after fallback timer)
+            hrefCheckId = sendMsg("Runtime.evaluate", { expression: "location.href", returnByValue: true }, cdpSessionId);
+            selectorCheckId = sendMsg("Runtime.evaluate", { expression: "document.querySelector('#ikea-search-input') !== null", returnByValue: true }, cdpSessionId);
+            diagFallbackTimerId = setTimeout(fireEvalIdOnce, 1000);
+          } else {
+            // Non-diagnostic path: fire findExpr directly
+            evalId = sendMsg("Runtime.evaluate", { expression: buildElementFindExpr(elementDescription, selectorHint), returnByValue: true }, cdpSessionId);
+          }
         } else {
           // No-target path: verify there is an active focusable element
           activeCheckId = sendMsg("Runtime.evaluate", { expression: ACTIVE_ELEMENT_CHECK_EXPR, returnByValue: true }, cdpSessionId);
         }
+        return;
+      }
+
+      // ── Diag: href check (cdpDiagnostics path only) ───────────────────────────
+      if (hrefCheckId !== null && id === hrefCheckId) {
+        const r = result?.result as Record<string, unknown> | undefined;
+        diagHref = (r?.value as string) ?? null;
+        diagHrefDone = true;
+        if (diagSelectorDone) fireEvalIdOnce();
+        return;
+      }
+
+      // ── Diag: selector check (cdpDiagnostics path only) ──────────────────────
+      if (selectorCheckId !== null && id === selectorCheckId) {
+        const r = result?.result as Record<string, unknown> | undefined;
+        diagSelectorFound = (r?.value as boolean) ?? null;
+        diagSelectorDone = true;
+        if (diagHrefDone) fireEvalIdOnce();
         return;
       }
 
@@ -476,7 +531,14 @@ export async function realisticTypeTextViaCDP(params: {
         const val = evalResult?.value;
 
         if (val === null || val === undefined) {
-          if (cdpDiagnostics) console.log("[RealisticType] focus_fallback", { surface: "browser_type", reason: "ELEMENT_NOT_FOUND" });
+          if (cdpDiagnostics) {
+            console.log("[RealisticType] element_not_found_detail", {
+              chosen_target_href: diagHref,
+              selector_check: diagSelectorFound,
+              element_description: elementDescription,
+            });
+            console.log("[RealisticType] focus_fallback", { surface: "browser_type", reason: "ELEMENT_NOT_FOUND" });
+          }
           finish({ success: false, error: "ELEMENT_NOT_FOUND", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
           return;
         }

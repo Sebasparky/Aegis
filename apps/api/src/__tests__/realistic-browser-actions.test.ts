@@ -265,6 +265,41 @@ describe("buildElementFindExpr — injection safety", () => {
   });
 });
 
+// ─── 3b. buildElementFindExpr — accessible-name sources ──────────────────────
+
+describe("buildElementFindExpr — accessible-name sources", () => {
+  it("includes [role=combobox] in element selector", () => {
+    const expr = buildElementFindExpr("Search by product");
+    expect(expr).toContain("[role=combobox]");
+  });
+
+  it("includes [role=searchbox] in element selector", () => {
+    const expr = buildElementFindExpr("Search by product");
+    expect(expr).toContain("[role=searchbox]");
+  });
+
+  it("includes aria-labelledby resolution in fields()", () => {
+    const expr = buildElementFindExpr("Search by product");
+    expect(expr).toContain("aria-labelledby");
+    expect(expr).toContain("getElementById");
+  });
+
+  it("includes el.labels check for associated label text", () => {
+    const expr = buildElementFindExpr("Search by product");
+    expect(expr).toContain("el.labels");
+  });
+
+  it("expression with new accessible-name fields is still valid JS", () => {
+    const expr = buildElementFindExpr("Search by product");
+    expect(() => { new Function(expr); }).not.toThrow();
+  });
+
+  it("expression with selectorHint and new fields is still valid JS", () => {
+    const expr = buildElementFindExpr("Search by product", "input[type=search]");
+    expect(() => { new Function(expr); }).not.toThrow();
+  });
+});
+
 // ─── 4. realisticClickByDescription — fast mode gate ─────────────────────────
 
 describe("realisticClickByDescription — mode gate (fast/disabled)", () => {
@@ -738,7 +773,46 @@ describe("realisticTypeTextViaCDP — log safety with browser_type diagnostics e
   });
 });
 
-// ─── 19. ACTIVE_ELEMENT_CHECK_EXPR — is valid JS ─────────────────────────────
+// ─── 19. realisticTypeTextViaCDP — element_not_found_detail diagnostics ──────
+
+describe("realisticTypeTextViaCDP — element_not_found_detail diagnostics (cdpDiagnostics=true)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.stubEnv("ANTIGEN_CDP_DIAGNOSTICS", "true");
+    mockState.nextEvalResponse = null; // all evals (href/selector diag + findExpr) return null
+  });
+
+  it("returns ELEMENT_NOT_FOUND and logs element_not_found_detail with element_description", async () => {
+    const loggedCalls: Array<{ label: string; obj: Record<string, unknown> }> = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      const [label, obj] = args;
+      if (typeof label === "string" && obj !== null && typeof obj === "object") {
+        loggedCalls.push({ label, obj: obj as Record<string, unknown> });
+      }
+    });
+
+    const result = await realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "search query",
+      elementDescription: "Search by product",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("ELEMENT_NOT_FOUND");
+
+    const detailLog = loggedCalls.find((c) => c.label === "[RealisticType] element_not_found_detail");
+    expect(detailLog).toBeDefined();
+    expect(detailLog?.obj.element_description).toBe("Search by product");
+
+    // Safe keys only — no forbidden values
+    for (const key of ["text", "value", "raw_value", "char", "chars", "password", "secret"]) {
+      expect(Object.keys(detailLog?.obj ?? {})).not.toContain(key);
+    }
+  });
+});
+
+// ─── 20. ACTIVE_ELEMENT_CHECK_EXPR — is valid JS ─────────────────────────────
 
 describe("ACTIVE_ELEMENT_CHECK_EXPR — structural checks", () => {
   it("is a valid JS expression (can be parsed by Function constructor)", () => {

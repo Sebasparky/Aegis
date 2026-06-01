@@ -637,7 +637,7 @@ describe("realisticTypeTextViaCDP — submit:true dispatches Enter after chars",
     mockState.nextEvalResponse = true; // active element present
   });
 
-  it("dispatches Enter keyDown + keyUp after text chars when submit=true", async () => {
+  it("dispatches Enter rawKeyDown + char + keyUp after text chars when submit=true", async () => {
     const text = "hi";
     const resultPromise = realisticTypeTextViaCDP({
       cdpUrl: "http://localhost:9222",
@@ -652,19 +652,21 @@ describe("realisticTypeTextViaCDP — submit:true dispatches Enter after chars",
 
     const parsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
     const keyEvents = parsed.filter((m) => m?.method === "Input.dispatchKeyEvent");
-    const charEvents = keyEvents.filter((m) => m.params?.type === "char");
-    const enterEvents = keyEvents.filter((m) => m.params?.key === "Return");
+    // char events for typed characters have a single character in text, not "\r"
+    const charEvents = keyEvents.filter((m) => m.params?.type === "char" && m.params?.text !== "\r");
+    const enterEvents = keyEvents.filter((m) => m.params?.key === "Enter");
 
     expect(charEvents).toHaveLength(text.length);
-    expect(enterEvents).toHaveLength(2); // keyDown + keyUp
-    expect(enterEvents[0].params.type).toBe("keyDown");
-    expect(enterEvents[1].params.type).toBe("keyUp");
+    expect(enterEvents).toHaveLength(3); // rawKeyDown + char + keyUp
+    expect(enterEvents[0].params.type).toBe("rawKeyDown");
+    expect(enterEvents[1].params.type).toBe("char");
+    expect(enterEvents[2].params.type).toBe("keyUp");
 
-    // All Enter events appear after all char events
+    // All Enter events appear after all typed-char events
     const allParsed = mockState.allSentMessages.map((m) => { try { return JSON.parse(m); } catch { return null; } });
-    const lastCharIdx = allParsed.map((m, i) => m?.params?.type === "char" ? i : -1).filter((i) => i >= 0).at(-1) ?? -1;
-    const firstEnterIdx = allParsed.findIndex((m) => m?.params?.key === "Return");
-    expect(firstEnterIdx).toBeGreaterThan(lastCharIdx);
+    const lastTypedCharIdx = allParsed.map((m, i) => (m?.params?.type === "char" && m.params?.text !== "\r") ? i : -1).filter((i) => i >= 0).at(-1) ?? -1;
+    const firstEnterIdx = allParsed.findIndex((m) => m?.params?.key === "Enter");
+    expect(firstEnterIdx).toBeGreaterThan(lastTypedCharIdx);
   });
 
   it("result.submitted is false when submit is not set", async () => {
@@ -680,7 +682,7 @@ describe("realisticTypeTextViaCDP — submit:true dispatches Enter after chars",
     await resultPromise;
     const enterEvents = mockState.allSentMessages
       .map((m) => { try { return JSON.parse(m); } catch { return null; } })
-      .filter((m) => m?.params?.key === "Return");
+      .filter((m) => m?.params?.key === "Enter");
     expect(enterEvents).toHaveLength(0);
   });
 });
@@ -711,30 +713,52 @@ describe("realisticTypeTextViaCDP — no target, no active element", () => {
 
 // ─── 17. dispatchEnterViaCDP — correct key events ────────────────────────────
 
-describe("dispatchEnterViaCDP — dispatches keyDown then keyUp for Return", () => {
-  it("sends keyDown then keyUp for Return key", async () => {
+describe("dispatchEnterViaCDP — dispatches rawKeyDown, char, then keyUp for Enter", () => {
+  it("sends rawKeyDown, char, then keyUp for Enter key", async () => {
     const mockSend = vi.fn();
     const mockSleep = vi.fn().mockResolvedValue(undefined);
     await dispatchEnterViaCDP(mockSend, mockSleep);
 
     const calls = mockSend.mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(calls[0]).toEqual(["Input.dispatchKeyEvent", {
-      type: "keyDown", key: "Return", code: "Enter",
+      type: "rawKeyDown", key: "Enter", code: "Enter",
       windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
     }]);
     expect(calls[1]).toEqual(["Input.dispatchKeyEvent", {
-      type: "keyUp", key: "Return", code: "Enter",
+      type: "char", key: "Enter", code: "Enter",
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      text: "\r", unmodifiedText: "\r",
+    }]);
+    expect(calls[2]).toEqual(["Input.dispatchKeyEvent", {
+      type: "keyUp", key: "Enter", code: "Enter",
       windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
     }]);
   });
 
-  it("Enter key params never include text-content fields", async () => {
+  it("rawKeyDown appears before keyUp", async () => {
+    const mockSend = vi.fn();
+    await dispatchEnterViaCDP(mockSend, vi.fn().mockResolvedValue(undefined));
+    const types = mockSend.mock.calls.map(([, p]) => (p as Record<string, unknown>).type);
+    expect(types.indexOf("rawKeyDown")).toBeLessThan(types.indexOf("keyUp"));
+  });
+
+  it("Enter key events never include user-typed content — char text is fixed \\r only", async () => {
     const mockSend = vi.fn();
     await dispatchEnterViaCDP(mockSend, vi.fn().mockResolvedValue(undefined));
     for (const [, params] of mockSend.mock.calls) {
-      for (const forbidden of ["text", "value", "raw_value", "password", "secret"]) {
-        expect(Object.keys(params)).not.toContain(forbidden);
+      const p = params as Record<string, unknown>;
+      // No event ever contains user-typed values, passwords, or secrets
+      for (const forbidden of ["value", "raw_value", "password", "secret"]) {
+        expect(Object.keys(p)).not.toContain(forbidden);
+      }
+      // If this is the char event, text must be exactly "\r" (fixed constant, not user input)
+      if (p.type === "char") {
+        expect(p.text).toBe("\r");
+        expect(p.unmodifiedText).toBe("\r");
+      } else {
+        // rawKeyDown and keyUp carry no text field at all
+        expect(Object.keys(p)).not.toContain("text");
       }
     }
   });

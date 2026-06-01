@@ -153,8 +153,9 @@ export async function dispatchTextCharsViaCDP(
 }
 
 /**
- * Dispatches an Enter key press (keyDown + keyUp) via CDP.
- * Used after typing when submit:true is requested.
+ * Dispatches an Enter key press via CDP using Playwright-equivalent event sequence:
+ * rawKeyDown → char ("\r") → keyUp. The char event fires the DOM keypress event,
+ * which is what form submit handlers (including IKEA search) listen for.
  * Exported for unit testing with injected sendCdp / sleep.
  */
 export async function dispatchEnterViaCDP(
@@ -162,12 +163,18 @@ export async function dispatchEnterViaCDP(
   sleep: (ms: number) => Promise<void>,
 ): Promise<void> {
   sendCdp("Input.dispatchKeyEvent", {
-    type: "keyDown", key: "Return", code: "Enter",
+    type: "rawKeyDown", key: "Enter", code: "Enter",
     windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
   });
-  await sleep(50);
+  await sleep(30);
   sendCdp("Input.dispatchKeyEvent", {
-    type: "keyUp", key: "Return", code: "Enter",
+    type: "char", key: "Enter", code: "Enter",
+    windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    text: "\r", unmodifiedText: "\r",
+  });
+  await sleep(30);
+  sendCdp("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Enter", code: "Enter",
     windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
   });
   await sleep(100);

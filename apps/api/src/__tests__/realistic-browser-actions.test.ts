@@ -446,6 +446,67 @@ describe("buildElementFindExpr — alias matching", () => {
   });
 });
 
+// ─── 3d. buildElementFindExpr — click alias matching (role-word stripping) ───
+
+describe("buildElementFindExpr — click alias matching (role-word stripping)", () => {
+  it('"desk lamp search suggestion link" matches anchor with textContent "desk lamp"', () => {
+    const anchor = makeMockEl({ tag: "a", textContent: "desk lamp" });
+    const result = evalFindExpr(
+      buildElementFindExpr("desk lamp search suggestion link", undefined, "click"),
+      [anchor],
+    );
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it('"desk lamp link" matches anchor with textContent "desk lamp"', () => {
+    const anchor = makeMockEl({ tag: "a", textContent: "desk lamp" });
+    const result = evalFindExpr(
+      buildElementFindExpr("desk lamp link", undefined, "click"),
+      [anchor],
+    );
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it('"desk lamp button" matches button with textContent "desk lamp"', () => {
+    const button = makeMockEl({ tag: "button", textContent: "desk lamp" });
+    const result = evalFindExpr(
+      buildElementFindExpr("desk lamp button", undefined, "click"),
+      [button],
+    );
+    expect(result).not.toBeNull();
+    expect(result).not.toBe("AMBIGUOUS");
+    expect((result as { width: number }).width).toBeGreaterThan(0);
+  });
+
+  it('two anchors both with textContent "desk lamp" → AMBIGUOUS', () => {
+    const a1 = makeMockEl({ tag: "a", textContent: "desk lamp" });
+    const a2 = makeMockEl({ tag: "a", textContent: "desk lamp" });
+    const result = evalFindExpr(
+      buildElementFindExpr("desk lamp search suggestion link", undefined, "click"),
+      [a1, a2],
+    );
+    expect(result).toBe("AMBIGUOUS");
+  });
+
+  it('"search suggestion link" does not collapse to an unsafe alias — unrelated element returns null', () => {
+    const unrelated = makeMockEl({ tag: "a", textContent: "search results" });
+    const result = evalFindExpr(
+      buildElementFindExpr("search suggestion link", undefined, "click"),
+      [unrelated],
+    );
+    expect(result).toBeNull();
+  });
+
+  it("click alias expression is still valid JS", () => {
+    const expr = buildElementFindExpr("desk lamp search suggestion link", undefined, "click");
+    expect(() => { new Function(expr); }).not.toThrow();
+  });
+});
+
 // ─── 4. realisticClickByDescription — fast mode gate ─────────────────────────
 
 describe("realisticClickByDescription — mode gate (fast/disabled)", () => {

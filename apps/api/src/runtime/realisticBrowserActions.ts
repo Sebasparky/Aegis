@@ -125,6 +125,23 @@ export function buildElementFindExpr(elementDescription: string, selectorHint?: 
     function descriptionAliases(d){
       var a=[d];
       if(d.includes('search')&&(d.includes('box')||d.includes('field')||d.includes('input')||d.includes('bar'))){a.push('search');}
+      if(intent==='click'){
+        var SUFFIX=['link','button','item','result','option','suggestion','menu'];
+        var SUFFIX_PHRASES=['search suggestion','menu item'];
+        var parts=d.split(' ').filter(Boolean);
+        var changed=true;
+        while(changed&&parts.length>0){
+          changed=false;
+          var joined=parts.join(' ');
+          for(var si=0;si<SUFFIX_PHRASES.length;si++){
+            if(joined===SUFFIX_PHRASES[si]){parts=[];changed=true;break;}
+            if(joined.endsWith(' '+SUFFIX_PHRASES[si])){var nj=joined.slice(0,joined.length-SUFFIX_PHRASES[si].length-1);parts=nj?nj.split(' ').filter(Boolean):[];changed=true;break;}
+          }
+          if(!changed&&parts.length>0){var last=parts[parts.length-1];if(SUFFIX.indexOf(last)>=0){parts=parts.slice(0,parts.length-1);changed=true;}}
+        }
+        var stripped=parts.join(' ');
+        if(stripped&&stripped!==d){var allSuffix=parts.every(function(w){return SUFFIX.indexOf(w)>=0;});if(!allSuffix){a.push(stripped);}}
+      }
       return a.filter(function(v,i,arr){return arr.indexOf(v)===i;});}
     function isTypeable(el){
       var tag=el.tagName.toLowerCase();

@@ -20,14 +20,16 @@ const createMock = vi.hoisted(() => vi.fn());
 const findReadyByDelegationMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../runtime/taskBrowserSessions.js", async () => {
-  const { taskBrowserSessions } = await vi.importActual<typeof import("../runtime/taskBrowserSessions.js")>(
+  // Spread all real implementations so getTaskBrowserSession, setTaskBrowserSessionCurrentUrl,
+  // getTaskBrowserSessionPointerState, and setTaskBrowserSessionPointerState work against the
+  // real in-memory Map. Only override functions that need controlled behavior in tests.
+  const actual = await vi.importActual<typeof import("../runtime/taskBrowserSessions.js")>(
     "../runtime/taskBrowserSessions.js",
   );
   return {
-    taskBrowserSessions,
+    ...actual,
     createTaskBrowserSession: createMock,
     closeTaskBrowserSession: vi.fn(),
-    getTaskBrowserSession: vi.fn(),
     getTaskBrowserSessionForReuse: vi.fn(),
     findReadySessionByDelegationId: findReadyByDelegationMock,
     findChromeBinary: vi.fn().mockReturnValue("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
@@ -128,7 +130,7 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
-import { agentApiRoutes } from "../routes/agent-api.js";
+import { agentApiRoutes, computeNavigationProxyPointerState } from "../routes/agent-api.js";
 import { agentDelegations, passes } from "../store/index.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -346,5 +348,198 @@ describe("POST /api/agent/v1/runtime/browser-endpoint", () => {
     expect(createMock).toHaveBeenCalledWith(
       expect.objectContaining({ runtime_mode: "local_runtime_endpoint" }),
     );
+  });
+});
+
+// ─── POST /api/agent/v1/runtime/browser-navigation-state ─────────────────────
+
+describe("POST /api/agent/v1/runtime/browser-navigation-state", () => {
+  const NAV_URL = "/api/agent/v1/runtime/browser-navigation-state";
+  const SESSION_ID = "tbsess_rbe_001";
+
+  function seedSession(overrides: Partial<TaskBrowserSession> = {}) {
+    const session = makeFreshSession(overrides);
+    taskBrowserSessions.set(session.browser_session_id, session);
+    return session;
+  }
+
+  it("returns 401 without a bearer token", async () => {
+    const res = await server.inject({ method: "POST", url: NAV_URL });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("returns 400 MISSING_FIELD when browser_runtime_id is absent", async () => {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { url: "https://example.com", action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("MISSING_FIELD");
+  });
+
+  it("returns 400 MISSING_FIELD when url is absent", async () => {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("MISSING_FIELD");
+  });
+
+  it("returns 400 INVALID_FIELD when action is not navigation_proxy", async () => {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://example.com", action: "other" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_FIELD");
+  });
+
+  it("returns 404 SESSION_NOT_FOUND for unknown browser_runtime_id", async () => {
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: "unknown_id", url: "https://example.com", action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("persists pointer state and returns safe metadata — first call uses viewport_center", async () => {
+    seedSession(); // no prior pointer_state
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://www.ikea.com/us/en/", action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.pointer_state_persisted).toBe(true);
+    expect(body.data.pointer_start_source).toBe("viewport_center");
+    expect(body.data.pointer_action).toBe("navigation_proxy");
+  });
+
+  it("returns pointer_start_source=session when session already has initialized pointer state", async () => {
+    const session = seedSession();
+    // Pre-seed an initialized pointer state
+    session.pointer_state = { x: 300, y: 250, initialized: true, updated_at: new Date().toISOString() };
+    taskBrowserSessions.set(session.browser_session_id, session);
+
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://www.ikea.com/us/en/", action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.pointer_start_source).toBe("session");
+  });
+
+  it("response never contains x, y, cdp_url, user_data_dir, pass_id, secret_ref, password, or coordinates", async () => {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://example.com", action: "navigation_proxy" },
+    });
+    const raw = JSON.stringify(res.json());
+    const FORBIDDEN = ["cdp_url", "user_data_dir", "pass_id", "secret_ref", "password", "\"x\":", "\"y\":"];
+    for (const f of FORBIDDEN) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
+  it("updates current_url on the session after navigation", async () => {
+    const session = seedSession();
+    const targetUrl = "https://www.ikea.com/us/en/search/?q=desk+lamp";
+
+    await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: targetUrl, action: "navigation_proxy" },
+    });
+
+    const updated = taskBrowserSessions.get(session.browser_session_id);
+    expect(updated?.current_url).toBe(targetUrl);
+  });
+
+  it("persists pointer state as initialized after navigation", async () => {
+    const session = seedSession();
+
+    await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://example.com", action: "navigation_proxy" },
+    });
+
+    const updated = taskBrowserSessions.get(session.browser_session_id);
+    expect(updated?.pointer_state?.initialized).toBe(true);
+    expect(updated?.pointer_state?.updated_at).toBeDefined();
+  });
+});
+
+// ─── computeNavigationProxyPointerState unit tests ────────────────────────────
+
+describe("computeNavigationProxyPointerState helper", () => {
+  const VW = 1280;
+
+  it("no existing state → pointer_start_source=viewport_center, x/y in safe upper-page bounds", () => {
+    const result = computeNavigationProxyPointerState({
+      url: "https://www.ikea.com/us/en/",
+      sessionId: "sess_test_001",
+      viewportWidth: VW,
+    });
+    expect(result.pointer_start_source).toBe("viewport_center");
+    expect(result.x).toBeGreaterThanOrEqual(80);
+    expect(result.x).toBeLessThanOrEqual(VW - 80);
+    expect(result.y).toBeGreaterThanOrEqual(70);
+    expect(result.y).toBeLessThanOrEqual(220);
+  });
+
+  it("existing initialized state → pointer_start_source=session, x/y in safe upper-page bounds", () => {
+    const result = computeNavigationProxyPointerState({
+      existingPointerState: { x: 300, y: 250, initialized: true },
+      url: "https://www.ikea.com/us/en/",
+      sessionId: "sess_test_001",
+      viewportWidth: VW,
+    });
+    expect(result.pointer_start_source).toBe("session");
+    expect(result.x).toBeGreaterThanOrEqual(80);
+    expect(result.x).toBeLessThanOrEqual(VW - 80);
+    expect(result.y).toBeGreaterThanOrEqual(70);
+    expect(result.y).toBeLessThanOrEqual(220);
+  });
+
+  it("same url + sessionId produces identical x, y on repeated calls (deterministic)", () => {
+    const params = { url: "https://github.com/login", sessionId: "sess_stable_001", viewportWidth: VW };
+    const r1 = computeNavigationProxyPointerState(params);
+    const r2 = computeNavigationProxyPointerState(params);
+    expect(r1.x).toBe(r2.x);
+    expect(r1.y).toBe(r2.y);
+  });
+
+  it("different urls with same session produce different x or y", () => {
+    // Two URLs chosen to verify hash-based zone selection varies.
+    const rIkea = computeNavigationProxyPointerState({ url: "https://www.ikea.com/us/en/", sessionId: "sess_diff_001", viewportWidth: VW });
+    const rGithub = computeNavigationProxyPointerState({ url: "https://github.com/login", sessionId: "sess_diff_001", viewportWidth: VW });
+    expect(rIkea.x !== rGithub.x || rIkea.y !== rGithub.y).toBe(true);
+  });
+
+  it("y is always in the upper-page range regardless of viewport height", () => {
+    const result = computeNavigationProxyPointerState({ url: "https://example.com/path/to/page", sessionId: "sess_y_001", viewportWidth: 1024 });
+    expect(result.y).toBeGreaterThanOrEqual(70);
+    expect(result.y).toBeLessThanOrEqual(220);
+  });
+
+  it("x is clamped within safe margins for the given viewport width", () => {
+    const result = computeNavigationProxyPointerState({ url: "https://example.com/", sessionId: "sess_clamp_001", viewportWidth: 800 });
+    expect(result.x).toBeGreaterThanOrEqual(80);
+    expect(result.x).toBeLessThanOrEqual(800 - 80);
   });
 });

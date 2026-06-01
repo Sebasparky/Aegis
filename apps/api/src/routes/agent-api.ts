@@ -128,6 +128,56 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
   return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
 }
 
+// ─── Navigation Proxy Landing Zones ──────────────────────────────────────────
+
+const NAVIGATION_LANDING_ZONES = [
+  { xFracMin: 0.45, xFracMax: 0.55, yMin: 70,  yMax: 110 }, // address/header center
+  { xFracMin: 0.20, xFracMax: 0.35, yMin: 120, yMax: 180 }, // upper-left content
+  { xFracMin: 0.40, xFracMax: 0.60, yMin: 130, yMax: 220 }, // upper-middle content scan
+  { xFracMin: 0.30, xFracMax: 0.45, yMin: 80,  yMax: 135 }, // left-of-center header
+];
+
+/** FNV-1a 32-bit hash — deterministic, no external deps. */
+export function navHash(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
+
+/**
+ * Chooses a natural upper-page landing zone for a browser_navigate pointer proxy.
+ * Zone and position are seeded from url + sessionId so the result is stable per navigation,
+ * but varies across different URLs and sessions.
+ */
+export function computeNavigationProxyPointerState(params: {
+  existingPointerState?: { x: number; y: number; initialized: boolean } | undefined;
+  viewportWidth?: number;
+  url: string;
+  sessionId?: string;
+}): { x: number; y: number; pointer_start_source: "session" | "viewport_center" } {
+  const vw = params.viewportWidth ?? 1280;
+  const seed = `${params.url}:${params.sessionId ?? ""}`;
+
+  const zoneIdx = navHash(seed + ":z") % NAVIGATION_LANDING_ZONES.length;
+  const zone = NAVIGATION_LANDING_ZONES[zoneIdx];
+
+  const xRange = Math.max(1, Math.round((zone.xFracMax - zone.xFracMin) * vw));
+  const rawX = Math.round(zone.xFracMin * vw + (navHash(seed + ":x") % xRange));
+  const yRange = Math.max(1, zone.yMax - zone.yMin);
+  const rawY = zone.yMin + (navHash(seed + ":y") % yRange);
+
+  const x = Math.max(80, Math.min(vw - 80, rawX));
+  const y = Math.max(70, Math.min(220, rawY));
+
+  const pointer_start_source: "session" | "viewport_center" =
+    params.existingPointerState?.initialized === true ? "session" : "viewport_center";
+
+  return { x, y, pointer_start_source };
+}
+
 /** Validates Bearer token and returns the matched AgentDelegation, or writes an error and returns null.
  *
  * Auth path: Bearer token is pass.token → find pass by token → find delegation via pass.id.
@@ -3534,6 +3584,59 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
         ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
         ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
+      },
+    });
+  });
+
+  // ─── Navigation-Aware Pointer Continuity ─────────────────────────────────────
+  // Called by antigen-browser-adapter after @playwright/mcp handles browser_navigate.
+  // Updates current_url and persists a navigation_proxy pointer state so the next
+  // browser_type / browser_click starts from pointer_start_source=session.
+
+  server.post("/api/agent/v1/runtime/browser-navigation-state", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; url?: unknown; action?: unknown };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (!body.url || typeof body.url !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "url is required.");
+    }
+    if (body.action !== "navigation_proxy") {
+      return sendError(reply, 400, "INVALID_FIELD", "action must be \"navigation_proxy\".");
+    }
+
+    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
+    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+
+    setTaskBrowserSessionCurrentUrl(session.browser_session_id, body.url);
+
+    const existingPointerState = getTaskBrowserSessionPointerState(session.browser_session_id, MOCK_USER_ID);
+    const { x: proxyX, y: proxyY, pointer_start_source: pointerStartSource } = computeNavigationProxyPointerState({
+      existingPointerState: existingPointerState ?? undefined,
+      viewportWidth: 1280,
+      url: body.url,
+      sessionId: session.browser_session_id,
+    });
+
+    setTaskBrowserSessionPointerState(session.browser_session_id, MOCK_USER_ID, {
+      x: proxyX,
+      y: proxyY,
+      initialized: true,
+      updated_at: new Date().toISOString(),
+    });
+
+    return reply.send({
+      ok: true,
+      data: {
+        pointer_state_persisted: true,
+        pointer_start_source: pointerStartSource,
+        pointer_action: "navigation_proxy",
       },
     });
   });

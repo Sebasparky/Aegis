@@ -595,16 +595,15 @@ function writeSyntheticResponse(requestId, text) {
 
 /**
  * Writes a synthetic MCP tools/call error response to stdout.
- * Used when browser_type cannot be handled by the Antigen adapter.
  * stdout is MCP protocol only — never write diagnostics here.
  * Never includes: raw text values, cdp_url, cookies, storage, or selectors.
  */
-function writeSyntheticErrorResponse(requestId, code, message) {
+function writeSyntheticErrorResponse(toolName, requestId, code, message) {
   const response = JSON.stringify({
     jsonrpc: "2.0",
     id: requestId,
     result: {
-      content: [{ type: "text", text: `Antigen browser_type unavailable: code=${code}; ${message}` }],
+      content: [{ type: "text", text: `Antigen ${toolName} unavailable: code=${code}; ${message}` }],
       isError: true,
     },
   });
@@ -694,6 +693,7 @@ async function handleLine(line) {
         ` reason=interception_disabled arg_keys=${argKeys}\n`
       );
       writeSyntheticErrorResponse(
+        "browser_click",
         requestId,
         "ANTIGEN_REALISM_UNAVAILABLE",
         "Antigen realistic browser_click requires ANTIGEN_BROWSER_HEADLESS=false and a valid Aegis browser session.",
@@ -707,6 +707,7 @@ async function handleLine(line) {
         ` reason=ANTIGEN_CLICK_TARGET_REQUIRED arg_keys=${argKeys}\n`
       );
       writeSyntheticErrorResponse(
+        "browser_click",
         requestId,
         "ANTIGEN_CLICK_TARGET_REQUIRED",
         "Antigen realistic browser_click requires element, target, or a CSS selector hint.",
@@ -753,6 +754,7 @@ async function handleLine(line) {
       const errCode = errBody?.error?.code ?? String(apiRes.status);
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=${errCode}\n`);
       writeSyntheticErrorResponse(
+        "browser_click",
         requestId,
         errCode,
         `Antigen realistic browser_click failed (${errCode}).`,
@@ -760,6 +762,7 @@ async function handleLine(line) {
     } catch (_err) {
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=INTERCEPT_ERROR\n`);
       writeSyntheticErrorResponse(
+        "browser_click",
         requestId,
         "ANTIGEN_CLICK_INTERCEPT_ERROR",
         "Antigen realistic browser_click encountered a network error.",
@@ -830,6 +833,7 @@ async function handleLine(line) {
         ` reason=interception_disabled arg_keys=${argKeys}\n`
       );
       writeSyntheticErrorResponse(
+        "browser_type",
         requestId,
         "ANTIGEN_REALISM_UNAVAILABLE",
         "Antigen realistic browser_type requires ANTIGEN_BROWSER_HEADLESS=false and a valid Aegis browser session.",
@@ -856,10 +860,12 @@ async function handleLine(line) {
 
       if (apiRes.ok) {
         const resBody      = await apiRes.json().catch(() => ({}));
-        const resBucket         = resBody?.data?.char_count_bucket ?? bucket;
-        const resFocused        = resBody?.data?.focused;
-        const resSubmitted      = resBody?.data?.submitted;
-        const resPointerCount   = resBody?.data?.pointer_path_point_count;
+        const resBucket              = resBody?.data?.char_count_bucket ?? bucket;
+        const resFocused             = resBody?.data?.focused;
+        const resSubmitted           = resBody?.data?.submitted;
+        const resPointerCount        = resBody?.data?.pointer_path_point_count;
+        const resPointerStartSource  = resBody?.data?.pointer_start_source;
+        const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;
         process.stderr.write(
           `[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_type` +
           ` char_count_bucket=${resBucket} has_target=${hasTarget} submit=${typeSubmit}\n`
@@ -871,6 +877,8 @@ async function handleLine(line) {
             focused: resFocused,
             submitted: resSubmitted,
             pointerPathPointCount: resPointerCount,
+            pointerStartSource: resPointerStartSource,
+            pointerStatePersisted: resPointerStatePersisted,
             version: ADAPTER_VERSION,
           }),
         );
@@ -883,6 +891,7 @@ async function handleLine(line) {
         `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=${errCode} source=browser_type\n`
       );
       writeSyntheticErrorResponse(
+        "browser_type",
         requestId,
         errCode,
         `Antigen realistic browser_type failed (${errCode}).`,
@@ -892,6 +901,7 @@ async function handleLine(line) {
         `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=INTERCEPT_ERROR source=browser_type\n`
       );
       writeSyntheticErrorResponse(
+        "browser_type",
         requestId,
         "ANTIGEN_TYPE_INTERCEPT_ERROR",
         "Antigen realistic browser_type encountered a network error.",

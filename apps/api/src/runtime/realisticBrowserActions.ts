@@ -255,8 +255,12 @@ export async function realisticClickByDescription(params: {
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
 
   const findExpr = buildElementFindExpr(elementDescription, selectorHint);
-  if (cdpDiagnostics && selectorHint) {
-    console.log("[RealisticClick] selector_hint provided — trying querySelector first", { surface: "browser_click" });
+  if (cdpDiagnostics) {
+    console.log("[RealisticClick] attempting element find", {
+      surface: "browser_click",
+      element_description: elementDescription,
+      selector_hint_present: selectorHint !== undefined,
+    });
   }
 
   return new Promise<RealisticClickResult>((resolve) => {
@@ -316,12 +320,26 @@ export async function realisticClickByDescription(params: {
         const val = evalResult?.value;
 
         if (val === null || val === undefined) {
-          if (cdpDiagnostics) console.log("[RealisticClick] element not found", { surface: "browser_click" });
+          if (cdpDiagnostics) {
+            console.log("[RealisticClick] element not found", {
+              surface: "browser_click",
+              element_description: elementDescription,
+              selector_hint_present: selectorHint !== undefined,
+              reason: "ELEMENT_NOT_FOUND",
+            });
+          }
           finish({ success: false, error: "ELEMENT_NOT_FOUND" });
           return;
         }
         if (val === "AMBIGUOUS") {
-          if (cdpDiagnostics) console.log("[RealisticClick] ambiguous element match", { surface: "browser_click" });
+          if (cdpDiagnostics) {
+            console.log("[RealisticClick] ambiguous element match", {
+              surface: "browser_click",
+              element_description: elementDescription,
+              selector_hint_present: selectorHint !== undefined,
+              reason: "AMBIGUOUS",
+            });
+          }
           finish({ success: false, error: "AMBIGUOUS_ELEMENT" });
           return;
         }

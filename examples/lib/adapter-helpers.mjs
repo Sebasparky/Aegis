@@ -47,6 +47,8 @@ export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, sub
     if (focused !== undefined) s += `; focused=${focused}`;
     if (submitted !== undefined) s += `; submitted=${submitted}`;
     if (pointerPathPointCount !== undefined) s += `; pointer_path_point_count=${pointerPathPointCount}`;
+    if (pointerStartSource !== undefined) s += `; pointer_start_source=${pointerStartSource}`;
+    if (pointerStatePersisted !== undefined) s += `; pointer_state_persisted=${pointerStatePersisted}`;
     s += `; source=antigen-browser-adapter@${version}`;
     return s;
   }

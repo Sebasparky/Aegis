@@ -519,6 +519,26 @@ describe("H. pointer_path_point_count surfacing", () => {
     assert.ok(text.endsWith(`source=antigen-browser-adapter@${V}`), `source should be last: ${text}`);
   });
 
+  test("buildSyntheticSuccessText includes pointer_start_source and pointer_state_persisted for browser_type", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", focused: true, submitted: false,
+      pointerPathPointCount: 51, pointerStartSource: "session", pointerStatePersisted: true,
+      version: V,
+    });
+    assert.ok(text.includes("pointer_path_point_count=51"), `missing pointer_path_point_count: ${text}`);
+    assert.ok(text.includes("pointer_start_source=session"), `missing pointer_start_source: ${text}`);
+    assert.ok(text.includes("pointer_state_persisted=true"), `missing pointer_state_persisted: ${text}`);
+    assert.ok(text.endsWith(`source=antigen-browser-adapter@${V}`), `source should be last: ${text}`);
+  });
+
+  test("buildSyntheticSuccessText omits pointer_start_source and pointer_state_persisted for browser_type when absent", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "5-8", focused: true, submitted: false, pointerPathPointCount: 10, version: V,
+    });
+    assert.ok(!text.includes("pointer_start_source"), `unexpected pointer_start_source when absent: ${text}`);
+    assert.ok(!text.includes("pointer_state_persisted"), `unexpected pointer_state_persisted when absent: ${text}`);
+  });
+
   test("browser_type API success mock with pointer_path_point_count emits Cowork-visible text containing it", { timeout: 7000 }, async () => {
     const { server, port } = await createMockApiServer({
       browserTypeStatus: 200,
@@ -561,6 +581,56 @@ describe("H. pointer_path_point_count surfacing", () => {
     assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
     const text = resp.result?.content?.[0]?.text ?? "";
     assert.ok(text.includes("pointer_path_point_count=8"), `expected pointer_path_point_count=8 in: ${text}`);
+    assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
+  });
+
+  test("browser_type API success with pointer_start_source and pointer_state_persisted emits all three pointer fields", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: {
+          char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: false,
+          pointer_path_point_count: 51, pointer_start_source: "session", pointer_state_persisted: true,
+        },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 54, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search", ref: "e5", text: "desk lamp", submit: false } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 54);
+    assert.ok(resp, `expected response for id=54, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("pointer_path_point_count=51"), `missing pointer_path_point_count: ${text}`);
+    assert.ok(text.includes("pointer_start_source=session"), `missing pointer_start_source: ${text}`);
+    assert.ok(text.includes("pointer_state_persisted=true"), `missing pointer_state_persisted: ${text}`);
     assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
   });
 
@@ -934,6 +1004,7 @@ describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
     assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
     const text = resp.result?.content?.[0]?.text ?? "";
     assert.ok(text.includes("ANTIGEN_REALISM_UNAVAILABLE"), `expected ANTIGEN_REALISM_UNAVAILABLE in: ${text}`);
+    assert.ok(!text.includes("browser_type"), `browser_click error must not say browser_type: ${text}`);
 
     assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
     assert.ok(!stdoutBuf.includes('"path": ["target"]'), `Zod target error leaked to stdout`);
@@ -981,6 +1052,7 @@ describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
     assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
     const text = resp.result?.content?.[0]?.text ?? "";
     assert.ok(text.includes("ELEMENT_NOT_FOUND"), `expected ELEMENT_NOT_FOUND in: ${text}`);
+    assert.ok(!text.includes("browser_type"), `browser_click error must not say browser_type: ${text}`);
 
     assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
   });

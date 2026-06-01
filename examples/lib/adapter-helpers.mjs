@@ -30,10 +30,10 @@ export function charCountBucket(len) {
  * Never includes raw typed text, passwords, or any field value.
  *
  * @param {"browser_type"|"browser_fill"|"browser_click"} toolName
- * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, version: string }} opts
+ * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, pointerPathPointCount?: number, version: string }} opts
  * @returns {string}
  */
-export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, version }) {
+export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, pointerPathPointCount, version }) {
   if (toolName === "browser_click") {
     return `Antigen realistic browser_click complete; path=realistic_success; hint=${hint ?? "description"}; source=antigen-browser-adapter@${version}`;
   }
@@ -41,6 +41,7 @@ export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, sub
     let s = `Antigen realistic browser_type complete; path=realistic_success; char_count_bucket=${bucket}`;
     if (focused !== undefined) s += `; focused=${focused}`;
     if (submitted !== undefined) s += `; submitted=${submitted}`;
+    if (pointerPathPointCount !== undefined) s += `; pointer_path_point_count=${pointerPathPointCount}`;
     s += `; source=antigen-browser-adapter@${version}`;
     return s;
   }

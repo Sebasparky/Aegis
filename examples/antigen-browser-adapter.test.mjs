@@ -504,6 +504,109 @@ describe("E. Pre-init gate", () => {
   });
 });
 
+// ─── H. pointer_path_point_count surfacing ────────────────────────────────────
+
+describe("H. pointer_path_point_count surfacing", () => {
+  const V = "2026-05-29";
+
+  test("buildSyntheticSuccessText includes pointer_path_point_count for browser_type when provided", () => {
+    const text = buildSyntheticSuccessText("browser_type", {
+      bucket: "9-16", focused: true, submitted: true, pointerPathPointCount: 12, version: V,
+    });
+    assert.ok(text.includes("pointer_path_point_count=12"), `missing pointer_path_point_count: ${text}`);
+    assert.ok(text.includes("focused=true"), `missing focused: ${text}`);
+    assert.ok(text.includes("submitted=true"), `missing submitted: ${text}`);
+    assert.ok(text.endsWith(`source=antigen-browser-adapter@${V}`), `source should be last: ${text}`);
+  });
+
+  test("browser_type API success mock with pointer_path_point_count emits Cowork-visible text containing it", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: true, pointer_path_point_count: 8 },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 50, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search", ref: "e5", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 50);
+    assert.ok(resp, `expected response for id=50, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("pointer_path_point_count=8"), `expected pointer_path_point_count=8 in: ${text}`);
+    assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
+  });
+
+  test("success text does not include raw typed text or forbidden fields", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserTypeStatus: 200,
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: true, pointer_path_point_count: 5 },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 51, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search", ref: "e5", text: "secret_password_value", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    assert.ok(!stdoutBuf.includes("secret_password_value"), `raw typed text leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("password"), `forbidden field 'password' leaked to stdout`);
+    assert.ok(!stdoutBuf.includes("secret_ref"), `forbidden field 'secret_ref' leaked to stdout`);
+  });
+});
+
 // ─── G. browser_type adapter-owned — no @playwright/mcp fallthrough ───────────
 // browser_type is now fully owned by the adapter. When INTERCEPTION_ENABLED=false,
 // or when the Aegis API returns non-200, or when the network fails, the adapter

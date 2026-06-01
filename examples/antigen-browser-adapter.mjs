@@ -801,9 +801,10 @@ async function handleLine(line) {
 
       if (apiRes.ok) {
         const resBody      = await apiRes.json().catch(() => ({}));
-        const resBucket    = resBody?.data?.char_count_bucket ?? bucket;
-        const resFocused   = resBody?.data?.focused;
-        const resSubmitted = resBody?.data?.submitted;
+        const resBucket         = resBody?.data?.char_count_bucket ?? bucket;
+        const resFocused        = resBody?.data?.focused;
+        const resSubmitted      = resBody?.data?.submitted;
+        const resPointerCount   = resBody?.data?.pointer_path_point_count;
         process.stderr.write(
           `[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_type` +
           ` char_count_bucket=${resBucket} has_target=${hasTarget} submit=${typeSubmit}\n`
@@ -814,6 +815,7 @@ async function handleLine(line) {
             bucket: resBucket,
             focused: resFocused,
             submitted: resSubmitted,
+            pointerPathPointCount: resPointerCount,
             version: ADAPTER_VERSION,
           }),
         );

@@ -667,18 +667,57 @@ async function handleLine(line) {
 
   const toolName = name;
 
-  // ── browser_click interception ────────────────────────────────────────────
-  if (INTERCEPTION_ENABLED && toolName === "browser_click") {
-    const argKeys          = Object.keys(msg?.params?.arguments ?? {}).join(",");
-    const elementDescription = msg?.params?.arguments?.element ?? "";
-    const requestId        = msg.id;
-    const targetArg        = msg?.params?.arguments?.target ?? "";
-    const selectorHint     = looksLikeSelector(targetArg) ? targetArg : undefined;
+  // ── browser_click: adapter-owned — never forwarded to @playwright/mcp ───────
+  // @playwright/mcp's real schema requires a "target" field that our static
+  // schema does not advertise. Forwarding browser_click always produces a Zod
+  // validation error (path: ["target"]). The adapter is the sole handler:
+  // realistic success or a clean MCP error. No fallthrough.
+  if (toolName === "browser_click") {
+    const argKeys    = Object.keys(msg?.params?.arguments ?? {}).join(",");
+    const elementArg = msg?.params?.arguments?.element ?? "";
+    const targetArg  = msg?.params?.arguments?.target ?? "";
+    const refArg     = msg?.params?.arguments?.ref ?? "";
+    const requestId  = msg.id;
+
+    // element_description: prefer args.element, then args.target as plain text
+    const elementDescription = elementArg || targetArg || "";
+    // selector_hint: only when args.target or args.ref looks like a real CSS selector
+    // snapshot refs like "e32" or "a2309" do not pass looksLikeSelector
+    const selectorHint =
+      looksLikeSelector(targetArg) ? targetArg :
+      looksLikeSelector(refArg)    ? refArg :
+      undefined;
+
+    if (!INTERCEPTION_ENABLED) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_click_unavailable` +
+        ` reason=interception_disabled arg_keys=${argKeys}\n`
+      );
+      writeSyntheticErrorResponse(
+        requestId,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        "Antigen realistic browser_click requires ANTIGEN_BROWSER_HEADLESS=false and a valid Aegis browser session.",
+      );
+      return;
+    }
+
+    if (!elementDescription && !selectorHint) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_click_error` +
+        ` reason=ANTIGEN_CLICK_TARGET_REQUIRED arg_keys=${argKeys}\n`
+      );
+      writeSyntheticErrorResponse(
+        requestId,
+        "ANTIGEN_CLICK_TARGET_REQUIRED",
+        "Antigen realistic browser_click requires element, target, or a CSS selector hint.",
+      );
+      return;
+    }
 
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] realistic_click_attempt` +
       ` arg_keys=${argKeys}` +
-      (selectorHint ? " hint=selector" : " hint=none") + "\n"
+      (selectorHint ? " hint=selector" : " hint=description") + "\n"
     );
 
     try {
@@ -692,24 +731,40 @@ async function handleLine(line) {
       });
 
       if (apiRes.ok) {
+        const resBody                  = await apiRes.json().catch(() => ({}));
+        const resPointerCount          = resBody?.data?.pointer_path_point_count;
+        const resPointerStartSource    = resBody?.data?.pointer_start_source;
+        const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;
         process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_click_success\n`);
         writeSyntheticResponse(
           requestId,
           buildSyntheticSuccessText("browser_click", {
             hint: selectorHint ? "selector" : "description",
+            pointerPathPointCount: resPointerCount,
+            pointerStartSource: resPointerStartSource,
+            pointerStatePersisted: resPointerStatePersisted,
             version: ADAPTER_VERSION,
           }),
         );
         return;
       }
-      const errBody = await apiRes.json().catch(() => ({}));
-      const errCode = errBody?.error?.code ?? apiRes.status;
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_click_fallback reason=${errCode}\n`);
-    } catch (err) {
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_click_fallback reason=INTERCEPT_ERROR(${err.message})\n`);
-    }
 
-    child.stdin.write(line);
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=${errCode}\n`);
+      writeSyntheticErrorResponse(
+        requestId,
+        errCode,
+        `Antigen realistic browser_click failed (${errCode}).`,
+      );
+    } catch (_err) {
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=INTERCEPT_ERROR\n`);
+      writeSyntheticErrorResponse(
+        requestId,
+        "ANTIGEN_CLICK_INTERCEPT_ERROR",
+        "Antigen realistic browser_click encountered a network error.",
+      );
+    }
     return;
   }
 

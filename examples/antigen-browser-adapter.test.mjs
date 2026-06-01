@@ -654,7 +654,10 @@ function createFakeMcpBin() {
 }
 
 async function createMockApiServer(opts = {}) {
-  const { browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false } = opts;
+  const {
+    browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false,
+    browserClickStatus = 200, browserClickBody = null, browserClickDestroy = false,
+  } = opts;
 
   const server = createServer((req, res) => {
     let body = "";
@@ -679,6 +682,16 @@ async function createMockApiServer(opts = {}) {
           data: { char_count_bucket: "5-8", duration_ms: 120, focused: true, submitted: false },
         };
         res.writeHead(browserTypeStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-click") {
+        if (browserClickDestroy) { req.socket.destroy(); return; }
+        const responseBody = browserClickBody ?? {
+          ok: true,
+          data: { mode: "realistic_pointer_click", pointer_path_point_count: 42, pointer_start_source: "session", pointer_state_persisted: true },
+        };
+        res.writeHead(browserClickStatus, { "Content-Type": "application/json" });
         res.end(JSON.stringify(responseBody));
         return;
       }
@@ -878,5 +891,228 @@ describe("G. browser_type adapter-owned — no Playwright fallthrough", () => {
     assert.ok(text.includes("focused=true"), `expected focused=true in: ${text}`);
     assert.ok(text.includes("submitted=true"), `expected submitted=true in: ${text}`);
     assert.ok(!stdoutBuf.includes("sofa chair"), `raw text value leaked to stdout`);
+  });
+});
+
+// ─── H. browser_click adapter-owned — no Playwright fallthrough ──────────────
+
+describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
+
+  test("INTERCEPTION_ENABLED=false: returns clean MCP error with ANTIGEN_REALISM_UNAVAILABLE", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",   // visible mode OFF → INTERCEPTION_ENABLED=false
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 50, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "desk lamp suggestion", ref: "e32" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 50);
+    assert.ok(resp, `expected response for id=50, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_REALISM_UNAVAILABLE"), `expected ANTIGEN_REALISM_UNAVAILABLE in: ${text}`);
+
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+    assert.ok(!stdoutBuf.includes('"path": ["target"]'), `Zod target error leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, API 422: returns clean MCP error with error code, no fallthrough", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickStatus: 422,
+      browserClickBody: {
+        ok: false,
+        error: { code: "ELEMENT_NOT_FOUND", message: "Element not found." },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 51, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "desk lamp suggestion", ref: "e32" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 51);
+    assert.ok(resp, `expected response for id=51, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ELEMENT_NOT_FOUND"), `expected ELEMENT_NOT_FOUND in: ${text}`);
+
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, API success: returns path=realistic_success and source", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickStatus: 200,
+      browserClickBody: { ok: true, data: { mode: "realistic_pointer_click", pointer_path_point_count: 37, pointer_start_source: "viewport_center", pointer_state_persisted: false } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 52, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "desk lamp suggestion", ref: "e32" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 52);
+    assert.ok(resp, `expected response for id=52, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success (no isError), got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
+    assert.ok(text.includes("source=antigen-browser-adapter"), `expected source in: ${text}`);
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
+  });
+
+  test("INTERCEPTION_ENABLED=true, API success with pointer metadata: output includes pointer fields", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();  // default body has pointer_path_point_count=42, pointer_start_source=session
+
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 53, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "desk lamp suggestion", ref: "e32" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 53);
+    assert.ok(resp, `expected response for id=53, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("pointer_path_point_count=42"), `expected pointer_path_point_count=42 in: ${text}`);
+    assert.ok(text.includes("pointer_start_source=session"), `expected pointer_start_source=session in: ${text}`);
+
+    // No forbidden internals
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "password", "secret", '"path":["target"]'];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
+
+  test("INTERCEPTION_ENABLED=true, snapshot ref as target: treated as description not selector", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    // ref="e2309" is a snapshot ref — looksLikeSelector must reject it
+    // No element provided — element_description falls back to target=""
+    // target="e2309" is also not a selector, so element_description="e2309" from fallback
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 54, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "search suggestion item", ref: "e2309" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 54);
+    assert.ok(resp, `expected response for id=54, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success (element provided), got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    // hint must be "description" because "e2309" is not a CSS selector
+    assert.ok(text.includes("hint=description"), `expected hint=description (not selector) in: ${text}`);
   });
 });

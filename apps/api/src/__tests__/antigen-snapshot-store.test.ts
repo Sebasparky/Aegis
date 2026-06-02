@@ -22,6 +22,7 @@ import {
   listAntigenSnapshotElements,
   isAntigenSnapshotExpired,
   deleteExpiredAntigenSnapshots,
+  deleteAntigenSnapshotsForSession,
   toExternalAntigenSnapshotElement,
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
@@ -51,11 +52,12 @@ function makeCandidate(overrides: Partial<AntigenSnapshotCandidate> = {}): Antig
 
 function createFor(
   candidates: AntigenSnapshotCandidate[],
-  opts: { user_id?: string; now?: Date; url?: string | null } = {},
+  opts: { user_id?: string; now?: Date; url?: string | null; browser_session_id?: string } = {},
 ) {
+  const sessionId = opts.browser_session_id ?? "tbsess_store_001";
   return createAntigenSnapshotRecord({
-    browser_session_id: "tbsess_store_001",
-    browser_runtime_id: "tbsess_store_001",
+    browser_session_id: sessionId,
+    browser_runtime_id: sessionId,
     user_id: opts.user_id ?? USER,
     url: opts.url ?? "https://www.ikea.com/us/en/search/?q=desk%20lamp",
     title: null,
@@ -124,9 +126,10 @@ describe("lookup", () => {
 });
 
 describe("ref namespace is per-snapshot", () => {
-  it("two independent snapshots can each contain ag_1", () => {
-    const a = createFor([makeCandidate({ name: "A" })]);
-    const b = createFor([makeCandidate({ name: "B" })]);
+  it("two independent snapshots (distinct sessions) can each contain ag_1", () => {
+    // Distinct sessions so both survive the same-session cleanup invariant.
+    const a = createFor([makeCandidate({ name: "A" })], { browser_session_id: "session_1" });
+    const b = createFor([makeCandidate({ name: "B" })], { browser_session_id: "session_2" });
     expect(a.snapshot.snapshot_id).not.toBe(b.snapshot.snapshot_id);
     expect(getAntigenSnapshotElement(a.snapshot.snapshot_id, "ag_1", USER)?.name).toBe("A");
     expect(getAntigenSnapshotElement(b.snapshot.snapshot_id, "ag_1", USER)?.name).toBe("B");
@@ -155,6 +158,89 @@ describe("expiry", () => {
     const { snapshot } = createFor([makeCandidate()], { now });
     expect(deleteExpiredAntigenSnapshots(now)).toBe(0);
     expect(getAntigenSnapshot(snapshot.snapshot_id, USER)).toBeDefined();
+  });
+});
+
+describe("session cleanup semantics", () => {
+  // Invariant: after createAntigenSnapshotRecord(...), at most one active snapshot
+  // remains per browser_session_id + user_id. Expired snapshots and prior
+  // same-session/user snapshots are deleted before the new one is stored.
+
+  it("a second snapshot for the same session+user deletes the first", () => {
+    const a = createFor([makeCandidate({ name: "A" })]);
+    const b = createFor([
+      makeCandidate({ name: "B1" }),
+      makeCandidate({ name: "B2", kind: "button", role: "button", href: null, href_path: null }),
+    ]);
+
+    expect(a.snapshot.snapshot_id).not.toBe(b.snapshot.snapshot_id);
+    // A is gone, including its elements.
+    expect(getAntigenSnapshot(a.snapshot.snapshot_id, USER)).toBeUndefined();
+    expect(listAntigenSnapshotElements(a.snapshot.snapshot_id, USER)).toEqual([]);
+    // B is the latest active snapshot and keeps its own ref namespace.
+    expect(getAntigenSnapshot(b.snapshot.snapshot_id, USER)).toBeDefined();
+    expect(getAntigenSnapshotElement(b.snapshot.snapshot_id, "ag_1", USER)?.name).toBe("B1");
+    expect(getAntigenSnapshotElement(b.snapshot.snapshot_id, "ag_2", USER)?.name).toBe("B2");
+  });
+
+  it("keeps different browser sessions (same user) isolated", () => {
+    const a = createFor([makeCandidate({ name: "A" })], { browser_session_id: "session_1" });
+    const b = createFor([makeCandidate({ name: "B" })], { browser_session_id: "session_2" });
+    expect(getAntigenSnapshot(a.snapshot.snapshot_id, USER)).toBeDefined();
+    expect(getAntigenSnapshot(b.snapshot.snapshot_id, USER)).toBeDefined();
+  });
+
+  it("keeps different users (same session) isolated and user-scoped", () => {
+    const a = createFor([makeCandidate({ name: "A" })], { user_id: USER });
+    const b = createFor([makeCandidate({ name: "B" })], { user_id: OTHER_USER });
+    // Both survive — creating B for OTHER_USER must not delete A for USER.
+    expect(getAntigenSnapshot(a.snapshot.snapshot_id, USER)).toBeDefined();
+    expect(getAntigenSnapshot(b.snapshot.snapshot_id, OTHER_USER)).toBeDefined();
+    // Cross-user access is denied either direction.
+    expect(getAntigenSnapshot(a.snapshot.snapshot_id, OTHER_USER)).toBeUndefined();
+    expect(getAntigenSnapshot(b.snapshot.snapshot_id, USER)).toBeUndefined();
+  });
+
+  it("deletes a globally-expired snapshot when a new snapshot is created", () => {
+    const t0 = new Date("2026-06-02T12:00:00.000Z");
+    // Old snapshot on a DIFFERENT session, so it is removed by the expiry sweep
+    // (not the same-session sweep).
+    const old = createFor([makeCandidate({ name: "old" })], { browser_session_id: "session_old", now: t0 });
+    const t1 = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    const fresh = createFor([makeCandidate({ name: "fresh" })], { browser_session_id: "session_new", now: t1 });
+
+    expect(getAntigenSnapshot(old.snapshot.snapshot_id, USER)).toBeUndefined();
+    expect(getAntigenSnapshot(fresh.snapshot.snapshot_id, USER)).toBeDefined();
+  });
+
+  it("deleteAntigenSnapshotsForSession returns an accurate count and only removes matching session+user", () => {
+    const target = createFor([makeCandidate()], { browser_session_id: "session_1", user_id: USER });
+    const otherSession = createFor([makeCandidate()], { browser_session_id: "session_2", user_id: USER });
+    const otherUser = createFor([makeCandidate()], { browser_session_id: "session_1", user_id: OTHER_USER });
+
+    expect(deleteAntigenSnapshotsForSession("session_1", USER)).toBe(1);
+    expect(getAntigenSnapshot(target.snapshot.snapshot_id, USER)).toBeUndefined();
+    // Other session and other user are untouched.
+    expect(getAntigenSnapshot(otherSession.snapshot.snapshot_id, USER)).toBeDefined();
+    expect(getAntigenSnapshot(otherUser.snapshot.snapshot_id, OTHER_USER)).toBeDefined();
+    // A second call finds nothing left to remove.
+    expect(deleteAntigenSnapshotsForSession("session_1", USER)).toBe(0);
+  });
+
+  it("an empty snapshot still replaces a prior snapshot for the same session+user", () => {
+    const a = createFor([makeCandidate({ name: "A" })]);
+    const empty = createFor([]);
+    expect(getAntigenSnapshot(a.snapshot.snapshot_id, USER)).toBeUndefined();
+    expect(getAntigenSnapshot(empty.snapshot.snapshot_id, USER)).toBeDefined();
+    expect(empty.snapshot.element_count).toBe(0);
+  });
+
+  it("retires the prior snapshot's ag_1 while the new snapshot's ag_1 resolves", () => {
+    const first = createFor([makeCandidate({ name: "first-1" })]);
+    const second = createFor([makeCandidate({ name: "second-1" })]);
+    // Same session+user: first is gone, second owns its own ag_1.
+    expect(getAntigenSnapshotElement(first.snapshot.snapshot_id, "ag_1", USER)).toBeUndefined();
+    expect(getAntigenSnapshotElement(second.snapshot.snapshot_id, "ag_1", USER)?.name).toBe("second-1");
   });
 });
 

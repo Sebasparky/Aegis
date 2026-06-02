@@ -349,6 +349,35 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     expect(raw).not.toContain("\"box\"");
   });
 
+  it("keeps only the latest snapshot when called twice for the same session", async () => {
+    seedSession();
+    const first = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const second = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+
+    const idA = first.json().data.snapshot_id;
+    const bodyB = second.json();
+    const idB = bodyB.data.snapshot_id;
+    expect(idA).not.toBe(idB);
+
+    // Store invariant: the first snapshot was retired; only the latest survives.
+    expect(getAntigenSnapshotElement(idA, "ag_1", MOCK_USER_ID)).toBeUndefined();
+    expect(getAntigenSnapshotElement(idB, "ag_1", MOCK_USER_ID)).toBeDefined();
+
+    // External response shape is unchanged on the second call.
+    expect(bodyB.ok).toBe(true);
+    expect(idB).toMatch(/^snap_/);
+    expect(bodyB.data.snapshot_ttl_ms).toBe(10_000);
+    expect(bodyB.data.elements.map((e: { ref: string }) => e.ref)).toEqual(["ag_1", "ag_2", "ag_3"]);
+  });
+
   it("returns 403 FORBIDDEN when the session belongs to another delegation", async () => {
     seedSession({ delegation_id: "del_other" });
     const res = await server.inject({

@@ -134,6 +134,13 @@ export function createAntigenSnapshotRecord(params: CreateAntigenSnapshotParams)
   const expiresAt = new Date(now.getTime() + ANTIGEN_SNAPSHOT_TTL_MS).toISOString();
   const snapshotId = newId("snap");
 
+  // Store-cleanup invariant: after this call, at most one active snapshot remains
+  // per browser_session_id + user_id. First drop globally-expired snapshots, then
+  // drop any prior snapshot for THIS session+user before storing the fresh one.
+  // (Other sessions/users are untouched.)
+  deleteExpiredAntigenSnapshots(now);
+  deleteAntigenSnapshotsForSession(params.browser_session_id, params.user_id);
+
   const elements: AntigenSnapshotElementRecord[] = params.candidates.map((c, i) => ({
     snapshot_id: snapshotId,
     ref: `ag_${i + 1}`,
@@ -220,6 +227,30 @@ export function deleteExpiredAntigenSnapshots(now?: Date): number {
   let removed = 0;
   for (const [id, stored] of snapshots) {
     if (isAntigenSnapshotExpired(stored.snapshot, ref)) {
+      snapshots.delete(id);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+/**
+ * Deletes every stored snapshot (and its elements) for a given
+ * browser_session_id + user_id. Returns the number of snapshots removed.
+ *
+ * Used to enforce the "at most one active snapshot per session+user" invariant
+ * before storing a fresh snapshot (see createAntigenSnapshotRecord). Scoped to a
+ * single session+user — snapshots for other sessions or other users are left
+ * untouched, preserving cross-session and cross-user isolation. Because a stored
+ * snapshot carries its elements with it, deleting the entry drops the elements too.
+ */
+export function deleteAntigenSnapshotsForSession(browserSessionId: string, userId: string): number {
+  let removed = 0;
+  for (const [id, stored] of snapshots) {
+    if (
+      stored.snapshot.browser_session_id === browserSessionId &&
+      stored.snapshot.user_id === userId
+    ) {
       snapshots.delete(id);
       removed += 1;
     }

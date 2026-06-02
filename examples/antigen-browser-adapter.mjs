@@ -373,6 +373,19 @@ let runtimeInitDone = false; // true after child handshake + stdout piped
 // Each entry: { url: string, resolve: (result: { line: string, parsed: object }) => void }
 const pendingNavigations = new Map();
 
+// browser_navigate child-response safety net. @playwright/mcp always eventually
+// responds — with a success OR its own navigation error — so this only fires if the
+// child process is genuinely hung or dead. It MUST sit well above the child's own
+// navigation timeout (it is not a page-load timer). Env-overridable so tests can
+// exercise the never-responds path quickly.
+const NAVIGATE_CHILD_TIMEOUT_MS =
+  Number(process.env.ANTIGEN_NAVIGATE_CHILD_TIMEOUT_MS) || 120000;
+
+// Request ids whose browser_navigate already received a synthetic
+// NAVIGATE_CHILD_TIMEOUT response. A late child response for one of these ids is
+// dropped (not re-forwarded) so the adapter never emits a duplicate response.
+const navigateTimedOutIds = new Set();
+
 async function ensureRuntime() {
   if (!_initPromise) {
     _initPromise = _doInitRuntime().catch((err) => {
@@ -638,6 +651,15 @@ function handleChildLine(line) {
       pendingNavigations.delete(parsed.id);
       pending.resolve({ line, parsed });
       return; // browser_navigate handler owns forwarding — do not write to stdout here
+    }
+    if (parsed?.id !== undefined && navigateTimedOutIds.has(parsed.id)) {
+      // browser_navigate already returned NAVIGATE_CHILD_TIMEOUT for this id.
+      // Drop the late child response so we never emit a duplicate response.
+      navigateTimedOutIds.delete(parsed.id);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] navigation_late_child_response_dropped id=${parsed.id}\n`
+      );
+      return;
     }
   } catch {}
   process.stdout.write(line.endsWith("\n") ? line : line + "\n");
@@ -1109,20 +1131,22 @@ async function handleLine(line) {
     // Forward to @playwright/mcp for actual page load.
     child.stdin.write(line);
 
-    // Wait for child response with a 5s timeout to prevent indefinite Map leak.
-    const CHILD_TIMEOUT_MS = 5000;
+    // Wait for the child response, guarded by a generous safety-net timeout that
+    // only fires if the child is genuinely hung/dead (see NAVIGATE_CHILD_TIMEOUT_MS).
     const CHILD_TIMEOUT_SENTINEL = Symbol("child_timeout");
     let childTimeoutId;
     const childTimeoutPromise = new Promise((resolve) => {
-      childTimeoutId = setTimeout(() => resolve(CHILD_TIMEOUT_SENTINEL), CHILD_TIMEOUT_MS);
+      childTimeoutId = setTimeout(() => resolve(CHILD_TIMEOUT_SENTINEL), NAVIGATE_CHILD_TIMEOUT_MS);
     });
 
     const childResult = await Promise.race([childResponsePromise, childTimeoutPromise]);
     clearTimeout(childTimeoutId);
 
     if (childResult === CHILD_TIMEOUT_SENTINEL) {
-      // Child never responded — clean up and surface an error.
+      // Child never responded within the safety-net window — clean up and surface an
+      // error. Record the id so a late child response is dropped (no duplicate).
       pendingNavigations.delete(requestId);
+      navigateTimedOutIds.add(requestId);
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] navigation_child_timeout id=${requestId}\n`
       );

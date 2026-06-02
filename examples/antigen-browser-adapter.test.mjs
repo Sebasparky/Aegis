@@ -1518,6 +1518,54 @@ function createNavigateFakeMcpBin() {
   };
 }
 
+// Fake MCP stub that answers initialize immediately but delays its browser_navigate
+// response. Used to exercise the late-child-response path: the adapter's safety-net
+// timeout fires first, then the delayed child response must be dropped (no duplicate).
+function createDelayedNavigateFakeMcpBin(delayMs) {
+  const stubSrc = `
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  try {
+    const msg = JSON.parse(line.trim());
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id: msg.id,
+        result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "fake-mcp-nav-delayed", version: "0" } }
+      }) + "\\n");
+    } else if (msg.method === "tools/call" && msg.params?.name === "browser_navigate") {
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: "2.0", id: msg.id,
+          result: { content: [{ type: "text", text: "Navigated to " + (msg.params?.arguments?.url ?? "unknown") }] }
+        }) + "\\n");
+      }, ${Number(delayMs)});
+    }
+  } catch {}
+});
+process.stdin.resume();
+`;
+  const tmpDir = mkdtempSync(join(tmpdir(), "antigen-nav-delayed-mcp-"));
+  const fakeMcpPath = join(tmpDir, "fake-mcp-nav-delayed.mjs");
+  writeFileSync(fakeMcpPath, stubSrc, "utf8");
+  const fakeNpxPath = join(tmpDir, "npx");
+  writeFileSync(fakeNpxPath, `#!/bin/sh\nexec ${process.execPath} ${fakeMcpPath}\n`, "utf8");
+  chmodSync(fakeNpxPath, 0o755);
+  return {
+    binPath: tmpDir,
+    cleanup() { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+// Count how many JSON-RPC lines in stdout carry the given id (duplicate detector).
+function countMcpResponses(stdoutBuf, id) {
+  return stdoutBuf
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((m) => m?.id === id).length;
+}
+
 describe("I. browser_navigate — navigation-aware pointer continuity", () => {
 
   test("browser_navigate forwards child response to Cowork after nav-state update", { timeout: 7000 }, async () => {
@@ -1861,6 +1909,137 @@ describe("I. browser_navigate — navigation-aware pointer continuity", () => {
     for (const f of FORBIDDEN) {
       assert.ok(!stdoutBuf.includes(f), `forbidden field "${f}" leaked to stdout`);
     }
+  });
+
+  test("does NOT return NAVIGATE_CHILD_TIMEOUT when child responds normally (default safety-net timeout)", { timeout: 7000 }, async () => {
+    // No ANTIGEN_NAVIGATE_CHILD_TIMEOUT_MS override → adapter uses its generous default.
+    // A normal child response must forward immediately, never racing a false timeout.
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 90, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 90);
+    assert.ok(resp, `expected response for id=90, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("Navigated to"), `expected navigate success text, got: ${text}`);
+    assert.ok(!stdoutBuf.includes("NAVIGATE_CHILD_TIMEOUT"), `must not emit NAVIGATE_CHILD_TIMEOUT for a normal response`);
+    assert.equal(countMcpResponses(stdoutBuf, 90), 1, `expected exactly one response for id=90`);
+  });
+
+  test("child truly never responds → NAVIGATE_CHILD_TIMEOUT once, with cleanup diagnostic", { timeout: 7000 }, async () => {
+    // FAKE_MCP_STUB_SRC (createFakeMcpBin) answers initialize but NEVER browser_navigate.
+    // Short safety-net timeout so the never-responds path is exercised quickly.
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_NAVIGATE_CHILD_TIMEOUT_MS: "600",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 91, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 91);
+    assert.ok(resp, `expected response for id=91, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("NAVIGATE_CHILD_TIMEOUT"), `expected NAVIGATE_CHILD_TIMEOUT in: ${text}`);
+    assert.equal(countMcpResponses(stdoutBuf, 91), 1, `expected exactly one response for id=91`);
+    assert.ok(stderrBuf.includes("navigation_child_timeout"), `expected navigation_child_timeout diagnostic in stderr`);
+  });
+
+  test("late child response after synthetic timeout is dropped (no duplicate response)", { timeout: 8000 }, async () => {
+    // Child replies to browser_navigate after 1200ms, but the safety-net timeout is 400ms.
+    // The timeout response goes out first; the late child line must be dropped, not re-forwarded.
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createDelayedNavigateFakeMcpBin(1200);
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_NAVIGATE_CHILD_TIMEOUT_MS: "400",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 92, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    // Wait past the child's 1200ms delay so the late response would have arrived.
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Exactly one response for id=92, and it is the timeout error — the late line was dropped.
+    assert.equal(countMcpResponses(stdoutBuf, 92), 1, `expected exactly one response for id=92 (no duplicate)`);
+    const resp = parseMcpResponse(stdoutBuf, 92);
+    assert.ok(resp, `expected response for id=92`);
+    assert.equal(resp.result?.isError, true, `expected the single response to be the timeout error`);
+    assert.ok((resp.result?.content?.[0]?.text ?? "").includes("NAVIGATE_CHILD_TIMEOUT"), `expected NAVIGATE_CHILD_TIMEOUT`);
+    assert.ok(stderrBuf.includes("navigation_late_child_response_dropped"), `expected late-response-dropped diagnostic in stderr`);
+    assert.ok(!stdoutBuf.includes("Navigated to"), `late child success text must not reach stdout`);
   });
 });
 

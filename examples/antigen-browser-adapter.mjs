@@ -343,6 +343,12 @@ let INTERCEPTION_ENABLED = false; // set after successful lazy init
 let _initPromise = null;
 let runtimeInitDone = false; // true after child handshake + stdout piped
 
+// ─── Pending navigation registry ──────────────────────────────────────────────
+// Tracks in-flight browser_navigate calls by requestId so handleChildLine can
+// resolve the waiting handler instead of forwarding directly to stdout.
+// Each entry: { url: string, resolve: (result: { line: string, parsed: object }) => void }
+const pendingNavigations = new Map();
+
 async function ensureRuntime() {
   if (!_initPromise) {
     _initPromise = _doInitRuntime().catch((err) => {
@@ -474,8 +480,19 @@ async function _doInitRuntime() {
   // This prevents the child's init response from being forwarded to Claude.
   await doChildInitHandshake();
 
-  // Handshake complete — now safe to pipe child responses to Claude.
-  child.stdout.pipe(process.stdout);
+  // Handshake complete — now safe to forward child responses to Claude.
+  // Use a manual line buffer instead of pipe so browser_navigate can intercept
+  // its own response before it reaches Cowork.
+  let _childStdoutBuf = "";
+  child.stdout.on("data", (chunk) => {
+    _childStdoutBuf += chunk.toString();
+    let idx;
+    while ((idx = _childStdoutBuf.indexOf("\n")) !== -1) {
+      const line = _childStdoutBuf.slice(0, idx + 1);
+      _childStdoutBuf = _childStdoutBuf.slice(idx + 1);
+      handleChildLine(line);
+    }
+  });
   runtimeInitDone = true;
 
   process.on("SIGINT",  () => child.kill("SIGINT"));
@@ -578,6 +595,63 @@ process.stdin.on("end", () => {
     if (child) child.stdin.end();
   });
 });
+
+/**
+ * Routes a single line from child.stdout.
+ *
+ * If the line is a JSON-RPC response whose id is in pendingNavigations, the
+ * waiting browser_navigate handler is resolved and this function returns without
+ * writing to stdout (the handler owns forwarding). All other lines go to stdout.
+ * Malformed non-navigation lines are forwarded as-is to preserve existing behavior.
+ */
+function handleChildLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed?.id !== undefined && pendingNavigations.has(parsed.id)) {
+      const pending = pendingNavigations.get(parsed.id);
+      pendingNavigations.delete(parsed.id);
+      pending.resolve({ line, parsed });
+      return; // browser_navigate handler owns forwarding — do not write to stdout here
+    }
+  } catch {}
+  process.stdout.write(line.endsWith("\n") ? line : line + "\n");
+}
+
+/**
+ * Calls POST /api/agent/v1/runtime/browser-navigation-state to update current_url
+ * and persist a navigation_proxy pointer state. Awaited with a 400ms timeout.
+ * On failure or timeout, logs a safe diagnostic and returns — navigation is not blocked.
+ */
+async function updateNavigationPointerState(runtimeId, url) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 400);
+  try {
+    const res = await fetch(`${BASE}/api/agent/v1/runtime/browser-navigation-state`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify({ browser_runtime_id: runtimeId, url, action: "navigation_proxy" }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const body = await res.json().catch(() => ({}));
+    const source = body?.data?.pointer_start_source ?? "unknown";
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update` +
+      ` ok=${res.ok} pointer_start_source=${source}\n`
+    );
+  } catch (_err) {
+    clearTimeout(timeoutId);
+    const reason = _err?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR";
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update_error reason=${reason}\n`
+    );
+  }
+}
 
 /**
  * Writes a synthetic MCP tools/call success response to stdout.
@@ -909,6 +983,66 @@ async function handleLine(line) {
         "Antigen realistic browser_type encountered a network error.",
       );
     }
+    return;
+  }
+
+  // ── browser_navigate: Antigen owns pointer continuity ─────────────────────
+  // Actual page load is delegated to @playwright/mcp. After the child responds
+  // successfully, Antigen updates current_url and persists a navigation_proxy
+  // pointer state so the next browser_type/browser_click starts from session state.
+  // This is always-on for Antigen-managed sessions — session continuity, not evasion.
+  if (toolName === "browser_navigate") {
+    const navigateUrl = msg?.params?.arguments?.url ?? "";
+    const requestId = msg.id;
+
+    // Register pending navigation — handleChildLine will resolve this when child responds.
+    let resolveChildResponse;
+    const childResponsePromise = new Promise((resolve) => {
+      resolveChildResponse = resolve;
+    });
+    pendingNavigations.set(requestId, { url: navigateUrl, resolve: resolveChildResponse });
+
+    // Forward to @playwright/mcp for actual page load.
+    child.stdin.write(line);
+
+    // Wait for child response with a 5s timeout to prevent indefinite Map leak.
+    const CHILD_TIMEOUT_MS = 5000;
+    const CHILD_TIMEOUT_SENTINEL = Symbol("child_timeout");
+    let childTimeoutId;
+    const childTimeoutPromise = new Promise((resolve) => {
+      childTimeoutId = setTimeout(() => resolve(CHILD_TIMEOUT_SENTINEL), CHILD_TIMEOUT_MS);
+    });
+
+    const childResult = await Promise.race([childResponsePromise, childTimeoutPromise]);
+    clearTimeout(childTimeoutId);
+
+    if (childResult === CHILD_TIMEOUT_SENTINEL) {
+      // Child never responded — clean up and surface an error.
+      pendingNavigations.delete(requestId);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] navigation_child_timeout id=${requestId}\n`
+      );
+      writeSyntheticErrorResponse(
+        "browser_navigate",
+        requestId,
+        "NAVIGATE_CHILD_TIMEOUT",
+        "Navigation response timed out.",
+      );
+      return;
+    }
+
+    const { line: childLine, parsed: childParsed } = childResult;
+    const isError = childParsed?.result?.isError === true;
+
+    // On successful navigation, update pointer state synchronously (short timeout).
+    // This must complete before forwarding the response so Cowork's next action
+    // sees pointer_start_source=session rather than viewport_center.
+    if (!isError && browser_runtime_id) {
+      await updateNavigationPointerState(browser_runtime_id, navigateUrl);
+    }
+
+    // Forward the original child response to Cowork.
+    process.stdout.write(childLine.endsWith("\n") ? childLine : childLine + "\n");
     return;
   }
 

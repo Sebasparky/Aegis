@@ -1363,3 +1363,458 @@ describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
     assert.ok(text.includes("hint=description"), `expected hint=description (not selector) in: ${text}`);
   });
 });
+
+// ─── I. browser_navigate — navigation-aware pointer continuity ─────────────────
+//
+// browser_navigate forwards actual page load to @playwright/mcp (fake MCP stub),
+// then calls POST /api/agent/v1/runtime/browser-navigation-state and waits for it
+// to complete before forwarding the navigate response to Cowork.
+//
+// Infrastructure reuses createFakeMcpBin() and extends createMockApiServer to
+// handle the navigation-state endpoint.
+
+async function createNavMockApiServer(opts = {}) {
+  const {
+    navStateStatus = 200,
+    navStateBody = null,
+    navStateDelayMs = 0,
+    browserTypeStatus = 200,
+    browserTypeBody = null,
+  } = opts;
+
+  const navRequests = [];
+
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          data: {
+            cdp_url: "http://127.0.0.1:19999",
+            browser_runtime_id: "test_runtime_001",
+            runtime_mode: "test_mode",
+            reused_existing: false,
+          },
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-navigation-state") {
+        let parsed = {};
+        try { parsed = JSON.parse(body); } catch {}
+        navRequests.push(parsed);
+        const respond = () => {
+          const responseBody = navStateBody ?? {
+            ok: true,
+            data: { pointer_state_persisted: true, pointer_start_source: "session", pointer_action: "navigation_proxy" },
+          };
+          res.writeHead(navStateStatus, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(responseBody));
+        };
+        if (navStateDelayMs > 0) {
+          setTimeout(respond, navStateDelayMs);
+        } else {
+          respond();
+        }
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-type") {
+        const responseBody = browserTypeBody ?? {
+          ok: true,
+          data: { char_count_bucket: "9-16", duration_ms: 120, focused: true, submitted: false, pointer_start_source: "session", pointer_state_persisted: true },
+        };
+        res.writeHead(browserTypeStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
+      res.writeHead(404);
+      res.end("{}");
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, port: server.address().port, getNavRequests: () => navRequests };
+}
+
+// Fake MCP stub that responds to browser_navigate with a success result.
+const FAKE_MCP_NAVIGATE_STUB_SRC = `
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  try {
+    const msg = JSON.parse(line.trim());
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id: msg.id,
+        result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "fake-mcp-nav", version: "0" } }
+      }) + "\\n");
+    } else if (msg.method === "tools/call" && msg.params?.name === "browser_navigate") {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id: msg.id,
+        result: { content: [{ type: "text", text: "Navigated to " + (msg.params?.arguments?.url ?? "unknown") }] }
+      }) + "\\n");
+    }
+  } catch {}
+});
+process.stdin.resume();
+`;
+
+function createNavigateFakeMcpBin() {
+  const tmpDir = mkdtempSync(join(tmpdir(), "antigen-nav-mcp-"));
+  const fakeMcpPath = join(tmpDir, "fake-mcp-nav.mjs");
+  writeFileSync(fakeMcpPath, FAKE_MCP_NAVIGATE_STUB_SRC, "utf8");
+  const fakeNpxPath = join(tmpDir, "npx");
+  writeFileSync(fakeNpxPath, `#!/bin/sh\nexec ${process.execPath} ${fakeMcpPath}\n`, "utf8");
+  chmodSync(fakeNpxPath, 0o755);
+  return {
+    binPath: tmpDir,
+    cleanup() { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+describe("I. browser_navigate — navigation-aware pointer continuity", () => {
+
+  test("browser_navigate forwards child response to Cowork after nav-state update", { timeout: 7000 }, async () => {
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 70, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 70);
+    assert.ok(resp, `expected response for id=70, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    // @playwright/mcp fake returns "Navigated to <url>"
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("Navigated to"), `expected navigate success text, got: ${text}`);
+  });
+
+  test("browser_navigate calls browser-navigation-state endpoint after child responds", { timeout: 7000 }, async () => {
+    const { server, port, getNavRequests } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 71, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const navReqs = getNavRequests();
+    assert.equal(navReqs.length, 1, `expected 1 nav-state call, got ${navReqs.length}`);
+    assert.equal(navReqs[0].action, "navigation_proxy", `expected action=navigation_proxy`);
+    assert.equal(navReqs[0].url, "https://www.ikea.com/us/en/", `expected url to match`);
+    assert.ok(navReqs[0].browser_runtime_id, `expected browser_runtime_id to be set`);
+  });
+
+  test("browser_navigate waits for nav-state update before forwarding response (deterministic, not fire-and-forget)", { timeout: 7000 }, async () => {
+    // Add a 150ms delay to the nav-state endpoint. Track when the navigate response
+    // (id=72) specifically arrives in stdout — it must arrive after the delay completes.
+    const { server, port } = await createNavMockApiServer({ navStateDelayMs: 150 });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let navigateResponseArrivedAt = null;
+    adapter.stdout.on("data", (d) => {
+      stdoutBuf += d.toString();
+      // Check if the navigate response (id=72) has arrived in this chunk
+      if (navigateResponseArrivedAt === null) {
+        const lines = stdoutBuf.split("\n");
+        for (const l of lines) {
+          try {
+            const parsed = JSON.parse(l.trim());
+            if (parsed?.id === 72) {
+              navigateResponseArrivedAt = Date.now();
+              break;
+            }
+          } catch {}
+        }
+      }
+    });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    const navigateSentAt = Date.now();
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 72, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 72);
+    assert.ok(resp, `expected response for id=72`);
+    assert.ok(navigateResponseArrivedAt !== null, `expected navigate response to have arrived`);
+    // The response must have arrived at least 130ms after navigate was sent
+    // (the nav-state update adds 150ms of delay — proving it was awaited, not fire-and-forget).
+    const elapsed = navigateResponseArrivedAt - navigateSentAt;
+    assert.ok(elapsed >= 130, `expected response to take >=130ms (nav-state delay=150ms), got ${elapsed}ms`);
+  });
+
+  test("browser_navigate still succeeds when nav-state endpoint returns non-200", { timeout: 7000 }, async () => {
+    const { server, port } = await createNavMockApiServer({
+      navStateStatus: 500,
+      navStateBody: { ok: false, error: { code: "INTERNAL_ERROR", message: "Test error" } },
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 73, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Navigation must still succeed despite nav-state failure
+    const resp = parseMcpResponse(stdoutBuf, 73);
+    assert.ok(resp, `expected response for id=73`);
+    assert.ok(!resp.result?.isError, `expected navigation success despite nav-state error`);
+    // Safe diagnostic must appear in stderr
+    assert.ok(stderrBuf.includes("navigation_state_update"), `expected navigation_state_update in stderr`);
+  });
+
+  test("browser_navigate still succeeds when nav-state endpoint times out (>400ms)", { timeout: 10000 }, async () => {
+    const { server, port } = await createNavMockApiServer({ navStateDelayMs: 600 }); // > 400ms timeout
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 74, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 3000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 74);
+    assert.ok(resp, `expected response for id=74`);
+    assert.ok(!resp.result?.isError, `expected navigation success despite nav-state timeout`);
+    assert.ok(stderrBuf.includes("TIMEOUT"), `expected TIMEOUT in stderr, got: ${stderrBuf}`);
+  });
+
+  test("non-navigation child responses are forwarded normally after browser_navigate", { timeout: 7000 }, async () => {
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+
+    // First: navigate
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 75, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // Then: browser_type (adapter-owned, goes through Aegis API)
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 76, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Both responses must be present
+    const navResp = parseMcpResponse(stdoutBuf, 75);
+    assert.ok(navResp, `expected navigate response for id=75`);
+    const typeResp = parseMcpResponse(stdoutBuf, 76);
+    assert.ok(typeResp, `expected browser_type response for id=76`);
+  });
+
+  test("after browser_navigate, browser_type response includes pointer_start_source=session", { timeout: 7000 }, async () => {
+    const { server, port } = await createNavMockApiServer({
+      browserTypeBody: {
+        ok: true,
+        data: { char_count_bucket: "9-16", duration_ms: 130, focused: true, submitted: true, submit_method: "enter", pointer_start_source: "session", pointer_state_persisted: true },
+      },
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 77, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 78, method: "tools/call",
+      params: { name: "browser_type", arguments: { element: "Search box", text: "desk lamp", submit: true } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const typeResp = parseMcpResponse(stdoutBuf, 78);
+    assert.ok(typeResp, `expected browser_type response for id=78`);
+    assert.ok(!typeResp.result?.isError, `expected success`);
+    const text = typeResp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("pointer_start_source=session"), `expected pointer_start_source=session, got: ${text}`);
+    assert.ok(text.includes("pointer_state_persisted=true"), `expected pointer_state_persisted=true, got: ${text}`);
+  });
+
+  test("no forbidden internals appear in navigate stdout", { timeout: 7000 }, async () => {
+    const { server, port } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 79, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "password", "cdp_url", '"secret"'];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden field "${f}" leaked to stdout`);
+    }
+  });
+});

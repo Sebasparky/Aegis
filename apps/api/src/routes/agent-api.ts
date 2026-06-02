@@ -48,6 +48,8 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { realisticClickByDescription, realisticTypeTextViaCDP } from "../runtime/realisticBrowserActions.js";
+import { extractAntigenSnapshotCandidatesViaCDP } from "../runtime/antigenSnapshotRuntime.js";
+import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3637,6 +3639,89 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         pointer_state_persisted: true,
         pointer_start_source: pointerStartSource,
         pointer_action: "navigation_proxy",
+      },
+    });
+  });
+
+  // ─── Antigen Snapshot v1 ─────────────────────────────────────────────────────
+  // Antigen-owned page snapshot. Extracts visible interactive DOM candidates over
+  // CDP, stores internal records (with bounding boxes) keyed by ag_* refs, and
+  // returns a SAFE external view — semantic metadata only, never coordinates,
+  // cdp_url, profile paths, selector hints, or field values. No ag_* resolution
+  // for click/type yet; this endpoint only extracts, stores, and returns refs.
+
+  server.post("/api/agent/v1/runtime/browser-snapshot", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as {
+      browser_runtime_id?: unknown;
+      action?: unknown;
+      max_candidates?: unknown;
+      viewport_only?: unknown;
+    };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (body.action !== "dom_snapshot") {
+      return sendError(reply, 400, "INVALID_FIELD", 'action must be "dom_snapshot".');
+    }
+    if (body.max_candidates !== undefined && typeof body.max_candidates !== "number") {
+      return sendError(reply, 400, "INVALID_FIELD", "max_candidates must be a number if provided.");
+    }
+
+    // Bound max_candidates to [1, 500]; default 200 (extraction runtime default).
+    const maxCandidates =
+      typeof body.max_candidates === "number"
+        ? Math.max(1, Math.min(500, Math.floor(body.max_candidates)))
+        : 200;
+    // viewport_only defaults true; only an explicit false opts out.
+    const viewportOnly = body.viewport_only === false ? false : true;
+
+    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
+    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (session.delegation_id !== delegation.id) {
+      return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    }
+    if (session.status !== "ready") {
+      return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+    }
+    if (!session.cdp_url) {
+      return sendError(reply, 400, "SESSION_NOT_READY", "Browser runtime session has no active CDP endpoint.");
+    }
+
+    let candidates;
+    try {
+      candidates = await extractAntigenSnapshotCandidatesViaCDP({
+        cdpUrl: session.cdp_url,
+        maxCandidates,
+        viewportOnly,
+      });
+    } catch {
+      // Never leak CDP URLs, filesystem paths, or stack detail.
+      return sendError(reply, 502, "SNAPSHOT_EXTRACTION_FAILED", "Failed to capture an Antigen snapshot of the page.");
+    }
+
+    const { snapshot, elements } = createAntigenSnapshotRecord({
+      browser_session_id: session.browser_session_id,
+      browser_runtime_id: body.browser_runtime_id,
+      user_id: MOCK_USER_ID,
+      url: session.current_url ?? null,
+      title: null, // v1: document.title extraction is out of scope
+      candidates,
+    });
+
+    return reply.send({
+      ok: true,
+      data: {
+        snapshot_id: snapshot.snapshot_id,
+        url: snapshot.url,
+        title: snapshot.title,
+        expires_at: snapshot.expires_at,
+        snapshot_ttl_ms: ANTIGEN_SNAPSHOT_TTL_MS,
+        element_count: snapshot.element_count,
+        elements: elements.map(toExternalAntigenSnapshotElement),
       },
     });
   });

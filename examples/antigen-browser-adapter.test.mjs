@@ -24,6 +24,7 @@ import {
   looksLikeSelector,
   charCountBucket,
   buildSyntheticSuccessText,
+  buildAntigenSnapshotText,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -902,12 +903,56 @@ async function createMockApiServer(opts = {}) {
   const {
     browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false,
     browserClickStatus = 200, browserClickBody = null, browserClickDestroy = false,
+    browserSnapshotStatus = 200, browserSnapshotBody = null, browserSnapshotDestroy = false,
   } = opts;
+
+  // Captured antigen_snapshot request bodies + their Authorization header,
+  // so tests can assert what the adapter sent.
+  const snapshotRequests = [];
+
+  const DEFAULT_SNAPSHOT_BODY = {
+    ok: true,
+    data: {
+      snapshot_id: "snap_test123",
+      url: "https://www.ikea.com/us/en/search/?q=desk%20lamp",
+      title: null,
+      expires_at: "2026-01-01T00:00:10.000Z",
+      snapshot_ttl_ms: 10000,
+      element_count: 2,
+      elements: [
+        {
+          ref: "ag_1",
+          kind: "link",
+          role: "link",
+          name: "TERTIAL, Work lamp, light blue",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          hints: { href_path: "/us/en/p/tertial-work-lamp-light-blue-70504295/" },
+        },
+        {
+          ref: "ag_2",
+          kind: "button",
+          role: "button",
+          name: "Add to bag",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+        },
+      ],
+    },
+  };
 
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-snapshot") {
+        if (browserSnapshotDestroy) { req.socket.destroy(); return; }
+        let parsed = {};
+        try { parsed = JSON.parse(body); } catch {}
+        snapshotRequests.push({ body: parsed, authorization: req.headers["authorization"] });
+        const responseBody = browserSnapshotBody ?? DEFAULT_SNAPSHOT_BODY;
+        res.writeHead(browserSnapshotStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -946,7 +991,7 @@ async function createMockApiServer(opts = {}) {
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, port: server.address().port };
+  return { server, port: server.address().port, getSnapshotRequests: () => snapshotRequests };
 }
 
 function parseMcpResponse(stdoutBuf, id) {
@@ -1816,5 +1861,539 @@ describe("I. browser_navigate — navigation-aware pointer continuity", () => {
     for (const f of FORBIDDEN) {
       assert.ok(!stdoutBuf.includes(f), `forbidden field "${f}" leaked to stdout`);
     }
+  });
+});
+
+// ─── J. buildAntigenSnapshotText — pure allowlist formatter ───────────────────
+
+describe("J. buildAntigenSnapshotText — pure formatter", () => {
+  const V = "2026-05-29";
+  const SAMPLE = {
+    snapshot_id: "snap_abc123",
+    url: "https://www.ikea.com/us/en/search/?q=desk%20lamp",
+    title: null,
+    expires_at: "2026-01-01T00:00:10.000Z",
+    element_count: 2,
+    elements: [
+      {
+        ref: "ag_1", kind: "link", role: "link", name: "TERTIAL, Work lamp, light blue",
+        state: { visible: true, enabled: true, clickable: true, typeable: false },
+        hints: { href_path: "/us/en/p/tertial-work-lamp-light-blue-70504295/" },
+      },
+      {
+        ref: "ag_2", kind: "button", role: "button", name: "Add to bag",
+        state: { visible: true, enabled: true, clickable: true, typeable: false },
+      },
+    ],
+  };
+
+  test("header includes path, snapshot_id, element_count, source", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes("path=antigen_snapshot_success"), text);
+    assert.ok(text.includes("snapshot_id=snap_abc123"), text);
+    assert.ok(text.includes("element_count=2"), text);
+    assert.ok(text.includes(`source=antigen-browser-adapter@${V}`), text);
+  });
+
+  test("includes url and expires_at when present", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes("url: https://www.ikea.com/us/en/search/?q=desk%20lamp"), text);
+    assert.ok(text.includes("expires_at: 2026-01-01T00:00:10.000Z"), text);
+  });
+
+  test("omits url/title/expires_at lines when absent", () => {
+    const text = buildAntigenSnapshotText({ snapshot_id: "snap_x", element_count: 0, elements: [] }, V);
+    assert.ok(!text.includes("url:"), text);
+    assert.ok(!text.includes("title:"), text);
+    assert.ok(!text.includes("expires_at:"), text);
+  });
+
+  test("omits title line when title is null", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(!text.includes("title:"), text);
+  });
+
+  test("element lines include kind, name, ref, clickable, typeable", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes('- link "TERTIAL, Work lamp, light blue" [ref=ag_1] [clickable=true] [typeable=false]'), text);
+    assert.ok(text.includes('- button "Add to bag" [ref=ag_2] [clickable=true] [typeable=false]'), text);
+  });
+
+  test("href_path appended only when present", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes("[href_path=/us/en/p/tertial-work-lamp-light-blue-70504295/]"), text);
+    // ag_2 has no href_path — its line must not carry one
+    const ag2Line = text.split("\n").find((l) => l.includes("[ref=ag_2]")) ?? "";
+    assert.ok(!ag2Line.includes("href_path"), ag2Line);
+  });
+
+  test("empty elements → (no visible interactive elements found)", () => {
+    const text = buildAntigenSnapshotText({ snapshot_id: "snap_e", element_count: 0, elements: [] }, V);
+    assert.ok(text.includes("Elements:"), text);
+    assert.ok(text.includes("(no visible interactive elements found)"), text);
+  });
+
+  test("ignores forbidden internal fields even if backend includes them", () => {
+    const malicious = {
+      snapshot_id: "snap_m", element_count: 1,
+      cdp_url: "http://internal-cdp-endpoint",
+      secret_ref: "sr_should_not_appear",
+      user_data_dir: "/tmp/aegis-profile",
+      elements: [
+        {
+          ref: "ag_1", kind: "link", role: "link", name: "Item",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          box: { x: 10, y: 20, width: 30, height: 40 },
+          center: { x: 25, y: 40 },
+          hints: { href_path: "/p/item" },
+        },
+      ],
+    };
+    const text = buildAntigenSnapshotText(malicious, V);
+    for (const f of ["cdp_url", "secret_ref", "user_data_dir", '"box"', "width", "height", "center"]) {
+      assert.ok(!text.includes(f), `forbidden field "${f}" leaked: ${text}`);
+    }
+    // The safe fields still render
+    assert.ok(text.includes("[ref=ag_1]"), text);
+    assert.ok(text.includes("[href_path=/p/item]"), text);
+  });
+});
+
+// ─── K. antigen_snapshot adapter tool — adapter-owned, no Playwright fallthrough ─
+//
+// antigen_snapshot is additive and adapter-owned. It calls the Antigen backend
+// snapshot endpoint and returns a readable, allowlist-formatted ag_* listing.
+// It is never forwarded to @playwright/mcp. browser_snapshot is unaffected.
+
+describe("K. antigen_snapshot adapter tool", () => {
+
+  test("tools/list includes antigen_snapshot with max_candidates/viewport_only and no agent-supplied browser_runtime_id", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    const toolsResponse = parseMcpResponse(stdoutBuf, 2);
+    assert.ok(toolsResponse, `expected tools/list response, stdout: ${stdoutBuf}`);
+    const tools = toolsResponse.result?.tools ?? [];
+    const snap = tools.find((t) => t.name === "antigen_snapshot");
+    assert.ok(snap, "tools list should include antigen_snapshot");
+    const props = snap.inputSchema?.properties ?? {};
+    assert.ok("max_candidates" in props, "schema should expose max_candidates");
+    assert.ok("viewport_only" in props, "schema should expose viewport_only");
+    assert.ok(!("browser_runtime_id" in props), "agent-facing schema must NOT expose browser_runtime_id");
+    // browser_snapshot remains advertised (additive — not replaced)
+    assert.ok(tools.some((t) => t.name === "browser_snapshot"), "browser_snapshot must remain in tools list");
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("success: calls backend snapshot endpoint with defaults and Authorization header", { timeout: 7000 }, async () => {
+    const { server, port, getSnapshotRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",   // antigen_snapshot is independent of interception
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderrBuf = "";
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 80, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const reqs = getSnapshotRequests();
+    assert.equal(reqs.length, 1, `expected exactly one snapshot backend call, got ${reqs.length}`);
+    assert.equal(reqs[0].body.action, "dom_snapshot", "action should be dom_snapshot");
+    assert.equal(reqs[0].body.max_candidates, 200, "default max_candidates should be 200");
+    assert.equal(reqs[0].body.viewport_only, true, "default viewport_only should be true");
+    assert.ok(reqs[0].body.browser_runtime_id, "adapter must supply browser_runtime_id internally");
+    assert.equal(reqs[0].authorization, "Bearer test_token", "Authorization header should be present");
+    // Lazy init: runtime was only created on this first call
+    assert.ok(stderrBuf.includes("Runtime ready"), `expected lazy Runtime ready in stderr: ${stderrBuf}`);
+  });
+
+  test("success: returns readable text with snapshot_id, element_count, ag_* refs, href_path", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 81, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 81);
+    assert.ok(resp, `expected response for id=81, stdout: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=antigen_snapshot_success"), text);
+    assert.ok(text.includes("snapshot_id=snap_test123"), text);
+    assert.ok(text.includes("element_count=2"), text);
+    assert.ok(text.includes("source=antigen-browser-adapter"), text);
+    assert.ok(text.includes('- link "TERTIAL, Work lamp, light blue" [ref=ag_1]'), text);
+    assert.ok(text.includes('- button "Add to bag" [ref=ag_2]'), text);
+    assert.ok(text.includes("[href_path=/us/en/p/tertial-work-lamp-light-blue-70504295/]"), text);
+  });
+
+  test("custom args (max_candidates=50, viewport_only=false) reach the backend", { timeout: 7000 }, async () => {
+    const { server, port, getSnapshotRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 82, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: { max_candidates: 50, viewport_only: false } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const reqs = getSnapshotRequests();
+    assert.equal(reqs.length, 1, `expected one snapshot call, got ${reqs.length}`);
+    assert.equal(reqs[0].body.max_candidates, 50, "max_candidates should pass through");
+    assert.equal(reqs[0].body.viewport_only, false, "viewport_only=false should pass through");
+  });
+
+  test("empty snapshot formats cleanly", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserSnapshotBody: {
+        ok: true,
+        data: {
+          snapshot_id: "snap_empty", url: "https://example.com", title: null,
+          expires_at: "2026-01-01T00:00:10.000Z", snapshot_ttl_ms: 10000,
+          element_count: 0, elements: [],
+        },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 83, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 83);
+    assert.ok(resp, `expected response for id=83, stdout: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("element_count=0"), text);
+    assert.ok(text.includes("(no visible interactive elements found)"), text);
+  });
+
+  test("backend 422: clean synthetic error mentioning antigen_snapshot, no fallthrough", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserSnapshotStatus: 422,
+      browserSnapshotBody: { ok: false, error: { code: "SNAPSHOT_EXTRACTION_FAILED", message: "Failed." } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 84, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 84);
+    assert.ok(resp, `expected response for id=84, stdout: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("SNAPSHOT_EXTRACTION_FAILED"), text);
+    assert.ok(text.includes("antigen_snapshot"), `error must reference antigen_snapshot: ${text}`);
+    assert.ok(!text.includes("browser_type"), `must not say browser_type: ${text}`);
+    assert.ok(!text.includes("browser_click"), `must not say browser_click: ${text}`);
+    assert.ok(!stdoutBuf.includes('"path":["target"]'), "no Zod target error");
+  });
+
+  test("network error: clean synthetic error with ANTIGEN_SNAPSHOT_INTERCEPT_ERROR, no fallthrough", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({ browserSnapshotDestroy: true });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 85, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 85);
+    assert.ok(resp, `expected response for id=85, stdout: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_SNAPSHOT_INTERCEPT_ERROR"), text);
+    // No raw stack trace internals
+    assert.ok(!stdoutBuf.includes("at Object."), "no stack frames in stdout");
+    assert.ok(!stdoutBuf.includes("node:internal"), "no node internals in stdout");
+  });
+
+  test("success output contains no forbidden internals", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 86, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const FORBIDDEN = [
+      "user_data_dir", "profile_key", ".aegis", "browser-profiles", "localStorage",
+      "sessionStorage", "cdp_url", "pass_id", "secret_ref", "password",
+      '"box"', '"x"', '"y"', '"width"', '"height"',
+    ];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
+
+  test("backend returning extra forbidden fields: adapter still omits them (allowlist)", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserSnapshotBody: {
+        ok: true,
+        data: {
+          snapshot_id: "snap_evil",
+          url: "https://example.com",
+          title: null,
+          expires_at: "2026-01-01T00:00:10.000Z",
+          snapshot_ttl_ms: 10000,
+          element_count: 1,
+          cdp_url: "http://internal-cdp-endpoint",
+          secret_ref: "sr_should_not_appear",
+          user_data_dir: "/tmp/aegis-profile",
+          elements: [
+            {
+              ref: "ag_1", kind: "link", role: "link", name: "Item",
+              state: { visible: true, enabled: true, clickable: true, typeable: false },
+              box: { x: 10, y: 20, width: 30, height: 40 },
+              hints: { href_path: "/p/item" },
+            },
+          ],
+        },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 87, method: "tools/call",
+      params: { name: "antigen_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 87);
+    assert.ok(resp, `expected response for id=87, stdout: ${stdoutBuf}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    // Safe fields render
+    assert.ok(text.includes("[ref=ag_1]"), text);
+    assert.ok(text.includes("[href_path=/p/item]"), text);
+    // Forbidden backend extras must NOT appear anywhere in stdout
+    for (const f of ["cdp_url", "secret_ref", "user_data_dir", '"box"', "width", "height"]) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden field "${f}" leaked to stdout`);
+    }
+  });
+
+  test("regression: browser_snapshot is NOT hijacked — no snapshot backend call, no antigen success text", { timeout: 7000 }, async () => {
+    const { server, port, getSnapshotRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    // browser_snapshot must remain delegated to @playwright/mcp — the adapter must
+    // not route it to the Antigen snapshot endpoint and must not emit antigen text.
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 88, method: "tools/call",
+      params: { name: "browser_snapshot", arguments: {} },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    assert.equal(getSnapshotRequests().length, 0, "browser_snapshot must NOT call the Antigen snapshot endpoint");
+    assert.ok(!stdoutBuf.includes("antigen_snapshot_success"), "browser_snapshot must not produce antigen snapshot text");
   });
 });

@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, buildSyntheticSuccessText } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, buildSyntheticSuccessText, buildAntigenSnapshotText } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -76,6 +76,30 @@ const STATIC_BROWSER_TOOLS = [
     name: "browser_snapshot",
     description: "Capture accessibility snapshot of the current page, this is better than screenshot",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "antigen_snapshot",
+    description:
+      "Take an Antigen-owned DOM snapshot of the current browser page. Returns safe semantic " +
+      "elements with Antigen refs (ag_*) that Antigen can later resolve. Does not expose " +
+      "coordinates, boxes, cookies, storage, raw DOM, or secrets.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        max_candidates: {
+          type: "number",
+          description:
+            "Maximum number of visible interactive candidates to return. Defaults to 200. " +
+            "Backend clamps to a safe bound.",
+        },
+        viewport_only: {
+          type: "boolean",
+          description:
+            "Whether to include only elements intersecting the current viewport. Defaults to true.",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "browser_navigate",
@@ -713,6 +737,11 @@ async function handleLine(line) {
     method === "tools/call" &&
     typeof name === "string" &&
     name.startsWith("browser_");
+  // antigen_snapshot is adapter-owned (not a browser_ tool and not a Playwright
+  // tool). It still needs a browser runtime, so it routes through ensureRuntime()
+  // and is handled locally — never forwarded to @playwright/mcp.
+  const isAntigenSnapshot = method === "tools/call" && name === "antigen_snapshot";
+  const needsRuntime = isBrowserToolCall || isAntigenSnapshot;
 
   // Emit a diagnostic for every message processed before runtime is ready.
   if (!runtimeInitDone) {
@@ -720,11 +749,11 @@ async function handleLine(line) {
       `[antigen-browser@${ADAPTER_VERSION}] preinit_message` +
       ` method=${method ?? "unknown"}` +
       ` name=${name ?? "none"}` +
-      ` action=${isBrowserToolCall ? "ensure_runtime" : "no_runtime"}\n`
+      ` action=${needsRuntime ? "ensure_runtime" : "no_runtime"}\n`
     );
   }
 
-  if (!isBrowserToolCall) {
+  if (!needsRuntime) {
     if (runtimeInitDone) {
       // Child is ready — pass non-browser messages through.
       child.stdin.write(line);
@@ -735,10 +764,85 @@ async function handleLine(line) {
     return;
   }
 
-  // ── Browser tools/call — init runtime if not yet done ─────────────────────
+  // ── Adapter-owned / browser tools/call — init runtime if not yet done ──────
   await ensureRuntime();
 
   const toolName = name;
+
+  // ── antigen_snapshot: adapter-owned — never forwarded to @playwright/mcp ────
+  // Calls the Antigen backend snapshot endpoint and returns a readable, safe
+  // ag_* ref listing. Allowlist-formatted: no coordinates, boxes, cdp_url,
+  // cookies, storage, raw DOM, or secrets ever reach the agent.
+  if (toolName === "antigen_snapshot") {
+    const requestId = msg.id;
+    const maxCandidates = msg?.params?.arguments?.max_candidates ?? 200;
+    const viewportOnly = msg?.params?.arguments?.viewport_only !== false;
+
+    if (!browser_runtime_id) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_unavailable reason=no_runtime\n`
+      );
+      writeSyntheticErrorResponse(
+        "antigen_snapshot",
+        requestId,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        "Antigen snapshot requires a valid Aegis browser session.",
+      );
+      return;
+    }
+
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_attempt` +
+      ` max_candidates=${maxCandidates} viewport_only=${viewportOnly}\n`
+    );
+
+    try {
+      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          browser_runtime_id,
+          action: "dom_snapshot",
+          max_candidates: maxCandidates,
+          viewport_only: viewportOnly,
+        }),
+      });
+
+      if (apiRes.ok) {
+        const resBody = await apiRes.json().catch(() => ({}));
+        const data = resBody?.data ?? {};
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_success` +
+          ` element_count=${data?.element_count ?? 0}\n`
+        );
+        writeSyntheticResponse(requestId, buildAntigenSnapshotText(data, ADAPTER_VERSION));
+        return;
+      }
+
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_error reason=${errCode}\n`
+      );
+      writeSyntheticErrorResponse(
+        "antigen_snapshot",
+        requestId,
+        errCode,
+        `Antigen snapshot failed (${errCode}).`,
+      );
+    } catch (_err) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_error reason=INTERCEPT_ERROR\n`
+      );
+      writeSyntheticErrorResponse(
+        "antigen_snapshot",
+        requestId,
+        "ANTIGEN_SNAPSHOT_INTERCEPT_ERROR",
+        "Antigen snapshot encountered a network error.",
+      );
+    }
+    return;
+  }
 
   // ── browser_click: adapter-owned — never forwarded to @playwright/mcp ───────
   // @playwright/mcp's real schema requires a "target" field that our static

@@ -56,3 +56,63 @@ export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, sub
   // browser_fill and others — unchanged format
   return `Antigen realistic ${toolName} complete; path=realistic_success; char_count_bucket=${bucket}; source=antigen-browser-adapter@${version}`;
 }
+
+/**
+ * Builds the readable, agent-facing text for a successful antigen_snapshot.
+ *
+ * Allowlist-only: reads exclusively the safe external snapshot fields. Never
+ * stringifies the raw backend payload, so any unexpected internal field
+ * (box, x, y, width, height, cdp_url, secret_ref, etc.) the backend might
+ * include can never leak into agent-visible output. Coordinates and boxes are
+ * server-side only and are intentionally absent from this surface.
+ *
+ * @param {{ snapshot_id?: string, url?: string|null, title?: string|null,
+ *           expires_at?: string|null, element_count?: number,
+ *           elements?: Array<{ ref?: string, kind?: string, role?: string|null,
+ *             name?: string, state?: { visible?: boolean, enabled?: boolean,
+ *             clickable?: boolean, typeable?: boolean },
+ *             hints?: { href_path?: string } }> }} data
+ * @param {string} version
+ * @returns {string}
+ */
+export function buildAntigenSnapshotText(data, version) {
+  const d = data ?? {};
+  const elements = Array.isArray(d.elements) ? d.elements : [];
+  const elementCount = typeof d.element_count === "number" ? d.element_count : elements.length;
+
+  const lines = [];
+  lines.push(
+    `Antigen snapshot complete; path=antigen_snapshot_success;` +
+    ` snapshot_id=${d.snapshot_id ?? "unknown"}; element_count=${elementCount};` +
+    ` source=antigen-browser-adapter@${version}`,
+  );
+
+  const meta = [];
+  if (d.url) meta.push(`url: ${d.url}`);
+  if (d.title) meta.push(`title: ${d.title}`);
+  if (d.expires_at) meta.push(`expires_at: ${d.expires_at}`);
+  if (meta.length > 0) {
+    lines.push("");
+    lines.push(...meta);
+  }
+
+  lines.push("");
+  lines.push("Elements:");
+  if (elements.length === 0) {
+    lines.push("(no visible interactive elements found)");
+  } else {
+    for (const el of elements) {
+      const kind = el?.kind ?? "element";
+      const name = el?.name ?? "";
+      const ref = el?.ref ?? "unknown";
+      const clickable = el?.state?.clickable === true;
+      const typeable = el?.state?.typeable === true;
+      let line = `- ${kind} "${name}" [ref=${ref}] [clickable=${clickable}] [typeable=${typeable}]`;
+      const hrefPath = el?.hints?.href_path;
+      if (hrefPath) line += ` [href_path=${hrefPath}]`;
+      lines.push(line);
+    }
+  }
+
+  return lines.join("\n");
+}

@@ -44,11 +44,20 @@ const mockState = vi.hoisted(() => ({
   // Controls what a `document.location.href` eval responds with (post-click URL read).
   // When a function (e.g. throws), the mock simulates an unavailable URL read.
   nextLocationHref: null as unknown,
+  // ── Overlay status injection eval (OVERLAY_ENSURE_EXPR) controls ──
+  // Detected by the unique `visibility_state` token in the expression. Kept independent
+  // of nextEvalResponse so element-find and overlay status evals never collide.
+  nextOverlayValue: null as unknown,        // becomes result.result.value
+  nextOverlayException: false,              // when true, attach result.exceptionDetails
+  nextOverlayHang: false,                   // when true, never respond (exercises fail-open timeout)
   wsCreated: false,
   reset() {
     this.allSentMessages = [];
     this.nextEvalResponse = null;
     this.nextLocationHref = null;
+    this.nextOverlayValue = null;
+    this.nextOverlayException = false;
+    this.nextOverlayHang = false;
     this.wsCreated = false;
   },
 }));
@@ -86,9 +95,21 @@ vi.mock("ws", () => {
       }
 
       if (msg.method === "Runtime.evaluate") {
+        const expr = typeof msg.params?.expression === "string" ? msg.params.expression : "";
+        // Overlay status injection eval (OVERLAY_ENSURE_EXPR) — recognized by its unique
+        // `visibility_state` token. Configurable value / exceptionDetails, or a simulated
+        // hang (no response) to exercise the fail-open timeout path.
+        if (expr.includes("visibility_state")) {
+          if (state.nextOverlayHang) return; // never respond
+          const cdpResult: Record<string, unknown> = { result: { value: state.nextOverlayValue } };
+          if (state.nextOverlayException) cdpResult.exceptionDetails = { text: "overlay eval threw" };
+          setImmediate(() =>
+            this._fire("message", Buffer.from(JSON.stringify({ id: msg.id, result: cdpResult }))),
+          );
+          return;
+        }
         // Post-click URL reads (document.location.href) get nextLocationHref so the
         // element-find / viewport evals (nextEvalResponse) stay independent.
-        const expr = typeof msg.params?.expression === "string" ? msg.params.expression : "";
         const val = expr.includes("location.href") ? state.nextLocationHref : state.nextEvalResponse;
         setImmediate(() =>
           this._fire("message", Buffer.from(JSON.stringify({ id: msg.id, result: { result: { value: val } } }))),
@@ -144,6 +165,7 @@ import {
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
 } from "../runtime/realisticBrowserActions.js";
+import { ensurePointerDebugOverlayWithStatus } from "../runtime/nativePointerRuntime.js";
 
 // ─── fetch mock helpers ───────────────────────────────────────────────────────
 
@@ -1554,5 +1576,160 @@ describe("computeScrollTargetY", () => {
 
   it("returns 0 for a non-finite docY", () => {
     expect(computeScrollTargetY({ docY: Number.NaN, height: 44, vh: 900, scrollHeight: 5000 })).toBe(0);
+  });
+});
+
+// ─── Overlay observability — ensurePointerDebugOverlayWithStatus (unit) ───────
+//
+// Verifies the verified-injection helper detects success and exceptions and is
+// strictly fail-open (never throws, never hangs the click). Diagnostic only.
+
+describe("ensurePointerDebugOverlayWithStatus — status detection + fail-open", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it("detects a successful injection (created:true, exception_present:false)", async () => {
+    const sendCdpAndWait = vi.fn().mockResolvedValue({
+      result: { value: { created: true, body_present: true, already_existed: false, top_frame: true, visibility_state: "visible", hidden: false } },
+    });
+    const status = await ensurePointerDebugOverlayWithStatus(sendCdpAndWait);
+    expect(status).toMatchObject({
+      attempted: true, created: true, body_present: true,
+      visibility_state: "visible", top_frame: true, exception_present: false,
+    });
+    // The eval must request the value back (returnByValue) so the status is readable.
+    expect(sendCdpAndWait).toHaveBeenCalledWith("Runtime.evaluate", expect.objectContaining({ returnByValue: true }));
+  });
+
+  it("detects in-page exceptionDetails (exception_present:true)", async () => {
+    const sendCdpAndWait = vi.fn().mockResolvedValue({
+      result: { value: { created: false, body_present: true, top_frame: true, visibility_state: "visible", hidden: false } },
+      exceptionDetails: { text: "ReferenceError" },
+    });
+    const status = await ensurePointerDebugOverlayWithStatus(sendCdpAndWait);
+    expect(status.exception_present).toBe(true);
+    expect(status.created).toBe(false);
+  });
+
+  it("detects an in-page eval_error sentinel (exception_present:true)", async () => {
+    const sendCdpAndWait = vi.fn().mockResolvedValue({
+      result: { value: { created: false, body_present: false, eval_error: true } },
+    });
+    const status = await ensurePointerDebugOverlayWithStatus(sendCdpAndWait);
+    expect(status.exception_present).toBe(true);
+  });
+
+  it("fail-open when the CDP call rejects (never throws)", async () => {
+    const sendCdpAndWait = vi.fn().mockRejectedValue(new Error("boom"));
+    const status = await ensurePointerDebugOverlayWithStatus(sendCdpAndWait);
+    expect(status).toMatchObject({ attempted: true, created: null, exception_present: true });
+  });
+
+  it("fail-open when the CDP call hangs (bounded by timeout, never blocks)", async () => {
+    const sendCdpAndWait = vi.fn(() => new Promise<Record<string, unknown> | undefined>(() => { /* never resolves */ }));
+    const p = ensurePointerDebugOverlayWithStatus(sendCdpAndWait, { timeoutMs: 1500 });
+    await vi.advanceTimersByTimeAsync(1600);
+    const status = await p;
+    expect(status).toMatchObject({ attempted: true, created: null, exception_present: true });
+  });
+});
+
+// ─── Overlay observability — browser_click integration (fail-open + no leak) ──
+//
+// Proves overlay diagnostics never affect or appear in browser_click output, and a
+// failed/created:false/hung overlay never blocks a successful realistic click.
+
+describe("browser_click overlay observability — integration", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "true");
+    vi.useFakeTimers();
+    mockState.nextEvalResponse = { x: 300, y: 200, width: 100, height: 40, vw: 1280, vh: 800 };
+  });
+
+  it("click still succeeds when overlay injection hangs (fail-open)", async () => {
+    mockState.nextOverlayHang = true;
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.success).toBe(true);
+  });
+
+  it("click still succeeds when overlay returns created:false", async () => {
+    mockState.nextOverlayValue = { created: false, body_present: true, already_existed: false, top_frame: true, visibility_state: "hidden", hidden: true };
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.success).toBe(true);
+  });
+
+  it("click still succeeds when overlay eval reports an exception", async () => {
+    mockState.nextOverlayException = true;
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    expect(result.success).toBe(true);
+  });
+
+  it("inject_result is logged (dev-only) but no overlay diagnostics leak into the result object", async () => {
+    mockState.nextOverlayValue = { created: true, body_present: true, already_existed: false, top_frame: true, visibility_state: "visible", hidden: false };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+
+    // Diagnostics ARE present in dev logs (target_url from DEFAULT_TARGETS = example.com).
+    const injectLog = logSpy.mock.calls.find(([label]) => label === "[PointerDebugOverlay] inject_result");
+    expect(injectLog).toBeDefined();
+    expect(injectLog?.[1]).toMatchObject({ created: true, visibility_state: "visible", top_frame: true, target_url: "https://example.com" });
+
+    // …but NONE of those diagnostics appear in the agent-facing result object.
+    const FORBIDDEN = [
+      "created", "body_present", "visibility_state", "top_frame", "exception_present",
+      "attempted", "target_url", "target_reason", "inject_result", "already_existed",
+      "x", "y", "cdp_url",
+    ];
+    for (const key of FORBIDDEN) expect(Object.keys(result)).not.toContain(key);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("visibility_state");
+    expect(serialized).not.toContain("example.com");
+    expect(serialized).not.toContain("inject_result");
+  });
+
+  it("Input.dispatchMouseEvent count and sequence are identical with overlay on vs off", async () => {
+    // Deterministic pointer path: fix Math.random so both runs target the same point.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const mouseTypes = () =>
+      mockState.allSentMessages
+        .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+        .filter((m) => m?.method === "Input.dispatchMouseEvent")
+        .map((m) => (m.params as { type: string }).type);
+
+    // Run A — overlay OFF.
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "");
+    const offPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    expect((await offPromise).success).toBe(true);
+    const offTypes = mouseTypes();
+
+    // Reset captured traffic; Run B — overlay ON (with a verified status response).
+    mockState.allSentMessages = [];
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "true");
+    mockState.nextOverlayValue = { created: true, body_present: true, already_existed: false, top_frame: true, visibility_state: "visible", hidden: false };
+    const onPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    expect((await onPromise).success).toBe(true);
+    const onTypes = mouseTypes();
+
+    expect(onTypes).toEqual(offTypes);
+    // Sanity: a real movement + click occurred (moves then pressed then released).
+    expect(offTypes).toContain("mousePressed");
+    expect(offTypes).toContain("mouseReleased");
+    expect(offTypes.filter((t) => t === "mousePressed")).toHaveLength(1);
+    expect(offTypes.filter((t) => t === "mouseReleased")).toHaveLength(1);
   });
 });

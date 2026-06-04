@@ -64,10 +64,14 @@ async function dispatchPointerClickToBox(opts: {
   sessionId?: string;
   userId?: string;
   sendCdp: (method: string, p: Record<string, unknown>) => void;
+  // Dev-only: request/response channel used solely to verify + log overlay injection
+  // status when ANTIGEN_POINTER_DEBUG_OVERLAY=true. Never affects pointer dispatch.
+  sendCdpAndWait?: (method: string, p: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
   sleep: (ms: number) => Promise<void>;
   debugOverlay: boolean;
+  targetContext?: { url?: string; reason?: string };
 }): Promise<RealisticClickResult> {
-  const { box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay } = opts;
+  const { box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait, sleep, debugOverlay, targetContext } = opts;
 
   // Two-tier pointer state load: taskBrowserSessions (shared cross-path store)
   // preferred when userId is available; browsingPointerState as fast fallback.
@@ -91,6 +95,8 @@ async function dispatchPointerClickToBox(opts: {
   let clickPathCount: number | undefined;
   await clickBoxWithPointer(state, box, sendCdp, sleep, {
     debugOverlay,
+    sendCdpAndWait,
+    targetContext,
     debugLabel: "general_click",
     templateTraces: getLoadedPointerTraces(),
     purpose: "button_click",
@@ -389,7 +395,7 @@ export async function realisticClickByDescription(params: {
   const browserWsUrl = versionData.webSocketDebuggerUrl;
   if (!browserWsUrl) return { success: false, error: "No browser WebSocket debugger URL from CDP." };
 
-  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  const { target: pageTarget, reason: targetReason } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
 
   const findExpr = buildElementFindExpr(elementDescription, selectorHint);
@@ -518,7 +524,8 @@ export async function realisticClickByDescription(params: {
         void (async () => {
           try {
             const clickResult = await dispatchPointerClickToBox({
-              box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
+              box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
+              targetContext: { url: pageTarget.url, reason: targetReason },
             });
             // Refresh the live URL after a click-triggered navigation settles.
             // Best-effort: a failed read never fails an otherwise-successful click.
@@ -586,7 +593,7 @@ export async function realisticClickKnownBox(params: {
   const browserWsUrl = versionData.webSocketDebuggerUrl;
   if (!browserWsUrl) return { success: false, error: "No browser WebSocket debugger URL from CDP." };
 
-  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  const { target: pageTarget, reason: targetReason } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
 
   // Phase 4B: when `expected` snapshot metadata is supplied, this eval also
@@ -720,7 +727,8 @@ export async function realisticClickKnownBox(params: {
         void (async () => {
           try {
             const clickResult = await dispatchPointerClickToBox({
-              box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
+              box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
+              targetContext: { url: pageTarget.url, reason: targetReason },
             });
             // Refresh the live URL after a click-triggered navigation settles.
             // Best-effort: a failed read never fails an otherwise-successful click.

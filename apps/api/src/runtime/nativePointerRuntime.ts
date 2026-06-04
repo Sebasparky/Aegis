@@ -68,15 +68,100 @@ const MODE_TIMING: Record<PointerInteractionMode, ModeTiming> = {
 // Dev-only pointer debug overlay — controlled by ANTIGEN_POINTER_DEBUG_OVERLAY=true.
 // Injects a visible dot into the page to trace native pointer paths during manual verification.
 // Never includes secret or profile values in evaluated expressions.
+//
+// Observability: ensurePointerDebugOverlayWithStatus reads the Runtime.evaluate result
+// and exceptionDetails so callers can log whether the overlay DOM was actually created
+// and visible — instead of only logging that injection was attempted. All overlay
+// behavior is FAIL-OPEN: a failed / hidden / exception / timed-out injection never blocks
+// the click or alters pointer dispatch, and overlay diagnostics are dev-log only — they
+// are never returned to API/adapter agent-facing output.
 const OVERLAY_DOT_ID = "__aegis_pointer_debug_dot";
 const OVERLAY_TRAIL_ID = "__aegis_pointer_debug_trail";
 const OVERLAY_PATH_ID = "__aegis_pointer_debug_path";
+const OVERLAY_BANNER_ID = "__aegis_pointer_debug_banner";
+
+// Shared injection expression. Creates the dot + trail when absent and ALWAYS returns a
+// safe status object (booleans / a visibility string only — never coordinates, secrets,
+// or DOM nodes). The dot/trail cssText is byte-for-byte the original, so visual behavior
+// is unchanged. `visibility_state` is a unique token used by tests to recognize this eval.
+const OVERLAY_ENSURE_EXPR = `(function(){try{`
+  + `var bodyPresent=!!document.body;`
+  + `var existed=!!document.getElementById('${OVERLAY_DOT_ID}');`
+  + `if(!existed&&bodyPresent){`
+  + `var d=document.createElement('div');d.id='${OVERLAY_DOT_ID}';d.style.cssText='position:fixed;width:24px;height:24px;border-radius:50%;background:rgba(255,80,0,0.9);border:2px solid #fff;pointer-events:none;z-index:2147483647;box-shadow:0 0 10px rgba(0,0,0,0.8),0 0 20px rgba(255,80,0,0.5);transform:translate(-50%,-50%);top:0;left:0;';document.body.appendChild(d);`
+  + `var t=document.createElement('div');t.id='${OVERLAY_TRAIL_ID}';t.style.cssText='position:fixed;top:0;left:0;pointer-events:none;z-index:2147483646;';document.body.appendChild(t);`
+  + `}`
+  + `var created=!!document.getElementById('${OVERLAY_DOT_ID}');`
+  + `return {created:created,body_present:bodyPresent,already_existed:existed,top_frame:(window.top===window.self),visibility_state:(document.visibilityState||null),hidden:!!document.hidden};`
+  + `}catch(e){return {created:false,body_present:(typeof document!=='undefined'&&!!document.body),already_existed:false,top_frame:null,visibility_state:null,hidden:null,eval_error:true};}})()`;
 
 function ensurePointerDebugOverlay(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
 ): void {
-  const expression = `(function(){if(document.getElementById('${OVERLAY_DOT_ID}'))return;var d=document.createElement('div');d.id='${OVERLAY_DOT_ID}';d.style.cssText='position:fixed;width:24px;height:24px;border-radius:50%;background:rgba(255,80,0,0.9);border:2px solid #fff;pointer-events:none;z-index:2147483647;box-shadow:0 0 10px rgba(0,0,0,0.8),0 0 20px rgba(255,80,0,0.5);transform:translate(-50%,-50%);top:0;left:0;';document.body&&document.body.appendChild(d);var t=document.createElement('div');t.id='${OVERLAY_TRAIL_ID}';t.style.cssText='position:fixed;top:0;left:0;pointer-events:none;z-index:2147483646;';document.body&&document.body.appendChild(t);})()`;
-  sendCdp("Runtime.evaluate", { expression });
+  // Fire-and-forget legacy path (status not read) — used by clickPointWithPointer and
+  // renderPersistentPointerCursor, which have no request/response channel.
+  sendCdp("Runtime.evaluate", { expression: OVERLAY_ENSURE_EXPR });
+}
+
+/** Dev-only overlay injection status — booleans / a visibility string only, never agent-facing. */
+export interface OverlayInjectStatus {
+  attempted: boolean;
+  created: boolean | null;
+  body_present: boolean | null;
+  visibility_state: string | null;
+  top_frame: boolean | null;
+  exception_present: boolean;
+}
+
+/**
+ * Injects the overlay and reads back the Runtime.evaluate result + exceptionDetails so
+ * the caller can verify the DOM node was actually created and the page is visible.
+ *
+ * FAIL-OPEN by contract: this never throws and never hangs the click. On a CDP error,
+ * in-page exception, malformed result, or a stalled response (bounded by `timeoutMs`)
+ * it returns a status with nulls and exception_present=true. The caller proceeds with
+ * the click regardless — this function performs no pointer dispatch.
+ */
+export async function ensurePointerDebugOverlayWithStatus(
+  sendCdpAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
+  options?: { timeoutMs?: number },
+): Promise<OverlayInjectStatus> {
+  const timeoutMs = options?.timeoutMs ?? 1500;
+  const failOpen: OverlayInjectStatus = {
+    attempted: true, created: null, body_present: null,
+    visibility_state: null, top_frame: null, exception_present: true,
+  };
+  try {
+    const res = await Promise.race([
+      sendCdpAndWait("Runtime.evaluate", { expression: OVERLAY_ENSURE_EXPR, returnByValue: true }),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("overlay_status_timeout")), timeoutMs)),
+    ]);
+    const exception_present = !!(res && (res as { exceptionDetails?: unknown }).exceptionDetails);
+    const value = (res?.result as Record<string, unknown> | undefined)?.value as Record<string, unknown> | undefined;
+    const evalError = value?.eval_error === true;
+    return {
+      attempted: true,
+      created: typeof value?.created === "boolean" ? (value.created as boolean) : null,
+      body_present: typeof value?.body_present === "boolean" ? (value.body_present as boolean) : null,
+      visibility_state: typeof value?.visibility_state === "string" ? (value.visibility_state as string) : null,
+      top_frame: typeof value?.top_frame === "boolean" ? (value.top_frame as boolean) : null,
+      exception_present: exception_present || evalError,
+    };
+  } catch {
+    return failOpen;
+  }
+}
+
+// Short-lived dev-only "overlay active" banner. Lets headed QA distinguish "overlay
+// never injected" from "path too fast / dot hidden". Fire-and-forget and fail-open — a
+// banner failure never affects the click. Auto-removes after ~1.5s. pointer-events:none
+// so it can never intercept input or alter dispatch.
+const OVERLAY_BANNER_EXPR = `(function(){try{if(!document.body)return;var old=document.getElementById('${OVERLAY_BANNER_ID}');if(old&&old.parentNode)old.parentNode.removeChild(old);var b=document.createElement('div');b.id='${OVERLAY_BANNER_ID}';b.textContent='Antigen pointer overlay active';b.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);background:rgba(255,80,0,0.92);color:#fff;font:600 12px/1.4 monospace;padding:4px 10px;border-radius:0 0 6px 6px;pointer-events:none;z-index:2147483647;box-shadow:0 2px 8px rgba(0,0,0,0.4);';document.body.appendChild(b);setTimeout(function(){if(b&&b.parentNode)b.parentNode.removeChild(b);},1500);}catch(e){}})()`;
+
+function injectPointerDebugBanner(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+): void {
+  sendCdp("Runtime.evaluate", { expression: OVERLAY_BANNER_EXPR });
 }
 
 function updatePointerDebugOverlay(
@@ -457,12 +542,32 @@ export async function clickBoxWithPointer(
     templateTraces?: PointerTrace[];
     purpose?: TracePurpose;
     onFocusComplete?: (info: { path_point_count: number }) => void;
+    // Dev-only: when provided alongside debugOverlay, the overlay injection is verified
+    // (result + exceptionDetails read back) and logged as inject_result. Diagnostics are
+    // dev-log only and never returned to the caller — pointer dispatch is unaffected.
+    sendCdpAndWait?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
+    targetContext?: { url?: string; reason?: string };
   },
 ): Promise<void> {
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {
     console.log("[PointerDebugOverlay] enabled");
-    ensurePointerDebugOverlay(sendCdp);
+    // Verified injection path: read back whether the overlay DOM was actually created
+    // and the page is visible. Fail-open — the helper never throws and never hangs the
+    // click; on failure we log and proceed. Falls back to fire-and-forget when no
+    // request/response channel was supplied.
+    if (options.sendCdpAndWait) {
+      const status = await ensurePointerDebugOverlayWithStatus(options.sendCdpAndWait);
+      console.log("[PointerDebugOverlay] inject_result", {
+        ...status,
+        ...(options.targetContext?.url ? { target_url: options.targetContext.url } : {}),
+        ...(options.targetContext?.reason ? { target_reason: options.targetContext.reason } : {}),
+        ...(options.debugLabel ? { path: options.debugLabel } : {}),
+      });
+    } else {
+      ensurePointerDebugOverlay(sendCdp);
+    }
+    injectPointerDebugBanner(sendCdp);
     effectiveSendCdp = (method, params) => {
       if (method === "Input.dispatchMouseEvent") {
         const { type, x, y } = params as { type: string; x?: number; y?: number };

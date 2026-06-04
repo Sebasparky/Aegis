@@ -47,7 +47,7 @@ import {
 } from "../runtime/authenticatedSessions.js";
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
@@ -3593,6 +3593,67 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
         ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
+      },
+    });
+  });
+
+  // Antigen scroll-to-ref recovery (Phase 5C). Scrolls an offscreen ag_* ref
+  // near the current viewport so the agent can take a fresh antigen_snapshot and
+  // click the new in-viewport ref. SCROLL ONLY — never clicks, never auto-refreshes
+  // the snapshot, never returns coordinates/box/cdp_url. The old offscreen ref is
+  // a scroll target only, never a click target.
+  server.post("/api/agent/v1/runtime/browser-scroll-to-ref", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; ref?: unknown };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+
+    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
+    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+
+    const refRaw = typeof body.ref === "string" ? body.ref : undefined;
+    if (!refRaw || !/^ag_\d+$/.test(refRaw)) {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw ?? ""}'; expected ag_<number>.` } });
+    }
+
+    const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
+    if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+    }
+    if (resolution.status === "expired") {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+    }
+
+    // A scrollable ref needs a positive-dimension box and document-space geometry.
+    const el = resolution.element;
+    if (el.box.width <= 0 || el.box.height <= 0 || !Number.isFinite(el.box.doc_y)) {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_SCROLLABLE", message: `Antigen ref '${refRaw}' has no scrollable geometry. Take a fresh antigen_snapshot.` } });
+    }
+
+    const scrollResult = await scrollKnownBoxIntoView({
+      cdpUrl: session.cdp_url,
+      box: { width: el.box.width, height: el.box.height, doc_y: el.box.doc_y as number },
+      sessionId: session.browser_session_id,
+      userId: MOCK_USER_ID,
+    });
+
+    if (!scrollResult.success) {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_SCROLL_FAILED", message: "Antigen could not scroll the ref into view. Take a fresh antigen_snapshot and retry." } });
+    }
+
+    // Success is intentionally minimal: the agent must take a NEW antigen_snapshot
+    // and click the fresh in-viewport ref. The old ref is not now clickable.
+    return reply.send({
+      ok: true,
+      data: {
+        mode: "scroll_to_ref",
+        hint: "take_new_snapshot",
       },
     });
   });

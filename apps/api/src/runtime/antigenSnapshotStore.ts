@@ -74,7 +74,12 @@ export interface AntigenSnapshotElementRecord {
   typeable: boolean;
   clickable: boolean;
 
-  box: { x: number; y: number; width: number; height: number };
+  /**
+   * Bounding box — internal only, never exposed. `x`/`y` are viewport-relative
+   * (realistic pointer click); `doc_x`/`doc_y` are document-space (for
+   * scroll-to-ref recovery of an offscreen ref).
+   */
+  box: { x: number; y: number; width: number; height: number; doc_x?: number; doc_y?: number };
 
   /**
    * Bounded disambiguation context (internal record carries `nearby_text`
@@ -174,7 +179,14 @@ export function createAntigenSnapshotRecord(params: CreateAntigenSnapshotParams)
     typeable: c.typeable,
     clickable: c.clickable,
 
-    box: { x: c.box.x, y: c.box.y, width: c.box.width, height: c.box.height },
+    box: {
+      x: c.box.x,
+      y: c.box.y,
+      width: c.box.width,
+      height: c.box.height,
+      doc_x: c.box.doc_x,
+      doc_y: c.box.doc_y,
+    },
 
     context: c.context,
 

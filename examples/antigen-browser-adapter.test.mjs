@@ -904,6 +904,7 @@ async function createMockApiServer(opts = {}) {
     browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false,
     browserClickStatus = 200, browserClickBody = null, browserClickDestroy = false,
     browserSnapshotStatus = 200, browserSnapshotBody = null, browserSnapshotDestroy = false,
+    browserScrollStatus = 200, browserScrollBody = null, browserScrollDestroy = false,
   } = opts;
 
   // Captured antigen_snapshot request bodies + their Authorization header,
@@ -911,6 +912,8 @@ async function createMockApiServer(opts = {}) {
   const snapshotRequests = [];
   // Captured browser-click request bodies, so tests can assert ref pass-through.
   const clickRequests = [];
+  // Captured browser-scroll-to-ref request bodies (Phase 5C).
+  const scrollRequests = [];
 
   const DEFAULT_SNAPSHOT_BODY = {
     ok: true,
@@ -990,6 +993,19 @@ async function createMockApiServer(opts = {}) {
         res.end(JSON.stringify(responseBody));
         return;
       }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-scroll-to-ref") {
+        if (browserScrollDestroy) { req.socket.destroy(); return; }
+        let parsedScroll = {};
+        try { parsedScroll = JSON.parse(body); } catch {}
+        scrollRequests.push({ body: parsedScroll, authorization: req.headers["authorization"] });
+        const responseBody = browserScrollBody ?? {
+          ok: true,
+          data: { mode: "scroll_to_ref", hint: "take_new_snapshot" },
+        };
+        res.writeHead(browserScrollStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
       res.writeHead(404);
       res.end("{}");
     });
@@ -1001,6 +1017,7 @@ async function createMockApiServer(opts = {}) {
     port: server.address().port,
     getSnapshotRequests: () => snapshotRequests,
     getClickRequests: () => clickRequests,
+    getScrollRequests: () => scrollRequests,
   };
 }
 
@@ -1624,6 +1641,226 @@ describe("H2. browser_click Antigen ag_* ref pass-through", () => {
     for (const f of FORBIDDEN) {
       assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
     }
+  });
+});
+
+// ─── H3. browser_scroll_to_ref adapter tool (Phase 5C) ──────────────────────
+//
+// browser_scroll_to_ref is adapter-owned: it scrolls an offscreen ag_* ref near
+// the viewport so the agent can take a fresh antigen_snapshot before clicking. It
+// NEVER falls through to Playwright, never clicks, and never exposes coordinates.
+describe("H3. browser_scroll_to_ref adapter tool", () => {
+
+  test("tools/list includes browser_scroll_to_ref requiring ref, with no agent-supplied browser_runtime_id", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    const toolsResponse = parseMcpResponse(stdoutBuf, 2);
+    assert.ok(toolsResponse, `expected tools/list response, stdout: ${stdoutBuf}`);
+    const tools = toolsResponse.result?.tools ?? [];
+    const scroll = tools.find((t) => t.name === "browser_scroll_to_ref");
+    assert.ok(scroll, "tools list should include browser_scroll_to_ref");
+    const props = scroll.inputSchema?.properties ?? {};
+    assert.ok("ref" in props, "schema should expose ref");
+    assert.ok(Array.isArray(scroll.inputSchema?.required) && scroll.inputSchema.required.includes("ref"), "ref must be required");
+    assert.ok(!("browser_runtime_id" in props), "agent-facing schema must NOT expose browser_runtime_id");
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("success: POSTs { ref, browser_runtime_id } and returns scroll_to_ref_success guidance", { timeout: 7000 }, async () => {
+    const { server, port, getScrollRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",   // scroll is independent of interception
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 70, method: "tools/call",
+      params: { name: "browser_scroll_to_ref", arguments: { ref: "ag_47" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Backend received { ref, browser_runtime_id } — the latter supplied internally.
+    const scrolls = getScrollRequests();
+    assert.equal(scrolls.length, 1, `expected one browser-scroll-to-ref request, got ${scrolls.length}`);
+    assert.equal(scrolls[0].body.ref, "ag_47", `expected ref=ag_47 forwarded, got: ${JSON.stringify(scrolls[0].body)}`);
+    assert.ok(scrolls[0].body.browser_runtime_id, `adapter must supply browser_runtime_id internally: ${JSON.stringify(scrolls[0].body)}`);
+
+    const resp = parseMcpResponse(stdoutBuf, 70);
+    assert.ok(resp, `expected response for id=70, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=scroll_to_ref_success"), `expected path=scroll_to_ref_success in: ${text}`);
+    assert.ok(text.includes("browser_scroll_to_ref"), `expected browser_scroll_to_ref in: ${text}`);
+    assert.ok(text.includes("take_new_snapshot") || text.includes("take a new antigen_snapshot"), `expected re-snapshot guidance in: ${text}`);
+    assert.ok(text.includes("source=antigen-browser-adapter"), `expected adapter source in: ${text}`);
+
+    // No forbidden internals / coordinates in output.
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "\"box\"", "doc_x", "doc_y", "cdp_url", "9222", "test_runtime_001"];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
+
+  test("malformed ref returns a clean ANTIGEN_REF_INVALID without calling the backend", { timeout: 7000 }, async () => {
+    const { server, port, getScrollRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "true",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 71, method: "tools/call",
+      params: { name: "browser_scroll_to_ref", arguments: { ref: "not-a-ref" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    assert.equal(getScrollRequests().length, 0, "malformed ref must not reach the backend");
+    const resp = parseMcpResponse(stdoutBuf, 71);
+    assert.ok(resp, `expected response for id=71, stdout was: ${stdoutBuf}`);
+    assert.ok(resp.result?.isError, `expected isError, got: ${JSON.stringify(resp.result)}`);
+    assert.ok((resp.result?.content?.[0]?.text ?? "").includes("ANTIGEN_REF_INVALID"), `expected ANTIGEN_REF_INVALID in: ${resp.result?.content?.[0]?.text}`);
+  });
+
+  // Each backend error code surfaces cleanly and tells the agent to re-snapshot.
+  for (const { id, code, label } of [
+    { id: 72, code: "ANTIGEN_REF_NOT_FOUND", label: "not found" },
+    { id: 73, code: "ANTIGEN_REF_EXPIRED", label: "expired" },
+    { id: 74, code: "ANTIGEN_REF_NOT_SCROLLABLE", label: "not scrollable" },
+    { id: 75, code: "ANTIGEN_SCROLL_FAILED", label: "scroll failed" },
+  ]) {
+    test(`backend ${code} surfaces cleanly (${label})`, { timeout: 7000 }, async () => {
+      const { server, port } = await createMockApiServer({
+        browserScrollStatus: 422,
+        browserScrollBody: { ok: false, error: { code, message: `Antigen browser_scroll_to_ref ${label}.` } },
+      });
+      const { binPath, cleanup } = createFakeMcpBin();
+
+      const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+        env: {
+          ...process.env,
+          PATH: `${binPath}:${process.env.PATH ?? ""}`,
+          AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+          AEGIS_AGENT_TOKEN: "test_token",
+          ANTIGEN_BROWSER_HEADLESS: "true",
+          ANTIGEN_INPUT_REALISM: "",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let stdoutBuf = "";
+      adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+      adapter.stdin.write(MCP_INIT_MSG);
+      await new Promise((r) => setTimeout(r, 200));
+      adapter.stdin.write(JSON.stringify({
+        jsonrpc: "2.0", id, method: "tools/call",
+        params: { name: "browser_scroll_to_ref", arguments: { ref: "ag_47" } },
+      }) + "\n");
+      await new Promise((r) => setTimeout(r, 1500));
+
+      adapter.kill("SIGTERM");
+      server.close();
+      cleanup();
+
+      const resp = parseMcpResponse(stdoutBuf, id);
+      assert.ok(resp, `expected response for id=${id}, stdout was: ${stdoutBuf}`);
+      assert.ok(resp.result?.isError, `expected isError, got: ${JSON.stringify(resp.result)}`);
+      const text = resp.result?.content?.[0]?.text ?? "";
+      assert.ok(text.includes(code), `expected ${code} in: ${text}`);
+      assert.ok(text.includes("browser_scroll_to_ref"), `error must reference browser_scroll_to_ref: ${text}`);
+
+      const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "\"box\"", "doc_x", "doc_y", "cdp_url", "9222"];
+      for (const f of FORBIDDEN) {
+        assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+      }
+    });
+  }
+
+  test("does not hijack browser_click / browser_snapshot routing", { timeout: 7000 }, async () => {
+    const { server, port, getClickRequests, getScrollRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 76, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Ok", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // browser_click still reaches the click endpoint; the scroll endpoint is untouched.
+    assert.equal(getClickRequests().length, 1, "browser_click must still call browser-click");
+    assert.equal(getScrollRequests().length, 0, "browser_click must not call browser-scroll-to-ref");
   });
 });
 

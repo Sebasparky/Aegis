@@ -29,11 +29,21 @@ export function charCountBucket(len) {
  * Builds the safe diagnostic text for a synthetic MCP success response.
  * Never includes raw typed text, passwords, or any field value.
  *
- * @param {"browser_type"|"browser_fill"|"browser_click"} toolName
- * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, submitMethod?: string, pointerPathPointCount?: number, pointerStartSource?: string, pointerStatePersisted?: boolean, version: string }} opts
+ * @param {"browser_type"|"browser_fill"|"browser_click"|"browser_scroll_to_ref"} toolName
+ * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, submitMethod?: string, pointerPathPointCount?: number, pointerStartSource?: string, pointerStatePersisted?: boolean, ref?: string, version: string }} opts
  * @returns {string}
  */
-export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, version }) {
+export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, ref, version }) {
+  if (toolName === "browser_scroll_to_ref") {
+    // Scroll-only recovery: the agent MUST take a new antigen_snapshot and click a
+    // fresh in-viewport ref. No coordinates, box, or pointer metadata — none exist
+    // for a scroll. The old ref is a scroll target, not a click target.
+    return (
+      `Antigen browser_scroll_to_ref complete; path=scroll_to_ref_success; ref=${ref}; ` +
+      `hint=take_new_snapshot; next=take a new antigen_snapshot and use a fresh in-viewport ref before clicking; ` +
+      `source=antigen-browser-adapter@${version}`
+    );
+  }
   if (toolName === "browser_click") {
     let s = `Antigen realistic browser_click complete; path=realistic_success; hint=${hint ?? "description"}`;
     if (pointerPathPointCount !== undefined) s += `; pointer_path_point_count=${pointerPathPointCount}`;

@@ -140,6 +140,7 @@ import {
   realisticClickByDescription,
   realisticClickKnownBox,
   realisticTypeTextViaCDP,
+  computeScrollTargetY,
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
 } from "../runtime/realisticBrowserActions.js";
@@ -1527,5 +1528,31 @@ describe("Persistent pointer continuity — taskBrowserSessions integration", ()
     expect(result.success).toBe(true);
     expect(typeof result.pointer_path_point_count).toBe("number");
     expect(result.pointer_path_point_count).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── computeScrollTargetY (Phase 5C) ──────────────────────────────────────────
+describe("computeScrollTargetY", () => {
+  it("places the box top ~1/3 down the viewport (docY - vh*0.33)", () => {
+    // docY 1800, vh 900 → 1800 - 297 = 1503, well within [0, sh-vh].
+    expect(computeScrollTargetY({ docY: 1800, height: 44, vh: 900, scrollHeight: 5000 })).toBe(1503);
+  });
+
+  it("clamps to 0 for a target near the top of the page", () => {
+    // docY 100, vh 900 → 100 - 297 = -197 → clamped to 0.
+    expect(computeScrollTargetY({ docY: 100, height: 44, vh: 900, scrollHeight: 5000 })).toBe(0);
+  });
+
+  it("clamps to the maximum scroll (scrollHeight - vh)", () => {
+    // docY near the bottom would exceed max → clamped to 5000 - 900 = 4100.
+    expect(computeScrollTargetY({ docY: 4900, height: 44, vh: 900, scrollHeight: 5000 })).toBe(4100);
+  });
+
+  it("returns 0 when the page is not scrollable (scrollHeight <= vh)", () => {
+    expect(computeScrollTargetY({ docY: 1800, height: 44, vh: 900, scrollHeight: 600 })).toBe(0);
+  });
+
+  it("returns 0 for a non-finite docY", () => {
+    expect(computeScrollTargetY({ docY: Number.NaN, height: 44, vh: 900, scrollHeight: 5000 })).toBe(0);
   });
 });

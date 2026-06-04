@@ -127,6 +127,19 @@ const STATIC_BROWSER_TOOLS = [
     },
   },
   {
+    name: "browser_scroll_to_ref",
+    description:
+      "Scroll an Antigen ag_* ref near the current viewport so you can take a fresh antigen_snapshot before clicking. Use this to recover from ANTIGEN_REF_OUT_OF_VIEWPORT on an offscreen ref. Does not click and does not expose coordinates. After it succeeds, take a new antigen_snapshot and click the fresh in-viewport ref.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "Antigen ref such as ag_47 from antigen_snapshot." },
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "browser_type",
     description: "Type text into editable element",
     inputSchema: {
@@ -861,6 +874,94 @@ async function handleLine(line) {
         requestId,
         "ANTIGEN_SNAPSHOT_INTERCEPT_ERROR",
         "Antigen snapshot encountered a network error.",
+      );
+    }
+    return;
+  }
+
+  // ── browser_scroll_to_ref: adapter-owned — never forwarded to @playwright/mcp ─
+  // Scrolls an offscreen ag_* ref near the viewport so the agent can take a fresh
+  // antigen_snapshot before clicking. SCROLL ONLY: the backend never clicks and
+  // never returns coordinates/box/cdp_url. Not gated on INTERCEPTION_ENABLED — a
+  // programmatic scroll carries no pointer-realism concern. The adapter supplies
+  // browser_runtime_id internally; the agent only passes a ref.
+  if (toolName === "browser_scroll_to_ref") {
+    const requestId = msg.id;
+    const refArg = msg?.params?.arguments?.ref ?? "";
+
+    if (!browser_runtime_id) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_unavailable reason=no_runtime\n`
+      );
+      writeSyntheticErrorResponse(
+        "browser_scroll_to_ref",
+        requestId,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        "Antigen browser_scroll_to_ref requires a valid Aegis browser session.",
+      );
+      return;
+    }
+
+    if (typeof refArg !== "string" || !/^ag_\d+$/.test(refArg)) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=ANTIGEN_REF_INVALID\n`
+      );
+      writeSyntheticErrorResponse(
+        "browser_scroll_to_ref",
+        requestId,
+        "ANTIGEN_REF_INVALID",
+        "Antigen browser_scroll_to_ref requires an Antigen ref such as ag_47 from antigen_snapshot.",
+      );
+      return;
+    }
+
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_attempt ref=${refArg}\n`
+    );
+
+    try {
+      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-scroll-to-ref`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ browser_runtime_id, ref: refArg }),
+      });
+
+      if (apiRes.ok) {
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_success ref=${refArg}\n`
+        );
+        writeSyntheticResponse(
+          requestId,
+          buildSyntheticSuccessText("browser_scroll_to_ref", { ref: refArg, version: ADAPTER_VERSION }),
+        );
+        return;
+      }
+
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=${errCode}\n`
+      );
+      const scrollErrMsg =
+        errCode === "ANTIGEN_REF_NOT_FOUND"
+          ? "Antigen browser_scroll_to_ref failed: the ag_* ref was not found in the latest snapshot. Take a fresh antigen_snapshot and retry."
+          : errCode === "ANTIGEN_REF_EXPIRED"
+          ? "Antigen browser_scroll_to_ref failed: the Antigen snapshot has expired. Take a fresh antigen_snapshot and retry."
+          : errCode === "ANTIGEN_REF_NOT_SCROLLABLE"
+          ? "Antigen browser_scroll_to_ref failed: the ag_* ref has no scrollable geometry. Take a fresh antigen_snapshot and retry."
+          : errCode === "ANTIGEN_SCROLL_FAILED"
+          ? "Antigen browser_scroll_to_ref failed: the page could not be scrolled. Take a fresh antigen_snapshot and retry."
+          : `Antigen browser_scroll_to_ref failed (${errCode}).`;
+      writeSyntheticErrorResponse("browser_scroll_to_ref", requestId, errCode, scrollErrMsg);
+    } catch (_err) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=INTERCEPT_ERROR\n`
+      );
+      writeSyntheticErrorResponse(
+        "browser_scroll_to_ref",
+        requestId,
+        "ANTIGEN_SCROLL_INTERCEPT_ERROR",
+        "Antigen browser_scroll_to_ref encountered a network error.",
       );
     }
     return;

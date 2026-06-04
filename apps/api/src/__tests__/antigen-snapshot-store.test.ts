@@ -274,6 +274,7 @@ describe("external view", () => {
     const serialized = JSON.stringify(elements.map(toExternalAntigenSnapshotElement));
     const FORBIDDEN = [
       "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "center",
+      "doc_x", "doc_y",
       "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref",
       "storageState", "selector",
     ];
@@ -283,6 +284,39 @@ describe("external view", () => {
     // href_path (a safe path) is allowed; the full href / origin / query is not.
     expect(serialized).not.toContain("https://www.ikea.com");
     expect(serialized).not.toContain("ref=nav");
+  });
+});
+
+describe("document-space geometry (Phase 5C)", () => {
+  it("retains doc_x/doc_y on the internal record when present", () => {
+    const { elements } = createFor([
+      makeCandidate({ box: { x: 100, y: 1800, width: 120, height: 44, doc_x: 100, doc_y: 1800 } }),
+    ]);
+    expect(elements[0].box.doc_x).toBe(100);
+    expect(elements[0].box.doc_y).toBe(1800);
+    // Viewport-relative x/y are preserved unchanged for the click path.
+    expect(elements[0].box.x).toBe(100);
+    expect(elements[0].box.y).toBe(1800);
+  });
+
+  it("resolveAntigenRefForSession surfaces doc geometry to the scroll path", () => {
+    createFor([
+      makeCandidate({ kind: "button", role: "button", name: "Add to bag", box: { x: 100, y: 1800, width: 120, height: 44, doc_x: 100, doc_y: 1800 } }),
+    ], { browser_session_id: "tbsess_doc_001" });
+    const res = resolveAntigenRefForSession("tbsess_doc_001", USER, "ag_1");
+    expect(res.status).toBe("ok");
+    if (res.status !== "ok") throw new Error("expected ok");
+    expect(res.element.box.doc_y).toBe(1800);
+  });
+
+  it("never exposes doc_x/doc_y via the external view", () => {
+    const { elements } = createFor([
+      makeCandidate({ box: { x: 100, y: 1800, width: 120, height: 44, doc_x: 100, doc_y: 1800 } }),
+    ]);
+    const serialized = JSON.stringify(toExternalAntigenSnapshotElement(elements[0]));
+    expect(serialized).not.toContain("doc_x");
+    expect(serialized).not.toContain("doc_y");
+    expect(serialized).not.toContain("1800");
   });
 });
 

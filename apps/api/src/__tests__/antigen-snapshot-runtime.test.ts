@@ -581,7 +581,9 @@ describe("extraction — box", () => {
   it("includes box values for visible candidates", () => {
     const el = makeEl({ tag: "button", textContent: "Buy", box: { left: 42, top: 17, width: 88, height: 30 } });
     const [c] = extractCandidates([el]);
-    expect(c.box).toEqual({ x: 42, y: 17, width: 88, height: 30 });
+    // Viewport-relative x/y plus document-space doc_x/doc_y (Phase 5C). The
+    // simulated page is at scroll offset 0, so doc_x/doc_y equal x/y here.
+    expect(c.box).toEqual({ x: 42, y: 17, width: 88, height: 30, doc_x: 42, doc_y: 17 });
   });
 });
 

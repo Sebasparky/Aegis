@@ -739,6 +739,161 @@ export async function realisticClickKnownBox(params: {
   });
 }
 
+// ─── Antigen scroll-to-ref (Phase 5C) ────────────────────────────────────────
+
+/**
+ * Pure document-space scroll-target math. Given the element's document-space top
+ * (`docY`), its height, the viewport height (`vh`) and the page scroll height
+ * (`scrollHeight`), returns the absolute window scrollY at which the element top
+ * lands ~1/3 down the viewport — near vertical center while staying clear of a
+ * common sticky header. Clamped to the page's scrollable range. Exported for
+ * unit testing without a browser.
+ */
+export function computeScrollTargetY(params: {
+  docY: number;
+  height: number;
+  vh: number;
+  scrollHeight: number;
+}): number {
+  const { docY, vh, scrollHeight } = params;
+  const max = Math.max(0, scrollHeight - vh);
+  const target = docY - vh * 0.33;
+  if (!Number.isFinite(target)) return 0;
+  return Math.min(max, Math.max(0, Math.round(target)));
+}
+
+/**
+ * Scrolls a known (server-side) document-space box near the current viewport so
+ * the agent can take a fresh antigen_snapshot before clicking. SCROLL ONLY:
+ *
+ * - Uses document-space window scroll math (`window.scrollTo`) — no
+ *   element.scrollIntoView(), no elementFromPoint, no text/element resolution.
+ * - Never dispatches Input.dispatchMouseEvent (no pointer move, press, or
+ *   release) and never clicks.
+ * - Returns success/failure only — never coordinates, the box, the scroll
+ *   target, cdp_url, or any DOM/cookie/storage data.
+ *
+ * Not gated on getInputRealismMode(): a programmatic scroll carries no
+ * pointer-realism concern, so offscreen recovery works regardless of realism
+ * mode. Connection boilerplate mirrors realisticClickKnownBox.
+ */
+export async function scrollKnownBoxIntoView(params: {
+  cdpUrl: string;
+  box: { width: number; height: number; doc_y: number };
+  sessionId?: string;
+  userId?: string;
+}): Promise<{ success: boolean; error?: string }> {
+  const { cdpUrl, box } = params;
+
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: Array<{ id: string; url: string; type: string }>;
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
+    ]);
+  } catch (err) {
+    return { success: false, error: `ANTIGEN_SCROLL_FAILED: CDP_FETCH_FAILED: ${(err as Error).message}` };
+  }
+
+  const browserWsUrl = versionData.webSocketDebuggerUrl;
+  if (!browserWsUrl) {
+    return { success: false, error: "ANTIGEN_SCROLL_FAILED: No browser WebSocket debugger URL from CDP." };
+  }
+
+  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  if (!pageTarget) return { success: false, error: "ANTIGEN_SCROLL_FAILED: No page targets found via CDP." };
+
+  // Read-only viewport + page scroll height. No element lookup, no mutation.
+  const readExpr =
+    "(function(){return {vh:window.innerHeight,sh:(document.documentElement&&document.documentElement.scrollHeight)||document.body.scrollHeight||0};})()";
+
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let cdpSessionId: string | null = null;
+    let attachId: number;
+    let readId: number;
+    let scrollId: number;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      finish({ success: false, error: "ANTIGEN_SCROLL_FAILED: timed out after 8 seconds." });
+    }, 8_000);
+
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+      const id = msgId++;
+      const msg: Record<string, unknown> = { id, method, params: p };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+      return id;
+    };
+
+    const finish = (result: { success: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(result);
+    };
+
+    ws.on("open", () => {
+      attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const result = msg.result as Record<string, unknown> | undefined;
+
+      if (id === attachId) {
+        if (!result?.sessionId) {
+          finish({ success: false, error: "ANTIGEN_SCROLL_FAILED: CDP attach failed: no sessionId." });
+          return;
+        }
+        cdpSessionId = result.sessionId as string;
+        readId = sendMsg("Runtime.evaluate", { expression: readExpr, returnByValue: true }, cdpSessionId);
+        return;
+      }
+
+      if (id === readId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value as { vh?: number; sh?: number } | undefined;
+        const vh = val?.vh ?? 800;
+        const scrollHeight = val?.sh ?? 0;
+        const targetY = computeScrollTargetY({
+          docY: box.doc_y,
+          height: box.height,
+          vh,
+          scrollHeight,
+        });
+        const scrollExpr = `(function(){window.scrollTo(0,${JSON.stringify(targetY)});return true;})()`;
+        scrollId = sendMsg("Runtime.evaluate", { expression: scrollExpr, returnByValue: true }, cdpSessionId!);
+        return;
+      }
+
+      if (id === scrollId) {
+        // Runtime.evaluate of window.scrollTo resolved without a CDP error.
+        if (result && (result as { exceptionDetails?: unknown }).exceptionDetails) {
+          finish({ success: false, error: "ANTIGEN_SCROLL_FAILED: scroll evaluation raised an exception." });
+          return;
+        }
+        finish({ success: true });
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      finish({ success: false, error: `ANTIGEN_SCROLL_FAILED: WS_ERROR: ${err.message}` });
+    });
+  });
+}
+
 /**
  * Types text character-by-character into a target element via CDP.
  *

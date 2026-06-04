@@ -64,7 +64,13 @@ export interface AntigenSnapshotCandidate {
   enabled: boolean;
   typeable: boolean;
   clickable: boolean;
-  box: { x: number; y: number; width: number; height: number };
+  /**
+   * Bounding box. `x`/`y` are viewport-relative (used by the realistic pointer
+   * click). `doc_x`/`doc_y` are document-space (viewport coord + page scroll
+   * offset at snapshot time) and exist only so an offscreen ref can be scrolled
+   * into view later. All geometry is internal — never exposed to the agent.
+   */
+  box: { x: number; y: number; width: number; height: number; doc_x?: number; doc_y?: number };
   /**
    * Bounded, visible-page-derived disambiguation context for repeated/generic
    * controls (e.g. two "Add to bag" buttons on different product cards).
@@ -107,7 +113,7 @@ export interface RawAntigenCandidate {
   aria_disabled: boolean;
   read_only: boolean;
   name: string;
-  box: { x: number; y: number; width: number; height: number };
+  box: { x: number; y: number; width: number; height: number; doc_x?: number; doc_y?: number };
   /** Raw, page-derived disambiguation context (bounded in the IIFE). */
   context?: AntigenSnapshotContext;
 }
@@ -384,6 +390,12 @@ export function buildAntigenExtractionExpr(opts: {
     var CTX_SECTION_MAX=${sectionMax};
     var CTX_NEARBY_MAX=${nearbyMax};
     var CTX_WALK_DEPTH=8;
+    // Page scroll offset, captured once for this snapshot. Box x/y stay
+    // viewport-relative (used by the realistic pointer click); doc_x/doc_y add
+    // document-space geometry so an offscreen ref can be scrolled into view
+    // later. Internal only — never exposed to the agent.
+    var SX=(window.pageXOffset||(document.documentElement&&document.documentElement.scrollLeft)||0);
+    var SY=(window.pageYOffset||(document.documentElement&&document.documentElement.scrollTop)||0);
     function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
     function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
     function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
@@ -623,7 +635,7 @@ export function buildAntigenExtractionExpr(opts: {
         aria_disabled: attr(el,'aria-disabled')==='true',
         read_only: el.readOnly===true,
         name: theName,
-        box: { x:r.left, y:r.top, width:r.width, height:r.height },
+        box: { x:r.left, y:r.top, width:r.width, height:r.height, doc_x:r.left+SX, doc_y:r.top+SY },
         context: ctx
       });
     }

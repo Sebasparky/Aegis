@@ -686,7 +686,15 @@ export async function realisticClickKnownBox(params: {
                 ...(revalidation.diagnostic ?? {}),
               });
             }
-            finish({ success: false, error: "ANTIGEN_REF_STALE" });
+            // Phase 4C: an offscreen stored box is not a true stale ref — the
+            // element likely still exists and is click-safe after scrolling.
+            // Surface it as a distinct out-of-viewport error so the agent can
+            // scroll + re-snapshot rather than treating it as a page change.
+            const error =
+              revalidation.reason === "BOX_OUT_OF_VIEWPORT"
+                ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+                : "ANTIGEN_REF_STALE";
+            finish({ success: false, error });
             return;
           }
         }

@@ -1379,7 +1379,7 @@ describe("Persistent pointer continuity — taskBrowserSessions integration", ()
       expect(result.error).toBe("ANTIGEN_REF_STALE");
     });
 
-    it("fails ANTIGEN_REF_STALE when the box center is outside the viewport", async () => {
+    it("fails ANTIGEN_REF_OUT_OF_VIEWPORT when the box center is outside the viewport", async () => {
       mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "out_of_viewport" };
       const p = realisticClickKnownBox({
         cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
@@ -1388,7 +1388,20 @@ describe("Persistent pointer continuity — taskBrowserSessions integration", ()
       await vi.runAllTimersAsync();
       const result = await p;
       expect(result.success).toBe(false);
-      expect(result.error).toBe("ANTIGEN_REF_STALE");
+      expect(result.error).toBe("ANTIGEN_REF_OUT_OF_VIEWPORT");
+    });
+
+    it("does NOT dispatch any pointer movement on an out-of-viewport ref", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "out_of_viewport" };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "button", normalized_name: "add to bag" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("ANTIGEN_REF_OUT_OF_VIEWPORT");
+      expect(mouseEvents()).toHaveLength(0);
     });
 
     it("does NOT dispatch any pointer movement on a stale ref", async () => {

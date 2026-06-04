@@ -1574,6 +1574,57 @@ describe("H2. browser_click Antigen ag_* ref pass-through", () => {
       assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
     }
   });
+
+  test("ANTIGEN_REF_OUT_OF_VIEWPORT (Phase 4C) returns a clean error telling the agent to scroll + re-snapshot", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickStatus: 422,
+      browserClickBody: { ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 63, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Ok", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 63);
+    assert.ok(resp, `expected response for id=63, stdout was: ${stdoutBuf}`);
+    assert.ok(resp.result?.isError, `expected isError, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_REF_OUT_OF_VIEWPORT"), `expected ANTIGEN_REF_OUT_OF_VIEWPORT in: ${text}`);
+    assert.ok(text.includes("antigen_snapshot"), `error should tell agent to re-snapshot: ${text}`);
+    assert.ok(text.toLowerCase().includes("scroll"), `error should tell agent to scroll into view: ${text}`);
+    assert.ok(text.includes("browser_click"), `error must reference browser_click: ${text}`);
+    assert.ok(!text.includes("browser_type"), `browser_click error must not say browser_type: ${text}`);
+
+    // No forbidden internals / coordinates in output.
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "\"box\"", "cdp_url", "9222"];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
 });
 
 // ─── I. browser_navigate — navigation-aware pointer continuity ─────────────────

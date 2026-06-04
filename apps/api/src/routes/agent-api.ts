@@ -3528,6 +3528,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
 
       if (!refResult.success) {
+        if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
+        }
         if (refResult.error === "ANTIGEN_REF_STALE") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry." } });
         }

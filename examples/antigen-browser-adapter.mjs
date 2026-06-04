@@ -960,10 +960,13 @@ async function handleLine(line) {
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? String(apiRes.status);
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=${errCode}\n`);
-      // Phase 4B: a stale ag_* ref means the page shifted since the snapshot.
-      // Tell the agent to re-snapshot and retry rather than reporting a generic
+      // Phase 4B/4C: a stale ag_* ref means the page shifted since the snapshot;
+      // an out-of-viewport ag_* ref means the stored target is offscreen. In both
+      // cases tell the agent how to recover rather than reporting a generic
       // failure. Never surfaces coordinates or live DOM.
-      const clickErrMsg = errCode === "ANTIGEN_REF_STALE"
+      const clickErrMsg = errCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
+        ? "Antigen realistic browser_click failed: the ag_* ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry."
+        : errCode === "ANTIGEN_REF_STALE"
         ? "Antigen realistic browser_click failed: the ag_* ref is stale (the page changed since the snapshot). Take a new antigen_snapshot and retry."
         : `Antigen realistic browser_click failed (${errCode}).`;
       writeSyntheticErrorResponse(

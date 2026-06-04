@@ -258,6 +258,43 @@ describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () =>
     }
   });
 
+  it("maps a runtime ANTIGEN_REF_OUT_OF_VIEWPORT result to a 422 ANTIGEN_REF_OUT_OF_VIEWPORT error", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_OUT_OF_VIEWPORT" });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_REF_OUT_OF_VIEWPORT");
+    expect(body.error.message).toContain("viewport");
+    expect(body.error.message).toContain("antigen_snapshot");
+    expect(body.error.message.toLowerCase()).toContain("scroll");
+    // session.current_url must not be refreshed on an out-of-viewport (failed) click.
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe("https://www.ikea.com/us/en/");
+  });
+
+  it("the ANTIGEN_REF_OUT_OF_VIEWPORT response leaks no internals", async () => {
+    seedSession();
+    seedSnapshot([candidate({ box: { x: 100, y: 200, width: 80, height: 40 } })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_OUT_OF_VIEWPORT" });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of ["\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "cdp_url", "user_data_dir", "9222", "localhost"]) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
   it("refreshes session.current_url from the click result after a successful ag_* click", async () => {
     seedSession(); // seeded current_url is the homepage
     seedSnapshot([candidate({ name: "Desks & desk chairs", box: { x: 100, y: 200, width: 80, height: 40 } })]);

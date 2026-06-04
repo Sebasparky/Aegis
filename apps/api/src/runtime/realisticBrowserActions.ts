@@ -24,6 +24,12 @@ import {
   type ElementBox,
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
+import {
+  buildAntigenRevalidationExpr,
+  evaluateKnownBoxRevalidation,
+  type AntigenKnownBoxRevalidationExpected,
+  type AntigenRevalidationEvalValue,
+} from "./antigenKnownBoxRevalidation.js";
 import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import {
@@ -532,27 +538,36 @@ export async function realisticClickByDescription(params: {
 }
 
 /**
- * Realistic-pointer click of a KNOWN element box (Antigen Phase 4A).
+ * Realistic-pointer click of a KNOWN element box (Antigen Phase 4A + 4B).
  *
  * Used by the exact `ag_*` ref path: the caller has already resolved the box
  * from the active Antigen snapshot store, so there is NO element finding here.
- * The only Runtime.evaluate on this path reads viewport dimensions
- * (innerWidth/innerHeight) for accurate pointer clamping — never an element,
- * never element.click(). The click itself is realistic pointer movement to the
- * given box via clickBoxWithPointer (shared dispatchPointerClickToBox), so it
- * produces the same pointer metadata as the description path.
+ *
+ * Phase 4B — lightweight stale-ref revalidation: when `expected` snapshot
+ * metadata is supplied, the single Runtime.evaluate on this path inspects the
+ * live element under the stored box center via document.elementFromPoint and
+ * returns its safe metadata alongside viewport dims. It NEVER clicks, dispatches
+ * events, or rediscovers alternatives. If the live element is not broadly
+ * compatible with the snapshot element, this fails closed with ANTIGEN_REF_STALE
+ * BEFORE any pointer movement. When `expected` is absent, the eval reads viewport
+ * dims only (Phase 4A behavior) for pointer clamping.
+ *
+ * The click itself is realistic pointer movement to the given box via
+ * clickBoxWithPointer (shared dispatchPointerClickToBox), so it produces the same
+ * pointer metadata as the description path. Never element.click().
  */
 export async function realisticClickKnownBox(params: {
   cdpUrl: string;
   box: ElementBox;
   sessionId?: string;
   userId?: string;
+  expected?: AntigenKnownBoxRevalidationExpected;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, box, sessionId, userId } = params;
+  const { cdpUrl, box, sessionId, userId, expected } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -574,9 +589,16 @@ export async function realisticClickKnownBox(params: {
   const { target: pageTarget } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
 
-  // Geometry-only IIFE: viewport dimensions for pointer clamping. No element
-  // lookup, no click, no DOM mutation.
-  const viewportExpr = "(function(){return {vw:window.innerWidth,vh:window.innerHeight};})()";
+  // Phase 4B: when `expected` snapshot metadata is supplied, this eval also
+  // inspects the live element under the stored box center (elementFromPoint) for
+  // stale-ref revalidation; it still returns vw/vh for pointer clamping. With no
+  // `expected`, it is the Phase 4A geometry-only viewport read. Either way: no
+  // element click, no DOM mutation.
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const viewportExpr = expected
+    ? buildAntigenRevalidationExpr(centerX, centerY)
+    : "(function(){return {vw:window.innerWidth,vh:window.innerHeight};})()";
 
   return new Promise<RealisticClickResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);
@@ -642,9 +664,32 @@ export async function realisticClickKnownBox(params: {
 
       if (id === viewportId) {
         const evalResult = result?.result as Record<string, unknown> | undefined;
-        const val = evalResult?.value as { vw?: number; vh?: number } | undefined;
+        const val = evalResult?.value as ({ vw?: number; vh?: number } & Partial<AntigenRevalidationEvalValue>) | undefined;
         const vw = val?.vw ?? 1280;
         const vh = val?.vh ?? 800;
+
+        // Phase 4B: fail closed before any pointer movement when the live element
+        // under the stored box center is not broadly compatible with the snapshot
+        // element. Revalidation only runs when `expected` was supplied (the eval
+        // carries a `status` discriminator); the elementFromPoint inspection never
+        // clicks or mutates the DOM.
+        if (expected && val?.status) {
+          const revalidation = evaluateKnownBoxRevalidation({
+            eval: val as AntigenRevalidationEvalValue,
+            expected,
+          });
+          if (revalidation.status === "stale") {
+            if (cdpDiagnostics) {
+              console.log("[RealisticClick] antigen ref stale", {
+                surface: "browser_click",
+                reason: revalidation.reason,
+                ...(revalidation.diagnostic ?? {}),
+              });
+            }
+            finish({ success: false, error: "ANTIGEN_REF_STALE" });
+            return;
+          }
+        }
 
         if (cdpDiagnostics) {
           console.log("[RealisticClick] antigen ref box, dispatching pointer", {

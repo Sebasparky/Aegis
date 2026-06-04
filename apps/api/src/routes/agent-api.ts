@@ -3516,9 +3516,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         box: el.box,
         sessionId: session.browser_session_id,
         userId: MOCK_USER_ID,
+        // Phase 4B: snapshot metadata for live-element revalidation before click.
+        expected: {
+          tag: el.tag,
+          kind: el.kind,
+          role: el.role,
+          name: el.name,
+          normalized_name: el.normalized_name,
+          href_path: el.href_path,
+        },
       });
 
       if (!refResult.success) {
+        if (refResult.error === "ANTIGEN_REF_STALE") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry." } });
+        }
         const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
         return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed." } });
       }

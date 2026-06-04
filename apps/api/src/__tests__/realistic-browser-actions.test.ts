@@ -138,6 +138,7 @@ import {
   dispatchEnterViaCDP,
   buildElementFindExpr,
   realisticClickByDescription,
+  realisticClickKnownBox,
   realisticTypeTextViaCDP,
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
@@ -1291,6 +1292,129 @@ describe("Persistent pointer continuity — taskBrowserSessions integration", ()
     const first = mouseMovedEvents[0];
     expect(Math.abs(first.x - 520)).toBeLessThan(50);
     expect(Math.abs(first.y - 180)).toBeLessThan(50);
+  });
+
+  // ── realisticClickKnownBox — Phase 4B revalidation (defined inside this
+  // describe so it shares the BOX_RESP-free setup; we set nextEvalResponse per
+  // test as the revalidation eval value { vw, vh, status, live }). ───────────
+  describe("realisticClickKnownBox — Phase 4B revalidation", () => {
+    const BOX = { x: 100, y: 200, width: 80, height: 40 };
+    function liveLink(overrides: Record<string, unknown> = {}) {
+      return {
+        tag: "a", type: null, role: null, content_editable: false, id: null,
+        href: "/us/en/p/tertial-work-lamp-70504295/", disabled: false,
+        aria_disabled: false, read_only: false, name: "TERTIAL Work lamp",
+        box: BOX, visible: true, ...overrides,
+      };
+    }
+    function liveButton(overrides: Record<string, unknown> = {}) {
+      return {
+        tag: "button", type: null, role: null, content_editable: false, id: null,
+        href: null, disabled: false, aria_disabled: false, read_only: false,
+        name: "Add to bag", box: BOX, visible: true, ...overrides,
+      };
+    }
+    const mouseEvents = () =>
+      mockState.allSentMessages
+        .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+        .filter((m) => m?.method === "Input.dispatchMouseEvent");
+
+    it("succeeds when live link matches expected by href_path → dispatches pointer", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "ok", live: liveLink() };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "link", href_path: "/us/en/p/tertial-work-lamp-70504295/", normalized_name: "tertial work lamp" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(true);
+      expect(mouseEvents().length).toBeGreaterThan(0);
+    });
+
+    it("succeeds when live button name matches expected name", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "ok", live: liveButton() };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "button", name: "Add to bag", normalized_name: "add to bag" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(true);
+      expect(mouseEvents().length).toBeGreaterThan(0);
+    });
+
+    it("fails ANTIGEN_REF_STALE when elementFromPoint returns no element", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "no_element" };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "link", href_path: "/us/en/p/tertial-work-lamp-70504295/" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("ANTIGEN_REF_STALE");
+    });
+
+    it("fails ANTIGEN_REF_STALE on href_path mismatch", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "ok", live: liveLink({ href: "/us/en/p/some-other-99999/" }) };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "link", href_path: "/us/en/p/tertial-work-lamp-70504295/", normalized_name: "tertial work lamp" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("ANTIGEN_REF_STALE");
+    });
+
+    it("fails ANTIGEN_REF_STALE on strong name mismatch", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "ok", live: liveButton({ name: "Newsletter signup" }) };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "button", name: "Add to bag", normalized_name: "add to bag" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("ANTIGEN_REF_STALE");
+    });
+
+    it("fails ANTIGEN_REF_STALE when the box center is outside the viewport", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "out_of_viewport" };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "button", normalized_name: "add to bag" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("ANTIGEN_REF_STALE");
+    });
+
+    it("does NOT dispatch any pointer movement on a stale ref", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "no_element" };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "link", href_path: "/us/en/p/tertial-work-lamp-70504295/" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(result.success).toBe(false);
+      expect(mouseEvents()).toHaveLength(0);
+    });
+
+    it("stale result object exposes no box/coordinates/forbidden fields", async () => {
+      mockState.nextEvalResponse = { vw: 1280, vh: 800, status: "ok", live: liveButton({ name: "Newsletter signup", href: "/p/full/path" }) };
+      const p = realisticClickKnownBox({
+        cdpUrl: "http://localhost:9222", box: BOX, sessionId: SESSION_ID, userId: USER_ID,
+        expected: { kind: "button", name: "Add to bag", normalized_name: "add to bag" },
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      const FORBIDDEN = ["box", "x", "y", "width", "height", "href", "cdp_url", "user_data_dir", "pass_id", "secret_ref", "password"];
+      for (const key of FORBIDDEN) expect(Object.keys(result)).not.toContain(key);
+      expect(JSON.stringify(result)).not.toContain("/p/full/path");
+    });
   });
 
   // Test 5 — no-session path: viewport-center fallback, no persistence attempted

@@ -198,6 +198,66 @@ describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () =>
     }));
   });
 
+  it("passes snapshot metadata as `expected` for Phase 4B revalidation", async () => {
+    seedSession();
+    seedSnapshot([
+      candidate({
+        tag: "a", kind: "link", role: "link", name: "Desks & desk chairs",
+        normalized_name: "desks & desk chairs", href_path: "/us/en/cat/workspace-desks-chairs-fu004/",
+        box: { x: 100, y: 200, width: 80, height: 40 },
+      }),
+    ]);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({
+      expected: {
+        tag: "a", kind: "link", role: "link", name: "Desks & desk chairs",
+        normalized_name: "desks & desk chairs", href_path: "/us/en/cat/workspace-desks-chairs-fu004/",
+      },
+    }));
+  });
+
+  it("maps a runtime ANTIGEN_REF_STALE result to a 422 ANTIGEN_REF_STALE error", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_STALE" });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_REF_STALE");
+    expect(body.error.message).toContain("antigen_snapshot");
+    // session.current_url must not be refreshed on a stale (failed) click.
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe("https://www.ikea.com/us/en/");
+  });
+
+  it("the ANTIGEN_REF_STALE response leaks no internals", async () => {
+    seedSession();
+    seedSnapshot([candidate({ box: { x: 100, y: 200, width: 80, height: 40 } })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_STALE" });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of ["\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "cdp_url", "user_data_dir", "9222", "localhost"]) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
   it("refreshes session.current_url from the click result after a successful ag_* click", async () => {
     seedSession(); // seeded current_url is the homepage
     seedSnapshot([candidate({ name: "Desks & desk chairs", box: { x: 100, y: 200, width: 80, height: 40 } })]);

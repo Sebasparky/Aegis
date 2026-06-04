@@ -41,10 +41,14 @@ const mockState = vi.hoisted(() => ({
   // Controls what value Runtime.evaluate responds with.
   // Set to null → ELEMENT_NOT_FOUND, "AMBIGUOUS" → AMBIGUOUS_ELEMENT, object → element found.
   nextEvalResponse: null as unknown,
+  // Controls what a `document.location.href` eval responds with (post-click URL read).
+  // When a function (e.g. throws), the mock simulates an unavailable URL read.
+  nextLocationHref: null as unknown,
   wsCreated: false,
   reset() {
     this.allSentMessages = [];
     this.nextEvalResponse = null;
+    this.nextLocationHref = null;
     this.wsCreated = false;
   },
 }));
@@ -82,7 +86,10 @@ vi.mock("ws", () => {
       }
 
       if (msg.method === "Runtime.evaluate") {
-        const val = state.nextEvalResponse;
+        // Post-click URL reads (document.location.href) get nextLocationHref so the
+        // element-find / viewport evals (nextEvalResponse) stay independent.
+        const expr = typeof msg.params?.expression === "string" ? msg.params.expression : "";
+        const val = expr.includes("location.href") ? state.nextLocationHref : state.nextEvalResponse;
         setImmediate(() =>
           this._fire("message", Buffer.from(JSON.stringify({ id: msg.id, result: { result: { value: val } } }))),
         );
@@ -573,6 +580,30 @@ describe("realisticClickByDescription — success path", () => {
       .map((m) => { try { return JSON.parse(m); } catch { return null; } })
       .filter((m): m is { method: string; params: unknown } => m?.method === "Input.dispatchMouseEvent");
     expect(mouseEvents.length).toBeGreaterThan(0);
+  });
+
+  it("reads the live URL after the click and returns it as current_url", async () => {
+    mockState.nextEvalResponse = { x: 300, y: 200, width: 100, height: 40, vw: 1280, vh: 800 };
+    mockState.nextLocationHref = "https://www.ikea.com/us/en/cat/workspace-desks-chairs-fu004/";
+
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Desks & desk chairs" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.current_url).toBe("https://www.ikea.com/us/en/cat/workspace-desks-chairs-fu004/");
+  });
+
+  it("still succeeds without current_url when the post-click URL read is unavailable", async () => {
+    mockState.nextEvalResponse = { x: 300, y: 200, width: 100, height: 40, vw: 1280, vh: 800 };
+    mockState.nextLocationHref = null; // URL read returns no usable value
+
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Search" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.current_url).toBeUndefined();
   });
 });
 

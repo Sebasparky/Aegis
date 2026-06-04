@@ -3523,6 +3523,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed." } });
       }
 
+      // Refresh session.current_url so the next Antigen snapshot is not stale after a
+      // click-triggered navigation. Internal session state only — never in the response.
+      if (typeof refResult.current_url === "string" && refResult.current_url.length > 0) {
+        setTaskBrowserSessionCurrentUrl(session.browser_session_id, refResult.current_url);
+      }
+
       return reply.send({
         ok: true,
         data: {
@@ -3557,6 +3563,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         : result.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
         : "REALISTIC_CLICK_FAILED";
       return reply.status(422).send({ ok: false, error: { code, message: result.error ?? "Realistic click failed." } });
+    }
+
+    // Refresh session.current_url so the next Antigen snapshot is not stale after a
+    // click-triggered navigation. Internal session state only — never in the response.
+    if (typeof result.current_url === "string" && result.current_url.length > 0) {
+      setTaskBrowserSessionCurrentUrl(session.browser_session_id, result.current_url);
     }
 
     return reply.send({

@@ -51,6 +51,7 @@ const DELEGATION_ID = "del_click_001";
 const MOCK_USER_ID = "user_001";
 const SESSION_ID = "tbsess_click_001";
 const URL = "/api/agent/v1/runtime/browser-click";
+const CATEGORY_URL = "https://www.ikea.com/us/en/cat/workspace-desks-chairs-fu004/";
 
 function makeSession(overrides: Partial<TaskBrowserSession> = {}): TaskBrowserSession {
   return {
@@ -156,6 +157,7 @@ beforeEach(() => {
     pointer_start_source: "session",
     pointer_path_point_count: 7,
     pointer_state_persisted: true,
+    current_url: CATEGORY_URL,
   });
 });
 
@@ -194,6 +196,44 @@ describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () =>
       sessionId: SESSION_ID,
       userId: MOCK_USER_ID,
     }));
+  });
+
+  it("refreshes session.current_url from the click result after a successful ag_* click", async () => {
+    seedSession(); // seeded current_url is the homepage
+    seedSnapshot([candidate({ name: "Desks & desk chairs", box: { x: 100, y: 200, width: 80, height: 40 } })]);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // Session current_url is updated to the post-click navigation target...
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe(CATEGORY_URL);
+    // ...but the URL is never surfaced in the click response.
+    expect(JSON.stringify(res.json())).not.toContain("ikea.com");
+  });
+
+  it("leaves session.current_url unchanged when the click result has no current_url", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true,
+      pointer_start_source: "session",
+      pointer_path_point_count: 7,
+      pointer_state_persisted: true,
+      // no current_url — simulates a click whose URL read failed or did not navigate
+    });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(200); // click still succeeds
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe("https://www.ikea.com/us/en/");
   });
 
   it("returns 422 ANTIGEN_REF_NOT_FOUND for a missing ref in the active snapshot", async () => {
@@ -343,6 +383,25 @@ describe("POST /api/agent/v1/runtime/browser-click — non-ag behavior unchanged
     expect(res.json().data.mode).toBe("realistic_pointer_click");
     expect(clickByDescriptionMock).toHaveBeenCalledTimes(1);
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("refreshes session.current_url after a successful description-path click", async () => {
+    seedSession();
+    clickByDescriptionMock.mockResolvedValueOnce({
+      success: true,
+      pointer_start_source: "viewport_center",
+      pointer_path_point_count: 5,
+      pointer_state_persisted: true,
+      current_url: CATEGORY_URL,
+    });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, element_description: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe(CATEGORY_URL);
+    expect(JSON.stringify(res.json())).not.toContain("ikea.com");
   });
 
   it("still requires element_description for the non-ag path", async () => {

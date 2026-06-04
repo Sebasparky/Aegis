@@ -143,6 +143,32 @@ export interface RealisticClickResult {
   pointer_start_source?: "session" | "viewport_center";
   pointer_path_point_count?: number;
   pointer_state_persisted?: boolean;
+  // Internal-only: the live page URL read after a successful click, used by the
+  // route handler to refresh session.current_url so later Antigen snapshots are
+  // not stale after a click-triggered navigation. Never returned to the agent.
+  current_url?: string;
+}
+
+/**
+ * Reads the live page URL (document.location.href) after a click settles.
+ *
+ * Best-effort and non-fatal: waits a short settle window (so a click-triggered
+ * navigation has a chance to commit), evaluates document.location.href, and
+ * returns the string or null. Any failure returns null — the caller must still
+ * report click success. Only reads the URL; no DOM mutation, no element lookup.
+ */
+async function readCurrentUrlAfterClick(
+  sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
+  sleep: (ms: number) => Promise<void>,
+): Promise<string | null> {
+  try {
+    await sleep(250); // brief settle so click-triggered navigation can commit
+    const r = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+    const val = (r?.result as Record<string, unknown> | undefined)?.value;
+    return typeof val === "string" && val.length > 0 ? val : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface RealisticTypeResult {
@@ -375,6 +401,8 @@ export async function realisticClickByDescription(params: {
     let cdpSessionId: string | null = null;
     let attachId: number;
     let boxId: number;
+    // One-time CDP response handlers for sendAndWait (post-click URL read).
+    const oneTimeHandlers = new Map<number, (result: Record<string, unknown> | undefined) => void>();
 
     const timer = setTimeout(() => {
       ws.terminate();
@@ -410,6 +438,14 @@ export async function realisticClickByDescription(params: {
       const id = msg.id as number | undefined;
       if (id === undefined) return;
       const result = msg.result as Record<string, unknown> | undefined;
+
+      // Dispatch one-time handlers (sendAndWait) before named stage handlers.
+      if (oneTimeHandlers.has(id)) {
+        const handler = oneTimeHandlers.get(id)!;
+        oneTimeHandlers.delete(id);
+        handler(result);
+        return;
+      }
 
       if (id === attachId) {
         if (!result?.sessionId) {
@@ -466,6 +502,11 @@ export async function realisticClickByDescription(params: {
         const sendCdp = (method: string, p: Record<string, unknown>) => {
           void sendMsg(method, p, cdpSessionId!);
         };
+        const sendAndWait = (method: string, p: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+          new Promise((res) => {
+            const reqId = sendMsg(method, p, cdpSessionId!);
+            oneTimeHandlers.set(reqId, res);
+          });
         const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
         void (async () => {
@@ -473,7 +514,10 @@ export async function realisticClickByDescription(params: {
             const clickResult = await dispatchPointerClickToBox({
               box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
             });
-            finish(clickResult);
+            // Refresh the live URL after a click-triggered navigation settles.
+            // Best-effort: a failed read never fails an otherwise-successful click.
+            const currentUrl = clickResult.success ? await readCurrentUrlAfterClick(sendAndWait, sleep) : null;
+            finish(currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult);
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }
@@ -540,6 +584,8 @@ export async function realisticClickKnownBox(params: {
     let cdpSessionId: string | null = null;
     let attachId: number;
     let viewportId: number;
+    // One-time CDP response handlers for sendAndWait (post-click URL read).
+    const oneTimeHandlers = new Map<number, (result: Record<string, unknown> | undefined) => void>();
 
     const timer = setTimeout(() => {
       ws.terminate();
@@ -576,6 +622,14 @@ export async function realisticClickKnownBox(params: {
       if (id === undefined) return;
       const result = msg.result as Record<string, unknown> | undefined;
 
+      // Dispatch one-time handlers (sendAndWait) before named stage handlers.
+      if (oneTimeHandlers.has(id)) {
+        const handler = oneTimeHandlers.get(id)!;
+        oneTimeHandlers.delete(id);
+        handler(result);
+        return;
+      }
+
       if (id === attachId) {
         if (!result?.sessionId) {
           finish({ success: false, error: "CDP attach failed: no sessionId." });
@@ -603,6 +657,11 @@ export async function realisticClickKnownBox(params: {
         const sendCdp = (method: string, p: Record<string, unknown>) => {
           void sendMsg(method, p, cdpSessionId!);
         };
+        const sendAndWait = (method: string, p: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+          new Promise((res) => {
+            const reqId = sendMsg(method, p, cdpSessionId!);
+            oneTimeHandlers.set(reqId, res);
+          });
         const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
         void (async () => {
@@ -610,7 +669,10 @@ export async function realisticClickKnownBox(params: {
             const clickResult = await dispatchPointerClickToBox({
               box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
             });
-            finish(clickResult);
+            // Refresh the live URL after a click-triggered navigation settles.
+            // Best-effort: a failed read never fails an otherwise-successful click.
+            const currentUrl = clickResult.success ? await readCurrentUrlAfterClick(sendAndWait, sleep) : null;
+            finish(currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult);
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }

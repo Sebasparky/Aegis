@@ -22,7 +22,11 @@
  * phase.
  */
 
-import type { AntigenCandidateKind, AntigenSnapshotCandidate } from "./antigenSnapshotRuntime.js";
+import type {
+  AntigenCandidateKind,
+  AntigenSnapshotCandidate,
+  AntigenSnapshotContext,
+} from "./antigenSnapshotRuntime.js";
 import { newId } from "../store/index.js";
 
 // ─── TTL ─────────────────────────────────────────────────────────────────────
@@ -72,6 +76,12 @@ export interface AntigenSnapshotElementRecord {
 
   box: { x: number; y: number; width: number; height: number };
 
+  /**
+   * Bounded disambiguation context (internal record carries `nearby_text`
+   * too; only `label`/`section` are ever exposed externally).
+   */
+  context?: AntigenSnapshotContext;
+
   created_at: string;
   expires_at: string;
 }
@@ -91,6 +101,8 @@ export interface ExternalAntigenSnapshotElement {
   hints: {
     href_path?: string;
   };
+  /** Agent-facing context — label/section only; never `nearby_text`. */
+  context?: { label?: string; section?: string };
 }
 
 // ─── In-memory store ─────────────────────────────────────────────────────────
@@ -163,6 +175,8 @@ export function createAntigenSnapshotRecord(params: CreateAntigenSnapshotParams)
     clickable: c.clickable,
 
     box: { x: c.box.x, y: c.box.y, width: c.box.width, height: c.box.height },
+
+    context: c.context,
 
     created_at: createdAt,
     expires_at: expiresAt,
@@ -309,7 +323,7 @@ export function deleteAntigenSnapshotsForSession(browserSessionId: string, userI
 export function toExternalAntigenSnapshotElement(
   el: AntigenSnapshotElementRecord,
 ): ExternalAntigenSnapshotElement {
-  return {
+  const out: ExternalAntigenSnapshotElement = {
     ref: el.ref,
     kind: el.kind,
     role: el.role,
@@ -322,6 +336,14 @@ export function toExternalAntigenSnapshotElement(
     },
     hints: el.href_path ? { href_path: el.href_path } : {},
   };
+  // Agent-facing context: label/section only — `nearby_text` stays internal.
+  if (el.context && (el.context.label || el.context.section)) {
+    const ctx: { label?: string; section?: string } = {};
+    if (el.context.label) ctx.label = el.context.label;
+    if (el.context.section) ctx.section = el.context.section;
+    out.context = ctx;
+  }
+  return out;
 }
 
 // ─── Test support ────────────────────────────────────────────────────────────

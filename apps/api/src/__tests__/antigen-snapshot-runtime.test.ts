@@ -76,6 +76,7 @@ import {
   inferClickable,
   computeEnabled,
   mapRawToCandidate,
+  sanitizeContext,
   ANTIGEN_CANDIDATE_SELECTOR,
   type RawAntigenCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -113,6 +114,9 @@ interface MockEl {
   readOnly: boolean;
   isContentEditable: boolean;
   labels: Array<{ textContent: string }>;
+  // Ancestor / sibling links for context extraction (default null).
+  parentElement: MockEl | null;
+  previousElementSibling: MockEl | null;
   getAttribute: (n: string) => string | null;
   getBoundingClientRect: () => { left: number; top: number; width: number; height: number };
   querySelector: (sel: string) => { getAttribute: (n: string) => string | null } | null;
@@ -135,6 +139,8 @@ function makeEl(opts: MockElOpts): MockEl {
     readOnly: opts.readOnly ?? false,
     isContentEditable: opts.isContentEditable ?? opts.contentEditable ?? false,
     labels: opts.labels ?? [],
+    parentElement: null,
+    previousElementSibling: null,
     getAttribute: (n: string) => (n in attrs ? attrs[n] : null),
     getBoundingClientRect: () => box,
     querySelector: (sel: string) => {
@@ -144,6 +150,137 @@ function makeEl(opts: MockElOpts): MockEl {
       return null;
     },
   };
+}
+
+// ─── Richer DOM-tree harness (for Phase 5A context heuristics) ────────────────
+// Supports descendant querySelectorAll, innerText aggregation, sibling links,
+// and document.querySelector("h1") — what the deeper context heuristic needs.
+
+interface TNode {
+  tagName: string;
+  __own: string;
+  __kids: TNode[];
+  value: string;
+  disabled: boolean;
+  readOnly: boolean;
+  isContentEditable: boolean;
+  labels: Array<{ textContent: string }>;
+  parentElement: TNode | null;
+  previousElementSibling: TNode | null;
+  nextElementSibling: TNode | null;
+  getAttribute: (n: string) => string | null;
+  getBoundingClientRect: () => { left: number; top: number; width: number; height: number };
+  querySelector: (sel: string) => TNode | null;
+  querySelectorAll: (sel: string) => TNode[];
+  readonly innerText: string;
+  readonly textContent: string;
+}
+
+function tDescendants(node: TNode): TNode[] {
+  const out: TNode[] = [];
+  for (const k of node.__kids) {
+    out.push(k);
+    out.push(...tDescendants(k));
+  }
+  return out;
+}
+function tAggText(node: TNode): string {
+  const parts = [node.__own, ...tDescendants(node).map((d) => d.__own)].filter(Boolean);
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+function tMatchTok(d: TNode, tok: string): boolean {
+  const t = tok.trim();
+  if (t === '[role="heading"]') return d.getAttribute("role") === "heading";
+  return d.tagName === t.toUpperCase();
+}
+function tMatchAll(node: TNode, sel: string): TNode[] {
+  const toks = sel.split(",");
+  return tDescendants(node).filter((d) => toks.some((tok) => tMatchTok(d, tok)));
+}
+function tnode(opts: {
+  tag: string;
+  attrs?: Record<string, string>;
+  text?: string;
+  type?: string;
+  value?: string;
+  box?: { left: number; top: number; width: number; height: number };
+  children?: TNode[];
+}): TNode {
+  const attrs: Record<string, string> = { ...(opts.attrs ?? {}) };
+  if (opts.type !== undefined) attrs["type"] = opts.type;
+  const self: TNode = {
+    tagName: opts.tag.toUpperCase(),
+    __own: opts.text ?? "",
+    __kids: [],
+    value: opts.value ?? "",
+    disabled: false,
+    readOnly: false,
+    isContentEditable: false,
+    labels: [],
+    parentElement: null,
+    previousElementSibling: null,
+    nextElementSibling: null,
+    getAttribute: (n: string) => (n in attrs ? attrs[n] : null),
+    getBoundingClientRect: () => opts.box ?? { left: 10, top: 10, width: 120, height: 32 },
+    querySelector: (sel: string) => tMatchAll(self, sel)[0] ?? null,
+    querySelectorAll: (sel: string) => tMatchAll(self, sel),
+    get innerText() {
+      return tAggText(self);
+    },
+    get textContent() {
+      return tAggText(self);
+    },
+  };
+  if (opts.children) {
+    let prev: TNode | null = null;
+    for (const k of opts.children) {
+      k.parentElement = self;
+      k.previousElementSibling = prev;
+      if (prev) prev.nextElementSibling = k;
+      prev = k;
+      self.__kids.push(k);
+    }
+  }
+  return self;
+}
+
+/** A nav-like block of filler links, enough to make an ancestor read as a broad page region. */
+function fillerLinks(n: number): TNode {
+  const links = Array.from({ length: n }, (_, i) => tnode({ tag: "a", attrs: { href: `/n${i}` }, text: `Nav ${i}` }));
+  return tnode({ tag: "nav", children: links });
+}
+
+/** Evaluates the extraction IIFE against a TNode tree; `root` backs document.querySelector. */
+function extractTree(
+  candidates: TNode[],
+  root: TNode | null,
+  opts?: { maxCandidates?: number; viewportOnly?: boolean },
+) {
+  const g = global as Record<string, unknown>;
+  const savedDoc = g["document"];
+  const savedWin = g["window"];
+  g["window"] = {
+    innerWidth: 1280,
+    innerHeight: 800,
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  };
+  const all = root ? [root, ...tDescendants(root)] : [];
+  g["document"] = {
+    querySelectorAll: () => candidates,
+    querySelector: (sel: string) => all.find((d) => tMatchTok(d, sel)) ?? null,
+    getElementById: (id: string) => all.find((d) => d.getAttribute("id") === id) ?? null,
+  };
+  try {
+    const expr = buildAntigenExtractionExpr({
+      maxCandidates: opts?.maxCandidates ?? 200,
+      viewportOnly: opts?.viewportOnly ?? false,
+    });
+    const raw = new Function(`return ${expr}`)() as RawAntigenCandidate[];
+    return raw.map((r, i) => mapRawToCandidate(r, i));
+  } finally {
+    g["document"] = savedDoc;
+    g["window"] = savedWin;
+  }
 }
 
 /**
@@ -476,6 +613,7 @@ describe("extraction — output hygiene", () => {
     const allowedKeys = new Set([
       "index", "tag", "kind", "role", "name", "normalized_name", "id",
       "href", "href_path", "visible", "enabled", "typeable", "clickable", "box",
+      "context",
     ]);
     for (const c of out) {
       for (const key of Object.keys(c)) {
@@ -529,6 +667,224 @@ describe("extraction — viewportOnly", () => {
     const offscreen = makeEl({ tag: "button", textContent: "OffScreen", box: { left: 5000, top: 5000, width: 80, height: 30 } });
     const out = extractCandidates([offscreen], { viewportOnly: false });
     expect(out).toHaveLength(1);
+  });
+});
+
+// ─── 16. Disambiguation context (Phase 5A) ───────────────────────────────────
+
+describe("extraction — disambiguation context", () => {
+  // Upsell: "Complete with" heading + a sibling product link, with the generic
+  // "Add to bag" button as a peer inside the same card. The button must pick up
+  // the SOLHETTA / LED bulb peer text — not collapse to only "Complete with".
+  it("harvests peer/sibling product text for an upsell Add to bag button", () => {
+    const heading = tnode({ tag: "h2", text: "Complete with" });
+    const link = tnode({ tag: "a", attrs: { href: "/p/solhetta-led-bulb" }, text: "SOLHETTA" });
+    const desc = tnode({ tag: "strong", text: "LED bulb E26 450 lumen" });
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    const card = tnode({ tag: "div", attrs: { "data-testid": "product-compact" }, children: [link, desc, btn] });
+    const section = tnode({ tag: "section", children: [heading, card] });
+    const root = tnode({ tag: "main", children: [section] });
+    const [c] = extractTree([btn], root);
+    expect(c.name).toBe("Add to bag");
+    expect(c.context?.section).toBe("Complete with");
+    expect(c.context?.label).toContain("SOLHETTA");
+    expect(c.context?.label).toContain("LED bulb E26 450 lumen");
+    expect(c.context?.label).not.toBe("Complete with");
+  });
+
+  it("picks up image alt text as peer context when there is no sibling link text", () => {
+    const img = tnode({ tag: "img", attrs: { alt: "SOLHETTA LED bulb E26 450 lumen" } });
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    const card = tnode({ tag: "article", children: [img, btn] });
+    const root = tnode({ tag: "main", children: [card] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label).toContain("SOLHETTA");
+  });
+
+  // Main product: distant purchase-panel "Add to bag" with no local card label
+  // falls back to the page H1 + subtitle + nearby price.
+  it("falls back to the page product header for a distant main Add to bag button", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL" });
+    const subtitle = tnode({ tag: "p", text: "Work lamp, dark gray" });
+    const header = tnode({ tag: "header", children: [h1, subtitle] });
+    const price = tnode({ tag: "span", text: "$19.99" });
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    // A purchase panel with no product title of its own, on a broad page.
+    const panel = tnode({ tag: "section", children: [price, btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), header, panel] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label).toContain("TERTIAL");
+    expect(c.context?.label).toContain("Work lamp");
+    expect(c.context?.label).toContain("$19.99");
+  });
+
+  // The exact QA failure shape: two "Add to bag" buttons in one snapshot must
+  // each get a distinct, positive context (not one populated and one blank).
+  it("gives two Add to bag buttons distinct positive contexts (SOLHETTA vs TERTIAL)", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp, dark gray" });
+    const mainPrice = tnode({ tag: "span", text: "$19.99" });
+    const mainBtn = tnode({ tag: "button", text: "Add to bag" });
+    const mainPanel = tnode({ tag: "section", children: [mainPrice, mainBtn] });
+
+    const upHeading = tnode({ tag: "h2", text: "Complete with" });
+    const upLink = tnode({ tag: "a", attrs: { href: "/p/solhetta" }, text: "SOLHETTA LED bulb E26 450 lumen" });
+    const upBtn = tnode({ tag: "button", text: "Add to bag" });
+    const upCard = tnode({ tag: "article", children: [upLink, upBtn] });
+    const upSection = tnode({ tag: "section", children: [upHeading, upCard] });
+
+    const root = tnode({
+      tag: "body",
+      children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), mainPanel, upSection],
+    });
+    const [mainC, upC] = extractTree([mainBtn, upBtn], root);
+    expect(mainC.name).toBe(upC.name); // indistinguishable by name alone
+    // Both populated…
+    expect((mainC.context?.label ?? "").length).toBeGreaterThan(0);
+    expect((upC.context?.label ?? "").length).toBeGreaterThan(0);
+    // …and distinct.
+    expect(mainC.context?.label).not.toBe(upC.context?.label);
+    expect(mainC.context?.label).toMatch(/TERTIAL|Work lamp/);
+    expect(upC.context?.label).toMatch(/SOLHETTA|LED bulb/);
+  });
+
+  it("uses an ancestor aria-label as section for a cookie banner control (no product fallback)", () => {
+    const btn = tnode({ tag: "button", text: "Ok" });
+    const banner = tnode({ tag: "div", attrs: { "aria-label": "Cookie consent banner" }, children: [btn] });
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp" });
+    // Broad page so the harvest walk stops before reaching the product header.
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), banner] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.section).toBe("Cookie consent banner");
+    // A control with a section must NOT inherit the page product header.
+    expect(c.context?.label ?? "").not.toContain("TERTIAL");
+  });
+
+  it("omits context entirely when there is no useful surrounding text", () => {
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    const wrap = tnode({ tag: "div", children: [btn] });
+    const root = tnode({ tag: "div", children: [wrap] }); // no h1, no peers, no price
+    const [c] = extractTree([btn], root);
+    expect(c.context).toBeUndefined();
+  });
+
+  it("bounds/truncates harvested context to the documented maxima", () => {
+    const link = tnode({ tag: "a", attrs: { href: "/p/x" }, text: "Z".repeat(600) });
+    const btn = tnode({ tag: "button", text: "Add" });
+    const card = tnode({ tag: "article", children: [link, btn] });
+    const root = tnode({ tag: "main", children: [card] });
+    const [c] = extractTree([btn], root);
+    expect((c.context?.label ?? "").length).toBeLessThanOrEqual(120);
+    expect((c.context?.nearby_text ?? "").length).toBeLessThanOrEqual(160);
+  });
+
+  it("never reads an input value into context (derives from visible text only)", () => {
+    const heading = tnode({ tag: "h2", text: "Sign in" });
+    const pwd = tnode({ tag: "input", type: "password", value: "hunter2-SECRET", attrs: { "aria-label": "Password" } });
+    const card = tnode({ tag: "article", children: [heading, pwd] });
+    const root = tnode({ tag: "main", children: [card] });
+    const [c] = extractTree([pwd], root);
+    expect(JSON.stringify(c.context ?? {})).not.toContain("hunter2-SECRET");
+  });
+
+  // The reported QA failure: the main "Add to bag" sits below the fold inside a
+  // purchase wrapper whose only grouping signal is a neutral aria-label. That
+  // shallow wrapper must NOT block the page-product-header fallback, so the
+  // button still inherits the product title + price and stays distinct.
+  it("adopts the page product header for a main Add to bag in a neutral wrapper", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp, dark gray" });
+    const price = tnode({ tag: "span", text: "$19.99" });
+    const btn = tnode({ tag: "button", text: "Add to bag", box: { left: 10, top: 4000, width: 120, height: 32 } });
+    const wrap = tnode({ tag: "div", attrs: { "aria-label": "Purchase options" }, children: [price, btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), wrap] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label).toContain("TERTIAL");
+    expect(c.context?.label).toContain("$19.99");
+  });
+
+  // Weak, non-product local text (a status <strong>, no price, not a link/heading)
+  // is treated as weak for a purchase-commit control and replaced by the header.
+  it("overrides weak non-product local text with the page header for an Add to cart", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp" });
+    const status = tnode({ tag: "strong", text: "In stock" });
+    const btn = tnode({ tag: "button", text: "Add to cart" });
+    const wrap = tnode({ tag: "div", children: [status, btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), wrap] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label).toContain("TERTIAL");
+    expect(c.context?.label ?? "").not.toContain("In stock");
+  });
+
+  // Strong card-local identity (a product link) is never overridden — protects
+  // self-contained product cards / listing-grid pages from the page header.
+  it("never overrides a strong card-local product link with the page header", () => {
+    const h1 = tnode({ tag: "h1", text: "Living room furniture" });
+    const link = tnode({ tag: "a", attrs: { href: "/p/foobar" }, text: "FOOBAR chair" });
+    const btn = tnode({ tag: "button", text: "Add to cart" });
+    const card = tnode({ tag: "article", children: [link, btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), card] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label).toContain("FOOBAR chair");
+    expect(c.context?.label ?? "").not.toContain("Living room");
+  });
+
+  // A clearly unrelated structural region (footer/nav landmark) blocks the
+  // main-product fallback even for an add-to-cart-named control.
+  it("blocks the product fallback for an Add to bag inside a footer landmark", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp" });
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    const footer = tnode({ tag: "footer", children: [btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), footer] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label ?? "").not.toContain("TERTIAL");
+  });
+
+  // The relaxed neutral-wrapper path is scoped to add-to-cart/bag/basket: a
+  // non-purchase control in a neutral wrapper does not adopt the page header.
+  it("does not adopt the page header for a non-purchase control in a neutral wrapper", () => {
+    const h1 = tnode({ tag: "h1", text: "TERTIAL Work lamp" });
+    const btn = tnode({ tag: "button", text: "Ok" });
+    const wrap = tnode({ tag: "div", attrs: { "aria-label": "Notice" }, children: [btn] });
+    const root = tnode({ tag: "body", children: [fillerLinks(16), tnode({ tag: "header", children: [h1] }), wrap] });
+    const [c] = extractTree([btn], root);
+    expect(c.context?.label ?? "").not.toContain("TERTIAL");
+  });
+
+  it("does not hard-code site- or brand-specific strings in the extraction source", () => {
+    const expr = buildAntigenExtractionExpr({ maxCandidates: 200, viewportOnly: false }).toLowerCase();
+    expect(expr).not.toContain("ikea");
+    expect(expr).not.toContain("solhetta");
+    expect(expr).not.toContain("tertial");
+    expect(expr).not.toContain("add to bag");
+  });
+});
+
+describe("sanitizeContext", () => {
+  it("trims, collapses whitespace, and keeps populated fields", () => {
+    expect(sanitizeContext({ label: "  Foo   Bar  ", section: "  Sec " }, "x")).toEqual({
+      label: "Foo Bar",
+      section: "Sec",
+    });
+  });
+
+  it("re-clamps fields beyond the documented maxima", () => {
+    const out = sanitizeContext(
+      { label: "L".repeat(300), section: "S".repeat(300), nearby_text: "N".repeat(300) },
+      "x",
+    );
+    expect(out?.label?.length).toBe(120);
+    expect(out?.section?.length).toBe(80);
+    expect(out?.nearby_text?.length).toBe(160);
+  });
+
+  it("drops fields that merely echo the element name", () => {
+    expect(sanitizeContext({ label: "Add to bag" }, "Add to bag")).toBeUndefined();
+  });
+
+  it("returns undefined for null/empty input", () => {
+    expect(sanitizeContext(null, "x")).toBeUndefined();
+    expect(sanitizeContext(undefined, "x")).toBeUndefined();
+    expect(sanitizeContext({}, "x")).toBeUndefined();
+    expect(sanitizeContext({ label: "   " }, "x")).toBeUndefined();
   });
 });
 

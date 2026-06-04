@@ -110,6 +110,15 @@ export function buildAntigenSnapshotText(data, version) {
       let line = `- ${kind} "${name}" [ref=${ref}] [clickable=${clickable}] [typeable=${typeable}]`;
       const hrefPath = el?.hints?.href_path;
       if (hrefPath) line += ` [href_path=${hrefPath}]`;
+      // Allowlist-only: read just context.section + context.label (no other
+      // backend fields), join them, and emit a single bounded [context="..."].
+      const ctx = el?.context;
+      if (ctx && typeof ctx === "object") {
+        const section = typeof ctx.section === "string" ? ctx.section : "";
+        const label = typeof ctx.label === "string" ? ctx.label : "";
+        const combined = `${section} ${label}`.replace(/\s+/g, " ").trim();
+        if (combined) line += ` [context="${combined.replace(/"/g, "'")}"]`;
+      }
       lines.push(line);
     }
   }

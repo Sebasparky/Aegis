@@ -286,6 +286,66 @@ describe("external view", () => {
   });
 });
 
+describe("disambiguation context (Phase 5A)", () => {
+  const withContext = () =>
+    makeCandidate({
+      kind: "button",
+      role: "button",
+      href: null,
+      href_path: null,
+      name: "Add to bag",
+      context: {
+        label: "SOLHETTA LED bulb E26 450 lumen",
+        section: "Complete with",
+        nearby_text: "Complete with SOLHETTA LED bulb E26 450 lumen $7.99",
+      },
+    });
+
+  it("stores the full context (including nearby_text) on the internal record", () => {
+    const { elements } = createFor([withContext()]);
+    expect(elements[0].context).toEqual({
+      label: "SOLHETTA LED bulb E26 450 lumen",
+      section: "Complete with",
+      nearby_text: "Complete with SOLHETTA LED bulb E26 450 lumen $7.99",
+    });
+  });
+
+  it("exposes only label/section externally — never nearby_text or box", () => {
+    const { elements } = createFor([withContext()]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.context).toEqual({
+      label: "SOLHETTA LED bulb E26 450 lumen",
+      section: "Complete with",
+    });
+    const serialized = JSON.stringify(ext);
+    expect(serialized).not.toContain("nearby_text");
+    expect(serialized).not.toContain("$7.99");
+    expect(Object.keys(ext)).not.toContain("box");
+  });
+
+  it("omits the context key entirely when an element has none", () => {
+    const { elements } = createFor([makeCandidate()]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(Object.keys(ext)).not.toContain("context");
+  });
+
+  it("includes context even when only a section is present", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        kind: "button",
+        role: "button",
+        href: null,
+        href_path: null,
+        name: "Ok",
+        context: { section: "Cookie consent banner" },
+      }),
+    ]);
+    expect(toExternalAntigenSnapshotElement(elements[0]).context).toEqual({
+      section: "Cookie consent banner",
+    });
+  });
+});
+
 describe("resolveAntigenRefForSession (Phase 4A)", () => {
   const SESSION = "tbsess_store_001";
 

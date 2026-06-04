@@ -236,6 +236,42 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     expect(stored?.box).toEqual({ x: 12, y: 34, width: 220, height: 48 });
   });
 
+  it("includes label/section context per element but never nearby_text or forbidden internals", async () => {
+    seedSession();
+    extractMock.mockResolvedValueOnce([
+      candidate({
+        tag: "button",
+        kind: "button",
+        role: "button",
+        name: "Add to bag",
+        normalized_name: "add to bag",
+        href: null,
+        href_path: null,
+        context: {
+          label: "SOLHETTA LED bulb E26 450 lumen",
+          section: "Complete with",
+          nearby_text: "Complete with SOLHETTA LED bulb E26 450 lumen INTERNAL_ONLY_99",
+        },
+      }),
+    ]);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const [el] = res.json().data.elements;
+    expect(el.context).toEqual({
+      label: "SOLHETTA LED bulb E26 450 lumen",
+      section: "Complete with",
+    });
+    const raw = JSON.stringify(res.json());
+    expect(raw).not.toContain("nearby_text");
+    expect(raw).not.toContain("INTERNAL_ONLY_99");
+    for (const f of ["\"box\"", "\"x\":", "cdp_url", "secret_ref", "9222"]) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
   it("returns 400 MISSING_FIELD when browser_runtime_id is absent", async () => {
     seedSession();
     const res = await server.inject({

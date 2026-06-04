@@ -2303,6 +2303,62 @@ describe("J. buildAntigenSnapshotText — pure formatter", () => {
     assert.ok(text.includes("[ref=ag_1]"), text);
     assert.ok(text.includes("[href_path=/p/item]"), text);
   });
+
+  test("context appended as combined section + label when present", () => {
+    const data = {
+      snapshot_id: "snap_ctx", element_count: 2,
+      elements: [
+        {
+          ref: "ag_37", kind: "button", role: "button", name: "Add to bag",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          context: { label: "SOLHETTA LED bulb E26 450 lumen", section: "Complete with" },
+        },
+        {
+          ref: "ag_44", kind: "button", role: "button", name: "Add to bag",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          context: { label: "TERTIAL Work lamp, dark gray $19.99" },
+        },
+      ],
+    };
+    const text = buildAntigenSnapshotText(data, V);
+    assert.ok(
+      text.includes('- button "Add to bag" [ref=ag_37] [clickable=true] [typeable=false] [context="Complete with SOLHETTA LED bulb E26 450 lumen"]'),
+      text,
+    );
+    // section-less context renders the label alone
+    assert.ok(
+      text.includes('- button "Add to bag" [ref=ag_44] [clickable=true] [typeable=false] [context="TERTIAL Work lamp, dark gray $19.99"]'),
+      text,
+    );
+  });
+
+  test("elements without context format unchanged (no [context=...])", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    const ag2Line = text.split("\n").find((l) => l.includes("[ref=ag_2]")) ?? "";
+    assert.ok(!ag2Line.includes("[context="), ag2Line);
+  });
+
+  test("context reads only label/section — backend nearby_text/extras never leak", () => {
+    const data = {
+      snapshot_id: "snap_ctx2", element_count: 1,
+      elements: [
+        {
+          ref: "ag_1", kind: "button", role: "button", name: "Ok",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          context: {
+            section: "Cookie consent banner",
+            nearby_text: "INTERNAL_ONLY_LEAK",
+            secret_ref: "sr_leak",
+          },
+        },
+      ],
+    };
+    const text = buildAntigenSnapshotText(data, V);
+    assert.ok(text.includes('[context="Cookie consent banner"]'), text);
+    for (const f of ["INTERNAL_ONLY_LEAK", "nearby_text", "secret_ref", "sr_leak"]) {
+      assert.ok(!text.includes(f), `leaked "${f}": ${text}`);
+    }
+  });
 });
 
 // ─── K. antigen_snapshot adapter tool — adapter-owned, no Playwright fallthrough ─

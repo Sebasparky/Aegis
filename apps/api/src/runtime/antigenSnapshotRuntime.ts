@@ -65,6 +65,20 @@ export interface AntigenSnapshotCandidate {
   typeable: boolean;
   clickable: boolean;
   box: { x: number; y: number; width: number; height: number };
+  /**
+   * Bounded, visible-page-derived disambiguation context for repeated/generic
+   * controls (e.g. two "Add to bag" buttons on different product cards).
+   * `label`/`section` are agent-facing; `nearby_text` is internal-only.
+   * Never carries input values, secrets, raw DOM, hrefs, or coordinates.
+   */
+  context?: AntigenSnapshotContext;
+}
+
+/** Bounded disambiguation context. label≤120, section≤80, nearby_text≤160. */
+export interface AntigenSnapshotContext {
+  label?: string;
+  section?: string;
+  nearby_text?: string;
 }
 
 export interface ExtractAntigenSnapshotCandidatesParams {
@@ -94,9 +108,16 @@ export interface RawAntigenCandidate {
   read_only: boolean;
   name: string;
   box: { x: number; y: number; width: number; height: number };
+  /** Raw, page-derived disambiguation context (bounded in the IIFE). */
+  context?: AntigenSnapshotContext;
 }
 
 const DEFAULT_MAX_CANDIDATES = 200;
+
+// ─── Context bounds (shared by IIFE + TS sanitizer) ──────────────────────────
+const CONTEXT_LABEL_MAX = 120;
+const CONTEXT_SECTION_MAX = 80;
+const CONTEXT_NEARBY_MAX = 160;
 
 /**
  * The candidate selector list from docs/antigen-snapshot/extraction-strategy.md.
@@ -159,6 +180,36 @@ export function normalizeName(name: string): string {
     .replace(/[.,!?;:'"()[\]{}]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Re-clamps and cleans raw page-derived context (defense-in-depth against a
+ * malicious page that ignores the IIFE bounds). Trims, collapses whitespace,
+ * enforces per-field maxima, drops fields that merely echo the element name,
+ * and returns `undefined` when nothing useful remains. Never reads or carries
+ * values, secrets, hrefs, DOM, or coordinates.
+ */
+export function sanitizeContext(
+  raw: AntigenSnapshotContext | null | undefined,
+  name: string,
+): AntigenSnapshotContext | undefined {
+  if (!raw) return undefined;
+  const echo = normalizeName(name);
+  const clean = (value: unknown, max: number): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.replace(/\s+/g, " ").trim().slice(0, max);
+    if (!trimmed) return undefined;
+    if (echo && normalizeName(trimmed) === echo) return undefined; // pure name echo
+    return trimmed;
+  };
+  const out: AntigenSnapshotContext = {};
+  const label = clean(raw.label, CONTEXT_LABEL_MAX);
+  const section = clean(raw.section, CONTEXT_SECTION_MAX);
+  const nearby = clean(raw.nearby_text, CONTEXT_NEARBY_MAX);
+  if (label) out.label = label;
+  if (section) out.section = section;
+  if (nearby) out.nearby_text = nearby;
+  return out.label || out.section || out.nearby_text ? out : undefined;
 }
 
 /** Pathname-only portion of an href. Origin and query string are dropped. */
@@ -275,7 +326,7 @@ export function inferClickable(raw: RawAntigenCandidate): boolean {
 
 /** Assemble a final candidate from a raw record + its position. */
 export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): AntigenSnapshotCandidate {
-  return {
+  const candidate: AntigenSnapshotCandidate = {
     index,
     tag: raw.tag,
     kind: inferKind(raw),
@@ -291,6 +342,11 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
     clickable: inferClickable(raw),
     box: raw.box,
   };
+  // Only attach context when something useful survives sanitization — keeps the
+  // key off candidates that have no disambiguation context.
+  const context = sanitizeContext(raw.context, raw.name);
+  if (context) candidate.context = context;
+  return candidate;
 }
 
 // ─── Page-side extraction IIFE builder ───────────────────────────────────────
@@ -316,12 +372,20 @@ export function buildAntigenExtractionExpr(opts: {
   const selector = JSON.stringify(ANTIGEN_CANDIDATE_SELECTOR);
   const maxCandidates = JSON.stringify(opts.maxCandidates);
   const viewportOnly = JSON.stringify(opts.viewportOnly);
+  const labelMax = JSON.stringify(CONTEXT_LABEL_MAX);
+  const sectionMax = JSON.stringify(CONTEXT_SECTION_MAX);
+  const nearbyMax = JSON.stringify(CONTEXT_NEARBY_MAX);
 
   return `(function(){
     var SELECTOR=${selector};
     var MAX=${maxCandidates};
     var VIEWPORT_ONLY=${viewportOnly};
+    var CTX_LABEL_MAX=${labelMax};
+    var CTX_SECTION_MAX=${sectionMax};
+    var CTX_NEARBY_MAX=${nearbyMax};
+    var CTX_WALK_DEPTH=8;
     function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
     function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
     function rectOf(el){
       var r=el.getBoundingClientRect();
@@ -368,6 +432,167 @@ export function buildAntigenExtractionExpr(opts: {
       var ph=attr(el,'placeholder'); if(txt(ph)) return txt(ph);
       return '';
     }
+    // ─── Disambiguation context (bounded, visible-text only) ───────────────
+    function isHeading(node){
+      if(!node||!node.tagName) return false;
+      var t=node.tagName.toLowerCase();
+      if(t==='h1'||t==='h2'||t==='h3'||t==='h4'||t==='h5'||t==='h6') return true;
+      return attr(node,'role')==='heading';
+    }
+    // Nearest section: a preceding-sibling heading at some ancestor level
+    // (captures "Complete with"), else an ancestor's aria-label
+    // (captures "Cookie consent banner").
+    // Returns {text, fromHeading}: a heading-derived section ("Complete with") is
+    // a real product sub-group and blocks the main-product fallback; an ancestor
+    // aria-label is a weaker grouping that does not, on its own, block it.
+    function findSection(el){
+      var node=el, depth=0;
+      while(node&&depth<CTX_WALK_DEPTH){
+        var sib=node.previousElementSibling, scan=0;
+        while(sib&&scan<6){
+          if(isHeading(sib)){ var h=txt(sib.innerText!=null?sib.innerText:sib.textContent); if(h) return {text:clip(h,CTX_SECTION_MAX),fromHeading:true}; }
+          sib=sib.previousElementSibling; scan++;
+        }
+        var al=txt(attr(node,'aria-label'));
+        if(al) return {text:clip(al,CTX_SECTION_MAX),fromHeading:false};
+        node=node.parentElement; depth++;
+      }
+      return {text:'',fromHeading:false};
+    }
+    // Meaningful descendants of a container: peer links, headings, emphasis,
+    // and images. Used both to measure breadth and to harvest identity text.
+    function harvestNodes(container){
+      var ns;
+      try{ ns=container.querySelectorAll('a,h1,h2,h3,h4,h5,h6,strong,b,[role="heading"],img'); }catch(e){ return null; }
+      try{ return Array.prototype.slice.call(ns); }catch(e){ return null; }
+    }
+    // Bounded identity text from a node set. Never reads input values or
+    // serialized DOM; per-snippet and total length capped; de-duplicated; the
+    // control's own name and the section heading are excluded.
+    // Returns {text, fromLinkOrHeading}. fromLinkOrHeading marks that a
+    // contributing node was a product link or heading — i.e. strong card-local
+    // identity that must never be overridden by the page product header.
+    function harvestFrom(ns,nameLow,sectionLow){
+      var seen={}, parts=[], total=0, strong=false;
+      for(var i=0;i<ns.length;i++){
+        var n=ns[i]; if(!n) continue;
+        var tg=(n.tagName||'').toLowerCase(), t='';
+        if(tg==='img'){ t=txt(attr(n,'alt')); }
+        else { try{ t=txt(n.innerText!=null?n.innerText:n.textContent); }catch(e){ t=''; } }
+        if(!t) continue;
+        var low=t.toLowerCase();
+        if(nameLow&&low===nameLow) continue;       // skip the control's own label
+        if(sectionLow&&low===sectionLow) continue; // avoid echoing the section
+        if(seen[low]) continue; seen[low]=1;
+        if(t.length>80) t=clip(t,80);
+        if(tg==='a'||isHeading(n)) strong=true;
+        parts.push(t); total+=t.length+1;
+        if(parts.length>=6||total>=CTX_NEARBY_MAX) break;
+      }
+      return {text:clip(parts.join(' '),CTX_NEARBY_MAX),fromLinkOrHeading:strong};
+    }
+    // Walk ancestors and return the first one whose harvested text is non-empty.
+    // Empty wrapper levels (e.g. a tiny button container) are skipped so a
+    // generic button still picks up its sibling product link / title text. The
+    // walk STOPS before entering a page-level region (one with too many
+    // matches), so a control never inherits unrelated page-wide text such as
+    // the product H1 from a sibling header.
+    function harvestLabel(el,nameLow,sectionLow){
+      var node=el.parentElement, depth=0;
+      while(node&&depth<CTX_WALK_DEPTH){
+        var ns=harvestNodes(node);
+        if(ns&&ns.length>0){
+          if(ns.length>14) return {text:'',fromLinkOrHeading:false}; // page region, not an item card — stop
+          var r=harvestFrom(ns,nameLow,sectionLow);
+          if(r.text) return r;
+        }
+        node=node.parentElement; depth++;
+      }
+      return {text:'',fromLinkOrHeading:false};
+    }
+    function priceMatch(s){
+      try{ var m=String(s).slice(0,400).match(/[$£€]\\s?\\d[\\d.,]*/); return m?txt(m[0]):''; }catch(e){ return ''; }
+    }
+    // A nearby price from the control's own ancestor chain (e.g. a purchase
+    // panel or product card). Bounded scan of a few ancestors.
+    function findPriceNear(el){
+      var node=el.parentElement, depth=0;
+      while(node&&depth<4){
+        var t=''; try{ t=(node.innerText!=null?node.innerText:node.textContent); }catch(e){ t=''; }
+        var p=priceMatch(t); if(p) return clip(p,16);
+        node=node.parentElement; depth++;
+      }
+      return '';
+    }
+    // Main-product fallback: the nearest page H1 plus a short following
+    // subtitle. Generic for ecommerce product pages; not site-specific.
+    function pageProductHeader(){
+      var h1=null; try{ h1=document.querySelector('h1'); }catch(e){ h1=null; }
+      if(!h1) return '';
+      var parts=[];
+      var title=''; try{ title=txt(h1.innerText!=null?h1.innerText:h1.textContent); }catch(e){ title=''; }
+      if(title) parts.push(clip(title,100));
+      var sib=h1.nextElementSibling, scan=0;
+      while(sib&&scan<3){
+        var st=''; try{ st=txt(sib.innerText!=null?sib.innerText:sib.textContent); }catch(e){ st=''; }
+        if(st&&st.length<=80&&!isHeading(sib)){ parts.push(st); break; }
+        sib=sib.nextElementSibling; scan++;
+      }
+      return clip(txt(parts.join(' ')),CTX_NEARBY_MAX);
+    }
+    // Page product header is computed at most once per snapshot (memoized).
+    var _pageHeader;
+    function pageHeaderMemo(){
+      if(_pageHeader===undefined){ try{ _pageHeader=pageProductHeader()||''; }catch(e){ _pageHeader=''; } }
+      return _pageHeader;
+    }
+    // A generic add-to-cart/bag/basket control. No brand/site strings; the
+    // source intentionally avoids the literal phrase the brand-string test
+    // forbids. \\badd\\b avoids matching "address".
+    function isAddToCartName(n){ return /\\badd\\b[\\s\\S]{0,12}\\b(cart|bag|basket)\\b/.test(n); }
+    // Clearly unrelated regions (cookie/nav/footer/modal/legal) block the
+    // main-product fallback — by section keyword or by a structural landmark
+    // ancestor. Bounded ancestor walk.
+    function isUnrelatedRegion(el,sectionLow){
+      if(sectionLow&&/cookie|consent|nav|navigation|menu|footer|modal|dialog|legal|privacy|terms|newsletter|subscribe/.test(sectionLow)) return true;
+      var node=el, depth=0;
+      while(node&&depth<CTX_WALK_DEPTH){
+        var tg=(node.tagName||'').toLowerCase();
+        if(tg==='nav'||tg==='footer') return true;
+        var role=attr(node,'role');
+        if(role){ role=String(role).toLowerCase(); if(role==='navigation'||role==='dialog'||role==='banner'||role==='contentinfo'||role==='menu') return true; }
+        node=node.parentElement; depth++;
+      }
+      return false;
+    }
+    function extractContext(el,name){
+      var nameLow=name?txt(name).toLowerCase():'';
+      var sec=findSection(el);
+      var section=sec.text;
+      var sectionLow=section?section.toLowerCase():'';
+      var hv=harvestLabel(el,nameLow,sectionLow);
+      var raw=hv.text;
+      // Main-product fallback: adopt the page product header when there is no
+      // card-local context at all, or when a generic add-to-cart/bag/basket
+      // control sits in a shallow neutral wrapper whose local text is blank or
+      // weak (not a product link/heading and carrying no price). A real heading
+      // sub-section ("Complete with") and clearly unrelated regions
+      // (cookie/nav/footer/modal/legal) keep their own identity and block the
+      // fallback; a tiny neutral wrapper aria-label ("Purchase options") does not.
+      var unrelated=isUnrelatedRegion(el,sectionLow);
+      var isPurchase=isAddToCartName(nameLow);
+      var weak=!raw||(!priceMatch(raw)&&!hv.fromLinkOrHeading);
+      if(!unrelated&&!sec.fromHeading&&((!raw&&!section)||(isPurchase&&weak))){ var ph=pageHeaderMemo(); if(ph) raw=ph; }
+      var price=findPriceNear(el);
+      if(raw&&price&&raw.indexOf(price)<0){ raw=clip(raw+' '+price,CTX_NEARBY_MAX); }
+      else if(!raw&&price){ raw=price; }
+      var ctx={};
+      var label=clip(raw,CTX_LABEL_MAX);
+      if(label) ctx.label=label;
+      if(section) ctx.section=section;
+      if(raw) ctx.nearby_text=raw;
+      return (ctx.label||ctx.section||ctx.nearby_text)?ctx:null;
+    }
     var out=[];
     var nodes;
     try{ nodes=document.querySelectorAll(SELECTOR); }catch(e){ return []; }
@@ -385,6 +610,8 @@ export function buildAntigenExtractionExpr(opts: {
       if(!r) continue;
       var contentEditable=false;
       try{ contentEditable=(el.isContentEditable===true)||(attr(el,'contenteditable')==='true'); }catch(e){ contentEditable=false; }
+      var theName=nameOf(el,tag,type);
+      var ctx=null; try{ ctx=extractContext(el,theName); }catch(e){ ctx=null; }
       out.push({
         tag: tag,
         type: type,
@@ -395,8 +622,9 @@ export function buildAntigenExtractionExpr(opts: {
         disabled: el.disabled===true,
         aria_disabled: attr(el,'aria-disabled')==='true',
         read_only: el.readOnly===true,
-        name: nameOf(el,tag,type),
-        box: { x:r.left, y:r.top, width:r.width, height:r.height }
+        name: theName,
+        box: { x:r.left, y:r.top, width:r.width, height:r.height },
+        context: ctx
       });
     }
     return out;

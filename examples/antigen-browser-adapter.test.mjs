@@ -909,6 +909,8 @@ async function createMockApiServer(opts = {}) {
   // Captured antigen_snapshot request bodies + their Authorization header,
   // so tests can assert what the adapter sent.
   const snapshotRequests = [];
+  // Captured browser-click request bodies, so tests can assert ref pass-through.
+  const clickRequests = [];
 
   const DEFAULT_SNAPSHOT_BODY = {
     ok: true,
@@ -977,6 +979,9 @@ async function createMockApiServer(opts = {}) {
       }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-click") {
         if (browserClickDestroy) { req.socket.destroy(); return; }
+        let parsedClick = {};
+        try { parsedClick = JSON.parse(body); } catch {}
+        clickRequests.push({ body: parsedClick, authorization: req.headers["authorization"] });
         const responseBody = browserClickBody ?? {
           ok: true,
           data: { mode: "realistic_pointer_click", pointer_path_point_count: 42, pointer_start_source: "session", pointer_state_persisted: true },
@@ -991,7 +996,12 @@ async function createMockApiServer(opts = {}) {
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, port: server.address().port, getSnapshotRequests: () => snapshotRequests };
+  return {
+    server,
+    port: server.address().port,
+    getSnapshotRequests: () => snapshotRequests,
+    getClickRequests: () => clickRequests,
+  };
 }
 
 function parseMcpResponse(stdoutBuf, id) {
@@ -1406,6 +1416,113 @@ describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
     const text = resp.result?.content?.[0]?.text ?? "";
     // hint must be "description" because "e2309" is not a CSS selector
     assert.ok(text.includes("hint=description"), `expected hint=description (not selector) in: ${text}`);
+  });
+});
+
+// ─── H2. browser_click Antigen ag_* ref pass-through (Phase 4A) ──────────────
+//
+// When browser_click is called with ref=ag_<n>, the adapter passes the ref
+// straight through to the backend browser-click endpoint (which resolves it
+// against the latest Antigen snapshot and clicks the stored box). The adapter
+// never resolves the ref, never touches Playwright, never sees coordinates.
+describe("H2. browser_click Antigen ag_* ref pass-through", () => {
+
+  test("sends ref=ag_1 to the backend and surfaces realistic pointer metadata", { timeout: 7000 }, async () => {
+    const { server, port, getClickRequests } = await createMockApiServer({
+      browserClickBody: { ok: true, data: { mode: "realistic_pointer_click", pointer_path_point_count: 9, pointer_start_source: "session", pointer_state_persisted: true } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 60, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Ok", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Backend received the ag_ ref verbatim.
+    const clicks = getClickRequests();
+    assert.equal(clicks.length, 1, `expected one browser-click request, got ${clicks.length}`);
+    assert.equal(clicks[0].body.ref, "ag_1", `expected ref=ag_1 forwarded, got: ${JSON.stringify(clicks[0].body)}`);
+
+    const resp = parseMcpResponse(stdoutBuf, 60);
+    assert.ok(resp, `expected response for id=60, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=realistic_success"), `expected path=realistic_success in: ${text}`);
+    assert.ok(text.includes("pointer_path_point_count=9"), `expected pointer_path_point_count=9 in: ${text}`);
+    assert.ok(text.includes("pointer_start_source=session"), `expected pointer_start_source=session in: ${text}`);
+    assert.ok(text.includes("pointer_state_persisted=true"), `expected pointer_state_persisted=true in: ${text}`);
+    assert.ok(text.includes("source=antigen-browser-adapter"), `expected source in: ${text}`);
+
+    // No forbidden internals / coordinates in output.
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", "\"box\"", "snapshot_id", '"path":["target"]'];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
+
+  test("ANTIGEN_REF_NOT_FOUND backend error returns a clean browser_click error (not browser_type)", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickStatus: 422,
+      browserClickBody: { ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: "Antigen ref 'ag_99' was not found in the latest snapshot." } },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 61, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Ok", ref: "ag_99" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 61);
+    assert.ok(resp, `expected response for id=61, stdout was: ${stdoutBuf}`);
+    assert.ok(resp.result?.isError, `expected isError, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_REF_NOT_FOUND"), `expected ANTIGEN_REF_NOT_FOUND in: ${text}`);
+    assert.ok(text.includes("browser_click"), `error must reference browser_click: ${text}`);
+    assert.ok(!text.includes("browser_type"), `browser_click error must not say browser_type: ${text}`);
   });
 });
 

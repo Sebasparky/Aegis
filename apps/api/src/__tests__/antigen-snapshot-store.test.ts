@@ -23,6 +23,7 @@ import {
   isAntigenSnapshotExpired,
   deleteExpiredAntigenSnapshots,
   deleteAntigenSnapshotsForSession,
+  resolveAntigenRefForSession,
   toExternalAntigenSnapshotElement,
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
@@ -282,5 +283,54 @@ describe("external view", () => {
     // href_path (a safe path) is allowed; the full href / origin / query is not.
     expect(serialized).not.toContain("https://www.ikea.com");
     expect(serialized).not.toContain("ref=nav");
+  });
+});
+
+describe("resolveAntigenRefForSession (Phase 4A)", () => {
+  const SESSION = "tbsess_store_001";
+
+  it("resolves the active snapshot element by session/user/ref with its box", () => {
+    createFor([
+      makeCandidate({ name: "Shopping bag" }),
+      makeCandidate({ kind: "button", role: "button", name: "Ok", box: { x: 100, y: 200, width: 80, height: 40 } }),
+    ]);
+
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_2");
+    expect(res.status).toBe("ok");
+    if (res.status !== "ok") throw new Error("expected ok");
+    expect(res.element.ref).toBe("ag_2");
+    expect(res.element.name).toBe("Ok");
+    // Internal box is available to the resolver (handed to the click path).
+    expect(res.element.box).toEqual({ x: 100, y: 200, width: 80, height: 40 });
+  });
+
+  it("does not resolve a ref for a different session", () => {
+    createFor([makeCandidate()], { browser_session_id: SESSION });
+    expect(resolveAntigenRefForSession("tbsess_other", USER, "ag_1").status).toBe("no_snapshot");
+  });
+
+  it("does not resolve a ref for a different user", () => {
+    createFor([makeCandidate()], { browser_session_id: SESSION, user_id: USER });
+    expect(resolveAntigenRefForSession(SESSION, OTHER_USER, "ag_1").status).toBe("no_snapshot");
+  });
+
+  it("returns expired when the active snapshot is past its TTL", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    createFor([makeCandidate()], { browser_session_id: SESSION, now: t0 });
+    const later = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", later).status).toBe("expired");
+  });
+
+  it("returns ref_not_found for a missing ref in a live snapshot", () => {
+    createFor([makeCandidate()], { browser_session_id: SESSION });
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_99").status).toBe("ref_not_found");
+  });
+
+  it("does not mutate the external view (box stays internal only)", () => {
+    createFor([makeCandidate({ name: "Ok" })], { browser_session_id: SESSION });
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_1");
+    if (res.status !== "ok") throw new Error("expected ok");
+    const external = toExternalAntigenSnapshotElement(res.element);
+    expect(JSON.stringify(external)).not.toContain("box");
   });
 });

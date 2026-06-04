@@ -38,6 +38,81 @@ const browsingPointerState = new Map<string, { x: number; y: number }>();
 
 export const GENERAL_TYPING_PROFILE = { min_ms: 30, max_ms: 80 } as const;
 
+/**
+ * Shared realistic-pointer click dispatch for a KNOWN element box.
+ *
+ * This is the single pointer-movement primitive used by both the
+ * description-matched click path (realisticClickByDescription) and the exact
+ * Antigen-ref click path (realisticClickKnownBox). It owns: two-tier pointer
+ * state load, makePointerRuntimeState, clickBoxWithPointer (template traces +
+ * debug overlay), pointer-state persistence, and the success metadata shape.
+ *
+ * Callers supply the box + viewport dims + an attached-session sendCdp closure.
+ * No element finding, no DOM/Playwright click — the click is always realistic
+ * pointer movement to the given box via clickBoxWithPointer.
+ */
+async function dispatchPointerClickToBox(opts: {
+  box: ElementBox;
+  vw: number;
+  vh: number;
+  sessionId?: string;
+  userId?: string;
+  sendCdp: (method: string, p: Record<string, unknown>) => void;
+  sleep: (ms: number) => Promise<void>;
+  debugOverlay: boolean;
+}): Promise<RealisticClickResult> {
+  const { box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay } = opts;
+
+  // Two-tier pointer state load: taskBrowserSessions (shared cross-path store)
+  // preferred when userId is available; browsingPointerState as fast fallback.
+  let savedClickState: { x: number; y: number } | undefined;
+  if (sessionId && userId) {
+    const saved = getTaskBrowserSessionPointerState(sessionId, userId);
+    if (saved?.initialized) savedClickState = { x: saved.x, y: saved.y };
+  }
+  if (!savedClickState && sessionId) savedClickState = browsingPointerState.get(sessionId);
+  const clickPointerStartSource: "session" | "viewport_center" = savedClickState ? "session" : "viewport_center";
+
+  const state = makePointerRuntimeState({
+    current_x: savedClickState?.x ?? vw / 2,
+    current_y: savedClickState?.y ?? vh / 2,
+    viewport_width: vw,
+    viewport_height: vh,
+    browser_session_id: sessionId,
+    interaction_mode: "realistic",
+  });
+
+  let clickPathCount: number | undefined;
+  await clickBoxWithPointer(state, box, sendCdp, sleep, {
+    debugOverlay,
+    debugLabel: "general_click",
+    templateTraces: getLoadedPointerTraces(),
+    purpose: "button_click",
+    onFocusComplete: (info) => { clickPathCount = info.path_point_count; },
+  });
+
+  let clickStatePersisted = false;
+  if (sessionId) {
+    browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+    if (userId) {
+      setTaskBrowserSessionPointerState(sessionId, userId, {
+        x: state.current_x,
+        y: state.current_y,
+        initialized: true,
+        updated_at: new Date().toISOString(),
+      });
+      clickStatePersisted = true;
+    }
+  }
+
+  return {
+    success: true,
+    pointer_start_source: clickPointerStartSource,
+    ...(clickPathCount !== undefined ? { pointer_path_point_count: clickPathCount } : {}),
+    pointer_state_persisted: clickStatePersisted,
+  };
+}
+
 // JS IIFE that checks whether the active element is a focusable input/textarea/contenteditable.
 // Returns true if focusable and visible, null otherwise.
 // Exported for unit testing.
@@ -388,24 +463,142 @@ export async function realisticClickByDescription(params: {
           });
         }
 
-        // Two-tier pointer state load: taskBrowserSessions (shared cross-path store)
-        // preferred when userId is available; browsingPointerState as fast fallback.
-        let savedClickState: { x: number; y: number } | undefined;
-        if (sessionId && userId) {
-          const saved = getTaskBrowserSessionPointerState(sessionId, userId);
-          if (saved?.initialized) savedClickState = { x: saved.x, y: saved.y };
-        }
-        if (!savedClickState && sessionId) savedClickState = browsingPointerState.get(sessionId);
-        const clickPointerStartSource: "session" | "viewport_center" = savedClickState ? "session" : "viewport_center";
+        const sendCdp = (method: string, p: Record<string, unknown>) => {
+          void sendMsg(method, p, cdpSessionId!);
+        };
+        const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
-        const state = makePointerRuntimeState({
-          current_x: savedClickState?.x ?? vw / 2,
-          current_y: savedClickState?.y ?? vh / 2,
-          viewport_width: vw,
-          viewport_height: vh,
-          browser_session_id: sessionId,
-          interaction_mode: "realistic",
-        });
+        void (async () => {
+          try {
+            const clickResult = await dispatchPointerClickToBox({
+              box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
+            });
+            finish(clickResult);
+          } catch (err) {
+            finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
+          }
+        })();
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      finish({ success: false, error: `WS_ERROR: ${err.message}` });
+    });
+  });
+}
+
+/**
+ * Realistic-pointer click of a KNOWN element box (Antigen Phase 4A).
+ *
+ * Used by the exact `ag_*` ref path: the caller has already resolved the box
+ * from the active Antigen snapshot store, so there is NO element finding here.
+ * The only Runtime.evaluate on this path reads viewport dimensions
+ * (innerWidth/innerHeight) for accurate pointer clamping — never an element,
+ * never element.click(). The click itself is realistic pointer movement to the
+ * given box via clickBoxWithPointer (shared dispatchPointerClickToBox), so it
+ * produces the same pointer metadata as the description path.
+ */
+export async function realisticClickKnownBox(params: {
+  cdpUrl: string;
+  box: ElementBox;
+  sessionId?: string;
+  userId?: string;
+}): Promise<RealisticClickResult> {
+  if (getInputRealismMode() === "direct") {
+    return { success: false, error: "REALISM_DISABLED" };
+  }
+
+  const { cdpUrl, box, sessionId, userId } = params;
+  const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
+  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
+  const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: Array<{ id: string; url: string; type: string }>;
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
+    ]);
+  } catch (err) {
+    return { success: false, error: `CDP_FETCH_FAILED: ${(err as Error).message}` };
+  }
+
+  const browserWsUrl = versionData.webSocketDebuggerUrl;
+  if (!browserWsUrl) return { success: false, error: "No browser WebSocket debugger URL from CDP." };
+
+  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
+
+  // Geometry-only IIFE: viewport dimensions for pointer clamping. No element
+  // lookup, no click, no DOM mutation.
+  const viewportExpr = "(function(){return {vw:window.innerWidth,vh:window.innerHeight};})()";
+
+  return new Promise<RealisticClickResult>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let cdpSessionId: string | null = null;
+    let attachId: number;
+    let viewportId: number;
+
+    const timer = setTimeout(() => {
+      ws.terminate();
+      resolve({ success: false, error: "Realistic click timed out after 8 seconds." });
+    }, 8_000);
+
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+      const id = msgId++;
+      const msg: Record<string, unknown> = { id, method, params: p };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+      return id;
+    };
+
+    const finish = (result: RealisticClickResult) => {
+      clearTimeout(timer);
+      ws.close();
+      resolve(result);
+    };
+
+    ws.on("open", () => {
+      attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const result = msg.result as Record<string, unknown> | undefined;
+
+      if (id === attachId) {
+        if (!result?.sessionId) {
+          finish({ success: false, error: "CDP attach failed: no sessionId." });
+          return;
+        }
+        cdpSessionId = result.sessionId as string;
+        viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
+        return;
+      }
+
+      if (id === viewportId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value as { vw?: number; vh?: number } | undefined;
+        const vw = val?.vw ?? 1280;
+        const vh = val?.vh ?? 800;
+
+        if (cdpDiagnostics) {
+          console.log("[RealisticClick] antigen ref box, dispatching pointer", {
+            surface: "browser_click",
+            box_width: Math.round(box.width),
+            box_height: Math.round(box.height),
+          });
+        }
 
         const sendCdp = (method: string, p: Record<string, unknown>) => {
           void sendMsg(method, p, cdpSessionId!);
@@ -414,33 +607,10 @@ export async function realisticClickByDescription(params: {
 
         void (async () => {
           try {
-            let clickPathCount: number | undefined;
-            await clickBoxWithPointer(state, box, sendCdp, sleep, {
-              debugOverlay,
-              debugLabel: "general_click",
-              templateTraces: getLoadedPointerTraces(),
-              purpose: "button_click",
-              onFocusComplete: (info) => { clickPathCount = info.path_point_count; },
+            const clickResult = await dispatchPointerClickToBox({
+              box, vw, vh, sessionId, userId, sendCdp, sleep, debugOverlay,
             });
-            let clickStatePersisted = false;
-            if (sessionId) {
-              browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
-              if (userId) {
-                setTaskBrowserSessionPointerState(sessionId, userId, {
-                  x: state.current_x,
-                  y: state.current_y,
-                  initialized: true,
-                  updated_at: new Date().toISOString(),
-                });
-                clickStatePersisted = true;
-              }
-            }
-            finish({
-              success: true,
-              pointer_start_source: clickPointerStartSource,
-              ...(clickPathCount !== undefined ? { pointer_path_point_count: clickPathCount } : {}),
-              pointer_state_persisted: clickStatePersisted,
-            });
+            finish(clickResult);
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }

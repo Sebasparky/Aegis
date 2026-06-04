@@ -47,9 +47,9 @@ import {
 } from "../runtime/authenticatedSessions.js";
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticTypeTextViaCDP } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP } from "../runtime/antigenSnapshotRuntime.js";
-import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
+import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3476,19 +3476,67 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
 
-    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown; selector_hint?: unknown };
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown; selector_hint?: unknown; ref?: unknown };
 
     if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
       return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
-    }
-    if (!body.element_description || typeof body.element_description !== "string") {
-      return sendError(reply, 400, "MISSING_FIELD", "element_description is required and must be a non-empty string.");
     }
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
     if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+
+    // Antigen exact-ref path (Phase 4A): when ref is an Antigen ref (ag_<n>),
+    // resolve the exact element box from the latest active snapshot for this
+    // session+user and click it via the realistic pointer runtime. No scoring,
+    // no fuzzy matching, no text rediscovery — exact ref only. Non-ag refs fall
+    // through to the unchanged description path below.
+    const refRaw = typeof body.ref === "string" ? body.ref : undefined;
+    if (refRaw && refRaw.startsWith("ag_")) {
+      if (!/^ag_\d+$/.test(refRaw)) {
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw}'; expected ag_<number>.` } });
+      }
+
+      const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
+      if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+      }
+      if (resolution.status === "expired") {
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      }
+
+      const el = resolution.element;
+      if (!el.enabled || !el.clickable || el.box.width <= 0 || el.box.height <= 0) {
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_CLICKABLE", message: `Antigen ref '${refRaw}' is not clickable.` } });
+      }
+
+      const refResult = await realisticClickKnownBox({
+        cdpUrl: session.cdp_url,
+        box: el.box,
+        sessionId: session.browser_session_id,
+        userId: MOCK_USER_ID,
+      });
+
+      if (!refResult.success) {
+        const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
+        return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed." } });
+      }
+
+      return reply.send({
+        ok: true,
+        data: {
+          mode: "realistic_pointer_click",
+          ...(refResult.pointer_start_source !== undefined ? { pointer_start_source: refResult.pointer_start_source } : {}),
+          ...(refResult.pointer_path_point_count !== undefined ? { pointer_path_point_count: refResult.pointer_path_point_count } : {}),
+          ...(refResult.pointer_state_persisted !== undefined ? { pointer_state_persisted: refResult.pointer_state_persisted } : {}),
+        },
+      });
+    }
+
+    if (!body.element_description || typeof body.element_description !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "element_description is required and must be a non-empty string.");
+    }
 
     const selectorHint = typeof body.selector_hint === "string" && body.selector_hint.length > 0
       ? body.selector_hint

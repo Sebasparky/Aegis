@@ -901,7 +901,9 @@ async function handleLine(line) {
       return;
     }
 
-    if (!elementDescription && !selectorHint) {
+    const hasAntigenRef = typeof refArg === "string" && /^ag_\d+$/.test(refArg);
+
+    if (!elementDescription && !selectorHint && !hasAntigenRef) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_click_error` +
         ` reason=ANTIGEN_CLICK_TARGET_REQUIRED arg_keys=${argKeys}\n`
@@ -924,6 +926,11 @@ async function handleLine(line) {
     try {
       const reqBody = { browser_runtime_id, element_description: elementDescription };
       if (selectorHint) reqBody.selector_hint = selectorHint;
+      // Antigen exact-ref path: pass an ag_<n> ref straight through to the
+      // backend, which resolves it against the latest snapshot and clicks the
+      // stored box via the realistic pointer runtime. The adapter never resolves
+      // the ref, never touches Playwright, and never receives coordinates.
+      if (typeof refArg === "string" && /^ag_\d+$/.test(refArg)) reqBody.ref = refArg;
 
       const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-click`, {
         method: "POST",

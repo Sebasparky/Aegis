@@ -214,6 +214,51 @@ export function listAntigenSnapshotElements(
   return [...stored.elementsByRef.values()];
 }
 
+// ─── Session-scoped ref resolution (Phase 4A) ───────────────────────────────
+
+/**
+ * Result of resolving an `ag_*` ref against the active snapshot for a
+ * session+user. The box lives only on `element` (internal) and is never
+ * surfaced to agents — callers read `element.box` solely to hand it to the
+ * realistic pointer click path.
+ */
+export type AntigenRefResolution =
+  | { status: "ok"; element: AntigenSnapshotElementRecord }
+  | { status: "no_snapshot" }
+  | { status: "expired" }
+  | { status: "ref_not_found" };
+
+/**
+ * Resolves an `ag_*` ref to its internal element record using the single active
+ * snapshot for the given browser_session_id + user_id. The Phase 3.5 invariant
+ * guarantees at most one active snapshot per session+user, so scanning the
+ * in-memory map is safe. This is exact-ref resolution only — no scoring, no
+ * fuzzy matching, no text rediscovery.
+ */
+export function resolveAntigenRefForSession(
+  browserSessionId: string,
+  userId: string,
+  ref: string,
+  now?: Date,
+): AntigenRefResolution {
+  let stored: StoredSnapshot | undefined;
+  for (const s of snapshots.values()) {
+    if (
+      s.snapshot.browser_session_id === browserSessionId &&
+      s.snapshot.user_id === userId
+    ) {
+      stored = s;
+      break;
+    }
+  }
+  if (!stored) return { status: "no_snapshot" };
+  if (isAntigenSnapshotExpired(stored.snapshot, now)) return { status: "expired" };
+
+  const element = stored.elementsByRef.get(ref);
+  if (!element) return { status: "ref_not_found" };
+  return { status: "ok", element };
+}
+
 // ─── Freshness ───────────────────────────────────────────────────────────────
 
 export function isAntigenSnapshotExpired(snapshot: AntigenSnapshotRecord, now?: Date): boolean {

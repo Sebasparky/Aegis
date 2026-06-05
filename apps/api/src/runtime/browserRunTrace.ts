@@ -20,7 +20,11 @@
 
 const MAX_EVENTS_PER_SESSION = 200;
 const MAX_SESSIONS = 50;
-const TRACE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+// Retention is based on LAST ACTIVITY, not creation time — a trace that keeps
+// receiving events stays alive, and only expires once it has been idle for the
+// full TTL. The 60-minute window gives manual QA a long-enough evidence window
+// while remaining bounded by MAX_SESSIONS / MAX_EVENTS_PER_SESSION.
+const TRACE_TTL_MS = 60 * 60 * 1000; // 60 minutes (dev QA window)
 const MAX_STR = 200;
 
 export type BrowserTraceEventType =
@@ -69,8 +73,28 @@ interface TraceEntry {
   browser_runtime_id: string;
   created_at: string;
   created_ms: number;
+  // Updated on every recorded event — TTL expiry is measured from here, not
+  // created_ms, so an actively-used trace does not disappear mid-QA.
+  last_event_at: string;
+  last_event_ms: number;
   event_count: number;
   events: BrowserTraceEvent[];
+}
+
+/**
+ * Expiration metadata shared by the per-runtime view and the list summary, so
+ * both surface identical fields. Derived purely from timestamps — no internals.
+ */
+function expiryMeta(
+  entry: TraceEntry,
+  nowMs: number,
+): { last_event_at: string; expires_at: string; ttl_ms: number; age_ms: number } {
+  return {
+    last_event_at: entry.last_event_at,
+    expires_at: new Date(entry.last_event_ms + TRACE_TTL_MS).toISOString(),
+    ttl_ms: TRACE_TTL_MS,
+    age_ms: Math.max(0, nowMs - entry.last_event_ms),
+  };
 }
 
 const traces = new Map<string, TraceEntry>();
@@ -110,7 +134,7 @@ export function sanitizeTraceUrl(input: unknown): string | undefined {
 
 function deleteExpired(nowMs: number): void {
   for (const [id, entry] of traces) {
-    if (nowMs - entry.created_ms > TRACE_TTL_MS) traces.delete(id);
+    if (nowMs - entry.last_event_ms > TRACE_TTL_MS) traces.delete(id);
   }
 }
 
@@ -186,6 +210,8 @@ export function recordBrowserTraceEvent(
         browser_runtime_id: browserRuntimeId,
         created_at: now.toISOString(),
         created_ms: nowMs,
+        last_event_at: now.toISOString(),
+        last_event_ms: nowMs,
         event_count: 0,
         events: [],
       };
@@ -196,6 +222,9 @@ export function recordBrowserTraceEvent(
     if (entry.events.length >= MAX_EVENTS_PER_SESSION) entry.events.shift();
     entry.events.push(safe);
     entry.event_count += 1;
+    // Refresh last-activity so the TTL window slides forward with use.
+    entry.last_event_at = safe.ts;
+    entry.last_event_ms = nowMs;
   } catch {
     // Diagnostics must never disrupt the tool path.
   }
@@ -204,6 +233,10 @@ export function recordBrowserTraceEvent(
 export interface BrowserRunTraceView {
   browser_runtime_id: string;
   created_at: string;
+  last_event_at: string;
+  expires_at: string;
+  ttl_ms: number;
+  age_ms: number;
   event_count: number;
   events: BrowserTraceEvent[];
 }
@@ -215,7 +248,8 @@ export function getBrowserRunTrace(
 ): BrowserRunTraceView | undefined {
   const entry = traces.get(browserRuntimeId);
   if (!entry) return undefined;
-  if (Date.now() - entry.created_ms > TRACE_TTL_MS) {
+  const nowMs = Date.now();
+  if (nowMs - entry.last_event_ms > TRACE_TTL_MS) {
     traces.delete(browserRuntimeId);
     return undefined;
   }
@@ -226,6 +260,7 @@ export function getBrowserRunTrace(
   return {
     browser_runtime_id: entry.browser_runtime_id,
     created_at: entry.created_at,
+    ...expiryMeta(entry, nowMs),
     event_count: entry.event_count,
     events,
   };
@@ -235,6 +270,10 @@ export function getBrowserRunTrace(
 export interface BrowserRunTraceSummary {
   browser_runtime_id: string;
   created_at: string;
+  last_event_at: string;
+  expires_at: string;
+  ttl_ms: number;
+  age_ms: number;
   event_count: number;
   last_event_type?: BrowserTraceEventType;
   last_ts?: string;
@@ -250,7 +289,8 @@ export interface BrowserRunTraceSummary {
  */
 export function listBrowserRunTraces(limit = 50): BrowserRunTraceSummary[] {
   if (!traceEnabled()) return [];
-  deleteExpired(Date.now());
+  const nowMs = Date.now();
+  deleteExpired(nowMs);
   const safeLimit = Number.isFinite(limit) ? Math.min(50, Math.max(1, Math.floor(limit))) : 50;
 
   const summaries: BrowserRunTraceSummary[] = [...traces.values()].map((entry) => {
@@ -267,6 +307,7 @@ export function listBrowserRunTraces(limit = 50): BrowserRunTraceSummary[] {
     return {
       browser_runtime_id: entry.browser_runtime_id,
       created_at: entry.created_at,
+      ...expiryMeta(entry, nowMs),
       event_count: entry.event_count,
       last_event_type: last?.event_type,
       last_ts: last?.ts,

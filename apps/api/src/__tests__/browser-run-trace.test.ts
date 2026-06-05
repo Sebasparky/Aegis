@@ -58,6 +58,7 @@ import { createAntigenSnapshotRecord, clearAntigenSnapshotStoreForTests } from "
 import {
   recordBrowserTraceEvent,
   getBrowserRunTrace,
+  listBrowserRunTraces,
   clearBrowserRunTraces,
 } from "../runtime/browserRunTrace.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
@@ -408,6 +409,10 @@ describe("browser run trace — list/index endpoint", () => {
       traces: Array<{
         browser_runtime_id: string;
         created_at: string;
+        last_event_at: string;
+        expires_at: string;
+        ttl_ms: number;
+        age_ms: number;
         event_count: number;
         last_event_type?: string;
         last_ts?: string;
@@ -608,5 +613,120 @@ describe("browser run trace — rejected/orphan calls (SESSION_NOT_FOUND)", () =
     // The rejected event carries only the safe allowlist fields.
     const keys = Object.keys(rejected).sort();
     expect(keys).toEqual(["browser_runtime_id", "error_code", "event_type", "tool", "ts"]);
+  });
+});
+
+describe("browser run trace — TTL & expiration metadata", () => {
+  const TTL_MS = 60 * 60 * 1000; // must match TRACE_TTL_MS in browserRunTrace.ts
+  const T0 = new Date("2026-06-05T00:00:00.000Z").getTime();
+  const LIST_URL = "/api/internal/browser-run-traces";
+
+  beforeEach(() => {
+    // Outer beforeEach already stubbed ANTIGEN_BROWSER_TRACE=true and cleared traces.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function recordNav(id: string, page: string) {
+    recordBrowserTraceEvent(id, {
+      event_type: "navigation_state",
+      browser_runtime_id: id,
+      url_after: page,
+    });
+  }
+
+  async function readList() {
+    const res = await server.inject({ method: "GET", url: LIST_URL });
+    expect(res.statusCode).toBe(200);
+    return res.json().data as {
+      trace_count: number;
+      traces: Array<{
+        browser_runtime_id: string;
+        created_at: string;
+        last_event_at: string;
+        expires_at: string;
+        ttl_ms: number;
+        age_ms: number;
+        event_count: number;
+      }>;
+    };
+  }
+
+  it("A. keeps a trace alive when it keeps receiving events (TTL slides forward)", () => {
+    recordNav("rt_ttl_a", "example.com/p1");
+    // Idle almost the full TTL, then a fresh event refreshes last-activity.
+    vi.setSystemTime(T0 + TTL_MS - 60_000);
+    recordNav("rt_ttl_a", "example.com/p2");
+    // Past created_at + TTL, but before last_event_at + TTL — must still be present.
+    vi.setSystemTime(T0 + TTL_MS + 30 * 60_000);
+    const traces = listBrowserRunTraces();
+    expect(traces.some((t) => t.browser_runtime_id === "rt_ttl_a")).toBe(true);
+  });
+
+  it("B. expires a trace once idle past last_event_at + TTL", () => {
+    recordNav("rt_ttl_b", "example.com/p1");
+    vi.setSystemTime(T0 + TTL_MS + 1);
+    expect(listBrowserRunTraces()).toEqual([]);
+    expect(getBrowserRunTrace("rt_ttl_b")).toBeUndefined();
+  });
+
+  it("C. index exposes expiration metadata derived from last_event_at, not created_at", async () => {
+    recordNav("rt_ttl_c", "example.com/p1");
+    // A later event must move last_event_at / expires_at forward.
+    vi.setSystemTime(T0 + 10 * 60_000);
+    recordNav("rt_ttl_c", "example.com/p2");
+
+    const data = await readList();
+    const entry = data.traces.find((t) => t.browser_runtime_id === "rt_ttl_c")!;
+    expect(entry.ttl_ms).toBe(TTL_MS);
+    expect(entry.last_event_at).toBe(new Date(T0 + 10 * 60_000).toISOString());
+    expect(entry.expires_at).toBe(new Date(T0 + 10 * 60_000 + TTL_MS).toISOString());
+    // Expiry tracks the later event, not creation time.
+    expect(entry.expires_at).not.toBe(new Date(T0 + TTL_MS).toISOString());
+    expect(entry.created_at).toBe(new Date(T0).toISOString());
+    expect(entry.age_ms).toBe(0);
+
+    // age_ms grows with idle time since the last event.
+    vi.setSystemTime(T0 + 15 * 60_000);
+    const later = (await readList()).traces.find((t) => t.browser_runtime_id === "rt_ttl_c")!;
+    expect(later.age_ms).toBe(5 * 60_000);
+  });
+
+  it("D. per-runtime endpoint exposes the same expiration metadata", async () => {
+    recordNav("rt_ttl_d", "example.com/p1");
+    const res = await server.inject({
+      method: "GET", url: "/api/internal/browser-run-trace/rt_ttl_d",
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data as {
+      last_event_at: string; expires_at: string; ttl_ms: number; age_ms: number; created_at: string;
+    };
+    expect(data.ttl_ms).toBe(TTL_MS);
+    expect(data.last_event_at).toBe(new Date(T0).toISOString());
+    expect(data.expires_at).toBe(new Date(T0 + TTL_MS).toISOString());
+    expect(data.age_ms).toBe(0);
+    expect(data.created_at).toBe(new Date(T0).toISOString());
+  });
+
+  it("E. expiration metadata leaks no forbidden internals", async () => {
+    recordNav("rt_ttl_e", "www.ikea.com/us/en/cat");
+    const listRaw = JSON.stringify((await server.inject({ method: "GET", url: LIST_URL })).json());
+    const oneRaw = JSON.stringify(
+      (await server.inject({ method: "GET", url: "/api/internal/browser-run-trace/rt_ttl_e" })).json(),
+    );
+    const FORBIDDEN = [
+      "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref", "password",
+      "cookies", "localStorage", "sessionStorage", "innerHTML",
+      "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "doc_x", "doc_y",
+      "nearby_text", "9222", "localhost",
+    ];
+    for (const f of FORBIDDEN) {
+      expect(listRaw).not.toContain(f);
+      expect(oneRaw).not.toContain(f);
+    }
   });
 });

@@ -864,3 +864,109 @@ describe("browser run trace — tool-surface disposition & warnings", () => {
     expect(res.json().data.warnings).toBeUndefined();
   });
 });
+
+describe("browser run trace — navigation discipline (Antigen Browser Realism v1)", () => {
+  const NAV_ID = "tbsess_nav_001";
+  const NAV_URL = `/api/internal/browser-run-trace/${NAV_ID}/navigation-disposition`;
+
+  async function readNavTrace(id = NAV_ID) {
+    const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${id}` });
+    expect(res.statusCode).toBe(200);
+    return res.json().data as { event_count: number; events: any[]; warnings?: string[] };
+  }
+
+  it("records a sanitized browser_navigation_disposition (host+path only, no query string)", async () => {
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      payload: {
+        tool: "browser_navigate",
+        navigation_disposition: "direct_navigation_blocked",
+        navigation_reason: "same_site_search_deeplink",
+        url_before: "https://www.ikea.com/us/en/cat/bookcases",
+        url_after: "https://www.ikea.com/us/en/search/?q=secret+billy+query",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    const trace = await readNavTrace();
+    const ev = trace.events.find((e) => e.event_type === "browser_navigation_disposition");
+    expect(ev).toBeTruthy();
+    expect(ev.navigation_disposition).toBe("direct_navigation_blocked");
+    expect(ev.navigation_reason).toBe("same_site_search_deeplink");
+    // URLs reduced to host+path; the raw query string must be stripped.
+    expect(ev.url_after).toBe("www.ikea.com/us/en/search/");
+    expect(ev.url_before).toBe("www.ikea.com/us/en/cat/bookcases");
+  });
+
+  it("leaks no raw query string or coordinates", async () => {
+    await server.inject({
+      method: "POST", url: `/api/internal/browser-run-trace/tbsess_nav_leak/navigation-disposition`,
+      payload: {
+        navigation_disposition: "direct_navigation_warned",
+        navigation_reason: "cart_deeplink",
+        url_after: "https://www.ikea.com/us/en/shoppingcart/?sessionkey=abc123&x=42",
+      },
+    });
+    const raw = JSON.stringify(await readNavTrace("tbsess_nav_leak"));
+    expect(raw).not.toContain("sessionkey");
+    expect(raw).not.toContain("abc123");
+    expect(raw).not.toContain("?");
+    expect(raw).not.toMatch(/"x":\s*42/);
+  });
+
+  it("drops an out-of-enum navigation_disposition (enum-gated)", () => {
+    recordBrowserTraceEvent("tbsess_nav_enum", {
+      event_type: "browser_navigation_disposition",
+      browser_runtime_id: "tbsess_nav_enum",
+      tool: "browser_navigate",
+      // @ts-expect-error — deliberately invalid enum value must be dropped.
+      navigation_disposition: "totally_made_up_disposition",
+      navigation_reason: "cart_deeplink",
+    });
+    const trace = getBrowserRunTrace("tbsess_nav_enum")!;
+    const ev = trace.events.find((e) => e.event_type === "browser_navigation_disposition")!;
+    expect(ev.navigation_disposition).toBeUndefined();
+    expect(ev.navigation_reason).toBe("cart_deeplink");
+  });
+
+  it("the navigation-disposition route is a no-op when ANTIGEN_BROWSER_TRACE is unset", async () => {
+    vi.stubEnv("ANTIGEN_BROWSER_TRACE", "");
+    const res = await server.inject({
+      method: "POST", url: `/api/internal/browser-run-trace/tbsess_nav_off/navigation-disposition`,
+      payload: { navigation_disposition: "direct_navigation_warned", navigation_reason: "cart_deeplink" },
+    });
+    expect(res.statusCode).toBe(200);
+    vi.stubEnv("ANTIGEN_BROWSER_TRACE", "true");
+    const trace = await readNavTrace("tbsess_nav_off");
+    expect(trace.event_count).toBe(0);
+  });
+
+  it("warns direct_navigation_shortcuts_dominant when shortcuts dominate", async () => {
+    const SD = "tbsess_nav_dominant";
+    for (let i = 0; i < 3; i++) {
+      recordBrowserTraceEvent(SD, {
+        event_type: "browser_navigation_disposition", browser_runtime_id: SD,
+        tool: "browser_navigate", navigation_disposition: "direct_navigation_warned", navigation_reason: "same_site_product_deeplink",
+      });
+    }
+    const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${SD}` });
+    expect(res.json().data.warnings).toContain("direct_navigation_shortcuts_dominant");
+  });
+
+  it("does NOT warn when shortcut navigations are offset by Antigen-owned actions", async () => {
+    const OK = "tbsess_nav_offset";
+    recordBrowserTraceEvent(OK, {
+      event_type: "browser_navigation_disposition", browser_runtime_id: OK,
+      tool: "browser_navigate", navigation_disposition: "direct_navigation_warned", navigation_reason: "same_site_product_deeplink",
+    });
+    recordBrowserTraceEvent(OK, { event_type: "antigen_snapshot", browser_runtime_id: OK, result_code: "antigen_snapshot_success" });
+    recordBrowserTraceEvent(OK, {
+      event_type: "browser_navigation_disposition", browser_runtime_id: OK,
+      tool: "browser_navigate", navigation_disposition: "direct_navigation_warned", navigation_reason: "cart_deeplink",
+    });
+    recordBrowserTraceEvent(OK, { event_type: "browser_click", browser_runtime_id: OK, ref: "ag_10" });
+    const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${OK}` });
+    expect(res.json().data.warnings ?? []).not.toContain("direct_navigation_shortcuts_dominant");
+  });
+});

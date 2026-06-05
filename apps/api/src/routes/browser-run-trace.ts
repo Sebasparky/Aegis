@@ -3,8 +3,10 @@ import {
   getBrowserRunTrace,
   listBrowserRunTraces,
   recordBrowserTraceEvent,
+  sanitizeTraceUrl,
   type BrowserToolSurface,
   type BrowserToolDisposition,
+  type NavigationDisposition,
 } from "../runtime/browserRunTrace.js";
 
 // ─── Dev-Only Browser Run Trace ───────────────────────────────────────────────
@@ -86,6 +88,41 @@ export async function browserRunTraceRoutes(server: FastifyInstance): Promise<vo
         disposition: body.disposition,
         result_code: typeof body.result_code === "string" ? body.result_code : undefined,
         error_code: typeof body.error_code === "string" ? body.error_code : undefined,
+      });
+      return reply.send({ ok: true });
+    },
+  );
+
+  // Internal / dev-only: record a NAVIGATION-DISCIPLINE disposition for a
+  // browser_navigate call (Antigen Browser Realism v1). Posted by the Antigen
+  // adapter so direct-navigation shortcuts — and hard-mode blocks — are visible
+  // in the trace. URLs are reduced to host+path here (query strings stripped)
+  // before storage; navigation_disposition is enum-gated and navigation_reason
+  // is clipped inside recordBrowserTraceEvent. Always returns { ok: true }.
+  server.post<{
+    Params: { browser_runtime_id: string };
+    Body: {
+      tool?: string;
+      navigation_disposition?: NavigationDisposition;
+      navigation_reason?: string;
+      url_before?: string;
+      url_after?: string;
+    };
+  }>(
+    "/api/internal/browser-run-trace/:browser_runtime_id/navigation-disposition",
+    async (req, reply) => {
+      const { browser_runtime_id } = req.params;
+      const body = req.body ?? {};
+      // Explicit allowlist — never spread the request body into the trace store.
+      // Sanitize URLs to host+path (strip query/fragment) before recording.
+      recordBrowserTraceEvent(browser_runtime_id, {
+        event_type: "browser_navigation_disposition",
+        browser_runtime_id,
+        tool: typeof body.tool === "string" ? body.tool : "browser_navigate",
+        navigation_disposition: body.navigation_disposition,
+        navigation_reason: typeof body.navigation_reason === "string" ? body.navigation_reason : undefined,
+        url_before: sanitizeTraceUrl(body.url_before),
+        url_after: sanitizeTraceUrl(body.url_after),
       });
       return reply.send({ ok: true });
     },

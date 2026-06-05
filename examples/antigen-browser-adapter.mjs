@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -379,6 +379,17 @@ let browser_runtime_id = null;
 let INTERCEPTION_ENABLED = false; // set after successful lazy init
 let _initPromise = null;
 let runtimeInitDone = false; // true after child handshake + stdout piped
+
+// ─── Navigation discipline state (Antigen Browser Realism v1) ─────────────────
+// The last current URL we successfully navigated to (used to tell same-site
+// deeplinks from cross-site research jumps), plus a compact, safe set of nav
+// hints derived from the most recent antigen_snapshot. Hints go stale quickly
+// (mirrors the backend snapshot TTL) so a navigation is never blocked on the
+// basis of a stale page map.
+let currentUrl = null;
+let lastNavHints = null;
+let lastNavHintsAt = 0;
+const NAV_HINTS_TTL_MS = 10000; // mirrors backend ANTIGEN_SNAPSHOT_TTL_MS (~10s)
 
 // ─── Pending navigation registry ──────────────────────────────────────────────
 // Tracks in-flight browser_navigate calls by requestId so handleChildLine can
@@ -773,6 +784,53 @@ function antigenHardModeEnabled() {
   return process.env.ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS === "true";
 }
 
+// QA-only navigation-discipline hard mode. Separate from REQUIRE_ANTIGEN_TOOLS:
+// that flag governs tool ownership (no raw browser_snapshot); this one governs
+// whether the agent may shortcut around visible refs with direct browser_navigate.
+function realisticNavRequired() {
+  return process.env.ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION === "true";
+}
+
+// Record a navigation-discipline disposition (Antigen Browser Realism v1). Like
+// noteToolDisposition this NEVER changes a tool result and never throws: it
+// always writes a sanitized stderr line, and additionally POSTs to the internal
+// navigation-disposition route only when ANTIGEN_BROWSER_TRACE=true and a
+// runtime id exists. Posts ONLY: tool name, enum disposition, short reason
+// string, and host+path-reduced before/after URLs (the backend route strips
+// query strings) — never raw query params, coordinates, or secrets.
+async function noteNavigationDisposition({ disposition, reason, category, urlBefore, urlAfter }) {
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] navigation_disposition` +
+    ` disposition=${disposition} reason=${reason ?? "none"} category=${category ?? "none"}` +
+    ` runtime_id=${clipRuntimeId(browser_runtime_id)}\n`
+  );
+  if (process.env.ANTIGEN_BROWSER_TRACE !== "true") return;
+  if (typeof browser_runtime_id !== "string" || browser_runtime_id.length === 0) return;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 500);
+  try {
+    await fetch(
+      `${BASE}/api/internal/browser-run-trace/${encodeURIComponent(browser_runtime_id)}/navigation-disposition`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          tool: "browser_navigate",
+          navigation_disposition: disposition,
+          navigation_reason: reason,
+          url_before: urlBefore ?? undefined,
+          url_after: urlAfter ?? undefined,
+        }),
+        signal: controller.signal,
+      },
+    );
+  } catch {
+    // Best-effort diagnostics — never disrupt the tool path.
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function logToolDisposition({ tool, surface, disposition, resultCode, errorCode }) {
   process.stderr.write(
     `[antigen-browser@${ADAPTER_VERSION}] tool_disposition` +
@@ -1068,6 +1126,16 @@ async function handleLine(line) {
           ` element_count=${data?.element_count ?? 0}\n`
         );
         await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+        // Cache a compact, safe set of navigation hints so the next
+        // browser_navigate can tell a shortcut deeplink from a legitimate jump.
+        // Derivation reads allowlisted page-map fields only; never throws into
+        // the tool path.
+        try {
+          lastNavHints = deriveNavHintsFromSnapshot(data);
+          lastNavHintsAt = Date.now();
+        } catch {
+          lastNavHints = null;
+        }
         writeSyntheticResponse(requestId, buildAntigenSnapshotText(data, ADAPTER_VERSION));
         return;
       }
@@ -1503,6 +1571,50 @@ async function handleLine(line) {
     const navigateUrl = msg?.params?.arguments?.url ?? "";
     const requestId = msg.id;
 
+    // ── Navigation discipline pre-flight (Antigen Browser Realism v1) ─────────
+    // Decide BEFORE forwarding to the child whether this direct navigation is an
+    // acceptable jump or a shortcut around visible refs. A blocked decision (only
+    // possible in QA hard mode) must short-circuit here so the navigation can
+    // NEVER reach child.stdin — a blocked shortcut cannot leak through the child.
+    // Stale/missing snapshot hints are treated as no hints (never block on them).
+    const navHintsFresh =
+      lastNavHints && Date.now() - lastNavHintsAt <= NAV_HINTS_TTL_MS ? lastNavHints : null;
+    const navDecision = classifyNavigationDiscipline({
+      targetUrl: navigateUrl,
+      currentUrl,
+      isFirstNavigation: currentUrl === null,
+      navHints: navHintsFresh,
+      hardMode: realisticNavRequired(),
+    });
+    if (navDecision.decision === "block") {
+      await noteNavigationDisposition({
+        disposition: navDecision.disposition,
+        reason: navDecision.reason,
+        category: navDecision.category,
+        urlBefore: currentUrl,
+        urlAfter: navigateUrl,
+      });
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_navigate_blocked reason=${navDecision.reason}\n`
+      );
+      writeSyntheticErrorResponse(
+        "browser_navigate",
+        requestId,
+        "ANTIGEN_REALISTIC_NAVIGATION_REQUIRED",
+        navigationBlockMessage(navDecision.category),
+      );
+      return;
+    }
+    // Allowed (clean or warned) — record the disposition for trace visibility,
+    // then proceed with the normal forward-to-child flow unchanged.
+    await noteNavigationDisposition({
+      disposition: navDecision.disposition,
+      reason: navDecision.reason,
+      category: navDecision.category,
+      urlBefore: currentUrl,
+      urlAfter: navigateUrl,
+    });
+
     // Register pending navigation — handleChildLine will resolve this when child responds.
     let resolveChildResponse;
     const childResponsePromise = new Promise((resolve) => {
@@ -1574,6 +1686,10 @@ async function handleLine(line) {
     // yet), so this is `adapter_child_forwarded` even in QA hard mode — navigation
     // is not a sensitive ref/click action.
     await noteToolDisposition({ tool: "browser_navigate", surface: "adapter_child_playwright", disposition: "adapter_child_forwarded", resultCode: "forwarded" });
+    // Track the page we are now on so the next navigation can distinguish a
+    // same-site deeplink from a cross-site jump. Only on a non-error load — a
+    // failed navigation did not change the current page.
+    if (!isError) currentUrl = navigateUrl;
     // Forward the original child response to Cowork.
     process.stdout.write(childLine.endsWith("\n") ? childLine : childLine + "\n");
     return;

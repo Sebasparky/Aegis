@@ -47,7 +47,14 @@ export type BrowserTraceEventType =
   // a child @playwright/mcp (untraced); a disposition event marks that surface
   // explicitly. Carries only `tool`, `tool_surface`, `disposition`,
   // `result_code`, `error_code` (enum-gated; no internals).
-  | "browser_tool_disposition";
+  | "browser_tool_disposition"
+  // Navigation discipline (Antigen Browser Realism v1): records whether a
+  // browser_navigate was an acceptable direct jump or a shortcut around visible
+  // refs, and (in QA hard mode) whether it was blocked. Posted by the Antigen
+  // adapter via the internal navigation-disposition route. Carries only
+  // `navigation_disposition` (enum-gated), a short clipped `navigation_reason`,
+  // and host+path-reduced url_before/url_after — no query strings or internals.
+  | "browser_navigation_disposition";
 
 /** Which surface handled a browser tool call. */
 export type BrowserToolSurface =
@@ -77,6 +84,45 @@ const BROWSER_TOOL_DISPOSITIONS = new Set<BrowserToolDisposition>([
   "raw_fallback",
   "failed",
   "blocked_by_antigen_required",
+]);
+
+/**
+ * Navigation-discipline outcome for a browser_navigate call (Antigen Browser
+ * Realism v1). The three `direct_navigation_*` values are the primary outcome
+ * recorded in `navigation_disposition`; the remaining values are category /
+ * reason tags that may also flow through (enum-gated) for forward compatibility.
+ */
+export type NavigationDisposition =
+  | "direct_navigation_allowed"
+  | "direct_navigation_warned"
+  | "direct_navigation_blocked"
+  | "ref_based_navigation_preferred"
+  | "initial_navigation"
+  | "user_provided_url"
+  | "top_level_site_entry"
+  | "cross_site_navigation"
+  | "same_site_product_deeplink"
+  | "same_site_search_deeplink"
+  | "cart_deeplink"
+  | "no_recent_snapshot"
+  | "no_matching_ref"
+  | "no_cart_ref";
+
+const NAVIGATION_DISPOSITIONS = new Set<NavigationDisposition>([
+  "direct_navigation_allowed",
+  "direct_navigation_warned",
+  "direct_navigation_blocked",
+  "ref_based_navigation_preferred",
+  "initial_navigation",
+  "user_provided_url",
+  "top_level_site_entry",
+  "cross_site_navigation",
+  "same_site_product_deeplink",
+  "same_site_search_deeplink",
+  "cart_deeplink",
+  "no_recent_snapshot",
+  "no_matching_ref",
+  "no_cart_ref",
 ]);
 
 export interface BrowserTraceEvent {
@@ -110,6 +156,10 @@ export interface BrowserTraceEvent {
   // disposition marks how it resolved.
   tool_surface?: BrowserToolSurface;
   disposition?: BrowserToolDisposition;
+  // Navigation-discipline fields (enum-gated disposition + clipped reason).
+  // Present on `browser_navigation_disposition` events.
+  navigation_disposition?: NavigationDisposition;
+  navigation_reason?: string;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -253,6 +303,12 @@ export function recordBrowserTraceEvent(
     if (event.disposition !== undefined && BROWSER_TOOL_DISPOSITIONS.has(event.disposition)) {
       safe.disposition = event.disposition;
     }
+    // Enum-gate navigation_disposition; clip the free-text navigation_reason.
+    if (event.navigation_disposition !== undefined && NAVIGATION_DISPOSITIONS.has(event.navigation_disposition)) {
+      safe.navigation_disposition = event.navigation_disposition;
+    }
+    const navReason = clip(event.navigation_reason);
+    if (navReason !== undefined) safe.navigation_reason = navReason;
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {
@@ -306,12 +362,32 @@ const ANTIGEN_ACTION_EVENT_TYPES = new Set<BrowserTraceEventType>([
 function computeTraceWarnings(events: BrowserTraceEvent[]): string[] {
   let navCount = 0;
   let hasAntigenAction = false;
+  let antigenActionCount = 0;
+  let shortcutNavCount = 0;
   for (const e of events) {
     if (e.event_type === "navigation_state") navCount++;
-    if (ANTIGEN_ACTION_EVENT_TYPES.has(e.event_type)) hasAntigenAction = true;
+    if (ANTIGEN_ACTION_EVENT_TYPES.has(e.event_type)) {
+      hasAntigenAction = true;
+      antigenActionCount++;
+    }
+    // A warned/blocked navigation disposition is a direct-navigation shortcut.
+    if (
+      e.event_type === "browser_navigation_disposition" &&
+      (e.navigation_disposition === "direct_navigation_warned" ||
+        e.navigation_disposition === "direct_navigation_blocked")
+    ) {
+      shortcutNavCount++;
+    }
   }
   const warnings: string[] = [];
   if (navCount >= 2 && !hasAntigenAction) warnings.push("navigation_without_antigen_actions");
+  // Direct-navigation shortcuts dominate when there are at least two of them and
+  // they are not offset by an equal-or-greater amount of Antigen-owned
+  // snapshot/click/type activity. A trace where shortcuts are followed by real
+  // ref-based actions does not warn.
+  if (shortcutNavCount >= 2 && antigenActionCount < shortcutNavCount) {
+    warnings.push("direct_navigation_shortcuts_dominant");
+  }
   return warnings;
 }
 

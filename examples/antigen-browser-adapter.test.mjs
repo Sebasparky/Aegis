@@ -26,6 +26,9 @@ import {
   clipRuntimeId,
   buildSyntheticSuccessText,
   buildAntigenSnapshotText,
+  deriveNavHintsFromSnapshot,
+  classifyNavigationDiscipline,
+  navigationBlockMessage,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3763,5 +3766,211 @@ describe("N. tool disposition and Antigen hard mode", () => {
     const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_click");
     assert.ok(disp, `expected a disposition POST for browser_click`);
     assert.equal(disp.body.disposition, "antigen_backend");
+  });
+});
+
+// ─── Navigation realism / direct navigation discipline ────────────────────────
+// Pure-function coverage for classifyNavigationDiscipline + deriveNavHintsFromSnapshot
+// (Antigen Browser Realism v1). Blocking only ever happens in hard mode; default
+// mode always allows but emits a warn disposition; stale/missing hints never block.
+
+describe("Navigation realism / direct navigation discipline", () => {
+  const IKEA = "https://www.ikea.com";
+  // A snapshot page map for an IKEA listing page with the affordances that justify
+  // ref-based movement: a search input, product cards, and a cart/bag control.
+  const ikeaListingSnapshot = {
+    page_summary: { url_host: "www.ikea.com", url_path: "/us/en/cat/bookcases" },
+    forms: [{ label: "Search IKEA", input_refs: ["ag_2"], submit_refs: ["ag_3"], action_hint: "browser_type_then_submit" }],
+    product_cards: [{ title: "BILLY Bookcase", price_text: "$59", add_ref: "ag_10", details_ref: "ag_11", refs: ["ag_10", "ag_11"] }],
+    warnings_or_modals: [{ kind: "cart_drawer", message: "Your bag", dismiss_refs: ["ag_20"] }],
+    primary_actions: [{ ref: "ag_30", role: "link", name: "Shopping bag" }],
+    elements: [
+      { kind: "input", name: "Search", ref: "ag_2", state: { typeable: true }, hints: {} },
+      { kind: "link", name: "BILLY Bookcase", ref: "ag_11", state: { clickable: true }, hints: { href_path: "/us/en/p/billy-bookcase-white-00263851" } },
+    ],
+  };
+  const freshHints = () => deriveNavHintsFromSnapshot(ikeaListingSnapshot);
+
+  test("deriveNavHintsFromSnapshot surfaces the expected affordances", () => {
+    const h = freshHints();
+    assert.equal(h.host, "www.ikea.com");
+    assert.equal(h.hasSearchInput, true);
+    assert.equal(h.hasProductCards, true);
+    assert.equal(h.hasCartRef, true);
+    assert.ok(h.hrefPaths.includes("/us/en/p/billy-bookcase-white-00263851"));
+  });
+
+  test("1. initial navigation (no current url) → allow", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: IKEA, currentUrl: null, isFirstNavigation: true, navHints: null, hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "initial_navigation");
+  });
+
+  test("2. top-level / home entry → allow", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/", currentUrl: "https://www.reddit.com/r/malelivingspace",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "cross_site_navigation");
+  });
+
+  test("2b. same-site home path → allow (top_level_site_entry)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/", currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "top_level_site_entry");
+  });
+
+  test("3. cross-site navigation (host changes) → allow", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: "https://www.reddit.com/r/malelivingspace",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "cross_site_navigation");
+  });
+
+  test("4. same-site product deeplink with refs → warned default, blocked hard", () => {
+    const args = {
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(),
+    };
+    const dflt = classifyNavigationDiscipline({ ...args, hardMode: false });
+    assert.equal(dflt.decision, "allow");
+    assert.equal(dflt.disposition, "direct_navigation_warned");
+    assert.equal(dflt.category, "product");
+
+    const hard = classifyNavigationDiscipline({ ...args, hardMode: true });
+    assert.equal(hard.decision, "block");
+    assert.equal(hard.disposition, "direct_navigation_blocked");
+    assert.equal(hard.category, "product");
+  });
+
+  test("5. search-query URL with a search input ref → blocked in hard mode", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/search/?q=billy+bookcase",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "block");
+    assert.equal(r.category, "search");
+    assert.equal(r.reason, "same_site_search_deeplink");
+  });
+
+  test("6. cart URL with a cart ref → blocked in hard mode", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/shoppingcart/",
+      currentUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "block");
+    assert.equal(r.category, "cart");
+    assert.equal(r.reason, "cart_deeplink");
+  });
+
+  test("7. cart URL with NO cart ref → warned, never blocked", () => {
+    const noCart = deriveNavHintsFromSnapshot({
+      page_summary: { url_host: "www.ikea.com" },
+      elements: [{ kind: "link", name: "About", ref: "ag_1", hints: {} }],
+    });
+    assert.equal(noCart.hasCartRef, false);
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/shoppingcart/",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: noCart, hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.disposition, "direct_navigation_warned");
+    assert.equal(r.reason, "no_cart_ref");
+  });
+
+  test("8. missing snapshot hints → allow (no_recent_snapshot)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "no_recent_snapshot");
+  });
+
+  test("8b. stale snapshot in hard mode → allow, never blocked on stale refs", () => {
+    // The adapter passes navHints:null when the cached snapshot is older than the
+    // TTL — assert the classifier treats that as a clean allow even for a target
+    // that would otherwise block.
+    const staleAsNull = null;
+    for (const targetUrl of [
+      "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      "https://www.ikea.com/us/en/search/?q=billy",
+      "https://www.ikea.com/us/en/shoppingcart/",
+    ]) {
+      const r = classifyNavigationDiscipline({
+        targetUrl, currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+        isFirstNavigation: false, navHints: staleAsNull, hardMode: true,
+      });
+      assert.equal(r.decision, "allow", `stale-hints target ${targetUrl} must not block`);
+      assert.equal(r.reason, "no_recent_snapshot");
+    }
+  });
+
+  test("8c. default mode NEVER blocks product/search/cart even with refs", () => {
+    for (const targetUrl of [
+      "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      "https://www.ikea.com/us/en/search/?q=billy",
+      "https://www.ikea.com/us/en/shoppingcart/",
+    ]) {
+      const r = classifyNavigationDiscipline({
+        targetUrl, currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+        isFirstNavigation: false, navHints: freshHints(), hardMode: false,
+      });
+      assert.equal(r.decision, "allow", `default mode must not block ${targetUrl}`);
+      assert.equal(r.disposition, "direct_navigation_warned");
+    }
+  });
+
+  test("9. same-site path matching no affordance → allow (no_matching_ref)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/customer-service/",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "allow");
+    assert.equal(r.reason, "no_matching_ref");
+  });
+
+  test("9b. exact href match to a visible link → blocked in hard mode", () => {
+    const r = classifyNavigationDiscipline({
+      // Same path as the visible product link, but not product-path-shaped on its own.
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    assert.equal(r.decision, "block");
+  });
+
+  test("10. a blocked decision exposes only safe enum fields (no query/coords)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/search/?q=secret+query+text",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: freshHints(), hardMode: true,
+    });
+    const blob = JSON.stringify(r);
+    assert.ok(!blob.includes("secret+query+text") && !/[?]q=/.test(blob), `no raw query leaked: ${blob}`);
+    assert.ok(!/\bx\b|\bdoc_x\b|width|height/.test(blob), `no coordinates leaked: ${blob}`);
+    assert.deepEqual(Object.keys(r).sort(), ["category", "decision", "disposition", "reason"]);
+  });
+
+  test("navigationBlockMessage gives a category-specific next action", () => {
+    assert.match(navigationBlockMessage("product"), /antigen_snapshot.*browser_click the product\/result ref/);
+    assert.match(navigationBlockMessage("search"), /browser_type on the search input ref/);
+    assert.match(navigationBlockMessage("cart"), /browser_click on the cart\/bag\/checkout ref/);
+    assert.match(navigationBlockMessage(null), /browser_click the product\/result ref/);
   });
 });

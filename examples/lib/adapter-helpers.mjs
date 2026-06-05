@@ -236,3 +236,216 @@ function formatActionLine(a) {
   const hint = snapClean(a?.action_hint, 40) || "browser_click";
   return `- ${ref} [${role || "control"}] ${name || "(unlabeled)"} — use ${hint}`;
 }
+
+// ─── Navigation Discipline (Antigen Browser Realism v1) ───────────────────────
+//
+// Pure, side-effect-free heuristics that decide whether a browser_navigate call
+// is an acceptable direct navigation or a shortcut that should have gone through
+// page-grounded refs (browser_click / browser_type). These functions read ONLY
+// the already-safe snapshot page-map fields (host, semantic affordances, and
+// path-only href_path values) — never coordinates, query strings, cookies, or
+// secrets. Blocking decisions are surfaced only in QA hard mode; default mode
+// always returns decision:"allow" with a warn disposition for diagnostics.
+
+/** Safe host extraction from a URL string. Returns "" when unparseable. */
+function urlHost(input) {
+  if (typeof input !== "string" || input.length === 0) return "";
+  try {
+    return new URL(input).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Safe path extraction (no query/fragment). Returns "" when unparseable. */
+function urlPath(input) {
+  if (typeof input !== "string" || input.length === 0) return "";
+  try {
+    return new URL(input).pathname || "";
+  } catch {
+    // Not absolute — strip any query/fragment and take what precedes it.
+    const noQuery = input.split(/[?#]/)[0];
+    const slash = noQuery.indexOf("/", noQuery.indexOf("://") + 3);
+    return slash >= 0 ? noQuery.slice(slash) : "";
+  }
+}
+
+/** Whether a URL string carries a non-empty query string. */
+function urlHasQuery(input) {
+  if (typeof input !== "string") return false;
+  try {
+    return new URL(input).search.length > 1;
+  } catch {
+    const q = input.split("#")[0].split("?")[1];
+    return typeof q === "string" && q.length > 0;
+  }
+}
+
+/**
+ * Derive a compact, safe set of navigation hints from an antigen_snapshot page
+ * map (the same `data` object handed to buildAntigenSnapshotText). Reads only
+ * allowlisted page-map fields; never reads boxes/coords/secrets. Returns the
+ * snapshot host plus booleans for the semantic affordances that justify a
+ * ref-based path, and the path-only href list for exact-link matching.
+ *
+ * @param {object} data Snapshot v2 response data.
+ * @returns {{ host: string, hasSearchInput: boolean, hasProductCards: boolean, hasCartRef: boolean, hasCheckoutRef: boolean, hrefPaths: string[] }}
+ */
+export function deriveNavHintsFromSnapshot(data) {
+  const d = data ?? {};
+  const summary = d.page_summary && typeof d.page_summary === "object" ? d.page_summary : {};
+  const host = typeof summary.url_host === "string" ? summary.url_host.toLowerCase() : "";
+
+  const elements = Array.isArray(d.elements) ? d.elements : [];
+  const forms = Array.isArray(d.forms) ? d.forms : [];
+  const cards = Array.isArray(d.product_cards) ? d.product_cards : [];
+  const warnings = Array.isArray(d.warnings_or_modals) ? d.warnings_or_modals : [];
+  const primary = Array.isArray(d.primary_actions) ? d.primary_actions : [];
+  const secondary = Array.isArray(d.secondary_actions) ? d.secondary_actions : [];
+  const navigation = Array.isArray(d.navigation) ? d.navigation : [];
+
+  // A label/name/context string blob for one element or action (safe fields only).
+  const blob = (el) => {
+    const ctx = el && typeof el.context === "object" && el.context ? el.context : {};
+    return `${el?.name ?? ""} ${ctx.section ?? ""} ${ctx.label ?? ""}`.toLowerCase();
+  };
+  const typeable = (el) => el?.state?.typeable === true || el?.kind === "input" || el?.kind === "textarea";
+
+  const SEARCH_RE = /search|find|query|keyword|look\s?up/i;
+  const CART_RE = /\b(cart|bag|basket)\b/i;
+  const CHECKOUT_RE = /check\s?out|proceed to (checkout|payment|pay)|place order/i;
+
+  const hasProductCards = cards.length > 0;
+
+  const hasSearchInput =
+    elements.some((el) => typeable(el) && SEARCH_RE.test(blob(el))) ||
+    forms.some((f) => SEARCH_RE.test(`${f?.label ?? ""} ${f?.action_hint ?? ""}`.toLowerCase()));
+
+  const cartDrawerOverlay = warnings.some((w) => w?.kind === "cart_drawer");
+  const hasCartRef =
+    cartDrawerOverlay ||
+    elements.some((el) => CART_RE.test(blob(el))) ||
+    [...primary, ...secondary, ...navigation].some((a) => CART_RE.test(`${a?.name ?? ""}`.toLowerCase()));
+
+  const hasCheckoutRef =
+    elements.some((el) => CHECKOUT_RE.test(blob(el))) ||
+    [...primary, ...secondary].some((a) => CHECKOUT_RE.test(`${a?.name ?? ""}`.toLowerCase()));
+
+  const hrefPaths = [];
+  for (const el of elements) {
+    const hp = el?.hints?.href_path;
+    if (typeof hp === "string" && hp.length > 0) hrefPaths.push(hp);
+  }
+
+  return { host, hasSearchInput, hasProductCards, hasCartRef, hasCheckoutRef, hrefPaths };
+}
+
+// Path shapes that look like a product detail page on most retail sites.
+const PRODUCT_PATH_RE = /\/(p|dp|gp\/product|product|products|item|items|pip|pd)\b/i;
+const PRODUCT_TRAILING_ID_RE = /-\d{4,}\/?$/;
+const CART_PATH_RE = /(cart|bag|basket|checkout|shoppingcart|shopping-cart)/i;
+const SEARCH_PATH_RE = /(\/search|\/s\b|\/s\/|results|catalogsearch|\/find\b)/i;
+
+function normalizePath(p) {
+  if (typeof p !== "string" || p.length === 0) return "/";
+  // Trim a single trailing slash for stable comparison (but keep root "/").
+  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
+/**
+ * Classify a browser_navigate target against the most recent snapshot's
+ * affordances and decide whether it is an acceptable direct navigation or a
+ * shortcut that bypasses available ref-based paths.
+ *
+ * Always-allow (clean) cases short-circuit first: first navigation, cross-site
+ * navigation, top-level/home paths, and missing/stale snapshot hints. After
+ * that, same-site product/search/cart deeplinks are flagged when a plausible
+ * semantic affordance exists. Blocking happens ONLY when hardMode is true;
+ * otherwise the same situation returns decision:"allow" with a warn disposition.
+ *
+ * @param {{ targetUrl: string, currentUrl: string|null, isFirstNavigation: boolean, navHints: (object|null), hardMode: boolean }} args
+ * @returns {{ decision: "allow"|"block", disposition: string, reason: string, category: ("product"|"search"|"cart"|null) }}
+ */
+export function classifyNavigationDiscipline({ targetUrl, currentUrl, isFirstNavigation, navHints, hardMode }) {
+  const allow = (reason, category = null) => ({
+    decision: "allow",
+    disposition: "direct_navigation_allowed",
+    reason,
+    category,
+  });
+  const warnOrBlock = (reason, category) =>
+    hardMode === true
+      ? { decision: "block", disposition: "direct_navigation_blocked", reason, category }
+      : { decision: "allow", disposition: "direct_navigation_warned", reason, category };
+
+  // 1. First navigation / no known current page → initial entry is always allowed.
+  if (isFirstNavigation === true || !currentUrl) return allow("initial_navigation");
+
+  const targetHost = urlHost(targetUrl);
+  // Unparseable target → cannot reason about it; never block.
+  if (!targetHost) return allow("no_matching_ref");
+
+  // 2. Cross-site navigation (research → site, site → site) is always allowed.
+  const currentHost = urlHost(currentUrl);
+  if (currentHost && targetHost !== currentHost) return allow("cross_site_navigation");
+
+  const path = normalizePath(urlPath(targetUrl));
+
+  // 3. Top-level / home entry is always allowed.
+  if (path === "" || path === "/") return allow("top_level_site_entry");
+
+  // 4. Missing or stale snapshot → never block on stale refs.
+  if (!navHints || typeof navHints !== "object") return allow("no_recent_snapshot");
+
+  const hrefPaths = Array.isArray(navHints.hrefPaths) ? navHints.hrefPaths.map(normalizePath) : [];
+  const hrefExactMatch = hrefPaths.includes(path);
+
+  // 5. Cart / checkout deeplink.
+  if (CART_PATH_RE.test(path)) {
+    if (navHints.hasCartRef === true || navHints.hasCheckoutRef === true) {
+      return warnOrBlock("cart_deeplink", "cart");
+    }
+    // Cart-shaped URL but no discoverable cart affordance — warn, never block.
+    return { decision: "allow", disposition: "direct_navigation_warned", reason: "no_cart_ref", category: "cart" };
+  }
+
+  // 6. Product deeplink.
+  const looksProduct = PRODUCT_PATH_RE.test(path) || PRODUCT_TRAILING_ID_RE.test(path);
+  if (looksProduct) {
+    const hasProductAffordance =
+      navHints.hasProductCards === true || navHints.hasSearchInput === true || hrefExactMatch || hrefPaths.length > 0;
+    if (hasProductAffordance) return warnOrBlock("same_site_product_deeplink", "product");
+    return allow("no_matching_ref", "product");
+  }
+
+  // 7. Search-query deeplink.
+  if (urlHasQuery(targetUrl) && SEARCH_PATH_RE.test(path)) {
+    if (navHints.hasSearchInput === true) return warnOrBlock("same_site_search_deeplink", "search");
+    return allow("no_matching_ref", "search");
+  }
+
+  // 8. Exact match to a visible link's path → click that link/result instead.
+  if (hrefExactMatch) return warnOrBlock("href_exact_match", "product");
+
+  // 9. Nothing matched a discoverable ref-based path → allow.
+  return allow("no_matching_ref");
+}
+
+/**
+ * Category-specific recovery guidance for a blocked direct navigation. Tells the
+ * agent the concrete Antigen-owned next action to take instead of deep-linking.
+ *
+ * @param {("product"|"search"|"cart"|null)} category
+ * @returns {string}
+ */
+export function navigationBlockMessage(category) {
+  const prefix = "Direct navigation blocked in Antigen realistic-navigation QA mode.";
+  if (category === "search") {
+    return `${prefix} Use browser_type on the search input ref, then submit/click search.`;
+  }
+  if (category === "cart") {
+    return `${prefix} Use browser_click on the cart/bag/checkout ref.`;
+  }
+  // product / generic link-result default
+  return `${prefix} Use antigen_snapshot, then browser_click the product/result ref.`;
+}

@@ -929,6 +929,8 @@ async function createMockApiServer(opts = {}) {
   const typeRequests = [];
   // Captured browser-endpoint request bodies (counts init + re-init calls).
   const endpointRequests = [];
+  // Captured tool-surface disposition POSTs (dev-only diagnostics route).
+  const dispositionRequests = [];
 
   const DEFAULT_SNAPSHOT_BODY = {
     ok: true,
@@ -1038,6 +1040,18 @@ async function createMockApiServer(opts = {}) {
         res.end(JSON.stringify(responseBody));
         return;
       }
+      if (
+        req.method === "POST" &&
+        req.url.startsWith("/api/internal/browser-run-trace/") &&
+        req.url.endsWith("/disposition")
+      ) {
+        let parsedDisp = {};
+        try { parsedDisp = JSON.parse(body); } catch {}
+        dispositionRequests.push({ url: req.url, body: parsedDisp, authorization: req.headers["authorization"] });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       res.writeHead(404);
       res.end("{}");
     });
@@ -1052,6 +1066,7 @@ async function createMockApiServer(opts = {}) {
     getScrollRequests: () => scrollRequests,
     getTypeRequests: () => typeRequests,
     getEndpointRequests: () => endpointRequests,
+    getDispositionRequests: () => dispositionRequests,
   };
 }
 
@@ -3553,5 +3568,154 @@ describe("M. clipRuntimeId", () => {
     assert.equal(clipRuntimeId(undefined), "none");
     assert.equal(clipRuntimeId(""), "none");
     assert.equal(clipRuntimeId(42), "none");
+  });
+});
+
+// ─── N. tool-surface disposition & QA hard mode ───────────────────────────────
+// Verifies that browser tool calls record a tool-surface disposition (sanitized
+// stderr line + best-effort POST to the dev-only trace disposition route), and
+// that QA hard mode (ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS=true) fails loudly
+// instead of silently forwarding Antigen-owned actions to the untraced
+// @playwright/mcp child. Default mode is behavior-identical except for the
+// best-effort diagnostics.
+
+describe("N. tool disposition and Antigen hard mode", () => {
+  // Spawn the adapter against a mock backend + fake @playwright/mcp, send one
+  // browser tool call, then return captured stdout/stderr and the mock recorders.
+  async function runToolCall({ tool, args, id, env = {}, waitMs = 1500, serverOpts = {} }) {
+    const mock = await createMockApiServer(serverOpts);
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${mock.port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_TRACE: "true",
+        // Default OFF — hard-mode tests opt in explicitly via `env`.
+        ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "",
+        ...env,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id, method: "tools/call",
+      params: { name: tool, arguments: args },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, waitMs));
+
+    adapter.kill("SIGTERM");
+    mock.server.close();
+    cleanup();
+    return {
+      stdoutBuf, stderrBuf,
+      getDispositionRequests: mock.getDispositionRequests,
+      getSnapshotRequests: mock.getSnapshotRequests,
+      getTypeRequests: mock.getTypeRequests,
+    };
+  }
+
+  test("browser_snapshot default mode records adapter_child_forwarded (not blocked)", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
+      tool: "browser_snapshot", args: {}, id: 701,
+    });
+    // Not blocked — no synthetic ANTIGEN_TOOL_REQUIRED error for this id.
+    const resp = parseMcpResponse(stdoutBuf, 701);
+    assert.ok(!resp || resp.result?.isError !== true, `browser_snapshot must not be blocked in default mode: ${JSON.stringify(resp?.result)}`);
+    assert.ok(!stdoutBuf.includes("ANTIGEN_TOOL_REQUIRED"), `default mode must not return ANTIGEN_TOOL_REQUIRED`);
+    assert.match(stderrBuf, /tool_disposition tool=browser_snapshot surface=adapter_child_playwright disposition=adapter_child_forwarded/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_snapshot");
+    assert.ok(disp, `expected a disposition POST for browser_snapshot, stderr: ${stderrBuf}`);
+    assert.equal(disp.body.tool_surface, "adapter_child_playwright");
+    assert.equal(disp.body.disposition, "adapter_child_forwarded");
+  });
+
+  test("browser_snapshot hard mode fails loudly with guidance to antigen_snapshot", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
+      tool: "browser_snapshot", args: {}, id: 702,
+      env: { ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true" },
+    });
+    const resp = parseMcpResponse(stdoutBuf, 702);
+    assert.ok(resp, `expected a response for id=702: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_TOOL_REQUIRED"), `expected ANTIGEN_TOOL_REQUIRED: ${text}`);
+    assert.ok(text.includes("antigen_snapshot"), `expected guidance to antigen_snapshot: ${text}`);
+    assert.match(stderrBuf, /tool_disposition tool=browser_snapshot surface=antigen_adapter disposition=blocked_by_antigen_required/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_snapshot");
+    assert.ok(disp, `expected a disposition POST`);
+    assert.equal(disp.body.disposition, "blocked_by_antigen_required");
+  });
+
+  test("antigen_snapshot hard mode succeeds through the backend (antigen_backend)", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests, getSnapshotRequests } = await runToolCall({
+      tool: "antigen_snapshot", args: { max_candidates: 50, viewport_only: true }, id: 703,
+      env: { ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true" },
+    });
+    assert.equal(getSnapshotRequests().length, 1, `expected one backend snapshot call`);
+    const resp = parseMcpResponse(stdoutBuf, 703);
+    assert.ok(resp && resp.result?.isError !== true, `expected antigen_snapshot success: ${JSON.stringify(resp?.result)}`);
+    assert.match(stderrBuf, /tool_disposition tool=antigen_snapshot surface=antigen_adapter disposition=antigen_backend/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "antigen_snapshot");
+    assert.ok(disp, `expected a disposition POST for antigen_snapshot`);
+    assert.equal(disp.body.disposition, "antigen_backend");
+    // Disposition payloads carry no forbidden internals.
+    const raw = JSON.stringify(getDispositionRequests());
+    for (const f of ["cdp_url", "user_data_dir", "secret_ref", "password", "9222", "localhost", "\"box\"", "doc_x"]) {
+      assert.ok(!raw.includes(f), `disposition payload leaked ${f}`);
+    }
+  });
+
+  test("browser_fill hard mode blocks the @playwright/mcp fallback", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
+      tool: "browser_fill", args: { value: "hello world" }, id: 704,
+      env: { ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true" },
+      serverOpts: { browserTypeStatus: 422, browserTypeBody: { ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "nope" } } },
+    });
+    const resp = parseMcpResponse(stdoutBuf, 704);
+    assert.ok(resp, `expected a response for id=704: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true);
+    assert.ok((resp.result?.content?.[0]?.text ?? "").includes("ANTIGEN_TOOL_REQUIRED"), `expected ANTIGEN_TOOL_REQUIRED`);
+    assert.match(stderrBuf, /browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_fill");
+    assert.ok(disp, `expected a disposition POST for browser_fill`);
+    assert.equal(disp.body.disposition, "blocked_by_antigen_required");
+    // No raw typed value ever leaves the adapter.
+    assert.ok(!stdoutBuf.includes("hello world") && !stderrBuf.includes("hello world"), `raw fill value leaked`);
+  });
+
+  test("browser_fill default mode preserves the child fallback (raw_fallback)", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
+      tool: "browser_fill", args: { value: "hello world" }, id: 705,
+      serverOpts: { browserTypeStatus: 422, browserTypeBody: { ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "nope" } } },
+    });
+    // Default mode falls through to the child — no synthetic block error.
+    assert.ok(!stdoutBuf.includes("ANTIGEN_TOOL_REQUIRED"), `default mode must not block browser_fill`);
+    assert.match(stderrBuf, /realistic_type_fallback reason=ELEMENT_NOT_FOUND source=browser_fill/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_fill");
+    assert.ok(disp, `expected a disposition POST for browser_fill`);
+    assert.equal(disp.body.tool_surface, "adapter_child_playwright");
+    assert.equal(disp.body.disposition, "raw_fallback");
+  });
+
+  test("browser_click success records an antigen_backend disposition", { timeout: 7000 }, async () => {
+    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
+      tool: "browser_click", args: { ref: "ag_1", element: "Add to bag" }, id: 706,
+    });
+    const resp = parseMcpResponse(stdoutBuf, 706);
+    assert.ok(resp && resp.result?.isError !== true, `expected browser_click success: ${JSON.stringify(resp?.result)}`);
+    assert.match(stderrBuf, /tool_disposition tool=browser_click surface=antigen_adapter disposition=antigen_backend/);
+    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_click");
+    assert.ok(disp, `expected a disposition POST for browser_click`);
+    assert.equal(disp.body.disposition, "antigen_backend");
   });
 });

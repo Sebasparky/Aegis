@@ -730,3 +730,128 @@ describe("browser run trace — TTL & expiration metadata", () => {
     }
   });
 });
+
+describe("browser run trace — tool-surface disposition & warnings", () => {
+  const DISP_ID = "tbsess_disp_001";
+  const DISP_URL = `/api/internal/browser-run-trace/${DISP_ID}/disposition`;
+
+  async function readDispTrace(id = DISP_ID) {
+    const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${id}` });
+    expect(res.statusCode).toBe(200);
+    return res.json().data as { browser_runtime_id: string; event_count: number; events: any[]; warnings?: string[] };
+  }
+
+  it("records a sanitized browser_tool_disposition via the internal route", async () => {
+    const res = await server.inject({
+      method: "POST", url: DISP_URL,
+      payload: {
+        tool: "browser_snapshot",
+        tool_surface: "adapter_child_playwright",
+        disposition: "adapter_child_forwarded",
+        result_code: "forwarded",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    const trace = await readDispTrace();
+    const disp = trace.events.find((e) => e.event_type === "browser_tool_disposition");
+    expect(disp).toBeTruthy();
+    expect(disp.tool).toBe("browser_snapshot");
+    expect(disp.tool_surface).toBe("adapter_child_playwright");
+    expect(disp.disposition).toBe("adapter_child_forwarded");
+    expect(disp.result_code).toBe("forwarded");
+    // Only the allowlist keys appear — no payload/body/coordinates/internals.
+    const keys = Object.keys(disp).sort();
+    expect(keys).toEqual([
+      "browser_runtime_id", "disposition", "event_type", "result_code", "tool", "tool_surface", "ts",
+    ]);
+  });
+
+  it("drops out-of-enum tool_surface / disposition values (enum-gated)", () => {
+    recordBrowserTraceEvent(DISP_ID, {
+      event_type: "browser_tool_disposition",
+      browser_runtime_id: DISP_ID,
+      tool: "browser_click",
+      // @ts-expect-error — deliberately invalid enum values must be dropped.
+      tool_surface: "totally_made_up_surface",
+      // @ts-expect-error — deliberately invalid enum values must be dropped.
+      disposition: "definitely_not_a_disposition",
+    });
+    const trace = getBrowserRunTrace(DISP_ID)!;
+    const disp = trace.events.find((e) => e.event_type === "browser_tool_disposition")!;
+    expect(disp.tool).toBe("browser_click");
+    expect(disp.tool_surface).toBeUndefined();
+    expect(disp.disposition).toBeUndefined();
+  });
+
+  it("disposition output leaks no forbidden internals", async () => {
+    await server.inject({
+      method: "POST", url: DISP_URL,
+      payload: {
+        tool: "browser_snapshot",
+        tool_surface: "antigen_adapter",
+        disposition: "blocked_by_antigen_required",
+        error_code: "ANTIGEN_TOOL_REQUIRED",
+      },
+    });
+    const raw = JSON.stringify((await readDispTrace()));
+    const FORBIDDEN = [
+      "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref", "password",
+      "cookies", "localStorage", "sessionStorage", "innerHTML",
+      "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "doc_x", "doc_y",
+      "nearby_text", "9222", "localhost",
+    ];
+    for (const f of FORBIDDEN) expect(raw).not.toContain(f);
+  });
+
+  it("the disposition route is a no-op when ANTIGEN_BROWSER_TRACE is unset", async () => {
+    vi.stubEnv("ANTIGEN_BROWSER_TRACE", "");
+    const res = await server.inject({
+      method: "POST", url: DISP_URL,
+      payload: { tool: "browser_snapshot", tool_surface: "adapter_child_playwright", disposition: "adapter_child_forwarded" },
+    });
+    // Always returns ok, but records nothing while disabled.
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    vi.stubEnv("ANTIGEN_BROWSER_TRACE", "true");
+    const trace = await readDispTrace();
+    expect(trace.event_count).toBe(0);
+  });
+
+  it("warns navigation_without_antigen_actions, then clears once an Antigen action is recorded", async () => {
+    const WARN_ID = "tbsess_warn_001";
+    // Two navigations, no Antigen-owned snapshot/click/type → warning.
+    recordBrowserTraceEvent(WARN_ID, { event_type: "navigation_state", browser_runtime_id: WARN_ID, url_after: "reddit.com/r/x" });
+    recordBrowserTraceEvent(WARN_ID, { event_type: "navigation_state", browser_runtime_id: WARN_ID, url_after: "ikea.com/cat" });
+
+    const getRes = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${WARN_ID}` });
+    expect(getRes.json().data.warnings).toContain("navigation_without_antigen_actions");
+
+    const listRes = await server.inject({ method: "GET", url: "/api/internal/browser-run-traces" });
+    const listEntry = listRes.json().data.traces.find((t: any) => t.browser_runtime_id === WARN_ID);
+    expect(listEntry.warnings).toContain("navigation_without_antigen_actions");
+
+    // A child-forwarded disposition is NOT an Antigen action — warning persists.
+    recordBrowserTraceEvent(WARN_ID, {
+      event_type: "browser_tool_disposition", browser_runtime_id: WARN_ID,
+      tool: "browser_snapshot", tool_surface: "adapter_child_playwright", disposition: "adapter_child_forwarded",
+    });
+    const stillWarn = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${WARN_ID}` });
+    expect(stillWarn.json().data.warnings).toContain("navigation_without_antigen_actions");
+
+    // A real Antigen-owned snapshot clears it.
+    recordBrowserTraceEvent(WARN_ID, {
+      event_type: "antigen_snapshot", browser_runtime_id: WARN_ID, result_code: "antigen_snapshot_success",
+    });
+    const cleared = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${WARN_ID}` });
+    expect(cleared.json().data.warnings).toBeUndefined();
+  });
+
+  it("does not warn for a single navigation (avoids fresh-session noise)", async () => {
+    const SINGLE_ID = "tbsess_single_001";
+    recordBrowserTraceEvent(SINGLE_ID, { event_type: "navigation_state", browser_runtime_id: SINGLE_ID, url_after: "reddit.com/r/x" });
+    const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${SINGLE_ID}` });
+    expect(res.json().data.warnings).toBeUndefined();
+  });
+});

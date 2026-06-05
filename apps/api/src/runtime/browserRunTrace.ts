@@ -39,7 +39,45 @@ export type BrowserTraceEventType =
   // route handler's !session branch — keyed by the supplied (stale) id — so a
   // stale-session continuity failure is visible in the trace instead of leaving
   // a silent gap. Carries only `tool` + `error_code` (no internals).
-  | "browser_tool_rejected";
+  | "browser_tool_rejected"
+  // Tool-surface disposition: which surface handled a browser tool call and how
+  // it resolved. Posted by the Antigen adapter (a separate process) via the
+  // internal disposition route — it exists to make tool-surface BYPASS visible.
+  // A trace can record navigation while sensitive snapshots/clicks happen through
+  // a child @playwright/mcp (untraced); a disposition event marks that surface
+  // explicitly. Carries only `tool`, `tool_surface`, `disposition`,
+  // `result_code`, `error_code` (enum-gated; no internals).
+  | "browser_tool_disposition";
+
+/** Which surface handled a browser tool call. */
+export type BrowserToolSurface =
+  | "aegis_backend"
+  | "antigen_adapter"
+  | "adapter_child_playwright"
+  | "raw_playwright";
+
+/** How an Antigen-adapter browser tool call resolved. */
+export type BrowserToolDisposition =
+  | "antigen_backend"
+  | "adapter_child_forwarded"
+  | "raw_fallback"
+  | "failed"
+  | "blocked_by_antigen_required";
+
+const BROWSER_TOOL_SURFACES = new Set<BrowserToolSurface>([
+  "aegis_backend",
+  "antigen_adapter",
+  "adapter_child_playwright",
+  "raw_playwright",
+]);
+
+const BROWSER_TOOL_DISPOSITIONS = new Set<BrowserToolDisposition>([
+  "antigen_backend",
+  "adapter_child_forwarded",
+  "raw_fallback",
+  "failed",
+  "blocked_by_antigen_required",
+]);
 
 export interface BrowserTraceEvent {
   ts: string;
@@ -64,6 +102,11 @@ export interface BrowserTraceEvent {
   char_count_bucket?: string;
   submit?: boolean;
   error_code?: string;
+  // Tool-surface disposition fields (enum-gated). Present on
+  // `browser_tool_disposition` events; surface marks who handled the call and
+  // disposition marks how it resolved.
+  tool_surface?: BrowserToolSurface;
+  disposition?: BrowserToolDisposition;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -198,6 +241,13 @@ export function recordBrowserTraceEvent(
     if (typeof event.submit === "boolean") safe.submit = event.submit;
     const errorCode = clip(event.error_code);
     if (errorCode !== undefined) safe.error_code = errorCode;
+    // Enum-gate disposition fields — never clip arbitrary strings into these.
+    if (event.tool_surface !== undefined && BROWSER_TOOL_SURFACES.has(event.tool_surface)) {
+      safe.tool_surface = event.tool_surface;
+    }
+    if (event.disposition !== undefined && BROWSER_TOOL_DISPOSITIONS.has(event.disposition)) {
+      safe.disposition = event.disposition;
+    }
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {
@@ -230,6 +280,36 @@ export function recordBrowserTraceEvent(
   }
 }
 
+// Antigen-owned action event types — events that prove the agent actually
+// snapshotted/clicked/typed THROUGH Antigen. A `browser_tool_disposition` event
+// (e.g. adapter_child_forwarded) is deliberately NOT in this set: a trace full of
+// child-forwarded dispositions still counts as navigation-only.
+const ANTIGEN_ACTION_EVENT_TYPES = new Set<BrowserTraceEventType>([
+  "antigen_snapshot",
+  "browser_click",
+  "browser_type",
+]);
+
+/**
+ * Compute safe, high-level warnings for a trace. Reveals only a coarse condition
+ * (no internals). Currently emits `navigation_without_antigen_actions` when a
+ * trace shows repeated navigation but no Antigen-owned snapshot/click/type — the
+ * signature of tool-surface bypass (sensitive actions driven through a raw/child
+ * Playwright surface off-trace). Single-navigation sessions are ignored to avoid
+ * noise on freshly created sessions.
+ */
+function computeTraceWarnings(events: BrowserTraceEvent[]): string[] {
+  let navCount = 0;
+  let hasAntigenAction = false;
+  for (const e of events) {
+    if (e.event_type === "navigation_state") navCount++;
+    if (ANTIGEN_ACTION_EVENT_TYPES.has(e.event_type)) hasAntigenAction = true;
+  }
+  const warnings: string[] = [];
+  if (navCount >= 2 && !hasAntigenAction) warnings.push("navigation_without_antigen_actions");
+  return warnings;
+}
+
 export interface BrowserRunTraceView {
   browser_runtime_id: string;
   created_at: string;
@@ -239,6 +319,7 @@ export interface BrowserRunTraceView {
   age_ms: number;
   event_count: number;
   events: BrowserTraceEvent[];
+  warnings?: string[];
 }
 
 /** Read the sanitized trace for a runtime id, optionally limited to the most recent N events. */
@@ -257,12 +338,15 @@ export function getBrowserRunTrace(
     typeof limit === "number" && limit > 0 && limit < entry.events.length
       ? entry.events.slice(-limit)
       : entry.events.slice();
+  // Compute warnings over the full retained event set, not the limited slice.
+  const warnings = computeTraceWarnings(entry.events);
   return {
     browser_runtime_id: entry.browser_runtime_id,
     created_at: entry.created_at,
     ...expiryMeta(entry, nowMs),
     event_count: entry.event_count,
     events,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
@@ -278,6 +362,7 @@ export interface BrowserRunTraceSummary {
   last_event_type?: BrowserTraceEventType;
   last_ts?: string;
   last_url?: string;
+  warnings?: string[];
 }
 
 /**
@@ -304,6 +389,7 @@ export function listBrowserRunTraces(limit = 50): BrowserRunTraceSummary[] {
         break;
       }
     }
+    const warnings = computeTraceWarnings(entry.events);
     return {
       browser_runtime_id: entry.browser_runtime_id,
       created_at: entry.created_at,
@@ -312,6 +398,7 @@ export function listBrowserRunTraces(limit = 50): BrowserRunTraceSummary[] {
       last_event_type: last?.event_type,
       last_ts: last?.ts,
       last_url: lastUrl,
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   });
 

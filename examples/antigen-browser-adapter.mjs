@@ -751,6 +751,73 @@ function logRuntimeRetry(tool, oldId, freshId) {
   );
 }
 
+// ─── Tool-surface disposition diagnostics + QA hard mode (dev-only) ────────────
+// Make tool-surface routing VISIBLE: which surface handled each browser tool call
+// (antigen_adapter backend vs the child @playwright/mcp) and how it resolved. This
+// exists because a trace can record navigation while sensitive snapshots/clicks are
+// driven through an untraced child/raw Playwright surface on the same browser.
+//
+// QA hard mode (ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS=true) makes Antigen-owned
+// actions FAIL LOUDLY rather than silently fall through to the untraced child.
+// When unset, behavior is identical except for these best-effort diagnostics.
+//
+// noteToolDisposition NEVER changes a tool result and never throws. It always
+// writes a sanitized stderr line; it additionally POSTs to the internal
+// browser-run-trace disposition route only when ANTIGEN_BROWSER_TRACE=true and a
+// browser_runtime_id exists. It logs/posts ONLY: tool name, enum surface, enum
+// disposition, short result/error codes, and a CLIPPED runtime id — never cdp_url,
+// child args, profile paths, raw payloads, raw URLs/text, refs-with-geometry, or
+// any secret.
+
+function antigenHardModeEnabled() {
+  return process.env.ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS === "true";
+}
+
+function logToolDisposition({ tool, surface, disposition, resultCode, errorCode }) {
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] tool_disposition` +
+    ` tool=${tool} surface=${surface} disposition=${disposition}` +
+    ` result=${resultCode ?? "none"} error=${errorCode ?? "none"}` +
+    ` runtime_id=${clipRuntimeId(browser_runtime_id)}\n`
+  );
+}
+
+async function recordToolDisposition({ tool, surface, disposition, resultCode, errorCode }) {
+  // Backend recording is gated by the same dev flag as the trace store, and needs
+  // a runtime id to key the event. Bounded by a short abort so a slow/hung backend
+  // can never stall the tool path.
+  if (process.env.ANTIGEN_BROWSER_TRACE !== "true") return;
+  if (typeof browser_runtime_id !== "string" || browser_runtime_id.length === 0) return;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 500);
+  try {
+    await fetch(
+      `${BASE}/api/internal/browser-run-trace/${encodeURIComponent(browser_runtime_id)}/disposition`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          tool,
+          tool_surface: surface,
+          disposition,
+          result_code: resultCode,
+          error_code: errorCode,
+        }),
+        signal: controller.signal,
+      },
+    );
+  } catch {
+    // Best-effort diagnostics — never disrupt the tool path.
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function noteToolDisposition(args) {
+  logToolDisposition(args);
+  await recordToolDisposition(args).catch(() => {});
+}
+
 /** True only for a 404 whose error code is SESSION_NOT_FOUND (reads a clone). */
 async function isSessionNotFound(apiRes) {
   if (apiRes.status !== 404) return false;
@@ -1000,6 +1067,7 @@ async function handleLine(line) {
           `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_success` +
           ` element_count=${data?.element_count ?? 0}\n`
         );
+        await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
         writeSyntheticResponse(requestId, buildAntigenSnapshotText(data, ADAPTER_VERSION));
         return;
       }
@@ -1009,6 +1077,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_error reason=${errCode}\n`
       );
+      await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
       writeSyntheticErrorResponse(
         "antigen_snapshot",
         requestId,
@@ -1021,6 +1090,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_error reason=INTERCEPT_ERROR\n`
       );
+      await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_SNAPSHOT_INTERCEPT_ERROR" });
       writeSyntheticErrorResponse(
         "antigen_snapshot",
         requestId,
@@ -1082,6 +1152,7 @@ async function handleLine(line) {
         process.stderr.write(
           `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_success ref=${refArg}\n`
         );
+        await noteToolDisposition({ tool: "browser_scroll_to_ref", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
         writeSyntheticResponse(
           requestId,
           buildSyntheticSuccessText("browser_scroll_to_ref", { ref: refArg, version: ADAPTER_VERSION }),
@@ -1094,6 +1165,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=${errCode}\n`
       );
+      await noteToolDisposition({ tool: "browser_scroll_to_ref", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
       const scrollErrMsg =
         errCode === "SESSION_NOT_FOUND"
           ? sessionNotFoundMessage("browser_scroll_to_ref")
@@ -1111,6 +1183,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=INTERCEPT_ERROR\n`
       );
+      await noteToolDisposition({ tool: "browser_scroll_to_ref", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_SCROLL_INTERCEPT_ERROR" });
       writeSyntheticErrorResponse(
         "browser_scroll_to_ref",
         requestId,
@@ -1199,6 +1272,7 @@ async function handleLine(line) {
         const resPointerStartSource    = resBody?.data?.pointer_start_source;
         const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;
         process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_click_success\n`);
+        await noteToolDisposition({ tool: "browser_click", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
         writeSyntheticResponse(
           requestId,
           buildSyntheticSuccessText("browser_click", {
@@ -1215,6 +1289,9 @@ async function handleLine(line) {
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? String(apiRes.status);
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=${errCode}\n`);
+      // browser_click is sole-handler (no @playwright/mcp fallthrough), so an
+      // Antigen failure is already loud in any mode — record it as `failed`.
+      await noteToolDisposition({ tool: "browser_click", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
       // Phase 4B/4C: a stale ag_* ref means the page shifted since the snapshot;
       // an out-of-viewport ag_* ref means the stored target is offscreen. In both
       // cases tell the agent how to recover rather than reporting a generic
@@ -1234,6 +1311,7 @@ async function handleLine(line) {
       );
     } catch (_err) {
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=INTERCEPT_ERROR\n`);
+      await noteToolDisposition({ tool: "browser_click", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_CLICK_INTERCEPT_ERROR" });
       writeSyntheticErrorResponse(
         "browser_click",
         requestId,
@@ -1267,6 +1345,7 @@ async function handleLine(line) {
         const resBody   = await apiRes.json().catch(() => ({}));
         const resBucket = resBody?.data?.char_count_bucket ?? bucket;
         process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_fill char_count_bucket=${resBucket}\n`);
+        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
         writeSyntheticResponse(
           requestId,
           buildSyntheticSuccessText("browser_fill", { bucket: resBucket, version: ADAPTER_VERSION }),
@@ -1279,12 +1358,30 @@ async function handleLine(line) {
       // @playwright/mcp child — surface it loudly so the agent reinitializes.
       if (errCode === "SESSION_NOT_FOUND") {
         process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_error reason=SESSION_NOT_FOUND source=browser_fill\n`);
+        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "failed", errorCode: "SESSION_NOT_FOUND" });
         writeSyntheticErrorResponse("browser_fill", requestId, "SESSION_NOT_FOUND", sessionNotFoundMessage("browser_fill"));
         return;
       }
+      // QA hard mode: never fall through to the UNTRACED @playwright/mcp child
+      // after an Antigen failure — fail loudly so the fill stays Antigen-owned and
+      // traceable. Default mode preserves the existing child fallback.
+      if (antigenHardModeEnabled()) {
+        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED prior=${errCode} source=browser_fill\n`);
+        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
+        writeSyntheticErrorResponse("browser_fill", requestId, "ANTIGEN_TOOL_REQUIRED", "Antigen realistic browser_fill failed and QA hard mode forbids the untraced @playwright/mcp fallback. Take a fresh antigen_snapshot and retry through an Antigen-owned tool.");
+        return;
+      }
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=${errCode} source=browser_fill\n`);
+      await noteToolDisposition({ tool: "browser_fill", surface: "adapter_child_playwright", disposition: "raw_fallback", errorCode: String(errCode) });
     } catch (err) {
+      if (antigenHardModeEnabled()) {
+        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED prior=INTERCEPT_ERROR source=browser_fill\n`);
+        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
+        writeSyntheticErrorResponse("browser_fill", requestId, "ANTIGEN_TOOL_REQUIRED", "Antigen realistic browser_fill encountered a network error and QA hard mode forbids the untraced @playwright/mcp fallback.");
+        return;
+      }
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_fill\n`);
+      await noteToolDisposition({ tool: "browser_fill", surface: "adapter_child_playwright", disposition: "raw_fallback", errorCode: "INTERCEPT_ERROR" });
     }
 
     child.stdin.write(line);
@@ -1351,6 +1448,7 @@ async function handleLine(line) {
           `[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_type` +
           ` char_count_bucket=${resBucket} has_target=${hasTarget} submit=${typeSubmit}\n`
         );
+        await noteToolDisposition({ tool: "browser_type", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
         writeSyntheticResponse(
           requestId,
           buildSyntheticSuccessText("browser_type", {
@@ -1372,6 +1470,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=${errCode} source=browser_type\n`
       );
+      await noteToolDisposition({ tool: "browser_type", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
       writeSyntheticErrorResponse(
         "browser_type",
         requestId,
@@ -1384,6 +1483,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_type_error reason=INTERCEPT_ERROR source=browser_type\n`
       );
+      await noteToolDisposition({ tool: "browser_type", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_TYPE_INTERCEPT_ERROR" });
       writeSyntheticErrorResponse(
         "browser_type",
         requestId,
@@ -1432,6 +1532,7 @@ async function handleLine(line) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] navigation_child_timeout id=${requestId}\n`
       );
+      await noteToolDisposition({ tool: "browser_navigate", surface: "adapter_child_playwright", disposition: "failed", errorCode: "NAVIGATE_CHILD_TIMEOUT" });
       writeSyntheticErrorResponse(
         "browser_navigate",
         requestId,
@@ -1457,6 +1558,7 @@ async function handleLine(line) {
         process.stderr.write(
           `[antigen-browser@${ADAPTER_VERSION}] browser_navigate_error reason=SESSION_NOT_FOUND id=${requestId}\n`
         );
+        await noteToolDisposition({ tool: "browser_navigate", surface: "antigen_adapter", disposition: "failed", errorCode: "SESSION_NOT_FOUND" });
         writeSyntheticErrorResponse(
           "browser_navigate",
           requestId,
@@ -1467,8 +1569,41 @@ async function handleLine(line) {
       }
     }
 
+    // browser_navigate intentionally forwards the page load to @playwright/mcp and
+    // mirrors nav-state to the Antigen backend (no Antigen-owned navigation route
+    // yet), so this is `adapter_child_forwarded` even in QA hard mode — navigation
+    // is not a sensitive ref/click action.
+    await noteToolDisposition({ tool: "browser_navigate", surface: "adapter_child_playwright", disposition: "adapter_child_forwarded", resultCode: "forwarded" });
     // Forward the original child response to Cowork.
     process.stdout.write(childLine.endsWith("\n") ? childLine : childLine + "\n");
+    return;
+  }
+
+  // ── browser_snapshot: NOT Antigen-owned — forwarded to @playwright/mcp ──────
+  // The adapter does not own browser_snapshot; it forwards to the child, which
+  // produces UNTRACED snapshots/refs on the same browser. That is the core
+  // tool-surface bypass: a trace can look navigation-complete while the agent's
+  // real snapshots happen off-trace. In QA hard mode we refuse to forward so the
+  // agent must call antigen_snapshot (which is Antigen-owned and traced). In
+  // default mode behavior is unchanged (forward) — we only record the disposition
+  // so the bypass is visible in the trace.
+  if (toolName === "browser_snapshot") {
+    const requestId = msg.id;
+    if (antigenHardModeEnabled()) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_snapshot_blocked reason=ANTIGEN_TOOL_REQUIRED\n`
+      );
+      await noteToolDisposition({ tool: "browser_snapshot", surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
+      writeSyntheticErrorResponse(
+        "browser_snapshot",
+        requestId,
+        "ANTIGEN_TOOL_REQUIRED",
+        "browser_snapshot is not Antigen-owned in QA hard mode. Use antigen_snapshot so refs/actions are traceable.",
+      );
+      return;
+    }
+    await noteToolDisposition({ tool: "browser_snapshot", surface: "adapter_child_playwright", disposition: "adapter_child_forwarded", resultCode: "forwarded" });
+    child.stdin.write(line);
     return;
   }
 

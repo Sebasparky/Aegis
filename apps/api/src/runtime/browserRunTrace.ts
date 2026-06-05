@@ -98,6 +98,9 @@ export interface BrowserTraceEvent {
     element_count?: number;
     clickable_count?: number;
     typeable_count?: number;
+    // Snapshot v2 page-map counts (safe aggregates only — no text/refs/coords).
+    primary_action_count?: number;
+    warning_count?: number;
   };
   char_count_bucket?: string;
   submit?: boolean;
@@ -234,6 +237,8 @@ export function recordBrowserTraceEvent(
       if (Number.isFinite(event.snapshot.element_count)) snap.element_count = event.snapshot.element_count;
       if (Number.isFinite(event.snapshot.clickable_count)) snap.clickable_count = event.snapshot.clickable_count;
       if (Number.isFinite(event.snapshot.typeable_count)) snap.typeable_count = event.snapshot.typeable_count;
+      if (Number.isFinite(event.snapshot.primary_action_count)) snap.primary_action_count = event.snapshot.primary_action_count;
+      if (Number.isFinite(event.snapshot.warning_count)) snap.warning_count = event.snapshot.warning_count;
       safe.snapshot = snap;
     }
     const bucket = clip(event.char_count_bucket);

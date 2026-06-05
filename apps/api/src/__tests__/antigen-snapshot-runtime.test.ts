@@ -67,7 +67,9 @@ vi.mock("ws", () => {
 
 import {
   buildAntigenExtractionExpr,
+  buildAntigenPageMetaExpr,
   extractAntigenSnapshotCandidatesViaCDP,
+  extractAntigenPageMetaViaCDP,
   normalizeName,
   hrefPath,
   inferKind,
@@ -1045,5 +1047,95 @@ describe("extractAntigenSnapshotCandidatesViaCDP — transport smoke", () => {
     await expect(extractAntigenSnapshotCandidatesViaCDP({ cdpUrl: "http://localhost:9999" })).rejects.toMatchObject({
       code: "CDP_FETCH_FAILED",
     });
+  });
+});
+
+// ─── Snapshot v2 page metadata ───────────────────────────────────────────────
+
+describe("buildAntigenPageMetaExpr — page-side IIFE", () => {
+  function evalMeta(win: Record<string, unknown>, doc: Record<string, unknown>) {
+    const g = global as Record<string, unknown>;
+    const savedDoc = g["document"];
+    const savedWin = g["window"];
+    g["window"] = win;
+    g["document"] = doc;
+    try {
+      return new Function(`return ${buildAntigenPageMetaExpr()}`)() as Record<string, unknown>;
+    } finally {
+      g["document"] = savedDoc;
+      g["window"] = savedWin;
+    }
+  }
+
+  it("produces valid JS and captures viewport, scroll, heading, and excerpt", () => {
+    const h1 = { innerText: "Desk lamps", textContent: "Desk lamps" };
+    const body = { innerText: "Showing 24 results for desk lamp", textContent: "Showing 24 results for desk lamp" };
+    const meta = evalMeta(
+      { innerWidth: 1280, innerHeight: 800, pageXOffset: 0, pageYOffset: 120 },
+      {
+        documentElement: { scrollHeight: 4000, scrollLeft: 0, scrollTop: 120 },
+        body,
+        querySelector: (sel: string) => (sel === "h1" ? h1 : null),
+      },
+    );
+    expect(meta.viewport_w).toBe(1280);
+    expect(meta.viewport_h).toBe(800);
+    expect(meta.scroll_y).toBe(120);
+    expect(meta.doc_h).toBe(4000);
+    expect(meta.heading).toBe("Desk lamps");
+    expect(meta.text_excerpt).toContain("results");
+  });
+
+  it("never hard-codes site/brand strings", () => {
+    const expr = buildAntigenPageMetaExpr().toLowerCase();
+    expect(expr).not.toContain("ikea");
+    expect(expr).not.toContain("reddit");
+  });
+});
+
+describe("extractAntigenPageMetaViaCDP — transport (best-effort)", () => {
+  const DEFAULT_VERSION = { webSocketDebuggerUrl: "ws://localhost:9222/browser" };
+  const DEFAULT_TARGETS = [{ id: "target1", url: "https://example.com", type: "page" }];
+
+  function stubFetch(version: unknown, list: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const data = String(url).endsWith("/json/version") ? version : list;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(data) });
+      }),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("attaches, evaluates, and returns sanitized page meta", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.nextEvalResponse = {
+      viewport_w: 1280, viewport_h: 800, scroll_x: 0, scroll_y: 40, doc_h: 3000,
+      heading: "Cart", text_excerpt: "subtotal checkout",
+    };
+    const p = extractAntigenPageMetaViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    const meta = await p;
+    expect(meta?.viewport_h).toBe(800);
+    expect(meta?.heading).toBe("Cart");
+  });
+
+  it("returns undefined (never throws) when the page result is not an object", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.nextEvalResponse = null;
+    const p = extractAntigenPageMetaViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    expect(await p).toBeUndefined();
+  });
+
+  it("returns undefined (never throws) when the CDP endpoint is unreachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+    await expect(extractAntigenPageMetaViaCDP({ cdpUrl: "http://localhost:9999" })).resolves.toBeUndefined();
   });
 });

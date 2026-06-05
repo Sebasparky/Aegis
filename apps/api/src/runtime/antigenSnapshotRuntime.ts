@@ -87,6 +87,24 @@ export interface AntigenSnapshotContext {
   nearby_text?: string;
 }
 
+/**
+ * Page-level metadata captured alongside (but independently of) candidate
+ * extraction. INTERNAL ONLY — consumed server-side by the Snapshot v2 page map
+ * to derive QUALITATIVE fields (page_kind, viewport_status, current_scroll,
+ * visible_text_hash). Raw numbers here NEVER reach the agent. `text_excerpt` is
+ * derived from `document.body.innerText`, which excludes form-control values, so
+ * no field values or secrets are captured. Bounded in the IIFE.
+ */
+export interface AntigenPageMeta {
+  viewport_w?: number;
+  viewport_h?: number;
+  scroll_x?: number;
+  scroll_y?: number;
+  doc_h?: number;
+  heading?: string;
+  text_excerpt?: string;
+}
+
 export interface ExtractAntigenSnapshotCandidatesParams {
   /** CDP http endpoint, e.g. http://localhost:9222 (not a ws:// URL). */
   cdpUrl: string;
@@ -777,6 +795,157 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
   });
 
   return raw.slice(0, maxCandidates).map((rec, i) => mapRawToCandidate(rec, i));
+}
+
+// ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
+
+const PAGE_META_HEADING_MAX = 160;
+const PAGE_META_EXCERPT_MAX = 600;
+
+/**
+ * Builds the raw JS string IIFE that returns page-level metadata for the Snapshot
+ * v2 page map. Separate from the candidate IIFE so candidate extraction (and all
+ * its tests) stays unchanged. Reads viewport size, scroll offset, document
+ * height, the page H1, and a clipped body innerText excerpt. innerText excludes
+ * input/textarea/select VALUES, so no field values or secrets are captured.
+ *
+ * Returns an AntigenPageMeta-shaped object. Raw JS string (no DOM lib in the
+ * Node tsconfig); options interpolated via JSON.stringify.
+ */
+export function buildAntigenPageMetaExpr(): string {
+  const headingMax = JSON.stringify(PAGE_META_HEADING_MAX);
+  const excerptMax = JSON.stringify(PAGE_META_EXCERPT_MAX);
+  return `(function(){
+    var HEADING_MAX=${headingMax};
+    var EXCERPT_MAX=${excerptMax};
+    function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
+    var vw=0,vh=0; try{ vw=window.innerWidth||0; vh=window.innerHeight||0; }catch(e){}
+    var sx=0,sy=0;
+    try{ sx=(window.pageXOffset||(document.documentElement&&document.documentElement.scrollLeft)||0); }catch(e){}
+    try{ sy=(window.pageYOffset||(document.documentElement&&document.documentElement.scrollTop)||0); }catch(e){}
+    var docH=0; try{ docH=(document.documentElement?document.documentElement.scrollHeight:0)||0; }catch(e){}
+    var heading=''; try{ var h1=document.querySelector('h1'); if(h1){ heading=clip(h1.innerText!=null?h1.innerText:h1.textContent,HEADING_MAX); } }catch(e){}
+    var excerpt=''; try{ var b=document.body; if(b){ excerpt=clip(b.innerText!=null?b.innerText:b.textContent,EXCERPT_MAX); } }catch(e){}
+    return { viewport_w:vw, viewport_h:vh, scroll_x:sx, scroll_y:sy, doc_h:docH, heading:heading, text_excerpt:excerpt };
+  })()`;
+}
+
+/** Defense-in-depth re-clamp of page meta returned from the page. */
+function sanitizePageMeta(raw: unknown): AntigenPageMeta | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const str = (v: unknown, max: number): string | undefined => {
+    if (typeof v !== "string") return undefined;
+    const t = v.replace(/\s+/g, " ").trim();
+    if (!t) return undefined;
+    return t.length > max ? t.slice(0, max) : t;
+  };
+  const out: AntigenPageMeta = {};
+  const vw = num(r.viewport_w);
+  if (vw !== undefined) out.viewport_w = vw;
+  const vh = num(r.viewport_h);
+  if (vh !== undefined) out.viewport_h = vh;
+  const sx = num(r.scroll_x);
+  if (sx !== undefined) out.scroll_x = sx;
+  const sy = num(r.scroll_y);
+  if (sy !== undefined) out.scroll_y = sy;
+  const docH = num(r.doc_h);
+  if (docH !== undefined) out.doc_h = docH;
+  const heading = str(r.heading, PAGE_META_HEADING_MAX);
+  if (heading) out.heading = heading;
+  const excerpt = str(r.text_excerpt, PAGE_META_EXCERPT_MAX);
+  if (excerpt) out.text_excerpt = excerpt;
+  return out;
+}
+
+/**
+ * Best-effort page metadata over CDP for the Snapshot v2 page map. Mirrors the
+ * candidate transport but evaluates the page-meta IIFE. NEVER throws — returns
+ * `undefined` on any connection/attach/evaluate failure so page-meta problems
+ * never fail a snapshot (candidate extraction is the authoritative path).
+ */
+export async function extractAntigenPageMetaViaCDP(
+  params: { cdpUrl: string },
+): Promise<AntigenPageMeta | undefined> {
+  const { cdpUrl } = params;
+  try {
+    let versionData: { webSocketDebuggerUrl?: string };
+    let targets: Array<{ id: string; url: string; type: string }>;
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then(
+        (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
+      ),
+    ]);
+
+    const browserWsUrl = versionData.webSocketDebuggerUrl;
+    const pageTarget = pickAntigenPageTarget(targets);
+    if (!browserWsUrl || !pageTarget) return undefined;
+
+    const expr = buildAntigenPageMetaExpr();
+
+    const raw = await new Promise<unknown>((resolve) => {
+      const ws = new WebSocket(browserWsUrl);
+      let msgId = 1;
+      let attachId: number;
+      let evalId: number;
+      let settled = false;
+
+      const timer = setTimeout(() => finish(undefined), 8_000);
+      const finish = (value: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        resolve(value);
+      };
+
+      const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+        const id = msgId++;
+        const msg: Record<string, unknown> = { id, method, params: p };
+        if (sid) msg.sessionId = sid;
+        ws.send(JSON.stringify(msg));
+        return id;
+      };
+
+      ws.on("open", () => {
+        attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+      });
+      ws.on("error", () => finish(undefined));
+      ws.on("message", (data: Buffer | string) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id as number | undefined;
+        if (id === undefined) return;
+        const result = msg.result as Record<string, unknown> | undefined;
+        if (id === attachId) {
+          const sid = result?.sessionId as string | undefined;
+          if (!sid) return finish(undefined);
+          evalId = sendMsg("Runtime.evaluate", { expression: expr, returnByValue: true }, sid);
+          return;
+        }
+        if (id === evalId) {
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          finish(evalResult?.value);
+        }
+      });
+    });
+
+    return sanitizePageMeta(raw);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

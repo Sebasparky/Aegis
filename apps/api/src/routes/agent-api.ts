@@ -48,8 +48,10 @@ import {
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView } from "../runtime/realisticBrowserActions.js";
-import { extractAntigenSnapshotCandidatesViaCDP } from "../runtime/antigenSnapshotRuntime.js";
+import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
+import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
+import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
@@ -3989,7 +3991,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return sendError(reply, 400, "SESSION_NOT_READY", "Browser runtime session has no active CDP endpoint.");
     }
 
-    let candidates;
+    let candidates: AntigenSnapshotCandidate[];
     try {
       candidates = await extractAntigenSnapshotCandidatesViaCDP({
         cdpUrl: session.cdp_url,
@@ -4007,6 +4009,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return sendError(reply, 502, "SNAPSHOT_EXTRACTION_FAILED", "Failed to capture an Antigen snapshot of the page.");
     }
 
+    // Best-effort page metadata for the Snapshot v2 page map. NEVER fails the
+    // snapshot — candidate extraction above is the authoritative path. The raw
+    // viewport/scroll numbers are consumed server-side to derive qualitative
+    // fields only; they are never emitted to the agent.
+    const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url });
+
     const { snapshot, elements } = createAntigenSnapshotRecord({
       browser_session_id: session.browser_session_id,
       browser_runtime_id: body.browser_runtime_id,
@@ -4016,15 +4024,55 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       candidates,
     });
 
-    // Counts only — never element names, values, or coordinates.
+    // Snapshot v2: derive the agent-readable page map (page summary, prioritized
+    // actions, hints, qualitative status, forms, best-effort product cards,
+    // warnings, evidence). Pure/derived — no raw geometry leaves this layer.
+    const pageMap = buildAntigenPageMap({
+      records: elements,
+      pageMeta,
+      viewportOnly,
+      url: snapshot.url,
+    });
+
+    // External elements + per-element qualitative status (additive, safe).
+    const externalElements = elements.map((el) => {
+      const ext = toExternalAntigenSnapshotElement(el);
+      const st = pageMap.ref_status[el.ref];
+      return st
+        ? {
+            ...ext,
+            viewport_status: st.viewport_status,
+            scroll_required: st.scroll_required,
+            stability_hint: st.stability_hint,
+          }
+        : ext;
+    });
+
+    const evidence = {
+      snapshot_id: snapshot.snapshot_id,
+      captured_at: snapshot.created_at,
+      ...(pageMap.page_summary.url_host ? { url_host: pageMap.page_summary.url_host } : {}),
+      ...(pageMap.page_summary.url_path ? { url_path: pageMap.page_summary.url_path } : {}),
+      viewport_only: viewportOnly,
+      element_count: pageMap.evidence_partial.element_count,
+      clickable_count: pageMap.evidence_partial.clickable_count,
+      typeable_count: pageMap.evidence_partial.typeable_count,
+      ...(pageMap.evidence_partial.visible_text_hash
+        ? { visible_text_hash: pageMap.evidence_partial.visible_text_hash }
+        : {}),
+    };
+
+    // Counts only — never element names, values, refs, text, or coordinates.
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "antigen_snapshot", browser_runtime_id: session.browser_session_id,
       tool: "antigen_snapshot", url_after: sanitizeTraceUrl(snapshot.url),
       snapshot: {
         viewport_only: viewportOnly,
         element_count: snapshot.element_count,
-        clickable_count: candidates.filter((c) => c.clickable).length,
-        typeable_count: candidates.filter((c) => c.typeable).length,
+        clickable_count: pageMap.evidence_partial.clickable_count,
+        typeable_count: pageMap.evidence_partial.typeable_count,
+        primary_action_count: pageMap.primary_actions.length,
+        warning_count: pageMap.warnings_or_modals.length,
       },
       result_code: "antigen_snapshot_success",
     });
@@ -4038,7 +4086,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         expires_at: snapshot.expires_at,
         snapshot_ttl_ms: ANTIGEN_SNAPSHOT_TTL_MS,
         element_count: snapshot.element_count,
-        elements: elements.map(toExternalAntigenSnapshotElement),
+        page_summary: pageMap.page_summary,
+        current_scroll: pageMap.current_scroll,
+        evidence,
+        primary_actions: pageMap.primary_actions,
+        secondary_actions: pageMap.secondary_actions,
+        navigation: pageMap.navigation,
+        forms: pageMap.forms,
+        product_cards: pageMap.product_cards,
+        warnings_or_modals: pageMap.warnings_or_modals,
+        action_hints: pageMap.action_hints,
+        elements: externalElements,
       },
     });
   });

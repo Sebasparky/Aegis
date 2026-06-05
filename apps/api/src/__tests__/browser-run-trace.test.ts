@@ -42,11 +42,16 @@ vi.mock("../runtime/realisticBrowserActions.js", async () => {
 
 // Mock snapshot extraction so browser-snapshot works without a real page.
 const extractMock = vi.hoisted(() => vi.fn());
+const pageMetaMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
   );
-  return { ...actual, extractAntigenSnapshotCandidatesViaCDP: extractMock };
+  return {
+    ...actual,
+    extractAntigenSnapshotCandidatesViaCDP: extractMock,
+    extractAntigenPageMetaViaCDP: pageMetaMock,
+  };
 });
 
 import Fastify from "fastify";
@@ -204,6 +209,7 @@ beforeEach(() => {
     candidate({ name: "Add to bag", clickable: true, typeable: false }),
     candidate({ name: "Search", kind: "textbox", role: "textbox", clickable: false, typeable: true }),
   ]);
+  pageMetaMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -281,6 +287,9 @@ describe("browser run trace — recording at tool boundaries", () => {
     expect(snap.snapshot.element_count).toBe(2);
     expect(snap.snapshot.clickable_count).toBe(1);
     expect(snap.snapshot.typeable_count).toBe(1);
+    // Snapshot v2 page-map counts — safe aggregates only.
+    expect(snap.snapshot.primary_action_count).toBe(1);
+    expect(snap.snapshot.warning_count).toBe(0);
     // The snapshot event must not carry element names/values.
     expect(snap.element_name).toBeUndefined();
   });

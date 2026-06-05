@@ -2573,21 +2573,49 @@ describe("I. browser_navigate — navigation-aware pointer continuity", () => {
 
 describe("J. buildAntigenSnapshotText — pure formatter", () => {
   const V = "2026-05-29";
+  // Realistic Snapshot v2 response shape (page map + safe external elements).
   const SAMPLE = {
     snapshot_id: "snap_abc123",
     url: "https://www.ikea.com/us/en/search/?q=desk%20lamp",
     title: null,
     expires_at: "2026-01-01T00:00:10.000Z",
     element_count: 2,
+    page_summary: {
+      page_kind: "product_page",
+      url_host: "www.ikea.com",
+      url_path: "/us/en/search/",
+      visible_heading: "Desk lamps",
+    },
+    current_scroll: { position: "top", more_above: false, more_below: true },
+    primary_actions: [
+      { ref: "ag_2", role: "button", name: "Add to bag", priority: "high", reason: "primary_purchase_action", action_hint: "browser_click", viewport_status: "visible", scroll_required: false },
+    ],
+    secondary_actions: [],
+    navigation: [],
+    forms: [
+      { input_refs: ["ag_5"], submit_refs: ["ag_6"], action_hint: "browser_type_then_submit" },
+    ],
+    product_cards: [
+      { title: "BILLY Bookcase white", price_text: "$59.99", add_ref: "ag_2", details_ref: "ag_1", refs: ["ag_1", "ag_2"] },
+    ],
+    warnings_or_modals: [
+      { kind: "cookie_banner", message: "Cookie consent banner", dismiss_refs: ["ag_9"], action_hint: "browser_click" },
+    ],
+    action_hints: [
+      { ref: "ag_1", action_hint: "browser_click" },
+      { ref: "ag_2", action_hint: "browser_click" },
+    ],
     elements: [
       {
         ref: "ag_1", kind: "link", role: "link", name: "TERTIAL, Work lamp, light blue",
         state: { visible: true, enabled: true, clickable: true, typeable: false },
         hints: { href_path: "/us/en/p/tertial-work-lamp-light-blue-70504295/" },
+        viewport_status: "visible", scroll_required: false, stability_hint: "may_stale_after_navigation",
       },
       {
         ref: "ag_2", kind: "button", role: "button", name: "Add to bag",
         state: { visible: true, enabled: true, clickable: true, typeable: false },
+        viewport_status: "visible", scroll_required: false, stability_hint: "fresh",
       },
     ],
   };
@@ -2600,22 +2628,40 @@ describe("J. buildAntigenSnapshotText — pure formatter", () => {
     assert.ok(text.includes(`source=antigen-browser-adapter@${V}`), text);
   });
 
-  test("includes url and expires_at when present", () => {
+  test("renders Page summary (kind + heading), sanitized URL host+path, and expires", () => {
     const text = buildAntigenSnapshotText(SAMPLE, V);
-    assert.ok(text.includes("url: https://www.ikea.com/us/en/search/?q=desk%20lamp"), text);
-    assert.ok(text.includes("expires_at: 2026-01-01T00:00:10.000Z"), text);
+    assert.ok(text.includes("Page: product_page — Desk lamps"), text);
+    assert.ok(text.includes("URL: www.ikea.com/us/en/search/"), text);
+    // Sanitized host+path only — the query string never appears.
+    assert.ok(!text.includes("?q=desk"), text);
+    assert.ok(text.includes("Expires: 2026-01-01T00:00:10.000Z"), text);
   });
 
-  test("omits url/title/expires_at lines when absent", () => {
+  test("renders Scroll position qualitatively (no raw numbers)", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes("Scroll: top (more below)"), text);
+  });
+
+  test("renders Primary actions, Forms, Product cards, and Warnings sections", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(text.includes("Primary actions:"), text);
+    assert.ok(text.includes("- ag_2 [button] Add to bag — use browser_click"), text);
+    assert.ok(text.includes("Forms:"), text);
+    assert.ok(text.includes("inputs ag_5"), text);
+    assert.ok(text.includes("submit ag_6"), text);
+    assert.ok(text.includes("Product cards:"), text);
+    assert.ok(text.includes("BILLY Bookcase white $59.99"), text);
+    assert.ok(text.includes("Warnings:"), text);
+    assert.ok(text.includes("dismiss ref ag_9"), text);
+  });
+
+  test("omits page/url details and warnings when absent (generic fallback)", () => {
     const text = buildAntigenSnapshotText({ snapshot_id: "snap_x", element_count: 0, elements: [] }, V);
-    assert.ok(!text.includes("url:"), text);
-    assert.ok(!text.includes("title:"), text);
-    assert.ok(!text.includes("expires_at:"), text);
-  });
-
-  test("omits title line when title is null", () => {
-    const text = buildAntigenSnapshotText(SAMPLE, V);
-    assert.ok(!text.includes("title:"), text);
+    assert.ok(text.includes("Page: generic"), text);
+    assert.ok(!text.includes("URL:"), text);
+    assert.ok(!text.includes("Expires:"), text);
+    assert.ok(!text.includes("Warnings:"), text);
+    assert.ok(!text.includes("Primary actions:"), text);
   });
 
   test("element lines include kind, name, ref, clickable, typeable", () => {

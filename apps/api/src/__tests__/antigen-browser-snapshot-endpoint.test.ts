@@ -18,13 +18,18 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
-// Mock only the CDP extraction transport — the store stays real.
+// Mock the CDP extraction transports — the store stays real.
 const extractMock = vi.hoisted(() => vi.fn());
+const pageMetaMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
   );
-  return { ...actual, extractAntigenSnapshotCandidatesViaCDP: extractMock };
+  return {
+    ...actual,
+    extractAntigenSnapshotCandidatesViaCDP: extractMock,
+    extractAntigenPageMetaViaCDP: pageMetaMock,
+  };
 });
 
 import Fastify from "fastify";
@@ -159,6 +164,8 @@ beforeEach(() => {
   clearAntigenSnapshotStoreForTests();
   vi.clearAllMocks();
   extractMock.mockResolvedValue(DEFAULT_CANDIDATES);
+  // Page meta is best-effort; default to none so the array-mock path is exercised.
+  pageMetaMock.mockResolvedValue(undefined);
 });
 
 describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
@@ -200,10 +207,18 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
       name: "TERTIAL, Work lamp, light blue",
       state: { visible: true, enabled: true, clickable: true, typeable: false },
       hints: { href_path: "/us/en/p/tertial-work-lamp-light-blue-70504295/" },
+      // Snapshot v2: qualitative per-element status (no raw geometry). With no
+      // page meta and a viewport-only snapshot, a returned element reads visible.
+      viewport_status: "visible",
+      scroll_required: false,
+      stability_hint: "may_stale_after_navigation",
     });
     expect(button.ref).toBe("ag_2");
     expect(button.kind).toBe("button");
     expect(button.hints).toEqual({});
+    expect(button.viewport_status).toBe("visible");
+    expect(button.scroll_required).toBe(false);
+    expect(button.stability_hint).toBe("fresh");
   });
 
   it("never includes boxes/coordinates or other forbidden internals in the response", async () => {
@@ -216,6 +231,7 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     const raw = JSON.stringify(res.json());
     const FORBIDDEN = [
       "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "center",
+      "doc_x", "doc_y", "nearby_text", "viewport_w", "viewport_h", "scroll_x", "scroll_y",
       "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref",
       "storageState", "9222",
     ];
@@ -434,5 +450,170 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("SESSION_NOT_READY");
+  });
+});
+
+// ─── Antigen Snapshot v2 — agent-readable page map ───────────────────────────
+
+describe("POST /api/agent/v1/runtime/browser-snapshot — v2 page map", () => {
+  async function snapshot() {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json().data;
+  }
+
+  it("includes page_summary and evidence metadata", async () => {
+    const data = await snapshot();
+    expect(typeof data.page_summary).toBe("object");
+    expect(typeof data.page_summary.page_kind).toBe("string");
+    expect(data.page_summary.url_host).toBe("www.ikea.com");
+    expect(data.page_summary.url_path).toBe("/us/en/search/");
+
+    expect(data.evidence.snapshot_id).toBe(data.snapshot_id);
+    expect(typeof data.evidence.captured_at).toBe("string");
+    expect(data.evidence.viewport_only).toBe(true);
+    expect(data.evidence.element_count).toBe(3);
+    expect(data.evidence.clickable_count).toBe(2);
+    expect(data.evidence.typeable_count).toBe(1);
+    // No page-meta source in this path → no visible_text_hash.
+    expect(data.evidence.visible_text_hash).toBeUndefined();
+  });
+
+  it("prioritizes the Add to bag button and routes the input into forms", async () => {
+    const data = await snapshot();
+    const primaryRefs = data.primary_actions.map((a: { ref: string }) => a.ref);
+    expect(primaryRefs).toContain("ag_2");
+    const addAction = data.primary_actions.find((a: { ref: string }) => a.ref === "ag_2");
+    expect(addAction.action_hint).toBe("browser_click");
+    expect(addAction.reason).toBe("primary_purchase_action");
+    // The content link is NOT ranked among primary actions.
+    expect(primaryRefs).not.toContain("ag_1");
+
+    // The password input becomes a form field with a browser_type hint.
+    expect(data.forms.length).toBeGreaterThanOrEqual(1);
+    const form = data.forms.find((f: { input_refs: string[] }) => f.input_refs.includes("ag_3"));
+    expect(form).toBeDefined();
+    expect(form.action_hint).toBe("browser_type");
+  });
+
+  it("emits an action hint for every ref (input→browser_type, clickable→browser_click)", async () => {
+    const data = await snapshot();
+    const byRef = new Map(data.action_hints.map((h: { ref: string }) => [h.ref, h]));
+    expect((byRef.get("ag_2") as { action_hint: string }).action_hint).toBe("browser_click");
+    expect((byRef.get("ag_3") as { action_hint: string }).action_hint).toBe("browser_type");
+  });
+
+  it("classifies a below-viewport clickable element with a scroll-then-click hint", async () => {
+    seedSession();
+    extractMock.mockResolvedValueOnce([
+      candidate({
+        tag: "button", kind: "button", role: "button", name: "Checkout",
+        normalized_name: "checkout", href: null, href_path: null,
+        box: { x: 10, y: 2400, width: 120, height: 40 }, // far below an 800px viewport
+      }),
+    ]);
+    pageMetaMock.mockResolvedValueOnce({
+      viewport_w: 1280, viewport_h: 800, scroll_x: 0, scroll_y: 0, doc_h: 4000,
+      heading: "Cart", text_excerpt: "Your cart subtotal checkout",
+    });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot", viewport_only: false },
+    });
+    const data = res.json().data;
+    const el = data.elements.find((e: { ref: string }) => e.ref === "ag_1");
+    expect(el.viewport_status).toBe("below_viewport");
+    expect(el.scroll_required).toBe(true);
+    const hint = data.action_hints.find((h: { ref: string }) => h.ref === "ag_1");
+    expect(hint.action_hint).toBe("browser_scroll_to_ref_then_click");
+    // page_kind from the cart language + checkout button.
+    expect(data.page_summary.page_kind).toBe("cart");
+    // visible_text_hash present when a text source exists.
+    expect(typeof data.evidence.visible_text_hash).toBe("string");
+  });
+
+  it("detects a cookie banner and surfaces its dismiss ref", async () => {
+    seedSession();
+    extractMock.mockResolvedValueOnce([
+      candidate({
+        tag: "button", kind: "button", role: "button", name: "Accept all",
+        normalized_name: "accept all", href: null, href_path: null,
+        context: { section: "Cookie consent banner", label: "We use cookies" },
+        box: { x: 10, y: 10, width: 120, height: 40 },
+      }),
+    ]);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const data = res.json().data;
+    expect(data.warnings_or_modals.length).toBeGreaterThanOrEqual(1);
+    const cookie = data.warnings_or_modals.find((w: { kind: string }) => w.kind === "cookie_banner");
+    expect(cookie).toBeDefined();
+    expect(cookie.dismiss_refs).toContain("ag_1");
+    expect(cookie.action_hint).toBe("browser_click");
+    // The dismiss hint reason is surfaced in action_hints.
+    const hint = data.action_hints.find((h: { ref: string }) => h.ref === "ag_1");
+    expect(hint.reason).toBe("dismiss_overlay");
+  });
+
+  it("groups product cards best-effort with clipped strings (no nearby_text)", async () => {
+    seedSession();
+    extractMock.mockResolvedValueOnce([
+      candidate({
+        tag: "a", kind: "link", role: "link", name: "BILLY Bookcase",
+        normalized_name: "billy bookcase", href: "https://www.ikea.com/p/billy", href_path: "/p/billy",
+        context: { label: "BILLY Bookcase white $59.99", nearby_text: "BILLY Bookcase white $59.99 SECRET_NEARBY_123" },
+        box: { x: 10, y: 10, width: 200, height: 40 },
+      }),
+      candidate({
+        tag: "button", kind: "button", role: "button", name: "Add to bag",
+        normalized_name: "add to bag", href: null, href_path: null,
+        context: { label: "BILLY Bookcase white $59.99", nearby_text: "BILLY Bookcase white $59.99 SECRET_NEARBY_123" },
+        box: { x: 10, y: 60, width: 120, height: 40 },
+      }),
+    ]);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const data = res.json().data;
+    expect(data.product_cards.length).toBeGreaterThanOrEqual(1);
+    const card = data.product_cards[0];
+    expect(card.add_ref).toBe("ag_2");
+    expect(card.title).toContain("BILLY");
+    expect(card.price_text).toBe("$59.99");
+    const raw = JSON.stringify(res.json());
+    expect(raw).not.toContain("nearby_text");
+    expect(raw).not.toContain("SECRET_NEARBY_123");
+  });
+
+  it("never leaks raw geometry or page-meta numbers across the full v2 response", async () => {
+    seedSession();
+    pageMetaMock.mockResolvedValueOnce({
+      viewport_w: 1280, viewport_h: 800, scroll_x: 0, scroll_y: 120, doc_h: 4000,
+      heading: "Desk lamps", text_excerpt: "Showing 24 results for desk lamp",
+    });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of [
+      "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"",
+      "doc_x", "doc_y", "nearby_text", "viewport_w", "viewport_h", "scroll_x", "scroll_y",
+      "cdp_url", "user_data_dir", "secret_ref", "9222",
+    ]) {
+      expect(raw).not.toContain(f);
+    }
   });
 });

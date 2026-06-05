@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import {
   looksLikeSelector,
   charCountBucket,
+  clipRuntimeId,
   buildSyntheticSuccessText,
   buildAntigenSnapshotText,
 } from "./lib/adapter-helpers.mjs";
@@ -904,11 +905,17 @@ async function createMockApiServer(opts = {}) {
     browserTypeStatus = 200, browserTypeBody = null, browserTypeDestroy = false,
     browserClickStatus = 200, browserClickBody = null, browserClickDestroy = false,
     browserSnapshotStatus = 200, browserSnapshotBody = null, browserSnapshotDestroy = false,
+    browserSnapshotStatusSequence = null, browserSnapshotBodySequence = null,
     browserScrollStatus = 200, browserScrollBody = null, browserScrollDestroy = false,
     // Optional per-call sequences for browser-click (used by SESSION_NOT_FOUND
     // recovery tests). When provided, each request shifts the next status/body;
     // when exhausted (or null), falls back to the static browserClickStatus/Body.
     browserClickStatusSequence = null, browserClickBodySequence = null,
+    // Optional per-call sequence of browser_runtime_id values for the
+    // browser-endpoint handler (init, then re-init). Lets fresh-id continuity
+    // tests distinguish a stale-id retry from a fresh-id retry. Falls back to the
+    // static "test_runtime_001" when exhausted/null.
+    browserEndpointIdSequence = null,
   } = opts;
 
   // Captured antigen_snapshot request bodies + their Authorization header,
@@ -961,8 +968,12 @@ async function createMockApiServer(opts = {}) {
         let parsed = {};
         try { parsed = JSON.parse(body); } catch {}
         snapshotRequests.push({ body: parsed, authorization: req.headers["authorization"] });
-        const responseBody = browserSnapshotBody ?? DEFAULT_SNAPSHOT_BODY;
-        res.writeHead(browserSnapshotStatus, { "Content-Type": "application/json" });
+        const seqSnapStatus = Array.isArray(browserSnapshotStatusSequence) && browserSnapshotStatusSequence.length
+          ? browserSnapshotStatusSequence.shift() : null;
+        const seqSnapBody = Array.isArray(browserSnapshotBodySequence) && browserSnapshotBodySequence.length
+          ? browserSnapshotBodySequence.shift() : null;
+        const responseBody = seqSnapBody ?? browserSnapshotBody ?? DEFAULT_SNAPSHOT_BODY;
+        res.writeHead(seqSnapStatus ?? browserSnapshotStatus, { "Content-Type": "application/json" });
         res.end(JSON.stringify(responseBody));
         return;
       }
@@ -970,11 +981,13 @@ async function createMockApiServer(opts = {}) {
         let parsedEndpoint = {};
         try { parsedEndpoint = JSON.parse(body); } catch {}
         endpointRequests.push(parsedEndpoint);
+        const seqId = Array.isArray(browserEndpointIdSequence) && browserEndpointIdSequence.length
+          ? browserEndpointIdSequence.shift() : null;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           data: {
             cdp_url: "http://127.0.0.1:19999",
-            browser_runtime_id: "test_runtime_001",
+            browser_runtime_id: seqId ?? "test_runtime_001",
             runtime_mode: "test_mode",
             reused_existing: false,
           },
@@ -1901,20 +1914,33 @@ async function createNavMockApiServer(opts = {}) {
     navStateDelayMs = 0,
     browserTypeStatus = 200,
     browserTypeBody = null,
+    // Optional per-call sequences for browser-navigation-state (SESSION_NOT_FOUND
+    // recovery tests). Each request shifts the next status/body; falls back to the
+    // static navStateStatus/Body when exhausted/null.
+    navStateStatusSequence = null, navStateBodySequence = null,
+    // Optional per-call sequence of browser_runtime_id values for the
+    // browser-endpoint handler (init, then re-init) — fresh-id continuity tests.
+    browserEndpointIdSequence = null,
   } = opts;
 
   const navRequests = [];
+  const endpointRequests = [];
 
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
+        let parsedEndpoint = {};
+        try { parsedEndpoint = JSON.parse(body); } catch {}
+        endpointRequests.push(parsedEndpoint);
+        const seqId = Array.isArray(browserEndpointIdSequence) && browserEndpointIdSequence.length
+          ? browserEndpointIdSequence.shift() : null;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           data: {
             cdp_url: "http://127.0.0.1:19999",
-            browser_runtime_id: "test_runtime_001",
+            browser_runtime_id: seqId ?? "test_runtime_001",
             runtime_mode: "test_mode",
             reused_existing: false,
           },
@@ -1925,12 +1951,16 @@ async function createNavMockApiServer(opts = {}) {
         let parsed = {};
         try { parsed = JSON.parse(body); } catch {}
         navRequests.push(parsed);
+        const seqStatus = Array.isArray(navStateStatusSequence) && navStateStatusSequence.length
+          ? navStateStatusSequence.shift() : null;
+        const seqBody = Array.isArray(navStateBodySequence) && navStateBodySequence.length
+          ? navStateBodySequence.shift() : null;
         const respond = () => {
-          const responseBody = navStateBody ?? {
+          const responseBody = seqBody ?? navStateBody ?? {
             ok: true,
             data: { pointer_state_persisted: true, pointer_start_source: "session", pointer_action: "navigation_proxy" },
           };
-          res.writeHead(navStateStatus, { "Content-Type": "application/json" });
+          res.writeHead(seqStatus ?? navStateStatus, { "Content-Type": "application/json" });
           res.end(JSON.stringify(responseBody));
         };
         if (navStateDelayMs > 0) {
@@ -1955,7 +1985,12 @@ async function createNavMockApiServer(opts = {}) {
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, port: server.address().port, getNavRequests: () => navRequests };
+  return {
+    server,
+    port: server.address().port,
+    getNavRequests: () => navRequests,
+    getEndpointRequests: () => endpointRequests,
+  };
 }
 
 // Fake MCP stub that responds to browser_navigate with a success result.
@@ -3296,5 +3331,227 @@ describe("L. Runtime session continuity + SESSION_NOT_FOUND recovery", () => {
     const text = resp.result?.content?.[0]?.text ?? "";
     assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
     assert.equal(getNavRequests().length, 2, "expected exactly one nav-state retry (2 nav-state requests)");
+  });
+
+  // ── Fresh-id continuity: the retry body must carry the re-init's fresh id, not
+  // the stale captured id. The mock returns DISTINCT ids per browser-endpoint call
+  // (init → tbsess_old, re-init → tbsess_new) so a stale-id retry is detectable.
+
+  test("Test 1 — nav-state retry uses the FRESH runtime id (not the stale one)", { timeout: 9000 }, async () => {
+    const { server, port, getNavRequests, getEndpointRequests } = await createNavMockApiServer({
+      browserEndpointIdSequence: ["tbsess_old", "tbsess_new"],
+      navStateStatusSequence: [404, 200],
+      navStateBodySequence: [
+        SNF_BODY,
+        { ok: true, data: { pointer_state_persisted: true, pointer_start_source: "session", pointer_action: "navigation_proxy" } },
+      ],
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 130, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const nav = getNavRequests();
+    assert.equal(nav.length, 2, `expected exactly 2 nav-state requests, got ${nav.length}`);
+    assert.equal(nav[0].browser_runtime_id, "tbsess_old", "first nav-state must use the stale id");
+    assert.equal(nav[1].browser_runtime_id, "tbsess_new", "retry nav-state must use the FRESH id, not the stale one");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init (init + 1 re-init)");
+
+    const resp = parseMcpResponse(stdoutBuf, 130);
+    assert.ok(resp, `expected response for id=130`);
+    assert.ok(!resp.result?.isError, `expected navigation success after fresh-id retry, got: ${JSON.stringify(resp.result)}`);
+    assert.ok(
+      /runtime_retry .*retry_uses_fresh_runtime_id=true/.test(stderrBuf),
+      `expected runtime_retry continuity diagnostic with retry_uses_fresh_runtime_id=true, got: ${stderrBuf}`,
+    );
+  });
+
+  test("Test 2 — persistent nav-state SNF: retry carried the fresh id, then a loud error", { timeout: 9000 }, async () => {
+    const { server, port, getNavRequests, getEndpointRequests } = await createNavMockApiServer({
+      browserEndpointIdSequence: ["tbsess_old", "tbsess_new"],
+      navStateStatus: 404,
+      navStateBody: SNF_BODY,
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 131, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const nav = getNavRequests();
+    assert.equal(nav.length, 2, `expected exactly 2 nav-state requests (no infinite retry), got ${nav.length}`);
+    assert.equal(nav[1].browser_runtime_id, "tbsess_new", "retry must still use the fresh id even when it persists in failing");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init");
+
+    const resp = parseMcpResponse(stdoutBuf, 131);
+    assert.ok(resp, `expected response for id=131`);
+    assert.equal(resp.result?.isError, true, `expected isError on persistent SNF, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
+    assert.ok(/reinitialize the browser runtime/i.test(text), `expected reinitialize guidance: ${text}`);
+  });
+
+  test("Test 3 — transient nav-state error (timeout) stays soft: no re-init, navigation succeeds", { timeout: 9000 }, async () => {
+    // nav-state delays past the adapter's 400ms abort → AbortError → TIMEOUT.
+    // TIMEOUT is not SESSION_NOT_FOUND, so there must be NO re-init and the child's
+    // navigation success must still be forwarded.
+    const { server, port, getNavRequests, getEndpointRequests } = await createNavMockApiServer({
+      navStateDelayMs: 800,
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 132, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    assert.equal(getEndpointRequests().length, 1, "transient TIMEOUT must NOT trigger a re-init (init only)");
+    assert.equal(getNavRequests().length, 1, "transient TIMEOUT must NOT trigger a nav-state retry");
+    const resp = parseMcpResponse(stdoutBuf, 132);
+    assert.ok(resp, `expected response for id=132`);
+    assert.ok(!resp.result?.isError, `transient nav-state failure must stay soft (navigation forwarded), got: ${JSON.stringify(resp.result)}`);
+  });
+
+  test("Test 4a — browser_click retry rebuilds the body with the fresh runtime id", { timeout: 8000 }, async () => {
+    const { server, port, getClickRequests, getEndpointRequests } = await createMockApiServer({
+      browserEndpointIdSequence: ["tbsess_old", "tbsess_new"],
+      browserClickStatusSequence: [404, 200],
+      browserClickBodySequence: [
+        SNF_BODY,
+        { ok: true, data: { mode: "realistic_pointer_click", pointer_path_point_count: 9, pointer_start_source: "session", pointer_state_persisted: true } },
+      ],
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 133, method: "tools/call", params: { name: "browser_click", arguments: { ref: "ag_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const click = getClickRequests();
+    assert.equal(click.length, 2, `expected one click retry (2 requests), got ${click.length}`);
+    assert.equal(click[0].body.browser_runtime_id, "tbsess_old", "first click must use the stale id");
+    assert.equal(click[1].body.browser_runtime_id, "tbsess_new", "click retry must use the FRESH id");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init");
+    const resp = parseMcpResponse(stdoutBuf, 133);
+    assert.ok(resp && !resp.result?.isError, `expected click success after fresh-id retry, got: ${JSON.stringify(resp?.result)}`);
+  });
+
+  test("Test 4b — antigen_snapshot retry rebuilds the body with the fresh runtime id", { timeout: 8000 }, async () => {
+    const { server, port, getSnapshotRequests, getEndpointRequests } = await createMockApiServer({
+      browserEndpointIdSequence: ["tbsess_old", "tbsess_new"],
+      browserSnapshotStatusSequence: [404, 200],
+      browserSnapshotBodySequence: [SNF_BODY, null], // null → DEFAULT_SNAPSHOT_BODY on retry
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 134, method: "tools/call", params: { name: "antigen_snapshot", arguments: {} } }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const snap = getSnapshotRequests();
+    assert.equal(snap.length, 2, `expected one snapshot retry (2 requests), got ${snap.length}`);
+    assert.equal(snap[0].body.browser_runtime_id, "tbsess_old", "first snapshot must use the stale id");
+    assert.equal(snap[1].body.browser_runtime_id, "tbsess_new", "snapshot retry must use the FRESH id");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init");
+    const resp = parseMcpResponse(stdoutBuf, 134);
+    assert.ok(resp && !resp.result?.isError, `expected snapshot success after fresh-id retry, got: ${JSON.stringify(resp?.result)}`);
+  });
+});
+
+// ─── M. clipRuntimeId — safe id clipping for continuity diagnostics ────────────
+
+describe("M. clipRuntimeId", () => {
+  test("clips a long id to a 14-char prefix with ellipsis", () => {
+    assert.equal(clipRuntimeId("tbsess_abcdef0123456789"), "tbsess_abcdef0…");
+  });
+  test("returns a short id unchanged", () => {
+    assert.equal(clipRuntimeId("tbsess_old"), "tbsess_old");
+  });
+  test("returns 'none' for null/empty/non-string", () => {
+    assert.equal(clipRuntimeId(null), "none");
+    assert.equal(clipRuntimeId(undefined), "none");
+    assert.equal(clipRuntimeId(""), "none");
+    assert.equal(clipRuntimeId(42), "none");
   });
 });

@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, buildSyntheticSuccessText, buildAntigenSnapshotText } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -700,9 +700,12 @@ function sessionNotFoundMessage(toolName) {
 
 /**
  * Forces a fresh browser-endpoint fetch to recover a lost backend session and
- * refreshes the module-level browser_runtime_id in place. Returns true if a
- * runtime id was obtained. Never calls process.exit — unlike first init, a failed
- * recovery must surface a loud agent-facing error rather than kill the adapter.
+ * refreshes the module-level browser_runtime_id in place. Returns the fresh
+ * browser_runtime_id string on success, or null on failure. Callers must use the
+ * returned id for the retry body — never a locally captured stale id. The module
+ * mutation is kept so any module-level reader also sees the fresh id. Never calls
+ * process.exit — unlike first init, a failed recovery must surface a loud
+ * agent-facing error rather than kill the adapter.
  */
 async function reinitRuntimeSession() {
   try {
@@ -716,7 +719,7 @@ async function reinitRuntimeSession() {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed code=${eb?.error?.code ?? res.status}\n`
       );
-      return false;
+      return null;
     }
     const data = (await res.json().catch(() => ({})))?.data ?? {};
     if (typeof data.browser_runtime_id === "string" && data.browser_runtime_id) {
@@ -724,14 +727,28 @@ async function reinitRuntimeSession() {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_ok reused_existing=${data.reused_existing === true}\n`
       );
-      return true;
+      return browser_runtime_id;
     }
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed code=NO_RUNTIME_ID\n`);
-    return false;
+    return null;
   } catch (_err) {
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed reason=NETWORK_ERROR\n`);
-    return false;
+    return null;
   }
+}
+
+/**
+ * Emits a single stderr continuity diagnostic after a SESSION_NOT_FOUND re-init,
+ * proving the retry uses the fresh runtime id rather than the stale captured one.
+ * Logs only CLIPPED ids — never cdp_url, paths, or request payloads.
+ */
+function logRuntimeRetry(tool, oldId, freshId) {
+  const retryUsesFresh = freshId != null && freshId !== oldId;
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] runtime_retry tool=${tool}` +
+    ` reason=SESSION_NOT_FOUND old_runtime_id=${clipRuntimeId(oldId)}` +
+    ` new_runtime_id=${clipRuntimeId(freshId)} retry_uses_fresh_runtime_id=${retryUsesFresh}\n`
+  );
 }
 
 /** True only for a 404 whose error code is SESSION_NOT_FOUND (reads a clone). */
@@ -742,29 +759,40 @@ async function isSessionNotFound(apiRes) {
 }
 
 /**
- * POSTs to an Antigen runtime endpoint. On a 404 SESSION_NOT_FOUND, forces exactly
- * one runtime re-init and retries the call once (buildBody is re-invoked so the
- * retry picks up the refreshed browser_runtime_id). Returns the final Response —
- * a persistent SESSION_NOT_FOUND comes back as a 404 the caller surfaces loudly,
- * and the retry's 404 is what produces the backend browser_tool_rejected trace
- * event. Adapter-owned tools must NOT fall through to the @playwright/mcp child on
- * this failure.
+ * POSTs to an Antigen runtime endpoint. The helper OWNS injecting
+ * browser_runtime_id at send time, so callers pass a body WITHOUT the id and can
+ * never accidentally capture a stale one. On a 404 SESSION_NOT_FOUND, forces
+ * exactly one runtime re-init and retries the call once using the FRESH id
+ * returned by reinitRuntimeSession() (never the stale id from the first attempt).
+ * Returns the final Response — a persistent SESSION_NOT_FOUND comes back as a 404
+ * the caller surfaces loudly, and the retry's 404 is what produces the backend
+ * browser_tool_rejected trace event. Adapter-owned tools must NOT fall through to
+ * the @playwright/mcp child on this failure.
+ *
+ * @param {string} path
+ * @param {object} bodyWithoutRuntimeId  body fields excluding browser_runtime_id
+ * @param {{ tool?: string }} [options]  tool name for the continuity diagnostic
  */
-async function antigenRuntimePost(path, buildBody) {
-  const doFetch = () =>
+async function antigenRuntimePost(path, bodyWithoutRuntimeId, options = {}) {
+  const send = (rid) =>
     fetch(`${BASE}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify(buildBody()),
+      body: JSON.stringify({ ...bodyWithoutRuntimeId, browser_runtime_id: rid }),
     });
 
-  let apiRes = await doFetch();
+  const oldId = browser_runtime_id;
+  let apiRes = await send(oldId);
   if (await isSessionNotFound(apiRes)) {
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] session_not_found path=${path} action=reinit_retry\n`
     );
-    await reinitRuntimeSession();
-    apiRes = await doFetch();
+    const freshId = await reinitRuntimeSession();
+    logRuntimeRetry(options.tool ?? path, oldId, freshId);
+    // Retry with the fresh id; never reuse the stale oldId. Fall back to the
+    // module-level id only if reinit returned null (so the retry still 404s loudly
+    // rather than throwing on an undefined id).
+    apiRes = await send(freshId ?? browser_runtime_id);
   }
   return apiRes;
 }
@@ -827,8 +855,10 @@ async function updateNavigationPointerState(runtimeId, url) {
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] session_not_found path=/api/agent/v1/runtime/browser-navigation-state action=reinit_retry\n`
     );
-    await reinitRuntimeSession();
-    result = await attempt(browser_runtime_id);
+    const freshId = await reinitRuntimeSession();
+    logRuntimeRetry("browser_navigation_state", runtimeId, freshId);
+    // Retry with the fresh id; never reuse the stale runtimeId parameter.
+    result = await attempt(freshId ?? browser_runtime_id);
   }
   return result;
 }
@@ -953,12 +983,15 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-snapshot", () => ({
-        browser_runtime_id,
-        action: "dom_snapshot",
-        max_candidates: maxCandidates,
-        viewport_only: viewportOnly,
-      }));
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-snapshot",
+        {
+          action: "dom_snapshot",
+          max_candidates: maxCandidates,
+          viewport_only: viewportOnly,
+        },
+        { tool: "antigen_snapshot" },
+      );
 
       if (apiRes.ok) {
         const resBody = await apiRes.json().catch(() => ({}));
@@ -1039,10 +1072,11 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-scroll-to-ref", () => ({
-        browser_runtime_id,
-        ref: refArg,
-      }));
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-scroll-to-ref",
+        { ref: refArg },
+        { tool: "browser_scroll_to_ref" },
+      );
 
       if (apiRes.ok) {
         process.stderr.write(
@@ -1149,14 +1183,15 @@ async function handleLine(line) {
       // backend, which resolves it against the latest snapshot and clicks the
       // stored box via the realistic pointer runtime. The adapter never resolves
       // the ref, never touches Playwright, and never receives coordinates.
-      const buildClickBody = () => {
-        const b = { browser_runtime_id, element_description: elementDescription };
-        if (selectorHint) b.selector_hint = selectorHint;
-        if (typeof refArg === "string" && /^ag_\d+$/.test(refArg)) b.ref = refArg;
-        return b;
-      };
+      const clickBody = { element_description: elementDescription };
+      if (selectorHint) clickBody.selector_hint = selectorHint;
+      if (typeof refArg === "string" && /^ag_\d+$/.test(refArg)) clickBody.ref = refArg;
 
-      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-click", buildClickBody);
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-click",
+        clickBody,
+        { tool: "browser_click" },
+      );
 
       if (apiRes.ok) {
         const resBody                  = await apiRes.json().catch(() => ({}));
@@ -1222,10 +1257,11 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-type", () => ({
-        browser_runtime_id,
-        text: fillText,
-      }));
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-type",
+        { text: fillText },
+        { tool: "browser_fill" },
+      );
 
       if (apiRes.ok) {
         const resBody   = await apiRes.json().catch(() => ({}));
@@ -1292,14 +1328,15 @@ async function handleLine(line) {
     );
 
     try {
-      const buildTypeBody = () => {
-        const b = { browser_runtime_id, text: typeText, submit: typeSubmit };
-        if (hasTarget) b.element_description = typeElement;
-        if (selectorHint) b.selector_hint = selectorHint;
-        return b;
-      };
+      const typeBody = { text: typeText, submit: typeSubmit };
+      if (hasTarget) typeBody.element_description = typeElement;
+      if (selectorHint) typeBody.selector_hint = selectorHint;
 
-      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-type", buildTypeBody);
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-type",
+        typeBody,
+        { tool: "browser_type" },
+      );
 
       if (apiRes.ok) {
         const resBody      = await apiRes.json().catch(() => ({}));

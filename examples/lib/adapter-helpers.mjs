@@ -15,6 +15,16 @@ export function looksLikeSelector(s) {
 }
 
 /**
+ * Clips a browser_runtime_id for safe diagnostic logging. Returns a short prefix
+ * (never the full id), or "none" for a missing/non-string id. Used only for
+ * stderr continuity diagnostics — never for protocol output.
+ */
+export function clipRuntimeId(id) {
+  if (typeof id !== "string" || id.length === 0) return "none";
+  return id.length > 14 ? id.slice(0, 14) + "…" : id;
+}
+
+/**
  * Maps text length to a coarse bucket for safe diagnostic logging.
  * Never call with the raw text — pass text.length only.
  */

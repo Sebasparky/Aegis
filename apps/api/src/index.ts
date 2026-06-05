@@ -61,6 +61,7 @@ import {
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
+import { browserRunTraceRoutes } from "./routes/browser-run-trace.js";
 import { sensitiveGrantRoutes } from "./routes/sensitive-grants.js";
 import { workspaceRoutes } from "./routes/workspaces.js";
 import { verificationRoutes } from "./routes/verifications.js";
@@ -164,6 +165,7 @@ async function main() {
   await server.register(securityChallengeRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);
+  await server.register(browserRunTraceRoutes);
   await server.register(sensitiveGrantRoutes);
   await server.register(workspaceRoutes);
   await server.register(verificationRoutes);

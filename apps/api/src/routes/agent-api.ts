@@ -50,6 +50,10 @@ import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } fro
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
+// Dev-only, behavior-neutral, sanitized browser run trace (gated by
+// ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
+// leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
+import { recordBrowserTraceEvent, sanitizeTraceUrl } from "../runtime/browserRunTrace.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3397,6 +3401,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // Return an existing ready session for this delegation rather than provisioning a duplicate.
     const existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
     if (existing) {
+      recordBrowserTraceEvent(existing.browser_session_id, {
+        event_type: "browser_endpoint_created",
+        browser_runtime_id: existing.browser_session_id,
+        tool: "get_runtime_browser_endpoint",
+        result_code: "reused_existing",
+      });
       return reply.send({
         ok: true,
         data: {
@@ -3445,6 +3455,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = result.session;
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_endpoint_created",
+      browser_runtime_id: session.browser_session_id,
+      tool: "get_runtime_browser_endpoint",
+      result_code: "created",
+    });
     return reply.status(201).send({
       ok: true,
       data: {
@@ -3495,19 +3511,40 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const refRaw = typeof body.ref === "string" ? body.ref : undefined;
     if (refRaw && refRaw.startsWith("ag_")) {
       if (!/^ag_\d+$/.test(refRaw)) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_INVALID",
+        });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw}'; expected ag_<number>.` } });
       }
 
       const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
       if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_NOT_FOUND",
+        });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
       }
       if (resolution.status === "expired") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_EXPIRED",
+        });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
       }
 
       const el = resolution.element;
       if (!el.enabled || !el.clickable || el.box.width <= 0 || el.box.height <= 0) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_NOT_CLICKABLE",
+        });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_CLICKABLE", message: `Antigen ref '${refRaw}' is not clickable.` } });
       }
 
@@ -3528,6 +3565,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
 
       if (!refResult.success) {
+        // No successful pointer dispatch on any failure (out-of-viewport / stale aborts before dispatch).
+        const failCode =
+          refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT" ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+          : refResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
+          : refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
+          : "REALISTIC_CLICK_FAILED";
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+          pointer_dispatch: false, error_code: failCode,
+        });
         if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
         }
@@ -3543,6 +3592,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (typeof refResult.current_url === "string" && refResult.current_url.length > 0) {
         setTaskBrowserSessionCurrentUrl(session.browser_session_id, refResult.current_url);
       }
+
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+        tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+        element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+        pointer_dispatch: true, result_code: "realistic_success",
+        url_after: sanitizeTraceUrl(refResult.current_url),
+      });
 
       return reply.send({
         ok: true,
@@ -3577,6 +3634,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         : result.error === "AMBIGUOUS_ELEMENT" ? "AMBIGUOUS_ELEMENT"
         : result.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
         : "REALISTIC_CLICK_FAILED";
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+        tool: "browser_click", click_path: "description",
+        pointer_dispatch: false, error_code: code,
+      });
       return reply.status(422).send({ ok: false, error: { code, message: result.error ?? "Realistic click failed." } });
     }
 
@@ -3585,6 +3647,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     if (typeof result.current_url === "string" && result.current_url.length > 0) {
       setTaskBrowserSessionCurrentUrl(session.browser_session_id, result.current_url);
     }
+
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+      tool: "browser_click", click_path: "description",
+      pointer_dispatch: true, result_code: "realistic_success",
+      url_after: sanitizeTraceUrl(result.current_url),
+    });
 
     return reply.send({
       ok: true,
@@ -3619,20 +3688,37 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     const refRaw = typeof body.ref === "string" ? body.ref : undefined;
     if (!refRaw || !/^ag_\d+$/.test(refRaw)) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_INVALID",
+      });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw ?? ""}'; expected ag_<number>.` } });
     }
 
     const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
     if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_NOT_FOUND",
+      });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
     }
     if (resolution.status === "expired") {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_EXPIRED",
+      });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
     }
 
     // A scrollable ref needs a positive-dimension box and document-space geometry.
     const el = resolution.element;
     if (el.box.width <= 0 || el.box.height <= 0 || !Number.isFinite(el.box.doc_y)) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
+        context: el.context, error_code: "ANTIGEN_REF_NOT_SCROLLABLE",
+      });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_SCROLLABLE", message: `Antigen ref '${refRaw}' has no scrollable geometry. Take a fresh antigen_snapshot.` } });
     }
 
@@ -3644,8 +3730,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     });
 
     if (!scrollResult.success) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
+        context: el.context, error_code: "ANTIGEN_SCROLL_FAILED",
+      });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_SCROLL_FAILED", message: "Antigen could not scroll the ref into view. Take a fresh antigen_snapshot and retry." } });
     }
+
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+      tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
+      context: el.context, result_code: "scroll_to_ref_success",
+    });
 
     // Success is intentionally minimal: the agent must take a NEW antigen_snapshot
     // and click the fresh in-viewport ref. The old ref is not now clickable.
@@ -3704,12 +3801,28 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     });
 
     if (!result.success) {
+      // text is never traced — only the char-count bucket, submit flag, and result code.
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+        tool: "browser_type", char_count_bucket: result.char_count_bucket,
+        submit: submitFlag, pointer_dispatch: false,
+        error_code: result.error ?? "REALISTIC_TYPE_FAILED",
+      });
       return reply.status(422).send({
         ok: false,
         error: { code: result.error ?? "REALISTIC_TYPE_FAILED", message: "Realistic typing failed." },
         data: { char_count_bucket: result.char_count_bucket, duration_ms: result.duration_ms },
       });
     }
+
+    // text is never traced — only the char-count bucket, submit flag, and result code.
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+      tool: "browser_type", char_count_bucket: result.char_count_bucket,
+      submit: typeof result.submitted === "boolean" ? result.submitted : submitFlag,
+      pointer_dispatch: result.pointer_path_point_count !== undefined,
+      result_code: "realistic_type_success",
+    });
 
     return reply.send({
       ok: true,
@@ -3752,7 +3865,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
+    // Sanitized host + path only (query strings and fragments stripped) so the
+    // trace distinguishes google.com search vs reddit.com thread vs ikea.com
+    // product pages without leaking URL params.
+    const urlBefore = sanitizeTraceUrl(session.current_url);
     setTaskBrowserSessionCurrentUrl(session.browser_session_id, body.url);
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "navigation_state", browser_runtime_id: session.browser_session_id,
+      tool: "browser_navigation_state",
+      url_before: urlBefore, url_after: sanitizeTraceUrl(body.url),
+    });
 
     const existingPointerState = getTaskBrowserSessionPointerState(session.browser_session_id, MOCK_USER_ID);
     const { x: proxyX, y: proxyY, pointer_start_source: pointerStartSource } = computeNavigationProxyPointerState({
@@ -3835,6 +3957,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         viewportOnly,
       });
     } catch {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "antigen_snapshot", browser_runtime_id: session.browser_session_id,
+        tool: "antigen_snapshot", url_before: sanitizeTraceUrl(session.current_url),
+        snapshot: { viewport_only: viewportOnly },
+        error_code: "SNAPSHOT_EXTRACTION_FAILED",
+      });
       // Never leak CDP URLs, filesystem paths, or stack detail.
       return sendError(reply, 502, "SNAPSHOT_EXTRACTION_FAILED", "Failed to capture an Antigen snapshot of the page.");
     }
@@ -3846,6 +3974,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       url: session.current_url ?? null,
       title: null, // v1: document.title extraction is out of scope
       candidates,
+    });
+
+    // Counts only — never element names, values, or coordinates.
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "antigen_snapshot", browser_runtime_id: session.browser_session_id,
+      tool: "antigen_snapshot", url_after: sanitizeTraceUrl(snapshot.url),
+      snapshot: {
+        viewport_only: viewportOnly,
+        element_count: snapshot.element_count,
+        clickable_count: candidates.filter((c) => c.clickable).length,
+        typeable_count: candidates.filter((c) => c.typeable).length,
+      },
+      result_code: "antigen_snapshot_success",
     });
 
     return reply.send({

@@ -225,6 +225,54 @@ export function getBrowserRunTrace(
   };
 }
 
+/** Sanitized summary of a single trace, returned by the list/index endpoint. */
+export interface BrowserRunTraceSummary {
+  browser_runtime_id: string;
+  created_at: string;
+  event_count: number;
+  last_event_type?: BrowserTraceEventType;
+  last_ts?: string;
+  last_url?: string;
+}
+
+/**
+ * List sanitized summaries of active traces, most recent first, so QA can
+ * discover active `browser_runtime_id`s without already knowing them. Returns
+ * metadata only — never the full event bodies. Empty (never throws) when
+ * tracing is disabled. `last_url` reuses the already-sanitized host+path values
+ * stored on events; no query strings, coordinates, secrets, or internals.
+ */
+export function listBrowserRunTraces(limit = 50): BrowserRunTraceSummary[] {
+  if (!traceEnabled()) return [];
+  deleteExpired(Date.now());
+  const safeLimit = Number.isFinite(limit) ? Math.min(50, Math.max(1, Math.floor(limit))) : 50;
+
+  const summaries: BrowserRunTraceSummary[] = [...traces.values()].map((entry) => {
+    const last = entry.events[entry.events.length - 1];
+    // Most recent event carrying a (sanitized) url_after or url_before.
+    let lastUrl: string | undefined;
+    for (let i = entry.events.length - 1; i >= 0; i--) {
+      const u = entry.events[i].url_after ?? entry.events[i].url_before;
+      if (u) {
+        lastUrl = u;
+        break;
+      }
+    }
+    return {
+      browser_runtime_id: entry.browser_runtime_id,
+      created_at: entry.created_at,
+      event_count: entry.event_count,
+      last_event_type: last?.event_type,
+      last_ts: last?.ts,
+      last_url: lastUrl,
+    };
+  });
+
+  // Most recent first — sort by last event ts, falling back to created_at.
+  summaries.sort((a, b) => (b.last_ts ?? b.created_at).localeCompare(a.last_ts ?? a.created_at));
+  return summaries.slice(0, safeLimit);
+}
+
 /** Test support — clears all traces. */
 export function clearBrowserRunTraces(): void {
   traces.clear();

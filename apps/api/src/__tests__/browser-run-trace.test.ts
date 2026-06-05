@@ -394,3 +394,156 @@ describe("browser run trace — leak guard & gating", () => {
     expect(res.json().data.events).toHaveLength(0);
   });
 });
+
+describe("browser run trace — list/index endpoint", () => {
+  const LIST_URL = "/api/internal/browser-run-traces";
+
+  async function readList(query = "") {
+    const res = await server.inject({ method: "GET", url: `${LIST_URL}${query}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    return body.data as {
+      trace_count: number;
+      traces: Array<{
+        browser_runtime_id: string;
+        created_at: string;
+        event_count: number;
+        last_event_type?: string;
+        last_ts?: string;
+        last_url?: string;
+      }>;
+    };
+  }
+
+  it("returns an empty list when ANTIGEN_BROWSER_TRACE is unset", async () => {
+    // Even if some events were recorded under the (then-enabled) flag, disabling
+    // the flag makes the list return empty without throwing.
+    recordBrowserTraceEvent("rt_disabled", {
+      event_type: "navigation_state",
+      browser_runtime_id: "rt_disabled",
+      url_after: "example.com/page",
+    });
+    vi.stubEnv("ANTIGEN_BROWSER_TRACE", "");
+
+    const data = await readList();
+    expect(data.trace_count).toBe(0);
+    expect(data.traces).toEqual([]);
+  });
+
+  it("returns active traces with safe metadata when enabled", async () => {
+    recordBrowserTraceEvent("rt_alpha", {
+      event_type: "navigation_state",
+      browser_runtime_id: "rt_alpha",
+      url_after: "www.ikea.com/us/en/cat",
+    });
+    recordBrowserTraceEvent("rt_alpha", {
+      event_type: "browser_click",
+      browser_runtime_id: "rt_alpha",
+      ref: "ag_1",
+      result_code: "realistic_success",
+    });
+    recordBrowserTraceEvent("rt_beta", {
+      event_type: "antigen_snapshot",
+      browser_runtime_id: "rt_beta",
+      result_code: "antigen_snapshot_success",
+    });
+
+    const data = await readList();
+    expect(data.trace_count).toBe(2);
+
+    const ids = data.traces.map((t) => t.browser_runtime_id).sort();
+    expect(ids).toEqual(["rt_alpha", "rt_beta"]);
+
+    const alpha = data.traces.find((t) => t.browser_runtime_id === "rt_alpha")!;
+    expect(alpha.created_at).toBeTruthy();
+    expect(alpha.event_count).toBe(2);
+    expect(alpha.last_event_type).toBe("browser_click");
+    expect(alpha.last_ts).toBeTruthy();
+  });
+
+  it("derives last_url as sanitized host+path with no query/fragment", async () => {
+    seedSession();
+    await server.inject({
+      method: "POST", url: NAV_URL, headers: { authorization: BEARER },
+      payload: {
+        browser_runtime_id: SESSION_ID, action: "navigation_proxy",
+        url: "https://www.reddit.com/r/IKEA/comments/abc/title/?token=secret#frag",
+      },
+    });
+
+    const data = await readList();
+    const entry = data.traces.find((t) => t.browser_runtime_id === SESSION_ID)!;
+    expect(entry.last_url).toBe("www.reddit.com/r/IKEA/comments/abc/title/");
+    expect(entry.last_url).not.toContain("token");
+    expect(entry.last_url).not.toContain("secret");
+    expect(entry.last_url).not.toContain("?");
+    expect(entry.last_url).not.toContain("#");
+  });
+
+  it("respects ?limit and never 500s on invalid limit", async () => {
+    for (const id of ["rt_1", "rt_2", "rt_3", "rt_4"]) {
+      recordBrowserTraceEvent(id, {
+        event_type: "navigation_state",
+        browser_runtime_id: id,
+        url_after: `example.com/${id}`,
+      });
+    }
+
+    const limited = await readList("?limit=2");
+    expect(limited.traces).toHaveLength(2);
+    expect(limited.trace_count).toBe(2);
+
+    // Invalid / negative limits fall back safely — no 500.
+    const invalid = await readList("?limit=abc");
+    expect(invalid.traces.length).toBeGreaterThan(0);
+    const negative = await readList("?limit=-5");
+    expect(negative.traces.length).toBeGreaterThan(0);
+  });
+
+  it("never leaks forbidden internals in the list response", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    await server.inject({
+      method: "POST", url: CLICK_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element_description: "Add to bag" },
+    });
+    await server.inject({
+      method: "POST", url: NAV_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "navigation_proxy", url: CATEGORY_URL },
+    });
+
+    const res = await server.inject({ method: "GET", url: LIST_URL });
+    const raw = JSON.stringify(res.json());
+    const FORBIDDEN = [
+      "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref", "password",
+      "cookies", "localStorage", "sessionStorage", "innerHTML",
+      "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "doc_x", "doc_y",
+      "nearby_text", "9222", "localhost", "secret123",
+    ];
+    for (const f of FORBIDDEN) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
+  it("returns ids usable against the per-runtime endpoint", async () => {
+    seedSession();
+    seedSnapshot([candidate({ name: "Add to bag" })]);
+    await server.inject({
+      method: "POST", url: CLICK_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element_description: "Add to bag" },
+    });
+
+    const data = await readList();
+    expect(data.trace_count).toBe(1);
+    const id = data.traces[0].browser_runtime_id;
+
+    const res = await server.inject({
+      method: "GET", url: `/api/internal/browser-run-trace/${id}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const full = res.json().data as { events: any[] };
+    expect(full.events.length).toBeGreaterThan(0);
+    expect(full.events.some((e) => e.event_type === "browser_click")).toBe(true);
+  });
+});

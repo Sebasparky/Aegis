@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { getBrowserRunTrace } from "../runtime/browserRunTrace.js";
+import { getBrowserRunTrace, listBrowserRunTraces } from "../runtime/browserRunTrace.js";
 
 // ─── Dev-Only Browser Run Trace ───────────────────────────────────────────────
 // Internal / dev-only endpoint for reading the sanitized Antigen browser run
@@ -13,6 +13,22 @@ import { getBrowserRunTrace } from "../runtime/browserRunTrace.js";
 // store sanitizes every event field-by-field before storage.
 
 export async function browserRunTraceRoutes(server: FastifyInstance): Promise<void> {
+  // Index of active traces so QA can discover runtime ids without knowing them
+  // up front. Sanitized metadata only — no event bodies. Static path, registered
+  // before the parametric per-runtime route for clarity.
+  server.get<{ Querystring: { limit?: string } }>(
+    "/api/internal/browser-run-traces",
+    async (req, reply) => {
+      const limitRaw = req.query?.limit;
+      const limit =
+        typeof limitRaw === "string" && /^\d+$/.test(limitRaw)
+          ? Math.min(50, Math.max(1, parseInt(limitRaw, 10)))
+          : 50;
+      const traces = listBrowserRunTraces(limit);
+      return reply.send({ ok: true, data: { trace_count: traces.length, traces } });
+    },
+  );
+
   server.get<{ Params: { browser_runtime_id: string }; Querystring: { limit?: string } }>(
     "/api/internal/browser-run-trace/:browser_runtime_id",
     async (req, reply) => {

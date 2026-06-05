@@ -3499,7 +3499,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (!session) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_click",
+        error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
@@ -3682,7 +3690,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (!session) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_scroll_to_ref",
+        error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
@@ -3775,7 +3791,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (!session) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_type",
+        error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
@@ -3861,7 +3885,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (!session) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_navigation_state",
+        error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
     if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
 
@@ -3938,7 +3970,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const viewportOnly = body.viewport_only === false ? false : true;
 
     const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    if (!session) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "antigen_snapshot",
+        error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
     if (session.delegation_id !== delegation.id) {
       return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
     }

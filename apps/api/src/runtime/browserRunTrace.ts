@@ -29,7 +29,13 @@ export type BrowserTraceEventType =
   | "antigen_snapshot"
   | "browser_scroll_to_ref"
   | "browser_click"
-  | "browser_type";
+  | "browser_type"
+  // Rejected/orphan call: a runtime tool was invoked with a browser_runtime_id
+  // that did not resolve to a live session (SESSION_NOT_FOUND). Recorded in the
+  // route handler's !session branch — keyed by the supplied (stale) id — so a
+  // stale-session continuity failure is visible in the trace instead of leaving
+  // a silent gap. Carries only `tool` + `error_code` (no internals).
+  | "browser_tool_rejected";
 
 export interface BrowserTraceEvent {
   ts: string;

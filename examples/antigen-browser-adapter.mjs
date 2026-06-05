@@ -678,38 +678,159 @@ function handleChildLine(line) {
   process.stdout.write(line.endsWith("\n") ? line : line + "\n");
 }
 
+// ─── Runtime-session continuity recovery ──────────────────────────────────────
+// The backend task-browser session store is in-memory; an API restart wipes it
+// while this long-lived adapter keeps a cached browser_runtime_id. Every Antigen
+// runtime call then 404s with SESSION_NOT_FOUND. These helpers make that a loud,
+// recoverable condition instead of a silent gap: one re-init + one retry, then a
+// clear agent-facing error. Recovery is scoped to SESSION_NOT_FOUND only —
+// transient network/timeout errors and other API error codes are left untouched.
+// NOTE: re-init refreshes only the backend session + browser_runtime_id. It does
+// NOT respawn the @playwright/mcp child (the child binds a cdp_url at spawn);
+// full child reconciliation is a deeper, separately-scoped concern.
+
+/** Stable, agent-facing message for an unrecoverable stale runtime session. */
+function sessionNotFoundMessage(toolName) {
+  return (
+    `Antigen ${toolName} failed: the browser runtime session was not found and ` +
+    `could not be recovered after one re-init. Reinitialize the browser runtime ` +
+    `(call get_runtime_browser_endpoint for a fresh browser_runtime_id) and retry.`
+  );
+}
+
+/**
+ * Forces a fresh browser-endpoint fetch to recover a lost backend session and
+ * refreshes the module-level browser_runtime_id in place. Returns true if a
+ * runtime id was obtained. Never calls process.exit — unlike first init, a failed
+ * recovery must surface a loud agent-facing error rather than kill the adapter.
+ */
+async function reinitRuntimeSession() {
+  try {
+    const res = await fetch(`${BASE}/api/agent/v1/runtime/browser-endpoint`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      const eb = await res.json().catch(() => ({}));
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed code=${eb?.error?.code ?? res.status}\n`
+      );
+      return false;
+    }
+    const data = (await res.json().catch(() => ({})))?.data ?? {};
+    if (typeof data.browser_runtime_id === "string" && data.browser_runtime_id) {
+      browser_runtime_id = data.browser_runtime_id;
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_ok reused_existing=${data.reused_existing === true}\n`
+      );
+      return true;
+    }
+    process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed code=NO_RUNTIME_ID\n`);
+    return false;
+  } catch (_err) {
+    process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] runtime_reinit_failed reason=NETWORK_ERROR\n`);
+    return false;
+  }
+}
+
+/** True only for a 404 whose error code is SESSION_NOT_FOUND (reads a clone). */
+async function isSessionNotFound(apiRes) {
+  if (apiRes.status !== 404) return false;
+  const eb = await apiRes.clone().json().catch(() => ({}));
+  return eb?.error?.code === "SESSION_NOT_FOUND";
+}
+
+/**
+ * POSTs to an Antigen runtime endpoint. On a 404 SESSION_NOT_FOUND, forces exactly
+ * one runtime re-init and retries the call once (buildBody is re-invoked so the
+ * retry picks up the refreshed browser_runtime_id). Returns the final Response —
+ * a persistent SESSION_NOT_FOUND comes back as a 404 the caller surfaces loudly,
+ * and the retry's 404 is what produces the backend browser_tool_rejected trace
+ * event. Adapter-owned tools must NOT fall through to the @playwright/mcp child on
+ * this failure.
+ */
+async function antigenRuntimePost(path, buildBody) {
+  const doFetch = () =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(buildBody()),
+    });
+
+  let apiRes = await doFetch();
+  if (await isSessionNotFound(apiRes)) {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] session_not_found path=${path} action=reinit_retry\n`
+    );
+    await reinitRuntimeSession();
+    apiRes = await doFetch();
+  }
+  return apiRes;
+}
+
 /**
  * Calls POST /api/agent/v1/runtime/browser-navigation-state to update current_url
  * and persist a navigation_proxy pointer state. Awaited with a 400ms timeout.
- * On failure or timeout, logs a safe diagnostic and returns — navigation is not blocked.
+ * Returns a result object: { ok: true } on success; { ok: false, reason } otherwise.
+ * SESSION_NOT_FOUND triggers exactly one re-init + retry; a persistent
+ * SESSION_NOT_FOUND is reported so browser_navigate fails loudly instead of
+ * reporting routine success. Transient TIMEOUT / NETWORK_ERROR and other API
+ * errors stay soft (caller does not block navigation on them).
  */
 async function updateNavigationPointerState(runtimeId, url) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 400);
-  try {
-    const res = await fetch(`${BASE}/api/agent/v1/runtime/browser-navigation-state`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${TOKEN}`,
-      },
-      body: JSON.stringify({ browser_runtime_id: runtimeId, url, action: "navigation_proxy" }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    const body = await res.json().catch(() => ({}));
-    const source = body?.data?.pointer_start_source ?? "unknown";
+  const attempt = async (rid) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 400);
+    try {
+      const res = await fetch(`${BASE}/api/agent/v1/runtime/browser-navigation-state`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ browser_runtime_id: rid, url, action: "navigation_proxy" }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const source = body?.data?.pointer_start_source ?? "unknown";
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update` +
+          ` ok=true pointer_start_source=${source}\n`
+        );
+        return { ok: true };
+      }
+      if (await isSessionNotFound(res)) {
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update ok=false reason=SESSION_NOT_FOUND\n`
+        );
+        return { ok: false, reason: "SESSION_NOT_FOUND" };
+      }
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update ok=false code=${res.status}\n`
+      );
+      return { ok: false, reason: "API_ERROR" };
+    } catch (_err) {
+      clearTimeout(timeoutId);
+      const reason = _err?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR";
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update_error reason=${reason}\n`
+      );
+      return { ok: false, reason };
+    }
+  };
+
+  let result = await attempt(runtimeId);
+  if (result.reason === "SESSION_NOT_FOUND") {
     process.stderr.write(
-      `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update` +
-      ` ok=${res.ok} pointer_start_source=${source}\n`
+      `[antigen-browser@${ADAPTER_VERSION}] session_not_found path=/api/agent/v1/runtime/browser-navigation-state action=reinit_retry\n`
     );
-  } catch (_err) {
-    clearTimeout(timeoutId);
-    const reason = _err?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR";
-    process.stderr.write(
-      `[antigen-browser@${ADAPTER_VERSION}] navigation_state_update_error reason=${reason}\n`
-    );
+    await reinitRuntimeSession();
+    result = await attempt(browser_runtime_id);
   }
+  return result;
 }
 
 /**
@@ -832,16 +953,12 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-snapshot`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({
-          browser_runtime_id,
-          action: "dom_snapshot",
-          max_candidates: maxCandidates,
-          viewport_only: viewportOnly,
-        }),
-      });
+      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-snapshot", () => ({
+        browser_runtime_id,
+        action: "dom_snapshot",
+        max_candidates: maxCandidates,
+        viewport_only: viewportOnly,
+      }));
 
       if (apiRes.ok) {
         const resBody = await apiRes.json().catch(() => ({}));
@@ -863,7 +980,9 @@ async function handleLine(line) {
         "antigen_snapshot",
         requestId,
         errCode,
-        `Antigen snapshot failed (${errCode}).`,
+        errCode === "SESSION_NOT_FOUND"
+          ? sessionNotFoundMessage("antigen_snapshot")
+          : `Antigen snapshot failed (${errCode}).`,
       );
     } catch (_err) {
       process.stderr.write(
@@ -920,11 +1039,10 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-scroll-to-ref`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ browser_runtime_id, ref: refArg }),
-      });
+      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-scroll-to-ref", () => ({
+        browser_runtime_id,
+        ref: refArg,
+      }));
 
       if (apiRes.ok) {
         process.stderr.write(
@@ -943,7 +1061,9 @@ async function handleLine(line) {
         `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=${errCode}\n`
       );
       const scrollErrMsg =
-        errCode === "ANTIGEN_REF_NOT_FOUND"
+        errCode === "SESSION_NOT_FOUND"
+          ? sessionNotFoundMessage("browser_scroll_to_ref")
+          : errCode === "ANTIGEN_REF_NOT_FOUND"
           ? "Antigen browser_scroll_to_ref failed: the ag_* ref was not found in the latest snapshot. Take a fresh antigen_snapshot and retry."
           : errCode === "ANTIGEN_REF_EXPIRED"
           ? "Antigen browser_scroll_to_ref failed: the Antigen snapshot has expired. Take a fresh antigen_snapshot and retry."
@@ -1025,19 +1145,18 @@ async function handleLine(line) {
     );
 
     try {
-      const reqBody = { browser_runtime_id, element_description: elementDescription };
-      if (selectorHint) reqBody.selector_hint = selectorHint;
       // Antigen exact-ref path: pass an ag_<n> ref straight through to the
       // backend, which resolves it against the latest snapshot and clicks the
       // stored box via the realistic pointer runtime. The adapter never resolves
       // the ref, never touches Playwright, and never receives coordinates.
-      if (typeof refArg === "string" && /^ag_\d+$/.test(refArg)) reqBody.ref = refArg;
+      const buildClickBody = () => {
+        const b = { browser_runtime_id, element_description: elementDescription };
+        if (selectorHint) b.selector_hint = selectorHint;
+        if (typeof refArg === "string" && /^ag_\d+$/.test(refArg)) b.ref = refArg;
+        return b;
+      };
 
-      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-click`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify(reqBody),
-      });
+      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-click", buildClickBody);
 
       if (apiRes.ok) {
         const resBody                  = await apiRes.json().catch(() => ({}));
@@ -1065,7 +1184,9 @@ async function handleLine(line) {
       // an out-of-viewport ag_* ref means the stored target is offscreen. In both
       // cases tell the agent how to recover rather than reporting a generic
       // failure. Never surfaces coordinates or live DOM.
-      const clickErrMsg = errCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
+      const clickErrMsg = errCode === "SESSION_NOT_FOUND"
+        ? sessionNotFoundMessage("browser_click")
+        : errCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
         ? "Antigen realistic browser_click failed: the ag_* ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry."
         : errCode === "ANTIGEN_REF_STALE"
         ? "Antigen realistic browser_click failed: the ag_* ref is stale (the page changed since the snapshot). Take a new antigen_snapshot and retry."
@@ -1101,11 +1222,10 @@ async function handleLine(line) {
     );
 
     try {
-      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-type`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ browser_runtime_id, text: fillText }),
-      });
+      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-type", () => ({
+        browser_runtime_id,
+        text: fillText,
+      }));
 
       if (apiRes.ok) {
         const resBody   = await apiRes.json().catch(() => ({}));
@@ -1119,6 +1239,13 @@ async function handleLine(line) {
       }
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? apiRes.status;
+      // A persistent stale runtime session must NOT silently fall through to the
+      // @playwright/mcp child — surface it loudly so the agent reinitializes.
+      if (errCode === "SESSION_NOT_FOUND") {
+        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_error reason=SESSION_NOT_FOUND source=browser_fill\n`);
+        writeSyntheticErrorResponse("browser_fill", requestId, "SESSION_NOT_FOUND", sessionNotFoundMessage("browser_fill"));
+        return;
+      }
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=${errCode} source=browser_fill\n`);
     } catch (err) {
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_fill\n`);
@@ -1165,15 +1292,14 @@ async function handleLine(line) {
     );
 
     try {
-      const reqBody = { browser_runtime_id, text: typeText, submit: typeSubmit };
-      if (hasTarget) reqBody.element_description = typeElement;
-      if (selectorHint) reqBody.selector_hint = selectorHint;
+      const buildTypeBody = () => {
+        const b = { browser_runtime_id, text: typeText, submit: typeSubmit };
+        if (hasTarget) b.element_description = typeElement;
+        if (selectorHint) b.selector_hint = selectorHint;
+        return b;
+      };
 
-      const apiRes = await fetch(`${BASE}/api/agent/v1/runtime/browser-type`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify(reqBody),
-      });
+      const apiRes = await antigenRuntimePost("/api/agent/v1/runtime/browser-type", buildTypeBody);
 
       if (apiRes.ok) {
         const resBody      = await apiRes.json().catch(() => ({}));
@@ -1213,7 +1339,9 @@ async function handleLine(line) {
         "browser_type",
         requestId,
         errCode,
-        `Antigen realistic browser_type failed (${errCode}).`,
+        errCode === "SESSION_NOT_FOUND"
+          ? sessionNotFoundMessage("browser_type")
+          : `Antigen realistic browser_type failed (${errCode}).`,
       );
     } catch (_err) {
       process.stderr.write(
@@ -1283,7 +1411,23 @@ async function handleLine(line) {
     // This must complete before forwarding the response so Cowork's next action
     // sees pointer_start_source=session rather than viewport_center.
     if (!isError && browser_runtime_id) {
-      await updateNavigationPointerState(browser_runtime_id, navigateUrl);
+      const navState = await updateNavigationPointerState(browser_runtime_id, navigateUrl);
+      if (navState && navState.ok === false && navState.reason === "SESSION_NOT_FOUND") {
+        // Persistent stale runtime session after one re-init + retry. Fail loudly
+        // instead of forwarding the child's routine success, so the agent learns the
+        // Antigen runtime is not bound and must be reinitialized. (The retry's 404
+        // produced the backend browser_tool_rejected trace event.)
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] browser_navigate_error reason=SESSION_NOT_FOUND id=${requestId}\n`
+        );
+        writeSyntheticErrorResponse(
+          "browser_navigate",
+          requestId,
+          "SESSION_NOT_FOUND",
+          sessionNotFoundMessage("browser_navigate"),
+        );
+        return;
+      }
     }
 
     // Forward the original child response to Cowork.

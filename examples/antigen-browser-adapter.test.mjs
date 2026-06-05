@@ -905,6 +905,10 @@ async function createMockApiServer(opts = {}) {
     browserClickStatus = 200, browserClickBody = null, browserClickDestroy = false,
     browserSnapshotStatus = 200, browserSnapshotBody = null, browserSnapshotDestroy = false,
     browserScrollStatus = 200, browserScrollBody = null, browserScrollDestroy = false,
+    // Optional per-call sequences for browser-click (used by SESSION_NOT_FOUND
+    // recovery tests). When provided, each request shifts the next status/body;
+    // when exhausted (or null), falls back to the static browserClickStatus/Body.
+    browserClickStatusSequence = null, browserClickBodySequence = null,
   } = opts;
 
   // Captured antigen_snapshot request bodies + their Authorization header,
@@ -914,6 +918,10 @@ async function createMockApiServer(opts = {}) {
   const clickRequests = [];
   // Captured browser-scroll-to-ref request bodies (Phase 5C).
   const scrollRequests = [];
+  // Captured browser-type request bodies (runtime-id continuity assertions).
+  const typeRequests = [];
+  // Captured browser-endpoint request bodies (counts init + re-init calls).
+  const endpointRequests = [];
 
   const DEFAULT_SNAPSHOT_BODY = {
     ok: true,
@@ -959,6 +967,9 @@ async function createMockApiServer(opts = {}) {
         return;
       }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
+        let parsedEndpoint = {};
+        try { parsedEndpoint = JSON.parse(body); } catch {}
+        endpointRequests.push(parsedEndpoint);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           data: {
@@ -972,6 +983,9 @@ async function createMockApiServer(opts = {}) {
       }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-type") {
         if (browserTypeDestroy) { req.socket.destroy(); return; }
+        let parsedType = {};
+        try { parsedType = JSON.parse(body); } catch {}
+        typeRequests.push({ body: parsedType, authorization: req.headers["authorization"] });
         const responseBody = browserTypeBody ?? {
           ok: true,
           data: { char_count_bucket: "5-8", duration_ms: 120, focused: true, submitted: false },
@@ -985,11 +999,16 @@ async function createMockApiServer(opts = {}) {
         let parsedClick = {};
         try { parsedClick = JSON.parse(body); } catch {}
         clickRequests.push({ body: parsedClick, authorization: req.headers["authorization"] });
-        const responseBody = browserClickBody ?? {
+        const seqStatus = Array.isArray(browserClickStatusSequence) && browserClickStatusSequence.length
+          ? browserClickStatusSequence.shift() : null;
+        const seqBody = Array.isArray(browserClickBodySequence) && browserClickBodySequence.length
+          ? browserClickBodySequence.shift() : null;
+        const status = seqStatus ?? browserClickStatus;
+        const responseBody = seqBody ?? browserClickBody ?? {
           ok: true,
           data: { mode: "realistic_pointer_click", pointer_path_point_count: 42, pointer_start_source: "session", pointer_state_persisted: true },
         };
-        res.writeHead(browserClickStatus, { "Content-Type": "application/json" });
+        res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(responseBody));
         return;
       }
@@ -1018,6 +1037,8 @@ async function createMockApiServer(opts = {}) {
     getSnapshotRequests: () => snapshotRequests,
     getClickRequests: () => clickRequests,
     getScrollRequests: () => scrollRequests,
+    getTypeRequests: () => typeRequests,
+    getEndpointRequests: () => endpointRequests,
   };
 }
 
@@ -3085,5 +3106,195 @@ describe("K. antigen_snapshot adapter tool", () => {
 
     assert.equal(getSnapshotRequests().length, 0, "browser_snapshot must NOT call the Antigen snapshot endpoint");
     assert.ok(!stdoutBuf.includes("antigen_snapshot_success"), "browser_snapshot must not produce antigen snapshot text");
+  });
+});
+
+// ─── L. Runtime session continuity + SESSION_NOT_FOUND recovery ────────────────
+//
+// Backend task-browser sessions are in-memory; an API restart wipes them while
+// this long-lived adapter keeps a cached browser_runtime_id, so every Antigen
+// runtime call then 404s with SESSION_NOT_FOUND. These tests cover:
+//   - id continuity: snapshot/scroll/click/type all send the same stored id
+//   - recovery: a 404 that clears after one re-init resolves normally
+//   - loud failure: a persistent 404 → exactly one re-init + retry, then a clear
+//     agent-facing error (never a silent continue, never a child fallthrough)
+//   - browser_navigate surfaces a persistent SESSION_NOT_FOUND instead of routine
+//     success (transient TIMEOUT / non-200 stay soft — covered in group I)
+
+const SNF_BODY = { ok: false, error: { code: "SESSION_NOT_FOUND", message: "Browser runtime session not found." } };
+
+function spawnRealisticAdapter(port, binPath) {
+  return spawn(process.execPath, [ADAPTER_PATH], {
+    env: {
+      ...process.env,
+      PATH: `${binPath}:${process.env.PATH ?? ""}`,
+      AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+      AEGIS_AGENT_TOKEN: "test_token",
+      ANTIGEN_BROWSER_HEADLESS: "false",
+      ANTIGEN_INPUT_REALISM: "",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+describe("L. Runtime session continuity + SESSION_NOT_FOUND recovery", () => {
+
+  test("continuity: snapshot, scroll, and click all send the same browser_runtime_id", { timeout: 8000 }, async () => {
+    const { server, port, getSnapshotRequests, getScrollRequests, getClickRequests } = await createMockApiServer();
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 120, method: "tools/call", params: { name: "antigen_snapshot", arguments: {} } }) + "\n");
+    await new Promise((r) => setTimeout(r, 400));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 121, method: "tools/call", params: { name: "browser_scroll_to_ref", arguments: { ref: "ag_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 400));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 122, method: "tools/call", params: { name: "browser_click", arguments: { ref: "ag_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 600));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const snap = getSnapshotRequests();
+    const scroll = getScrollRequests();
+    const click = getClickRequests();
+    assert.equal(snap.length, 1, `expected one snapshot request, got ${snap.length}`);
+    assert.equal(scroll.length, 1, `expected one scroll request, got ${scroll.length}`);
+    assert.equal(click.length, 1, `expected one click request, got ${click.length}`);
+    assert.equal(snap[0].body.browser_runtime_id, "test_runtime_001", "snapshot must use the stored runtime id");
+    assert.equal(scroll[0].body.browser_runtime_id, "test_runtime_001", "scroll must use the stored runtime id");
+    assert.equal(click[0].body.browser_runtime_id, "test_runtime_001", "click must use the stored runtime id");
+  });
+
+  test("recovery: a SESSION_NOT_FOUND that clears after one re-init resolves normally", { timeout: 8000 }, async () => {
+    const { server, port, getClickRequests, getEndpointRequests } = await createMockApiServer({
+      browserClickStatusSequence: [404, 200],
+      browserClickBodySequence: [
+        SNF_BODY,
+        { ok: true, data: { mode: "realistic_pointer_click", pointer_path_point_count: 9, pointer_start_source: "session", pointer_state_persisted: true } },
+      ],
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 123, method: "tools/call", params: { name: "browser_click", arguments: { ref: "ag_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 123);
+    assert.ok(resp, `expected response for id=123`);
+    assert.ok(!resp.result?.isError, `expected success after recovery, got: ${JSON.stringify(resp.result)}`);
+    assert.equal(getClickRequests().length, 2, "expected exactly one retry (2 click requests)");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init (init + 1 re-init)");
+    assert.ok(stderrBuf.includes("action=reinit_retry"), `expected reinit_retry diagnostic, got: ${stderrBuf}`);
+  });
+
+  test("persistent SESSION_NOT_FOUND: exactly one re-init + retry, then a clear error (no silent continue)", { timeout: 8000 }, async () => {
+    const { server, port, getClickRequests, getEndpointRequests } = await createMockApiServer({
+      browserClickStatus: 404,
+      browserClickBody: SNF_BODY,
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 124, method: "tools/call", params: { name: "browser_click", arguments: { ref: "ag_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 124);
+    assert.ok(resp, `expected response for id=124`);
+    assert.equal(resp.result?.isError, true, `expected isError after persistent SESSION_NOT_FOUND, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
+    assert.ok(/reinitialize the browser runtime/i.test(text), `expected reinitialize guidance: ${text}`);
+    assert.equal(getClickRequests().length, 2, "expected exactly one retry (2 click requests), not an infinite loop");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init (init + 1 re-init)");
+  });
+
+  test("browser_fill does not silently fall through to @playwright/mcp on SESSION_NOT_FOUND", { timeout: 8000 }, async () => {
+    // browser-type endpoint always 404s SESSION_NOT_FOUND. The fake MCP child never
+    // answers tools/call, so a fallthrough would yield NO response for the id. A
+    // clear isError SESSION_NOT_FOUND response proves the adapter handled it itself.
+    const { server, port } = await createMockApiServer({ browserTypeStatus: 404, browserTypeBody: SNF_BODY });
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawnRealisticAdapter(port, binPath);
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 125, method: "tools/call", params: { name: "browser_fill", arguments: { value: "desk lamp" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 1200));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 125);
+    assert.ok(resp, `expected an adapter response for id=125 (no silent child fallthrough)`);
+    assert.equal(resp.result?.isError, true, `expected isError, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
+  });
+
+  test("browser_navigate fails loudly on persistent SESSION_NOT_FOUND (one re-init + retry)", { timeout: 9000 }, async () => {
+    const { server, port, getNavRequests } = await createNavMockApiServer({
+      navStateStatus: 404,
+      navStateBody: SNF_BODY,
+    });
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 126, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 2500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 126);
+    assert.ok(resp, `expected response for id=126`);
+    assert.equal(resp.result?.isError, true, `expected isError on persistent SESSION_NOT_FOUND, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
+    assert.equal(getNavRequests().length, 2, "expected exactly one nav-state retry (2 nav-state requests)");
   });
 });

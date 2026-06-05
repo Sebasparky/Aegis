@@ -547,3 +547,66 @@ describe("browser run trace — list/index endpoint", () => {
     expect(full.events.some((e) => e.event_type === "browser_click")).toBe(true);
   });
 });
+
+describe("browser run trace — rejected/orphan calls (SESSION_NOT_FOUND)", () => {
+  const STALE_ID = "tbsess_stale_999";
+
+  async function readStaleTrace() {
+    const res = await server.inject({
+      method: "GET", url: `/api/internal/browser-run-trace/${STALE_ID}`,
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json().data as { browser_runtime_id: string; event_count: number; events: any[] };
+  }
+
+  it("records browser_tool_rejected for a browser-click against an unknown session", async () => {
+    // No session seeded — beforeEach clears taskBrowserSessions.
+    const res = await server.inject({
+      method: "POST", url: CLICK_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: STALE_ID, ref: "ag_1", element_description: "Add to bag" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("SESSION_NOT_FOUND");
+
+    const trace = await readStaleTrace();
+    expect(trace.browser_runtime_id).toBe(STALE_ID);
+    const rejected = trace.events.find((e) => e.event_type === "browser_tool_rejected");
+    expect(rejected).toBeTruthy();
+    expect(rejected.tool).toBe("browser_click");
+    expect(rejected.error_code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("records browser_tool_rejected (tool=browser_navigation_state) for nav-state against an unknown session", async () => {
+    const res = await server.inject({
+      method: "POST", url: NAV_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: STALE_ID, url: CATEGORY_URL, action: "navigation_proxy" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("SESSION_NOT_FOUND");
+
+    const trace = await readStaleTrace();
+    const rejected = trace.events.find(
+      (e) => e.event_type === "browser_tool_rejected" && e.tool === "browser_navigation_state",
+    );
+    expect(rejected).toBeTruthy();
+    expect(rejected.error_code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("rejected event leaks no internals — only event_type, tool, error_code, id, ts", async () => {
+    await server.inject({
+      method: "POST", url: SNAPSHOT_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: STALE_ID, action: "dom_snapshot" },
+    });
+    const trace = await readStaleTrace();
+    const rejected = trace.events.find((e) => e.event_type === "browser_tool_rejected");
+    expect(rejected).toBeTruthy();
+    expect(rejected.tool).toBe("antigen_snapshot");
+
+    const serialized = JSON.stringify(trace);
+    // No forbidden internals: cdp_url, ports, profile paths, secrets, coordinates.
+    expect(serialized).not.toMatch(/cdp_url|user_data_dir|localhost:9222|9222|secret|pass_id|doc_x|doc_y/);
+    // The rejected event carries only the safe allowlist fields.
+    const keys = Object.keys(rejected).sort();
+    expect(keys).toEqual(["browser_runtime_id", "error_code", "event_type", "tool", "ts"]);
+  });
+});

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"]
+    "antigen-browser": {
+      "command": "/Users/sebastianchacon/Desktop/aegis/scripts/run-antigen-browser-adapter-qa.sh",
+      "args": []
     }
   }
 }

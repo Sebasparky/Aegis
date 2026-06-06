@@ -1,0 +1,18 @@
+{
+  "_comment": "Antigen QA hard-mode MCP config. PREFERRED: point antigen-browser at scripts/run-antigen-browser-adapter-qa.sh (single source of QA env). The adapter fails closed (FATAL) if launched without the QA flags unless ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false. Replace <ABSOLUTE_PATH_TO_REPO> and <delegation-token>. See docs/dev/antigen-qa-mcp.md. DO NOT also register a raw `playwright` server pointing at @playwright/mcp, and do NOT pre-allowlist mcp__playwright__* tools during Antigen QA — that lets the agent bypass the Antigen adapter and attach raw Playwright to the same Chrome.",
+  "_comment_direct_fallback": "If you must invoke node directly instead of the wrapper, use { \"command\": \"node\", \"args\": [\"<ABSOLUTE_PATH_TO_REPO>/examples/antigen-browser-adapter.mjs\"], \"env\": { ...all QA flags... } }. The fail-closed guard requires AEGIS_API_BASE, AEGIS_AGENT_TOKEN, ANTIGEN_BROWSER_TRACE=true, ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS=true, ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION=true, ANTIGEN_INPUT_REALISM=realistic (and warns unless ANTIGEN_BROWSER_HEADLESS=false). The wrapper form is safer because it cannot be launched with a partial env.",
+  "mcpServers": {
+    "antigen": {
+      "command": "node",
+      "args": ["<ABSOLUTE_PATH_TO_REPO>/examples/aegis-tool-server.mjs"],
+      "env": {
+        "AEGIS_API_BASE": "http://localhost:4000",
+        "AEGIS_AGENT_TOKEN": "<delegation-token>"
+      }
+    },
+    "antigen-browser": {
+      "command": "<ABSOLUTE_PATH_TO_REPO>/scripts/run-antigen-browser-adapter-qa.sh",
+      "args": []
+    }
+  }
+}

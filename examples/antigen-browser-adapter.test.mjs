@@ -35,6 +35,13 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ADAPTER_PATH = join(__dirname, "antigen-browser-adapter.mjs");
 
+// The adapter fails closed (FATAL, exit 1) when launched without the full QA env.
+// These tests intentionally spawn it in weak/default mode (no QA flags) to exercise
+// interception/error paths, so opt out of the guard process-wide. Every existing
+// spawn site spreads `...process.env`, so this inherits automatically. Group G
+// (the guard tests) builds explicit env objects that do NOT inherit this opt-out.
+process.env.ANTIGEN_ADAPTER_REQUIRE_QA_ENV = "false";
+
 // ─── A. looksLikeSelector ─────────────────────────────────────────────────────
 
 describe("A. looksLikeSelector", () => {
@@ -4345,5 +4352,77 @@ describe("Navigation realism / direct navigation discipline", () => {
     assert.equal(sanitizeHostPath("about:blank"), "");
     const blob = sanitizeHostPath("https://www.ikea.com/p/x?token=abc123&cvv=999");
     assert.ok(!blob.includes("abc123") && !blob.includes("999") && !blob.includes("?"), `no secret/query leaked: ${blob}`);
+  });
+});
+
+// ─── G. Startup QA-env guard (fail-closed) ────────────────────────────────────
+// The adapter must refuse to serve tools when launched without the required QA env
+// (default-on), so a cached/weak direct launch FATALs instead of running weak.
+// These spawns build an EXPLICIT env object — they do NOT spread `...process.env`,
+// so they do not inherit the module-scope ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false.
+
+// Spawn the adapter with a fully explicit env, capture stderr + exit code.
+function spawnGuardAdapter(env) {
+  const adapter = spawn(process.execPath, [ADAPTER_PATH], { env, stdio: ["pipe", "pipe", "pipe"] });
+  let stderr = "";
+  adapter.stderr.on("data", (d) => { stderr += d.toString(); });
+  const closed = new Promise((resolve) => adapter.on("close", (code) => resolve(code)));
+  return { adapter, getStderr: () => stderr, closed };
+}
+
+const FULL_QA_ENV = {
+  AEGIS_API_BASE: "http://127.0.0.1:4000",
+  AEGIS_AGENT_TOKEN: "test_token",
+  ANTIGEN_BROWSER_HEADLESS: "false",
+  ANTIGEN_INPUT_REALISM: "realistic",
+  ANTIGEN_BROWSER_TRACE: "true",
+  ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true",
+  ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION: "true",
+};
+
+describe("G. Startup QA-env guard", () => {
+  test("default-on + missing QA env → FATAL exit 1 before serving tools", { timeout: 5000 }, async () => {
+    // Only API base + token; no QA flags; guard NOT opted out → must fail closed.
+    const { getStderr, closed } = spawnGuardAdapter({
+      AEGIS_API_BASE: "http://127.0.0.1:4000",
+      AEGIS_AGENT_TOKEN: "test_token",
+    });
+    const code = await closed;
+    const stderr = getStderr();
+    assert.notEqual(code, 0, `adapter must exit non-zero on missing QA env; stderr: ${stderr}`);
+    assert.match(stderr, /FATAL/, `expected FATAL: ${stderr}`);
+    assert.match(stderr, /Antigen QA adapter launched without required QA env/, stderr);
+    // Names at least one missing flag.
+    assert.match(stderr, /ANTIGEN_BROWSER_TRACE/, `expected a missing flag name: ${stderr}`);
+    // Did not advance to runtime/serving.
+    assert.ok(!stderr.includes("Runtime ready"), `must not serve before guard: ${stderr}`);
+  });
+
+  test("explicit opt-out (ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false) → starts in weak mode, no FATAL", { timeout: 5000 }, async () => {
+    const { adapter, getStderr } = spawnGuardAdapter({
+      AEGIS_API_BASE: "http://127.0.0.1:4000",
+      AEGIS_AGENT_TOKEN: "test_token",
+      ANTIGEN_ADAPTER_REQUIRE_QA_ENV: "false",
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const stderr = getStderr();
+    assert.ok(!stderr.includes("FATAL"), `weak mode must not FATAL when opted out: ${stderr}`);
+    assert.ok(stderr.includes("adapter loaded"), `expected startup log: ${stderr}`);
+    assert.equal(adapter.exitCode, null, `adapter should still be running (not exited): ${stderr}`);
+    adapter.kill("SIGTERM");
+  });
+
+  test("full QA env → starts, qa_flags all true, realism=realistic", { timeout: 5000 }, async () => {
+    const { adapter, getStderr } = spawnGuardAdapter({ ...FULL_QA_ENV });
+    await new Promise((r) => setTimeout(r, 400));
+    const stderr = getStderr();
+    assert.ok(!stderr.includes("FATAL"), `full QA env must not FATAL: ${stderr}`);
+    assert.match(
+      stderr,
+      /qa_flags require_realistic_navigation=true require_antigen_tools=true browser_trace=true/,
+      `expected all qa_flags true: ${stderr}`,
+    );
+    assert.match(stderr, /realism=realistic/, `expected realism=realistic: ${stderr}`);
+    adapter.kill("SIGTERM");
   });
 });

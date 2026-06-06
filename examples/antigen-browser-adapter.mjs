@@ -88,6 +88,53 @@ process.stderr.write(
   ` browser_trace=${process.env.ANTIGEN_BROWSER_TRACE === "true"}\n`
 );
 
+// ─── Fail-closed QA-env startup guard ─────────────────────────────────────────
+// This adapter is the Antigen browser-realism QA surface. Its hard-mode logic
+// (navigation discipline, antigen_snapshot ownership, pointer-realism, trace
+// dispositions) only runs when the QA env flags are set. The recurring failure is
+// a CACHED, app-level DIRECT launch (`node examples/antigen-browser-adapter.mjs`)
+// with NONE of those flags — the adapter would otherwise load weak tools and still
+// report "tools loaded", silently wasting QA runs.
+//
+// Default behavior: fail closed BEFORE serving any tools when the required QA env
+// is missing. Set ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false to opt out (non-QA / local
+// dev / weak-mode tests must set this explicitly). Only the literal string "false"
+// disables the guard. The message is sanitized — no token, CDP URL, path, payload.
+const REQUIRE_QA_ENV = process.env.ANTIGEN_ADAPTER_REQUIRE_QA_ENV !== "false";
+if (REQUIRE_QA_ENV) {
+  const missing = [];
+  if (!BASE) missing.push("AEGIS_API_BASE");
+  if (!TOKEN) missing.push("AEGIS_AGENT_TOKEN");
+  if (process.env.ANTIGEN_BROWSER_TRACE !== "true") missing.push("ANTIGEN_BROWSER_TRACE");
+  if (process.env.ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS !== "true") missing.push("ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS");
+  if (process.env.ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION !== "true") missing.push("ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION");
+  if (REALISM_ENV !== "realistic") missing.push("ANTIGEN_INPUT_REALISM");
+
+  // Headless is warning-only: visible mode is preferred for overlay QA, but many
+  // tests run headless intentionally. Do not fail on this one.
+  if (HEADLESS_ENV !== "false") {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] WARN: ANTIGEN_BROWSER_HEADLESS is not "false"` +
+      ` — running headless; pointer-overlay QA needs visible mode.\n`
+    );
+  }
+
+  if (missing.length > 0) {
+    const v = ADAPTER_VERSION;
+    process.stderr.write(
+      `[antigen-browser@${v}] FATAL: Antigen QA adapter launched without required QA env.\n` +
+      `[antigen-browser@${v}] Missing/invalid: ${missing.join(", ")}\n` +
+      `[antigen-browser@${v}] This usually means Claude is launching a cached DIRECT command:\n` +
+      `[antigen-browser@${v}]   node examples/antigen-browser-adapter.mjs\n` +
+      `[antigen-browser@${v}] instead of the QA wrapper:\n` +
+      `[antigen-browser@${v}]   scripts/run-antigen-browser-adapter-qa.sh\n` +
+      `[antigen-browser@${v}] Set ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false to allow weak/default mode (non-QA only).\n`
+    );
+    // Exit before any tool is served so the agent cannot report "tools loaded".
+    process.exit(1);
+  }
+}
+
 // ─── Static browser tool list (served without spawning a child) ───────────────
 // Schemas approximate @playwright/mcp@latest. The child validates actual args;
 // these schemas exist so Claude generates correct tool calls before runtime init.

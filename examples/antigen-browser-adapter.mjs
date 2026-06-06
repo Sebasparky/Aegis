@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -66,6 +66,16 @@ process.stderr.write(
   `[antigen-browser@${ADAPTER_VERSION}] adapter loaded` +
   ` headless=${HEADLESS_ENV} realism=${REALISM_ENV || "(default)"}` +
   ` interception_will_be=${VISIBLE_REALISM_REQUESTED ? "ENABLED_pending_runtime" : "DISABLED"}\n`
+);
+
+// Sanitized QA flag diagnostics — no token, CDP URL, profile path, payloads,
+// URLs, query strings, cookies, storage, or secrets. (antigenHardModeEnabled /
+// realisticNavRequired are hoisted function declarations defined below.)
+process.stderr.write(
+  `[antigen-browser@${ADAPTER_VERSION}] qa_flags` +
+  ` require_realistic_navigation=${realisticNavRequired()}` +
+  ` require_antigen_tools=${antigenHardModeEnabled()}` +
+  ` browser_trace=${process.env.ANTIGEN_BROWSER_TRACE === "true"}\n`
 );
 
 // ─── Static browser tool list (served without spawning a child) ───────────────
@@ -805,7 +815,14 @@ async function noteNavigationDisposition({ disposition, reason, category, urlBef
     ` runtime_id=${clipRuntimeId(browser_runtime_id)}\n`
   );
   if (process.env.ANTIGEN_BROWSER_TRACE !== "true") return;
-  if (typeof browser_runtime_id !== "string" || browser_runtime_id.length === 0) return;
+  if (typeof browser_runtime_id !== "string" || browser_runtime_id.length === 0) {
+    // Trace is on but we have no runtime id to attribute the disposition to —
+    // make the skip visible rather than silently dropping the record.
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] disposition_post_skipped reason=no_runtime_id\n`
+    );
+    return;
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 500);
   try {
@@ -1586,6 +1603,21 @@ async function handleLine(line) {
       navHints: navHintsFresh,
       hardMode: realisticNavRequired(),
     });
+    // Sanitized preflight diagnostics — proves the preflight ran for THIS
+    // navigate before any child.stdin.write. Host+path only; never the raw URL,
+    // query string, coordinates, cookies, storage, or secrets.
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] navigate_preflight` +
+      ` target=${sanitizeHostPath(navigateUrl) || "none"}` +
+      ` current=${sanitizeHostPath(currentUrl) || "none"}` +
+      ` hard_mode=${realisticNavRequired()}` +
+      ` fresh_nav_hints=${navHintsFresh !== null}` +
+      ` decision=${navDecision.decision}` +
+      ` disposition=${navDecision.disposition}` +
+      ` reason=${navDecision.reason ?? "none"}` +
+      ` category=${navDecision.category ?? "none"}` +
+      ` will_forward_to_child=${navDecision.decision !== "block"}\n`
+    );
     if (navDecision.decision === "block") {
       await noteNavigationDisposition({
         disposition: navDecision.disposition,

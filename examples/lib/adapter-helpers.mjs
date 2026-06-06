@@ -282,6 +282,19 @@ function urlHasQuery(input) {
 }
 
 /**
+ * Reduce a URL to host + path only (query/fragment stripped), for sanitized
+ * stderr diagnostics. Mirrors the backend `sanitizeTraceUrl` contract so the
+ * adapter never logs raw query strings, secrets, or coordinates. Returns ""
+ * when the input is empty/unparseable-without-host.
+ */
+export function sanitizeHostPath(input) {
+  const host = urlHost(input);
+  if (!host) return "";
+  const path = urlPath(input);
+  return path && path !== "/" ? `${host}${path}` : host;
+}
+
+/**
  * Derive a compact, safe set of navigation hints from an antigen_snapshot page
  * map (the same `data` object handed to buildAntigenSnapshotText). Reads only
  * allowlisted page-map fields; never reads boxes/coords/secrets. Returns the
@@ -353,18 +366,45 @@ function normalizePath(p) {
 }
 
 /**
+ * Whether a same-site navigation is a safe entry/recovery path that may proceed
+ * even without a fresh snapshot in hard mode. Conservative by design: only an
+ * explicit reload/refresh of the current page, or a search-LANDING page WITHOUT
+ * a query string, qualify. Cart/checkout and product deep links are never
+ * recovery paths.
+ *
+ * @param {{ targetUrl: string, currentUrl: (string|null), path: string }} args  `path` is the normalized target path.
+ * @returns {boolean}
+ */
+function isSafeRecoveryPath({ targetUrl, currentUrl, path }) {
+  const curHost = urlHost(currentUrl);
+  const tgtHost = urlHost(targetUrl);
+  // Explicit reload/refresh of the current page (same host + same path).
+  if (curHost && tgtHost === curHost && normalizePath(urlPath(currentUrl)) === path) return true;
+  // Cart/checkout and product deep links are never recovery paths.
+  if (CART_PATH_RE.test(path)) return false;
+  if (PRODUCT_PATH_RE.test(path) || PRODUCT_TRAILING_ID_RE.test(path)) return false;
+  // Search-landing page WITHOUT a query string is an acceptable entry/recovery path.
+  if (SEARCH_PATH_RE.test(path) && !urlHasQuery(targetUrl)) return true;
+  return false;
+}
+
+/**
  * Classify a browser_navigate target against the most recent snapshot's
  * affordances and decide whether it is an acceptable direct navigation or a
  * shortcut that bypasses available ref-based paths.
  *
  * Always-allow (clean) cases short-circuit first: first navigation, cross-site
- * navigation, top-level/home paths, and missing/stale snapshot hints. After
- * that, same-site product/search/cart deeplinks are flagged when a plausible
- * semantic affordance exists. Blocking happens ONLY when hardMode is true;
- * otherwise the same situation returns decision:"allow" with a warn disposition.
+ * navigation, and top-level/home paths. In DEFAULT mode, missing/stale snapshot
+ * hints are also always allowed. In HARD mode, a missing/stale snapshot is NOT a
+ * free pass: same-site product/detail/search-query/cart/checkout/deep navigation
+ * is blocked (a fresh antigen_snapshot is the precondition), while safe
+ * entry/recovery paths still proceed. After a fresh snapshot exists, same-site
+ * product/search/cart deeplinks are flagged when a plausible semantic affordance
+ * exists. Blocking happens ONLY when hardMode is true; otherwise the same
+ * situation returns decision:"allow" with a warn disposition.
  *
  * @param {{ targetUrl: string, currentUrl: string|null, isFirstNavigation: boolean, navHints: (object|null), hardMode: boolean }} args
- * @returns {{ decision: "allow"|"block", disposition: string, reason: string, category: ("product"|"search"|"cart"|null) }}
+ * @returns {{ decision: "allow"|"block", disposition: string, reason: string, category: ("product"|"search"|"cart"|"snapshot_required"|null) }}
  */
 export function classifyNavigationDiscipline({ targetUrl, currentUrl, isFirstNavigation, navHints, hardMode }) {
   const allow = (reason, category = null) => ({
@@ -394,8 +434,22 @@ export function classifyNavigationDiscipline({ targetUrl, currentUrl, isFirstNav
   // 3. Top-level / home entry is always allowed.
   if (path === "" || path === "/") return allow("top_level_site_entry");
 
-  // 4. Missing or stale snapshot → never block on stale refs.
-  if (!navHints || typeof navHints !== "object") return allow("no_recent_snapshot");
+  // 4. Missing or stale snapshot hints.
+  if (!navHints || typeof navHints !== "object") {
+    // Default mode: never block on stale/missing hints (diagnostic only).
+    if (hardMode !== true) return allow("no_recent_snapshot");
+    // Hard mode: a fresh antigen_snapshot is a precondition for same-site deep
+    // navigation. Safe entry/recovery shapes are still allowed; everything else
+    // (product/detail/search-query/cart/checkout/deep) is blocked so the agent
+    // must establish a page map before deep-linking around visible refs.
+    if (isSafeRecoveryPath({ targetUrl, currentUrl, path })) return allow("no_recent_snapshot");
+    return {
+      decision: "block",
+      disposition: "direct_navigation_blocked",
+      reason: "fresh_snapshot_required",
+      category: "snapshot_required",
+    };
+  }
 
   const hrefPaths = Array.isArray(navHints.hrefPaths) ? navHints.hrefPaths.map(normalizePath) : [];
   const hrefExactMatch = hrefPaths.includes(path);
@@ -440,6 +494,9 @@ export function classifyNavigationDiscipline({ targetUrl, currentUrl, isFirstNav
  */
 export function navigationBlockMessage(category) {
   const prefix = "Direct navigation blocked in Antigen realistic-navigation QA mode.";
+  if (category === "snapshot_required") {
+    return `${prefix} Use antigen_snapshot first, then use browser_click/browser_type/browser_scroll_to_ref with visible refs.`;
+  }
   if (category === "search") {
     return `${prefix} Use browser_type on the search input ref, then submit/click search.`;
   }

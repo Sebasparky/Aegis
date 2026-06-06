@@ -29,6 +29,7 @@ import {
   deriveNavHintsFromSnapshot,
   classifyNavigationDiscipline,
   navigationBlockMessage,
+  sanitizeHostPath,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1943,11 +1944,21 @@ async function createNavMockApiServer(opts = {}) {
 
   const navRequests = [];
   const endpointRequests = [];
+  const dispositionRequests = [];
 
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
+      // Capture navigation-discipline disposition POSTs (Antigen Browser Realism v1).
+      if (req.method === "POST" && typeof req.url === "string" && req.url.endsWith("/navigation-disposition")) {
+        let parsedDisp = {};
+        try { parsedDisp = JSON.parse(body); } catch {}
+        dispositionRequests.push(parsedDisp);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-endpoint") {
         let parsedEndpoint = {};
         try { parsedEndpoint = JSON.parse(body); } catch {}
@@ -2008,6 +2019,7 @@ async function createNavMockApiServer(opts = {}) {
     port: server.address().port,
     getNavRequests: () => navRequests,
     getEndpointRequests: () => endpointRequests,
+    getDispositionRequests: () => dispositionRequests,
   };
 }
 
@@ -2569,6 +2581,135 @@ describe("I. browser_navigate — navigation-aware pointer continuity", () => {
     assert.ok((resp.result?.content?.[0]?.text ?? "").includes("NAVIGATE_CHILD_TIMEOUT"), `expected NAVIGATE_CHILD_TIMEOUT`);
     assert.ok(stderrBuf.includes("navigation_late_child_response_dropped"), `expected late-response-dropped diagnostic in stderr`);
     assert.ok(!stdoutBuf.includes("Navigated to"), `late child success text must not reach stdout`);
+  });
+
+  // ── Realistic-navigation hard mode: fresh snapshot required before deep nav ──
+  // The fake MCP stub returns navigate success, so the first navigate sets the
+  // adapter's currentUrl. A second same-site deep navigate with no fresh snapshot
+  // must then be BLOCKED in hard mode — short-circuited before the child write and
+  // before the browser-navigation-state call — and a disposition must be recorded
+  // for BOTH the allowed first navigate and the blocked second navigate.
+
+  test("8. hard mode: same-site deep navigate with no fresh snapshot is blocked before the child write", { timeout: 9000 }, async () => {
+    const { server, port, getNavRequests, getDispositionRequests } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_TRACE: "true",
+        ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION: "true",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    // Navigate #1 — first navigation is always allowed; fake child returns success
+    // so the adapter records currentUrl = the IKEA listing page.
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 200, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/cat/bookcases" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1800));
+    // Navigate #2 — same-site product deeplink, no fresh snapshot → blocked in hard mode.
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 201, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Navigate #1 succeeded and forwarded the child response.
+    const r1 = parseMcpResponse(stdoutBuf, 200);
+    assert.ok(r1 && !r1.result?.isError, `nav#1 should succeed: ${JSON.stringify(r1?.result)}`);
+
+    // Navigate #2 was blocked with the synthetic realistic-navigation error — proof
+    // it short-circuited before the child write (the fake child never saw it).
+    const r2 = parseMcpResponse(stdoutBuf, 201);
+    assert.ok(r2, `expected a response for nav#2 (id=201), stdout: ${stdoutBuf}`);
+    assert.equal(r2.result?.isError, true, `nav#2 must be a synthetic error`);
+    const r2text = r2.result?.content?.[0]?.text ?? "";
+    assert.ok(r2text.includes("ANTIGEN_REALISTIC_NAVIGATION_REQUIRED"), `expected realistic-nav error code, got: ${r2text}`);
+    assert.match(r2text, /antigen_snapshot first/, `block message should instruct antigen_snapshot first: ${r2text}`);
+
+    // browser-navigation-state was called exactly once — only for the allowed nav#1.
+    // The blocked nav#2 never reached the forward-to-child / nav-state path.
+    assert.equal(getNavRequests().length, 1, `nav-state must be called once (nav#1 only), got ${getNavRequests().length}`);
+
+    // A blocked disposition was recorded for nav#2.
+    const blocked = getDispositionRequests().find((d) => d.navigation_disposition === "direct_navigation_blocked");
+    assert.ok(blocked, `expected a blocked disposition POST, got: ${JSON.stringify(getDispositionRequests())}`);
+    assert.equal(blocked.navigation_reason, "fresh_snapshot_required");
+
+    // stderr preflight made the block visible with will_forward_to_child=false.
+    assert.ok(stderrBuf.includes("navigate_preflight"), `expected navigate_preflight stderr line`);
+    assert.ok(/decision=block[\s\S]*will_forward_to_child=false/.test(stderrBuf) ||
+      stderrBuf.includes("will_forward_to_child=false"), `expected will_forward_to_child=false in preflight`);
+  });
+
+  test("9. hard mode: every adapter-handled navigate records a disposition (allowed + blocked)", { timeout: 9000 }, async () => {
+    const { server, port, getDispositionRequests } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_TRACE: "true",
+        ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION: "true",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderrBuf = "";
+    adapter.stdout.on("data", () => {});
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 210, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/cat/bookcases" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1800));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 211, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1000));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const disps = getDispositionRequests();
+    // Allowed first navigate posted a disposition...
+    assert.ok(disps.some((d) => d.navigation_disposition === "direct_navigation_allowed"),
+      `expected an allowed disposition POST, got: ${JSON.stringify(disps)}`);
+    // ...and the blocked second navigate posted one too.
+    assert.ok(disps.some((d) => d.navigation_disposition === "direct_navigation_blocked"),
+      `expected a blocked disposition POST, got: ${JSON.stringify(disps)}`);
+    // Two adapter-handled navigates → two disposition records.
+    assert.equal(disps.length, 2, `expected exactly two disposition POSTs, got ${disps.length}`);
+    // A preflight line was emitted per navigate.
+    const preflightCount = (stderrBuf.match(/navigate_preflight/g) ?? []).length;
+    assert.equal(preflightCount, 2, `expected two navigate_preflight stderr lines, got ${preflightCount}`);
   });
 });
 
@@ -3891,20 +4032,35 @@ describe("Navigation realism / direct navigation discipline", () => {
     assert.equal(r.reason, "no_cart_ref");
   });
 
-  test("8. missing snapshot hints → allow (no_recent_snapshot)", () => {
+  test("8. missing snapshot hints + same-site product deeplink in hard mode → block (fresh_snapshot_required)", () => {
     const r = classifyNavigationDiscipline({
       targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
       currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
       isFirstNavigation: false, navHints: null, hardMode: true,
     });
-    assert.equal(r.decision, "allow");
-    assert.equal(r.reason, "no_recent_snapshot");
+    assert.equal(r.decision, "block");
+    assert.equal(r.disposition, "direct_navigation_blocked");
+    assert.equal(r.reason, "fresh_snapshot_required");
+    assert.equal(r.category, "snapshot_required");
   });
 
-  test("8b. stale snapshot in hard mode → allow, never blocked on stale refs", () => {
+  test("8a. missing hints + same-site search-query URL in hard mode → block (snapshot_required)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/search/?q=billy",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    });
+    assert.equal(r.decision, "block");
+    assert.equal(r.category, "snapshot_required");
+    assert.equal(r.reason, "fresh_snapshot_required");
+  });
+
+  test("8b. stale snapshot (passed as null) in hard mode → blocks same-site deep nav, requiring a fresh snapshot", () => {
     // The adapter passes navHints:null when the cached snapshot is older than the
-    // TTL — assert the classifier treats that as a clean allow even for a target
-    // that would otherwise block.
+    // TTL. A stale snapshot must NOT be a free pass for same-site deep navigation:
+    // assert each deep target now blocks with fresh_snapshot_required so the agent
+    // re-establishes a page map before deep-linking (it still must not click stale
+    // refs — that is governed separately at click-resolution time).
     const staleAsNull = null;
     for (const targetUrl of [
       "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
@@ -3915,9 +4071,64 @@ describe("Navigation realism / direct navigation discipline", () => {
         targetUrl, currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
         isFirstNavigation: false, navHints: staleAsNull, hardMode: true,
       });
-      assert.equal(r.decision, "allow", `stale-hints target ${targetUrl} must not block`);
+      assert.equal(r.decision, "block", `stale-hints deep target ${targetUrl} must block in hard mode`);
+      assert.equal(r.reason, "fresh_snapshot_required");
+      assert.equal(r.category, "snapshot_required");
+    }
+  });
+
+  test("8b-i. missing hints in DEFAULT mode → still allow (no_recent_snapshot), behavior-compatible", () => {
+    for (const targetUrl of [
+      "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      "https://www.ikea.com/us/en/search/?q=billy",
+      "https://www.ikea.com/us/en/shoppingcart/",
+    ]) {
+      const r = classifyNavigationDiscipline({
+        targetUrl, currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+        isFirstNavigation: false, navHints: null, hardMode: false,
+      });
+      assert.equal(r.decision, "allow", `default mode must not block ${targetUrl} without a snapshot`);
+      assert.equal(r.disposition, "direct_navigation_allowed");
       assert.equal(r.reason, "no_recent_snapshot");
     }
+  });
+
+  test("8b-ii. missing hints in hard mode → first nav / cross-site / home still allowed", () => {
+    // first navigation
+    assert.equal(classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: null, isFirstNavigation: true, navHints: null, hardMode: true,
+    }).decision, "allow");
+    // cross-site
+    assert.equal(classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851",
+      currentUrl: "https://www.reddit.com/r/malelivingspace",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    }).decision, "allow");
+    // same-site top-level/home
+    assert.equal(classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/", currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    }).decision, "allow");
+  });
+
+  test("8b-iii. missing hints in hard mode → safe recovery paths still allowed (search landing, reload)", () => {
+    // Search-LANDING page without a query string is an acceptable entry/recovery path.
+    const landing = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/search/",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    });
+    assert.equal(landing.decision, "allow", "search landing without query must be allowed as recovery");
+    assert.equal(landing.reason, "no_recent_snapshot");
+
+    // Explicit reload/refresh of the current page (same host + same path).
+    const reload = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    });
+    assert.equal(reload.decision, "allow", "reload of current page must be allowed");
   });
 
   test("8c. default mode NEVER blocks product/search/cart even with refs", () => {
@@ -3972,5 +4183,36 @@ describe("Navigation realism / direct navigation discipline", () => {
     assert.match(navigationBlockMessage("search"), /browser_type on the search input ref/);
     assert.match(navigationBlockMessage("cart"), /browser_click on the cart\/bag\/checkout ref/);
     assert.match(navigationBlockMessage(null), /browser_click the product\/result ref/);
+    assert.match(
+      navigationBlockMessage("snapshot_required"),
+      /Use antigen_snapshot first.*browser_click\/browser_type\/browser_scroll_to_ref with visible refs/,
+    );
+  });
+
+  test("11. a fresh_snapshot_required block exposes only safe enum fields (no query/coords)", () => {
+    const r = classifyNavigationDiscipline({
+      targetUrl: "https://www.ikea.com/us/en/search/?q=secret+query+text",
+      currentUrl: "https://www.ikea.com/us/en/cat/bookcases",
+      isFirstNavigation: false, navHints: null, hardMode: true,
+    });
+    assert.equal(r.decision, "block");
+    assert.equal(r.reason, "fresh_snapshot_required");
+    const blob = JSON.stringify(r);
+    assert.ok(!blob.includes("secret+query+text") && !/[?]q=/.test(blob), `no raw query leaked: ${blob}`);
+    assert.ok(!/\bdoc_x\b|width|height/.test(blob), `no coordinates leaked: ${blob}`);
+    assert.deepEqual(Object.keys(r).sort(), ["category", "decision", "disposition", "reason"]);
+  });
+
+  test("12. sanitizeHostPath reduces a URL to host+path with query/fragment stripped", () => {
+    assert.equal(
+      sanitizeHostPath("https://www.ikea.com/us/en/search/?q=secret+query#frag"),
+      "www.ikea.com/us/en/search/",
+    );
+    assert.equal(sanitizeHostPath("https://www.ikea.com/"), "www.ikea.com");
+    assert.equal(sanitizeHostPath(""), "");
+    assert.equal(sanitizeHostPath(null), "");
+    assert.equal(sanitizeHostPath("about:blank"), "");
+    const blob = sanitizeHostPath("https://www.ikea.com/p/x?token=abc123&cvv=999");
+    assert.ok(!blob.includes("abc123") && !blob.includes("999") && !blob.includes("?"), `no secret/query leaked: ${blob}`);
   });
 });

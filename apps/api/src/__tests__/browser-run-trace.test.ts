@@ -969,4 +969,74 @@ describe("browser run trace — navigation discipline (Antigen Browser Realism v
     const res = await server.inject({ method: "GET", url: `/api/internal/browser-run-trace/${OK}` });
     expect(res.json().data.warnings ?? []).not.toContain("direct_navigation_shortcuts_dominant");
   });
+
+  // ── Realistic-navigation hard mode: fresh-snapshot-required block ──────────────
+  it("records a fresh_snapshot_required block with a sanitized host+path url (query stripped)", async () => {
+    const FS_ID = "tbsess_nav_fresh_required";
+    const res = await server.inject({
+      method: "POST", url: `/api/internal/browser-run-trace/${FS_ID}/navigation-disposition`,
+      payload: {
+        tool: "browser_navigate",
+        navigation_disposition: "direct_navigation_blocked",
+        navigation_reason: "fresh_snapshot_required",
+        url_before: "https://www.ikea.com/us/en/cat/bookcases",
+        url_after: "https://www.ikea.com/us/en/search/?q=secret+billy+query&token=xyz789",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const trace = await readNavTrace(FS_ID);
+    const ev = trace.events.find((e) => e.event_type === "browser_navigation_disposition");
+    expect(ev).toBeTruthy();
+    expect(ev.navigation_disposition).toBe("direct_navigation_blocked");
+    expect(ev.navigation_reason).toBe("fresh_snapshot_required");
+    // URL reduced to host+path; raw query (and the secret in it) must be stripped.
+    expect(ev.url_after).toBe("www.ikea.com/us/en/search/");
+    expect(ev.url_before).toBe("www.ikea.com/us/en/cat/bookcases");
+  });
+
+  it("the fresh_snapshot_required event appears in the GET trace with no query string", async () => {
+    const FS_ID = "tbsess_nav_fresh_required_leak";
+    await server.inject({
+      method: "POST", url: `/api/internal/browser-run-trace/${FS_ID}/navigation-disposition`,
+      payload: {
+        navigation_disposition: "direct_navigation_blocked",
+        navigation_reason: "fresh_snapshot_required",
+        url_after: "https://www.ikea.com/us/en/p/billy-bookcase-white-00263851?sessionkey=abc123&cvv=999",
+      },
+    });
+    const trace = await readNavTrace(FS_ID);
+    const ev = trace.events.find((e) => e.event_type === "browser_navigation_disposition");
+    expect(ev?.navigation_reason).toBe("fresh_snapshot_required");
+
+    const raw = JSON.stringify(trace);
+    expect(raw).not.toContain("sessionkey");
+    expect(raw).not.toContain("abc123");
+    expect(raw).not.toContain("cvv");
+    expect(raw).not.toContain("999");
+    expect(raw).not.toContain("?");
+  });
+
+  it("a fresh_snapshot_required trace leaks none of the forbidden substrings", async () => {
+    const FS_ID = "tbsess_nav_fresh_required_forbidden";
+    await server.inject({
+      method: "POST", url: `/api/internal/browser-run-trace/${FS_ID}/navigation-disposition`,
+      payload: {
+        navigation_disposition: "direct_navigation_blocked",
+        navigation_reason: "fresh_snapshot_required",
+        url_before: "https://www.ikea.com/us/en/cat/bookcases",
+        url_after: "https://www.ikea.com/us/en/shoppingcart/",
+      },
+    });
+    const raw = JSON.stringify(await readNavTrace(FS_ID));
+    const FORBIDDEN = [
+      "cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref", "password",
+      "cookies", "localStorage", "sessionStorage", "innerHTML",
+      "\"box\"", "\"x\":", "\"y\":", "\"width\"", "\"height\"", "doc_x", "doc_y",
+      "nearby_text", "9222", "localhost",
+    ];
+    for (const f of FORBIDDEN) {
+      expect(raw).not.toContain(f);
+    }
+  });
 });

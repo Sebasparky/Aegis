@@ -62,6 +62,16 @@ const VISIBLE_REALISM_REQUESTED =
   HEADLESS_ENV === "false" &&
   !["fast", "disabled", "false"].includes(REALISM_ENV);
 
+// Unambiguous identity banner. If you are running Antigen QA and DO NOT see this
+// line in your MCP server's stderr, the agent is talking to raw @playwright/mcp,
+// not the Antigen adapter — fix your MCP config (see docs/dev/antigen-qa-mcp.md).
+// Sanitized: no token, CDP URL, profile path, or payload.
+process.stderr.write(
+  `[antigen-browser@${ADAPTER_VERSION}] ANTIGEN BROWSER ADAPTER ACTIVE` +
+  ` — this is the Antigen adapter, NOT raw @playwright/mcp.` +
+  ` Browser tool calls are mediated by Antigen before reaching the child Playwright process.\n`
+);
+
 process.stderr.write(
   `[antigen-browser@${ADAPTER_VERSION}] adapter loaded` +
   ` headless=${HEADLESS_ENV} realism=${REALISM_ENV || "(default)"}` +
@@ -809,17 +819,28 @@ function realisticNavRequired() {
 // string, and host+path-reduced before/after URLs (the backend route strips
 // query strings) — never raw query params, coordinates, or secrets.
 async function noteNavigationDisposition({ disposition, reason, category, urlBefore, urlAfter }) {
+  // Always print the disposition line — this is the unconditional record that the
+  // navigate branch reached the disposition call, independent of trace/runtime.
   process.stderr.write(
     `[antigen-browser@${ADAPTER_VERSION}] navigation_disposition` +
     ` disposition=${disposition} reason=${reason ?? "none"} category=${category ?? "none"}` +
     ` runtime_id=${clipRuntimeId(browser_runtime_id)}\n`
   );
-  if (process.env.ANTIGEN_BROWSER_TRACE !== "true") return;
+  // Skip-reason guards are explicit and ordered so a missing
+  // browser_navigation_disposition event in the trace is always explained in
+  // stderr. Runtime-id check FIRST (independent of the trace flag) so the
+  // no_runtime_id case is visible even when trace is off; trace-flag check next
+  // (the most likely live cause — the adapter process not seeing the flag while
+  // the API server records navigation_state regardless).
   if (typeof browser_runtime_id !== "string" || browser_runtime_id.length === 0) {
-    // Trace is on but we have no runtime id to attribute the disposition to —
-    // make the skip visible rather than silently dropping the record.
     process.stderr.write(
       `[antigen-browser@${ADAPTER_VERSION}] disposition_post_skipped reason=no_runtime_id\n`
+    );
+    return;
+  }
+  if (process.env.ANTIGEN_BROWSER_TRACE !== "true") {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] disposition_post_skipped reason=trace_disabled\n`
     );
     return;
   }
@@ -1588,6 +1609,19 @@ async function handleLine(line) {
     const navigateUrl = msg?.params?.arguments?.url ?? "";
     const requestId = msg.id;
 
+    // Unconditional proof-of-entry — fires for EVERY browser_navigate before any
+    // preflight, disposition, or child forward, regardless of trace flag / runtime
+    // id. If a navigation appears in the trace as navigation_state but produces no
+    // browser_navigation_disposition, this line (plus the later
+    // disposition_post_skipped reason=…) explains where the disposition was lost.
+    // Sanitized: clipped runtime id only — never the raw URL, query string, token,
+    // or cdp_url.
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] browser_navigate_handler_entered` +
+      ` request_id=${requestId}` +
+      ` runtime_id=${browser_runtime_id ? clipRuntimeId(browser_runtime_id) : "none"}\n`
+    );
+
     // ── Navigation discipline pre-flight (Antigen Browser Realism v1) ─────────
     // Decide BEFORE forwarding to the child whether this direct navigation is an
     // acceptable jump or a shortcut around visible refs. A blocked decision (only
@@ -1654,6 +1688,11 @@ async function handleLine(line) {
     });
     pendingNavigations.set(requestId, { url: navigateUrl, resolve: resolveChildResponse });
 
+    // INVARIANT: noteNavigationDisposition (above) MUST run before this is the
+    // ONLY child.stdin.write reachable for browser_navigate. The block path returns
+    // before forwarding; this allow path forwards only after the disposition call.
+    // Do not move this write above the disposition call or add another navigate
+    // forward path. (Guarded by the ordering test in antigen-browser-adapter.test.mjs.)
     // Forward to @playwright/mcp for actual page load.
     child.stdin.write(line);
 

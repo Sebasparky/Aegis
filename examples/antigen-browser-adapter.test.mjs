@@ -1945,6 +1945,12 @@ async function createNavMockApiServer(opts = {}) {
   const navRequests = [];
   const endpointRequests = [];
   const dispositionRequests = [];
+  // True once at least one navigation-disposition POST has been received. The fake
+  // child fires /__child_received_navigate when it gets the navigate line; we
+  // snapshot this flag at that moment to prove the disposition POST landed first
+  // (i.e. noteNavigationDisposition ran before child.stdin.write).
+  let navigationDispositionSeen = false;
+  const childNavigateMarkers = [];
 
   const server = createServer((req, res) => {
     let body = "";
@@ -1955,6 +1961,15 @@ async function createNavMockApiServer(opts = {}) {
         let parsedDisp = {};
         try { parsedDisp = JSON.parse(body); } catch {}
         dispositionRequests.push(parsedDisp);
+        navigationDispositionSeen = true;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      // Ordering marker fired by the fake MCP child when it receives a navigate
+      // line. Snapshot whether the disposition POST has already arrived.
+      if (req.method === "POST" && req.url === "/__child_received_navigate") {
+        childNavigateMarkers.push({ disposition_seen_at_child_receipt: navigationDispositionSeen });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -2020,13 +2035,26 @@ async function createNavMockApiServer(opts = {}) {
     getNavRequests: () => navRequests,
     getEndpointRequests: () => endpointRequests,
     getDispositionRequests: () => dispositionRequests,
+    getChildNavigateMarkers: () => childNavigateMarkers,
   };
 }
 
-// Fake MCP stub that responds to browser_navigate with a success result.
+// Fake MCP stub that responds to browser_navigate with a success result. When
+// ANTIGEN_FAKE_MCP_MARKER_URL is set (inherited from the adapter's spawn env), it
+// fires an ordering marker (POST to that URL) BEFORE writing the navigate response,
+// so the ordering test can prove the adapter's disposition POST landed before the
+// navigate line reached the child. Backward-compatible: with no marker URL set,
+// behavior is identical to before.
 const FAKE_MCP_NAVIGATE_STUB_SRC = `
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin });
+const markerUrl = process.env.ANTIGEN_FAKE_MCP_MARKER_URL;
+function respondNavigate(id, url) {
+  process.stdout.write(JSON.stringify({
+    jsonrpc: "2.0", id,
+    result: { content: [{ type: "text", text: "Navigated to " + (url ?? "unknown") }] }
+  }) + "\\n");
+}
 rl.on("line", (line) => {
   try {
     const msg = JSON.parse(line.trim());
@@ -2036,10 +2064,15 @@ rl.on("line", (line) => {
         result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "fake-mcp-nav", version: "0" } }
       }) + "\\n");
     } else if (msg.method === "tools/call" && msg.params?.name === "browser_navigate") {
-      process.stdout.write(JSON.stringify({
-        jsonrpc: "2.0", id: msg.id,
-        result: { content: [{ type: "text", text: "Navigated to " + (msg.params?.arguments?.url ?? "unknown") }] }
-      }) + "\\n");
+      const url = msg.params?.arguments?.url;
+      if (markerUrl) {
+        // Fire the ordering marker first; only respond once the marker POST is sent.
+        fetch(markerUrl, { method: "POST" })
+          .catch(() => {})
+          .finally(() => respondNavigate(msg.id, url));
+      } else {
+        respondNavigate(msg.id, url);
+      }
     }
   } catch {}
 });
@@ -2710,6 +2743,104 @@ describe("I. browser_navigate — navigation-aware pointer continuity", () => {
     // A preflight line was emitted per navigate.
     const preflightCount = (stderrBuf.match(/navigate_preflight/g) ?? []).length;
     assert.equal(preflightCount, 2, `expected two navigate_preflight stderr lines, got ${preflightCount}`);
+  });
+
+  // ── Requirement 5: the live browser_navigate branch emits the unconditional
+  // handler-entry + preflight diagnostics AND attempts the navigation-disposition
+  // POST on an ordinary (non-hard-mode) allowed navigation. This is the path the
+  // live trace exercised when it showed navigation_state but zero disposition
+  // events — it now must produce a disposition POST.
+  test("10. live navigate branch emits handler-entered + preflight and attempts the navigation-disposition POST", { timeout: 7000 }, async () => {
+    const { server, port, getDispositionRequests } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_TRACE: "true",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderrBuf = "";
+    adapter.stdout.on("data", () => {});
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 220, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    // Unconditional proof-of-entry + preflight diagnostics both fired for the navigate.
+    assert.ok(stderrBuf.includes("browser_navigate_handler_entered"),
+      `expected browser_navigate_handler_entered in stderr: ${stderrBuf}`);
+    assert.match(stderrBuf, /browser_navigate_handler_entered request_id=220/,
+      `expected handler-entered to carry the request id: ${stderrBuf}`);
+    assert.ok(stderrBuf.includes("navigate_preflight"),
+      `expected navigate_preflight in stderr: ${stderrBuf}`);
+
+    // The navigation-disposition POST was attempted and landed at the backend.
+    const disps = getDispositionRequests();
+    assert.equal(disps.length, 1, `expected exactly one navigation-disposition POST, got ${disps.length}`);
+    assert.equal(disps[0].tool, "browser_navigate", `disposition POST must be for browser_navigate`);
+    assert.ok(typeof disps[0].navigation_disposition === "string" && disps[0].navigation_disposition.length > 0,
+      `expected a navigation_disposition value, got: ${JSON.stringify(disps[0])}`);
+  });
+
+  // ── Requirement 4: a browser_navigate must never reach child.stdin.write
+  // without noteNavigationDisposition running first. The fake child fires an
+  // ordering marker (/__child_received_navigate) the instant it receives the
+  // navigate line; the mock snapshots whether the disposition POST had already
+  // arrived. Because the adapter awaits noteNavigationDisposition (which sends the
+  // POST) before forwarding to the child, the snapshot must be true. This test
+  // fails if that ordering is ever broken (e.g. the forward is moved earlier).
+  test("11. browser_navigate cannot reach child.stdin.write before noteNavigationDisposition runs", { timeout: 7000 }, async () => {
+    const { server, port, getChildNavigateMarkers } = await createNavMockApiServer();
+    const { binPath, cleanup } = createNavigateFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_TRACE: "true",
+        // Inherited by the spawned fake child; tells it to fire the ordering marker.
+        ANTIGEN_FAKE_MCP_MARKER_URL: `http://127.0.0.1:${port}/__child_received_navigate`,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    adapter.stdout.on("data", () => {});
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 230, method: "tools/call",
+      params: { name: "browser_navigate", arguments: { url: "https://www.ikea.com/us/en/" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const markers = getChildNavigateMarkers();
+    assert.equal(markers.length, 1, `expected the child to receive exactly one navigate, got ${markers.length}`);
+    assert.equal(markers[0].disposition_seen_at_child_receipt, true,
+      `browser_navigate reached child.stdin.write before the disposition POST was sent — ordering invariant broken`);
   });
 });
 

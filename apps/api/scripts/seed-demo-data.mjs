@@ -1051,6 +1051,40 @@ const WORKSPACE_TASKS = [
   }]
 ];
 
+// Agent bearer-token passes. requireAgentToken (agent-api.ts) resolves a pass by
+// p.user_id === MOCK_USER_ID && p.token === token, then finds the delegation via
+// agentDelegations[].token_id === pass.id. These mirror the in-code fallback in
+// persistence.ts seedDefaultData(); for demo tokens id === token (demo shorthand).
+const DEMO_PASS_EXPIRY = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+const DEMO_PASSES = [
+  [
+    "pass_demo_001",
+    {
+      id: "pass_demo_001",
+      token: "pass_demo_001",
+      user_id: "user_001",
+      agent_name: "agent_demo_001",
+      default_collar_id: "collar_research_001",
+      status: "active",
+      expires_at: DEMO_PASS_EXPIRY,
+      created_at: "2026-04-30T12:00:00.000Z"
+    }
+  ],
+  [
+    "pass_demo_002",
+    {
+      id: "pass_demo_002",
+      token: "pass_demo_002",
+      user_id: "user_001",
+      agent_name: "agent_demo_restricted",
+      default_collar_id: "collar_review_001",
+      status: "active",
+      expires_at: DEMO_PASS_EXPIRY,
+      created_at: "2026-04-30T12:00:01.000Z"
+    }
+  ]
+];
+
 const store = {
   users: [
     [
@@ -1187,7 +1221,7 @@ const store = {
       }
     ]
   ],
-  passes: [],
+  passes: DEMO_PASSES,
   sessions: [],
   approvals: [],
   receipts: [],
@@ -1300,7 +1334,9 @@ const store = {
 };
 
 writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 3 collars, 1 workspace, 3 tasks, 1 payment method written.");
+console.log("Demo data seeded. 9 routes, 6 skills, 2 delegations, 2 agent passes, 3 collars, 1 workspace, 3 tasks, 1 payment method written.");
+console.log("  pass_demo_001                       — Agent A bearer pass             (collar_research_001, active)");
+console.log("  pass_demo_002                       — Agent B bearer pass             (collar_review_001, active)");
 console.log("  route_demo_banking_001              — Demo Banking Workflow           (localhost, aegis_scanned, private)");
 console.log("  route_demo_wikipedia_001            — Wikipedia Search                (en.wikipedia.org, aegis_scanned, approved, agent_runnable)");
 console.log("  route_demo_draft_001                — Account Statement Draft         (localhost, unverified_draft)");

@@ -9,13 +9,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   pickTargetPoint,
   generatePointerPath,
+  clampPathToViewport,
   dispatchPointerMovePath,
   clickAtPoint,
   clickBoxWithPointer,
   clickPointWithPointer,
   makePointerRuntimeState,
 } from "../runtime/nativePointerRuntime.js";
-import type { ElementBox } from "../runtime/nativePointerRuntime.js";
+import type { ElementBox, TimedPoint } from "../runtime/nativePointerRuntime.js";
 import {
   getMovementPoints,
   normalizePointerTrace,
@@ -119,6 +120,77 @@ describe("generatePointerPath", () => {
     const { path: fastPath }    = generatePointerPath(START, END, { mode: "fast",    random: () => 0.5 });
     const { path: carefulPath } = generatePointerPath(START, END, { mode: "careful", random: () => 0.5 });
     expect(carefulPath.length).toBeGreaterThan(fastPath.length);
+  });
+});
+
+// ─── clampPathToViewport ─────────────────────────────────────────────────────
+
+describe("clampPathToViewport", () => {
+  const VIEWPORT = { width: 1280, height: 800 };
+  const PAD = 8;
+
+  it("leaves an already in-viewport path unchanged (endpoint preserved)", () => {
+    const path: TimedPoint[] = [
+      { x: 100, y: 100, delay_ms: 0 },
+      { x: 400, y: 300, delay_ms: 10 },
+      { x: 640, y: 400, delay_ms: 10 },
+    ];
+    const result = clampPathToViewport(path, VIEWPORT, PAD);
+    expect(result).toEqual(path);
+    // Endpoint is exact
+    expect(result[result.length - 1]).toEqual({ x: 640, y: 400, delay_ms: 10 });
+  });
+
+  it("clamps negative intermediate points into [pad, dim-pad] while keeping a valid endpoint", () => {
+    const path: TimedPoint[] = [
+      { x: 640, y: 400, delay_ms: 0 },
+      { x: -200, y: -756, delay_ms: 12 }, // overshoot above/left of viewport
+      { x: 500, y: 250, delay_ms: 12 },   // valid endpoint
+    ];
+    const result = clampPathToViewport(path, VIEWPORT, PAD);
+    for (const p of result) {
+      expect(p.x).toBeGreaterThanOrEqual(PAD);
+      expect(p.x).toBeLessThanOrEqual(VIEWPORT.width - PAD);
+      expect(p.y).toBeGreaterThanOrEqual(PAD);
+      expect(p.y).toBeLessThanOrEqual(VIEWPORT.height - PAD);
+    }
+    // Overshoot point pinned to the padded edge
+    expect(result[1]).toEqual({ x: PAD, y: PAD, delay_ms: 12 });
+    // Valid endpoint untouched
+    expect(result[2]).toEqual({ x: 500, y: 250, delay_ms: 12 });
+  });
+
+  it("clamps points beyond the bottom/right edge", () => {
+    const path: TimedPoint[] = [
+      { x: 640, y: 400, delay_ms: 0 },
+      { x: 5000, y: 1608, delay_ms: 10 },
+    ];
+    const result = clampPathToViewport(path, VIEWPORT, PAD);
+    expect(result[1]).toEqual({ x: VIEWPORT.width - PAD, y: VIEWPORT.height - PAD, delay_ms: 10 });
+  });
+
+  it("preserves point count and delay_ms (timing/realism unchanged)", () => {
+    const { path } = generatePointerPath(START, END, { mode: "native", random: () => 0.5 });
+    const result = clampPathToViewport(path, VIEWPORT, PAD);
+    expect(result.length).toBe(path.length);
+    expect(result.map((p) => p.delay_ms)).toEqual(path.map((p) => p.delay_ms));
+  });
+
+  it("handles a degenerate viewport without NaN or crossed bounds", () => {
+    const tiny = { width: 10, height: 10 }; // <= 2*pad
+    const path: TimedPoint[] = [
+      { x: -50, y: -50, delay_ms: 0 },
+      { x: 999, y: 999, delay_ms: 5 },
+    ];
+    const result = clampPathToViewport(path, tiny, PAD);
+    for (const p of result) {
+      expect(Number.isNaN(p.x)).toBe(false);
+      expect(Number.isNaN(p.y)).toBe(false);
+      expect(p.x).toBeGreaterThanOrEqual(0);
+      expect(p.x).toBeLessThanOrEqual(tiny.width);
+      expect(p.y).toBeGreaterThanOrEqual(0);
+      expect(p.y).toBeLessThanOrEqual(tiny.height);
+    }
   });
 });
 
@@ -242,6 +314,35 @@ describe("clickBoxWithPointer", () => {
     await clickBoxWithPointer(state, BOX, sendCdp, mockSleep, { random: () => 0.3 });
     const methods = sendCdp.mock.calls.map(([m]) => m);
     expect(methods).not.toContain("Runtime.evaluate");
+  });
+
+  it("dispatches no mouse event outside the viewport even when the curve overshoots an edge", async () => {
+    const sendCdp = vi.fn();
+    // Start at the top edge, target a box hugging the top-right corner so a
+    // perpendicular Bézier bias is likely to push intermediate points off-screen.
+    const state = makePointerRuntimeState({
+      current_x: 1260,
+      current_y: 10,
+      viewport_width: 1280,
+      viewport_height: 800,
+      interaction_mode: "native",
+    });
+    const edgeBox: ElementBox = { x: 1230, y: 4, width: 40, height: 20 };
+
+    // random = 0 maximises the perpendicular bias sign/magnitude in the Bézier path.
+    await clickBoxWithPointer(state, edgeBox, sendCdp, mockSleep, { random: () => 0 });
+
+    const mouseEvents = sendCdp.mock.calls.filter(
+      ([m]) => m === "Input.dispatchMouseEvent",
+    );
+    expect(mouseEvents.length).toBeGreaterThan(0);
+    for (const [, params] of mouseEvents) {
+      const { x, y } = params as { x: number; y: number };
+      expect(x).toBeGreaterThanOrEqual(0);
+      expect(x).toBeLessThanOrEqual(1280);
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(y).toBeLessThanOrEqual(800);
+    }
   });
 });
 

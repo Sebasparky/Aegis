@@ -139,14 +139,22 @@ export const ACTIVE_ELEMENT_CHECK_EXPR = `(function(){
 // JS IIFE that finds a visible search/submit button.
 // Returns { x, y, width, height, vw, vh } or null. Used by the submit fallback path
 // when Enter does not trigger navigation. Returns only box geometry — no text or hrefs.
+//
+// The rect must be fully inside the current viewport. A scrolled-off submit button
+// returns a negative or oversized getBoundingClientRect (e.g. r.top = -756), which
+// would otherwise drive the pointer to impossible coordinates. Off-viewport
+// candidates are skipped; if none are visible the expr returns null and the caller
+// falls back to keyboard Enter only.
 export const SEARCH_BUTTON_FIND_EXPR = "(function(){"
   + "var selectors=['button[type=submit]','input[type=submit]',"
   + "'button[aria-label*=\"search\" i]','[role=\"button\"][aria-label*=\"search\" i]'];"
+  + "var vw=window.innerWidth,vh=window.innerHeight;"
   + "for(var i=0;i<selectors.length;i++){"
   + "var el=document.querySelector(selectors[i]);"
   + "if(!el)continue;"
   + "var r=el.getBoundingClientRect();"
-  + "if(r.width>0&&r.height>0)return{x:r.left,y:r.top,width:r.width,height:r.height,vw:window.innerWidth,vh:window.innerHeight};}"
+  + "if(r.width>0&&r.height>0&&r.top>=0&&r.left>=0&&r.bottom<=vh&&r.right<=vw)"
+  + "return{x:r.left,y:r.top,width:r.width,height:r.height,vw:vw,vh:vh};}"
   + "return null;})()";
 
 export interface RealisticClickResult {

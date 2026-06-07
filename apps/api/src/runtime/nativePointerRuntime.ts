@@ -415,6 +415,42 @@ export function generatePointerPath(
 }
 
 /**
+ * Constrains a generated pointer path to the visible viewport.
+ *
+ * Generated curves (Bézier overshoot near edges, or template arcs scaled around
+ * an endpoint close to a border) can briefly produce intermediate points outside
+ * the viewport — visually the pointer would leave the page. This clamps every
+ * point into `[padding, dim - padding]` on each axis, keeping a small safe margin
+ * from the edges.
+ *
+ * Only points that actually overshoot are pinned to the edge; in-bounds points
+ * (the bulk of the curve, and a valid endpoint) are untouched, so the curved,
+ * human-like shape is preserved — this is not a straight-line collapse. Timing
+ * (`delay_ms`) is preserved exactly.
+ *
+ * Note: this bounds the *rendered movement only*. The actual click coordinate is
+ * the separately-returned `target` from movePointerToBox, so clamping the path
+ * never moves a valid click. Endpoint/ref validity is enforced elsewhere (callers
+ * fail closed on stale/expired/out-of-viewport targets before reaching here).
+ */
+export function clampPathToViewport(
+  path: TimedPoint[],
+  viewport: { width: number; height: number },
+  padding = 8,
+): TimedPoint[] {
+  const clampAxis = (value: number, dim: number): number => {
+    // Degenerate viewport (too small for the margin): clamp to [0, dim] instead.
+    if (!(dim > padding * 2)) return Math.max(0, Math.min(dim, value));
+    return Math.max(padding, Math.min(dim - padding, value));
+  };
+  return path.map((p) => ({
+    x: clampAxis(p.x, viewport.width),
+    y: clampAxis(p.y, viewport.height),
+    delay_ms: p.delay_ms,
+  }));
+}
+
+/**
  * Dispatches a sequence of CDP mouseMoved events along the given path.
  * Waits delay_ms before each event. No mousePressed or mouseReleased events
  * are sent here — use clickAtPoint for the click.
@@ -486,11 +522,18 @@ export async function movePointerToBox(
   const startX = state.current_x;
   const startY = state.current_y;
   const target = pickTargetPoint(box, { random: options?.random });
-  const { path, generator } = generatePointerPath(
+  const { path: rawPath, generator } = generatePointerPath(
     { x: startX, y: startY },
     target,
     { mode, random: options?.random, templateTraces: options?.templateTraces, purpose: options?.purpose },
   );
+  // Bound the rendered movement to the visible viewport. The click coordinate is
+  // `target` (returned below), so a valid in-viewport target is still clicked
+  // exactly — only synthetic overshoot in intermediate points is pinned to the edge.
+  const path = clampPathToViewport(rawPath, {
+    width: state.viewport_width,
+    height: state.viewport_height,
+  });
   if (
     options?.debugLabel &&
     (process.env.ANTIGEN_CDP_DIAGNOSTICS === "true" || process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true")

@@ -164,6 +164,7 @@ import {
   computeScrollTargetY,
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
+  SEARCH_BUTTON_FIND_EXPR,
 } from "../runtime/realisticBrowserActions.js";
 import { ensurePointerDebugOverlayWithStatus } from "../runtime/nativePointerRuntime.js";
 
@@ -947,6 +948,45 @@ describe("realisticTypeTextViaCDP — submit:true dispatches Enter after chars",
       .filter((m) => m?.params?.key === "Enter");
     expect(enterEvents).toHaveLength(0);
   });
+
+  // When Enter does not navigate and no usable visible submit button is found,
+  // the fallback is skipped: submit_method stays "enter" and no pointer movement
+  // is dispatched (the real SEARCH_BUTTON_FIND_EXPR returns null for off-viewport
+  // buttons; here the find eval returns no box geometry).
+  it("submit fallback skipped when no usable button: submit_method stays enter, no pointer dispatch", async () => {
+    mockState.nextLocationHref = "https://example.com"; // urlBefore === urlAfter → fallback path entered
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hi",
+      submit: true,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.submitted).toBe(true);
+    expect(result.submit_method).toBe("enter");
+
+    const mouseEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchMouseEvent");
+    expect(mouseEvents).toHaveLength(0);
+  });
+});
+
+// ─── 15b. SEARCH_BUTTON_FIND_EXPR — viewport-visibility predicate ─────────────
+
+describe("SEARCH_BUTTON_FIND_EXPR — only returns viewport-visible buttons", () => {
+  it("requires the rect to be fully inside the viewport (top/left >= 0, bottom/right <= viewport)", () => {
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.top>=0");
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.left>=0");
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.bottom<=vh");
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.right<=vw");
+  });
+
+  it("still requires a non-zero box", () => {
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.width>0");
+    expect(SEARCH_BUTTON_FIND_EXPR).toContain("r.height>0");
+  });
 });
 
 // ─── 16. realisticTypeTextViaCDP — no target, no active element ──────────────
@@ -1315,6 +1355,41 @@ describe("Persistent pointer continuity — taskBrowserSessions integration", ()
     const first = mouseMovedEvents[0];
     expect(Math.abs(first.x - 520)).toBeLessThan(50);
     expect(Math.abs(first.y - 180)).toBeLessThan(50);
+  });
+
+  // Test 5 — viewport-bounded path: an edge-hugging target never dispatches
+  // off-viewport pointer coordinates even when the generated curve would overshoot.
+  it("browser_type focus to an edge target dispatches no negative / off-viewport coords", async () => {
+    // Target box hugging the top edge; start far away so the curve is long and
+    // a perpendicular Bézier bias would otherwise overshoot above the viewport.
+    mockState.nextEvalResponse = { x: 1180, y: 4, width: 80, height: 20, vw: 1280, vh: 800 };
+    taskMockState.pointerStore.set(SESSION_ID, { x: 100, y: 760, initialized: true });
+
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "bookcase",
+      elementDescription: "Search field",
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.focused).toBe(true);
+
+    const mouseEvents = mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Input.dispatchMouseEvent")
+      .map((m) => m.params as { x: number; y: number });
+
+    expect(mouseEvents.length).toBeGreaterThan(0);
+    for (const e of mouseEvents) {
+      expect(e.x).toBeGreaterThanOrEqual(0);
+      expect(e.x).toBeLessThanOrEqual(1280);
+      expect(e.y).toBeGreaterThanOrEqual(0);
+      expect(e.y).toBeLessThanOrEqual(800);
+    }
   });
 
   // ── realisticClickKnownBox — Phase 4B revalidation (defined inside this

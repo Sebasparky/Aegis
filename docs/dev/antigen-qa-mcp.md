@@ -2,6 +2,12 @@
 
 **Dev/QA only.** Nothing here changes production behavior, browser click/snapshot/navigation logic, approvals, receipts, scoring, credential policy, or checkout confirmation. It only ensures the agent's **browser tool calls are routed through the Antigen adapter** instead of raw Playwright.
 
+> For the **full end-to-end manual browser QA recipe** (required env, API start, seeding,
+> runtime-endpoint verification, the IKEA add-to-bag flow, expected markers, troubleshooting,
+> and the next QA milestone), see [`antigen-browser-qa.md`](./antigen-browser-qa.md). This
+> doc focuses on **MCP routing/config** — making sure the agent attaches to the Antigen
+> adapter, not raw `@playwright/mcp`.
+
 ## The problem this fixes
 
 Antigen's hard-mode browser logic (navigation discipline, `antigen_snapshot`, pointer-realism clicks, `browser_run_trace` disposition events) runs **inside the Antigen browser adapter** (`examples/antigen-browser-adapter.mjs`). The API-side flags below are necessary but **not sufficient on their own**:
@@ -55,7 +61,14 @@ A copy-pasteable sample lives at [`examples/mcp/antigen-qa.mcp.json`](../../exam
 }
 ```
 
-The wrapper script is the **preferred** form: it exports every QA flag (plus `ANTIGEN_ADAPTER_REQUIRE_QA_ENV=true`), so the adapter can never be launched with a partial env. A direct-node launch (`"command": "node", "args": [".../examples/antigen-browser-adapter.mjs"], "env": { ...all QA flags... }`) is supported as a fallback, but the adapter will **fail closed** (see below) if any required flag is missing.
+The wrapper script is the **canonical source of the QA env vars** — it exports every QA flag (plus `ANTIGEN_ADAPTER_REQUIRE_QA_ENV=true`), so the adapter can never be launched with a partial env — and it is convenient for terminal/manual runs.
+
+> **macOS / Claude local MCP caveat.** Pointing the `antigen-browser` server's `command`
+> directly at the `.sh` wrapper can fail under Claude's local MCP launcher with
+> **"Operation not permitted."** In that case, use the **inline form** that runs the
+> wrapper's exact exports through `/bin/bash -lc … exec node …adapter.mjs` (see
+> [`antigen-browser-qa.md` → Launching the adapter](./antigen-browser-qa.md#4-launching-the-adapter-macos--claude-local-mcp)).
+> A direct-node launch (`"command": "node", "args": [".../examples/antigen-browser-adapter.mjs"], "env": { ...all QA flags... }`) is also supported. The choice of launch shape (wrapper vs. inline-bash vs. direct-node) does not matter — **what matters is that the adapter starts with all required QA env present and the fail-closed guard on.** If anything is missing the adapter **fails closed** (see below).
 
 ### Adapter env reference
 
@@ -86,7 +99,7 @@ The validation command and config files cannot see Claude's **live** MCP launch 
 [antigen-browser@<VERSION>] Set ANTIGEN_ADAPTER_REQUIRE_QA_ENV=false to allow weak/default mode (non-QA only).
 ```
 
-**Preferred config** points `antigen-browser` at `scripts/run-antigen-browser-adapter-qa.sh` (the wrapper exports every QA flag and the guard var, so it can never be launched with a partial env). The direct-node form still works but must carry the full env block, or the guard will FATAL. `ANTIGEN_BROWSER_HEADLESS` not being `false` is a warning, not a FATAL.
+The wrapper at `scripts/run-antigen-browser-adapter-qa.sh` is the canonical source of every QA flag and the guard var. On macOS, if Claude's MCP launcher cannot execute the wrapper directly ("Operation not permitted"), inline the wrapper's exports via `/bin/bash -lc … exec node …adapter.mjs` instead (see [`antigen-browser-qa.md`](./antigen-browser-qa.md)). The direct-node form also works but must carry the full env block. Any launch shape is fine **as long as the full QA env is present** — otherwise the guard will FATAL. `ANTIGEN_BROWSER_HEADLESS` not being `false` is a warning, not a FATAL.
 
 ## Validation command
 
@@ -116,7 +129,7 @@ It is read-only and dev-only — it never edits your config.
    ANTIGEN_CDP_DIAGNOSTICS=true \
    npm run dev
    ```
-2. **Configure the agent to use the Antigen adapter MCP via the wrapper script, not raw Playwright.** Apply the config from `examples/mcp/antigen-qa.mcp.json` — point `antigen-browser` at `scripts/run-antigen-browser-adapter-qa.sh` (substitute the absolute repo path; the wrapper carries the QA env, so no env block is needed for it). Ensure no raw `playwright` server is registered and no `mcp__playwright__*` tools are pre-allowlisted.
+2. **Configure the agent to use the Antigen adapter MCP, not raw Playwright.** Apply the config from `examples/mcp/antigen-qa.mcp.json` — point `antigen-browser` at `scripts/run-antigen-browser-adapter-qa.sh` (substitute the absolute repo path; the wrapper carries the QA env, so no env block is needed). **On macOS**, if the wrapper cannot be executed directly by Claude's MCP launcher, use the inline `/bin/bash -lc … exec node …adapter.mjs` form instead — same exports (see [`antigen-browser-qa.md`](./antigen-browser-qa.md)). Ensure no raw `playwright` server is registered and no `mcp__playwright__*` tools are pre-allowlisted.
 3. **Validate:** `npm run qa:validate-mcp` → must print `RESULT: ✅ PASS`.
 4. **Restart the agent's MCP session** so it re-reads the MCP config and re-attaches to the adapter (config changes are not picked up live).
 5. **Confirm the adapter is the surface — and that it did NOT fail closed.** In the `antigen-browser` MCP server's stderr you must see, at startup:

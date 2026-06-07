@@ -187,9 +187,17 @@ The Aegis connector returns **two MCP server entries**. Both are required for th
 }
 ```
 
+> **Non-QA / pass-through launch only.** The direct `node …antigen-browser-adapter.mjs`
+> config above (with no QA env) starts the adapter in default pass-through mode. It does
+> **not** enable Antigen hard-mode browser QA (realistic-navigation discipline,
+> `antigen_snapshot` ownership, pointer realism, trace dispositions). For hard-mode QA the
+> adapter must launch with the full QA env and the fail-closed guard on — see
+> [`dev/antigen-browser-qa.md`](./dev/antigen-browser-qa.md) (end-to-end recipe) and
+> [`dev/antigen-qa-mcp.md`](./dev/antigen-qa-mcp.md) (MCP routing / launch form).
+
 **`antigen`** — Trust tools. Credential injection, approvals, sensitive action gates, receipts, vault passes, runtime guardrails. All Aegis-owned operations go through this server.
 
-**`antigen-browser`** — Browser adapter. At startup, `antigen-browser-adapter.mjs` calls `POST /api/agent/v1/runtime/browser-endpoint` to get the real CDP endpoint, then spawns `@playwright/mcp --cdp-endpoint <cdp_url>`. The agent uses this server for all ordinary browsing — navigation, reading, clicking, scrolling. Aegis does not see or control these operations.
+**`antigen-browser`** — Browser adapter. At startup, `antigen-browser-adapter.mjs` calls `POST /api/agent/v1/runtime/browser-endpoint` to get the real CDP endpoint, then spawns `@playwright/mcp --cdp-endpoint <cdp_url>`. The agent uses this server for all ordinary browsing — navigation, reading, clicking, scrolling. In **default pass-through mode** (no QA env, as configured above) Aegis does not mediate these operations. In **Antigen hard-mode QA** (full QA env set), the adapter mediates browsing — enforcing realistic-navigation discipline, owning `antigen_snapshot` resolution, applying pointer realism, and blocking raw `browser_snapshot` — before tool calls reach the child Playwright process. See [`dev/antigen-browser-qa.md`](./dev/antigen-browser-qa.md) and [`dev/antigen-qa-mcp.md`](./dev/antigen-qa-mcp.md).
 
 **Port handling.** The adapter resolves the CDP port dynamically at startup. If Chrome launches on an alternate port (`port_auto_selected=true`), the adapter picks up the correct URL automatically — no config editing or platform restart is required.
 

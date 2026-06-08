@@ -135,6 +135,35 @@ if (REQUIRE_QA_ENV) {
   }
 }
 
+// ─── Startup token self-check (non-blocking) ──────────────────────────────────
+// Resolve AEGIS_AGENT_TOKEN against the API and print the agent it maps to, so a human can
+// confirm this adapter and the aegis MCP server resolve to the SAME delegation. A mismatch is
+// the root cause of profile-fill INVALID_TOKEN / TASK_BROWSER_SESSION_FORBIDDEN during checkout.
+// Sanitized: logs only the token id (the demo pass id already in MCP config) plus agent_name /
+// delegation_id. Fire-and-forget so it never blocks the stdio loop.
+fetch(`${BASE}/api/agent/v1/me`, { headers: { Authorization: `Bearer ${TOKEN}` } })
+  .then(async (res) => {
+    if (res.status === 401) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] TOKEN-WARN: AEGIS_AGENT_TOKEN='${TOKEN}' does not resolve to ` +
+        `a delegation (401 from /api/agent/v1/me). Seed demo data and reload the API.\n`
+      );
+      return;
+    }
+    const body = await res.json().catch(() => ({}));
+    const id = body?.data ?? body;
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] token_self_check ok token='${TOKEN}' ` +
+      `agent='${id?.agent_name ?? "?"}' delegation='${id?.delegation_id ?? "?"}'. ` +
+      `This MUST match the aegis MCP server's delegation.\n`
+    );
+  })
+  .catch((err) => {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] token_self_check skipped — API unreachable (${err.message}).\n`
+    );
+  });
+
 // ─── Static browser tool list (served without spawning a child) ───────────────
 // Schemas approximate @playwright/mcp@latest. The child validates actual args;
 // these schemas exist so Claude generates correct tool calls before runtime init.

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aegis QA — Hydrated Checkout Fixture (contact + shipping)</title>
+  <!--
+    Checkout Profile Field Fill v1 — hydrated-checkout fixture.
+
+    Purpose: prove the Antigen profile-field-fill executor resolves fields semantically and is
+    STRONGER than a fixed-id selector / generic browser_type on modern checkout pages.
+
+    What this simulates: every REHYDRATE_MS the contact/shipping inputs are destroyed and recreated
+    with FRESH random ids (and the label htmlFor re-pointed), exactly like a framework re-render of
+    a delivery/billing panel. The STABLE signals — accessible <label> text, placeholder, and the
+    autocomplete attribute — are preserved. A snapshot ref or `#id` captured a moment earlier will
+    miss (ELEMENT_NOT_FOUND / stale ref), but the executor's semantic resolver
+    (pickProfileFieldCandidate) should still fill every field.
+
+    Scope: contact + shipping ONLY. No payment card fields, no place-order button. Not a real store.
+  -->
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; color: #1a1a1a; }
+    h1 { font-size: 20px; } h2 { font-size: 15px; margin-top: 28px; color: #444; }
+    fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px 18px; margin: 14px 0; }
+    legend { font-weight: 600; padding: 0 6px; }
+    .field { margin: 12px 0; }
+    label { display: block; font-size: 13px; margin-bottom: 4px; color: #333; }
+    input, select { width: 100%; padding: 9px 10px; border: 1px solid #bbb; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+    input[data-antigen-filled="true"] { border-color: #2e7d32; background: #f3fbf4; }
+    .note { font-size: 12px; color: #777; margin-top: 6px; }
+    #rehydrate-count { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <h1>Hydrated Checkout (Aegis QA fixture)</h1>
+  <p class="note">
+    Inputs re-render every <span id="rehydrate-ms"></span>ms with new element ids
+    (re-renders: <span id="rehydrate-count">0</span>). Labels, placeholders, and autocomplete stay stable.
+  </p>
+
+  <form id="checkout-form" autocomplete="on" onsubmit="return false">
+    <fieldset>
+      <legend>Contact</legend>
+      <div class="field" data-field-kind="email">
+        <label>Email address</label>
+        <input type="email" name="email" autocomplete="email" placeholder="you@example.com" />
+      </div>
+      <div class="field" data-field-kind="phone">
+        <label>Phone number</label>
+        <input type="tel" name="phone" autocomplete="tel" placeholder="(555) 555-5555" />
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Shipping address</legend>
+      <div class="field" data-field-kind="first_name">
+        <label>First name</label>
+        <input type="text" name="first_name" autocomplete="given-name" placeholder="First name" />
+      </div>
+      <div class="field" data-field-kind="last_name">
+        <label>Last name</label>
+        <input type="text" name="last_name" autocomplete="family-name" placeholder="Last name" />
+      </div>
+      <div class="field" data-field-kind="shipping_address_line1">
+        <label>Street address</label>
+        <input type="text" name="address1" autocomplete="address-line1" placeholder="Street and number" />
+      </div>
+      <div class="field" data-field-kind="shipping_address_line2">
+        <label>Apartment, suite, etc. (optional)</label>
+        <input type="text" name="address2" autocomplete="address-line2" placeholder="Apt, unit, suite" />
+      </div>
+      <div class="field" data-field-kind="city">
+        <label>City</label>
+        <input type="text" name="city" autocomplete="address-level2" placeholder="City" />
+      </div>
+      <div class="field" data-field-kind="region">
+        <label>State / Province</label>
+        <input type="text" name="region" autocomplete="address-level1" placeholder="State" />
+      </div>
+      <div class="field" data-field-kind="postal_code">
+        <label>ZIP / Postal code</label>
+        <input type="text" name="postal_code" autocomplete="postal-code" placeholder="ZIP code" />
+      </div>
+    </fieldset>
+  </form>
+
+  <script>
+    // Re-render interval. The DOM is rebuilt with new ids to break any captured snapshot ref / id.
+    var REHYDRATE_MS = 2500;
+    document.getElementById('rehydrate-ms').textContent = String(REHYDRATE_MS);
+
+    function rand() { return Math.random().toString(36).slice(2, 10); }
+
+    // Rebuild each input element from scratch with a FRESH random id and a re-pointed label htmlFor.
+    // Stable signals (label text, placeholder, autocomplete, name, type) are carried over verbatim.
+    // Already-filled values are preserved so a fill is not silently wiped by the next re-render.
+    function rehydrate() {
+      var fields = document.querySelectorAll('.field');
+      for (var i = 0; i < fields.length; i++) {
+        var wrap = fields[i];
+        var label = wrap.querySelector('label');
+        var old = wrap.querySelector('input, select');
+        if (!old) continue;
+        var fresh = document.createElement(old.tagName.toLowerCase());
+        var newId = 'in_' + rand();             // <-- id changes every cycle
+        fresh.id = newId;
+        fresh.name = old.name;                  // stable
+        if (old.getAttribute('type')) fresh.setAttribute('type', old.getAttribute('type')); // stable
+        if (old.getAttribute('autocomplete')) fresh.setAttribute('autocomplete', old.getAttribute('autocomplete')); // stable
+        if (old.getAttribute('placeholder')) fresh.setAttribute('placeholder', old.getAttribute('placeholder')); // stable
+        fresh.value = old.value;                // preserve any filled value
+        if (old.getAttribute('data-antigen-filled')) fresh.setAttribute('data-antigen-filled', old.getAttribute('data-antigen-filled'));
+        label.setAttribute('for', newId);       // label text stable, htmlFor re-pointed
+        old.parentNode.replaceChild(fresh, old);
+      }
+      var c = document.getElementById('rehydrate-count');
+      c.textContent = String(parseInt(c.textContent, 10) + 1);
+    }
+
+    setInterval(rehydrate, REHYDRATE_MS);
+  </script>
+</body>
+</html>

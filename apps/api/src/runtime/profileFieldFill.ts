@@ -140,24 +140,298 @@ export function maskProfileValue(kind: ProfileFieldKind, rawValue: string): stri
   }
 }
 
-// Build the selector expression for a single field, using the same priority as paymentCardFill.ts.
-function buildSelectorExpr(selector_hint?: string, label?: string, placeholder?: string): string {
-  if (selector_hint) {
-    return `document.querySelector(${JSON.stringify(selector_hint)})`;
+// ─── Semantic field resolution ────────────────────────────────────────────────
+//
+// Modern hydrated checkout pages re-render inputs and regenerate element ids on every
+// delivery/billing panel change, so a single brittle `querySelector(selector_hint)` (or a
+// snapshot ref captured a moment earlier) frequently misses. To survive this we resolve each
+// requested field semantically: the page is enumerated once for candidate fields (structural
+// metadata ONLY — never values), and a pure scoring function picks the best match using stable
+// signals (autocomplete attribute, accessible label, placeholder, name/id, field-kind). A
+// post-match kind-consistency check then fails closed if the chosen control's own signals point
+// at a different field kind. This recovery lives ONLY in the profile-field-fill executor; it does
+// not touch generic browser_type / browser_click / ag_* ref validation.
+
+/** Structural descriptor of a candidate field — emitted by the in-page enumeration. No values. */
+export interface ProfileFieldCandidate {
+  fill_id: string; // temporary stable handle assigned during enumeration (data-antigen-fill-id)
+  tag: string; // "input" | "select" | "textarea"
+  type: string; // input type, lowercased ("text" default)
+  name: string; // lowercased
+  id: string; // lowercased
+  autocomplete: string; // lowercased, whitespace-collapsed (may carry section tokens e.g. "shipping street-address")
+  placeholder: string; // lowercased
+  label_text: string; // lowercased accessible label text
+  aria_label: string; // lowercased
+  section_text: string; // lowercased nearest legend/section text
+}
+
+export interface ProfileFieldHints {
+  selector_hint?: string;
+  label?: string;
+  placeholder?: string;
+}
+
+export interface ProfileFieldResolution {
+  fill_id: string | null;
+  strategy: string; // which strategy matched, or "none"
+  reason?: string; // failure reason when fill_id is null: NO_CONFIDENT_MATCH | KIND_MISMATCH
+}
+
+interface KindSpec {
+  autocomplete: string[]; // meaningful autocomplete tokens for this kind
+  keywords: string[]; // substrings for label / placeholder / name / id matching
+}
+
+// Per-kind semantic signals. Keywords are matched against label/placeholder (raw, may contain spaces)
+// and against name/id (alphanumeric-normalized).
+const KIND_SPECS: Record<ProfileFieldKind, KindSpec> = {
+  first_name: { autocomplete: ["given-name"], keywords: ["first name", "firstname", "given name", "fname", "givenname"] },
+  last_name: { autocomplete: ["family-name"], keywords: ["last name", "lastname", "surname", "family name", "lname", "familyname"] },
+  email: { autocomplete: ["email"], keywords: ["email", "e-mail"] },
+  account_creation_email: { autocomplete: ["email"], keywords: ["email", "e-mail"] },
+  phone: { autocomplete: ["tel", "tel-national", "tel-local"], keywords: ["phone", "mobile", "telephone", "tel"] },
+  shipping_address_line1: {
+    autocomplete: ["address-line1", "street-address"],
+    keywords: ["address line 1", "street address", "address1", "addressline1", "street", "address"],
+  },
+  shipping_address_line2: {
+    autocomplete: ["address-line2"],
+    keywords: ["address line 2", "apartment", "apt", "unit", "suite", "address2", "addressline2", "line 2"],
+  },
+  city: { autocomplete: ["address-level2"], keywords: ["city", "town", "suburb"] },
+  region: { autocomplete: ["address-level1"], keywords: ["state", "province", "region", "county"] },
+  postal_code: { autocomplete: ["postal-code"], keywords: ["zip", "postal", "postcode", "post code", "zip code"] },
+  country: { autocomplete: ["country", "country-name"], keywords: ["country"] },
+};
+
+// Autocomplete token → kind family. Used by verifyKindConsistency to reject cross-kind fills.
+const AC_FAMILY: Record<string, string> = {
+  "given-name": "first_name",
+  "family-name": "last_name",
+  email: "email",
+  tel: "phone",
+  "tel-national": "phone",
+  "tel-local": "phone",
+  "address-line1": "addr1",
+  "street-address": "addr1",
+  "address-line2": "addr2",
+  "address-level2": "city",
+  "address-level1": "region",
+  "postal-code": "postal",
+  country: "country",
+  "country-name": "country",
+};
+
+const KIND_FAMILY: Record<ProfileFieldKind, string> = {
+  first_name: "first_name",
+  last_name: "last_name",
+  email: "email",
+  account_creation_email: "email",
+  phone: "phone",
+  shipping_address_line1: "addr1",
+  shipping_address_line2: "addr2",
+  city: "city",
+  region: "region",
+  postal_code: "postal",
+  country: "country",
+};
+
+function normAlnum(s: string): string {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// The last meaningful token of an autocomplete attribute (strips "shipping"/"billing"/"section-*" prefixes).
+function lastAutocompleteToken(autocomplete: string): string {
+  const toks = (autocomplete || "").split(/\s+/).filter(Boolean);
+  return toks.length ? toks[toks.length - 1] : "";
+}
+
+/**
+ * Verify a resolved candidate's own signals are consistent with the requested field kind.
+ * Fails closed: a candidate whose autocomplete or input type declares a DIFFERENT kind family is
+ * rejected, so e.g. an email request can never be filled into a `tel` field.
+ * Exported for unit testing.
+ */
+export function verifyKindConsistency(
+  kind: ProfileFieldKind,
+  c: ProfileFieldCandidate,
+): { ok: boolean; reason?: string } {
+  const wantFamily = KIND_FAMILY[kind];
+  const acTok = lastAutocompleteToken(c.autocomplete);
+  const acFamily = acTok ? AC_FAMILY[acTok] : undefined;
+  if (acFamily && acFamily !== wantFamily) {
+    return { ok: false, reason: `autocomplete=${acTok}` };
   }
-  if (label) {
-    return `(function() {
-      var labels = Array.from(document.querySelectorAll('label'));
-      var lbl = labels.find(function(l) { return l.textContent && l.textContent.trim().toLowerCase().indexOf(${JSON.stringify(label.toLowerCase())}) !== -1; });
-      if (!lbl) return null;
-      if (lbl.htmlFor) return document.getElementById(lbl.htmlFor);
-      return lbl.querySelector('input, select');
-    })()`;
+  if (c.type === "email" && wantFamily !== "email") {
+    return { ok: false, reason: "type=email" };
   }
-  if (placeholder) {
-    return `document.querySelector('input[placeholder=${JSON.stringify(placeholder)}]')`;
+  if (c.type === "tel" && wantFamily !== "phone") {
+    return { ok: false, reason: "type=tel" };
   }
-  return `document.querySelector('input[type="text"],input[type="email"],input[type="tel"],input:not([type])')`;
+  return { ok: true };
+}
+
+// Score a single candidate for a kind. Higher score = more confident strategy. 0 = no match.
+function scoreCandidate(
+  kind: ProfileFieldKind,
+  c: ProfileFieldCandidate,
+  hints: ProfileFieldHints,
+): { score: number; strategy: string } {
+  const spec = KIND_SPECS[kind];
+  const labelish = c.label_text || c.aria_label;
+
+  // Agent-provided label / placeholder hints take precedence over generic kind keywords.
+  if (hints.label) {
+    const hl = hints.label.toLowerCase();
+    if ((c.label_text && c.label_text.includes(hl)) || (c.aria_label && c.aria_label.includes(hl))) {
+      return { score: 80, strategy: "hint_label" };
+    }
+  }
+  if (hints.placeholder) {
+    const hp = hints.placeholder.toLowerCase();
+    if (c.placeholder && c.placeholder.includes(hp)) {
+      return { score: 75, strategy: "hint_placeholder" };
+    }
+  }
+
+  const acTok = lastAutocompleteToken(c.autocomplete);
+  if (acTok && spec.autocomplete.includes(acTok)) {
+    return { score: 90, strategy: "autocomplete" };
+  }
+  if (labelish && spec.keywords.some((k) => labelish.includes(k))) {
+    return { score: 70, strategy: "label" };
+  }
+  if (c.placeholder && spec.keywords.some((k) => c.placeholder.includes(k))) {
+    return { score: 60, strategy: "placeholder" };
+  }
+  const nameId = normAlnum(c.name + c.id);
+  if (nameId && spec.keywords.some((k) => nameId.includes(normAlnum(k)))) {
+    return { score: 50, strategy: "name_id" };
+  }
+  if ((kind === "email" && c.type === "email") || (kind === "phone" && c.type === "tel")) {
+    return { score: 30, strategy: "input_type" };
+  }
+  return { score: 0, strategy: "none" };
+}
+
+// Does an agent-provided selector_hint clearly point at this candidate's id or name?
+function selectorHintMatches(hint: string, c: ProfileFieldCandidate): boolean {
+  const h = hint.toLowerCase();
+  if (c.id) {
+    if (h === `#${c.id}` || h.includes(`#${c.id}`) || h.includes(`"${c.id}"`) || h.includes(`'${c.id}'`) || h.includes(`id=${c.id}`)) {
+      return true;
+    }
+  }
+  if (c.name) {
+    if (h.includes(`"${c.name}"`) || h.includes(`'${c.name}'`) || h.includes(`name=${c.name}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Pick the best candidate field for a requested kind. Strategy order (highest confidence first):
+ *   1. selector_hint that uniquely matches a candidate's id/name
+ *   2. agent-provided label / placeholder hint
+ *   3. autocomplete token
+ *   4. accessible label / aria-label keyword
+ *   5. placeholder keyword
+ *   6. name/id keyword
+ *   7. field-kind input-type heuristic (email/tel)
+ * The winner must then pass verifyKindConsistency or resolution fails closed (KIND_MISMATCH).
+ * Ambiguous ties at the top tier fail closed (NO_CONFIDENT_MATCH). Exported for unit testing.
+ */
+export function pickProfileFieldCandidate(
+  kind: ProfileFieldKind,
+  candidates: ProfileFieldCandidate[],
+  hints: ProfileFieldHints,
+): ProfileFieldResolution {
+  if (!candidates.length) {
+    return { fill_id: null, strategy: "none", reason: "NO_CONFIDENT_MATCH" };
+  }
+
+  // Tier 1 — selector_hint exact id/name match. A stale hint (0 or >1 matches) falls through to
+  // semantic recovery rather than failing immediately.
+  if (hints.selector_hint) {
+    const hintMatches = candidates.filter((c) => selectorHintMatches(hints.selector_hint!, c));
+    if (hintMatches.length === 1) {
+      const c = hintMatches[0];
+      const v = verifyKindConsistency(kind, c);
+      if (!v.ok) return { fill_id: null, strategy: "selector_hint", reason: "KIND_MISMATCH" };
+      return { fill_id: c.fill_id, strategy: "selector_hint" };
+    }
+  }
+
+  // Tiers 2–7 — semantic scoring; unique top score wins.
+  const scored = candidates.map((c) => ({ c, ...scoreCandidate(kind, c, hints) }));
+  const maxScore = Math.max(...scored.map((s) => s.score));
+  if (maxScore === 0) {
+    return { fill_id: null, strategy: "none", reason: "NO_CONFIDENT_MATCH" };
+  }
+  const top = scored.filter((s) => s.score === maxScore);
+  if (top.length !== 1) {
+    return { fill_id: null, strategy: top[0].strategy, reason: "NO_CONFIDENT_MATCH" };
+  }
+  const chosen = top[0].c;
+  const v = verifyKindConsistency(kind, chosen);
+  if (!v.ok) return { fill_id: null, strategy: top[0].strategy, reason: "KIND_MISMATCH" };
+  return { fill_id: chosen.fill_id, strategy: top[0].strategy };
+}
+
+// In-page enumeration of candidate fields. Returns structural metadata ONLY (never field values),
+// and tags each candidate with a temporary data-antigen-fill-id so the resolved field can be
+// re-located by a stable selector for the rest of the fill, immune to id regeneration.
+const ENUMERATE_CANDIDATES_JS = `(function() {
+  function clip(s, n) { return (s || '').replace(/\\s+/g, ' ').trim().slice(0, n).toLowerCase(); }
+  var nodes = Array.from(document.querySelectorAll('input, select, textarea'));
+  var skipTypes = ['hidden','submit','button','reset','image','checkbox','radio','file','range','color'];
+  var out = [];
+  var i = 0;
+  for (var n = 0; n < nodes.length; n++) {
+    var el = nodes[n];
+    var tag = el.tagName.toLowerCase();
+    var type = (el.getAttribute('type') || (tag === 'input' ? 'text' : '')).toLowerCase();
+    if (tag === 'input' && skipTypes.indexOf(type) !== -1) continue;
+    if (el.disabled || el.readOnly) continue;
+    var rect = el.getBoundingClientRect();
+    var style = window.getComputedStyle(el);
+    if (!(rect.width > 0 && rect.height > 0) || style.visibility === 'hidden' || style.display === 'none') continue;
+    var inIframe = false, node = el;
+    while (node && node.parentNode) { if (node.tagName === 'IFRAME') { inIframe = true; break; } node = node.parentNode; }
+    if (inIframe) continue;
+    var labelText = '';
+    if (el.labels && el.labels.length) { labelText = el.labels[0].textContent || ''; }
+    if (!labelText) { var anc = el.closest('label'); if (anc) labelText = anc.textContent || ''; }
+    if (!labelText) {
+      var by = el.getAttribute('aria-labelledby');
+      if (by) { var ref = document.getElementById(by); if (ref) labelText = ref.textContent || ''; }
+    }
+    var sectionText = '';
+    var fs = el.closest('fieldset');
+    if (fs) { var lg = fs.querySelector('legend'); if (lg) sectionText = lg.textContent || ''; }
+    var fid = 'agfill_' + i; i++;
+    el.setAttribute('data-antigen-fill-id', fid);
+    out.push({
+      fill_id: fid,
+      tag: tag,
+      type: type,
+      name: (el.getAttribute('name') || '').toLowerCase(),
+      id: (el.getAttribute('id') || '').toLowerCase(),
+      autocomplete: clip(el.getAttribute('autocomplete'), 60),
+      placeholder: clip(el.getAttribute('placeholder'), 120),
+      label_text: clip(labelText, 120),
+      aria_label: clip(el.getAttribute('aria-label'), 120),
+      section_text: clip(sectionText, 80)
+    });
+  }
+  return out;
+})()`;
+
+// Build a stable selector expression for a resolved fill_id (re-locatable across re-renders).
+function fillIdSelectorExpr(fillId: string): string {
+  return `document.querySelector(${JSON.stringify(`[data-antigen-fill-id="${fillId}"]`)})`;
 }
 
 // In-memory pointer state per fill session — tracks current pointer position across fields.
@@ -242,7 +516,10 @@ export async function executeProfileFieldFillViaCDP(
       let fieldIdx = 0;
       let msgId = 1;
       let sessionId: string | null = null;
-      let phase: "attach" | "iframe_check" | "input_box_lookup" | "input_pointer" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
+      let phase: "attach" | "resolve" | "iframe_check" | "input_box_lookup" | "input_pointer" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
+      // Stable selector for the current field, set once after the resolve phase and reused by every
+      // downstream eval so id regeneration between evals cannot break the fill.
+      let currentSelectorExpr = "null";
 
       // Track CDP command IDs for unambiguous response routing.
       let attachMsgId: number | null = null;
@@ -304,6 +581,20 @@ export async function executeProfileFieldFillViaCDP(
         advanceField();
       };
 
+      // Semantic resolution produced no confident, kind-consistent match for this field.
+      const recordNotFound = (reason: string) => {
+        const field = fields[fieldIdx];
+        entries.push({
+          key: field.key,
+          field_filled: false,
+          status: "not_found",
+          raw_profile_value_revealed_to_agent: false,
+          error: `Field resolution failed for kind '${field.key}': ${reason}.`,
+        });
+        fieldIdx++;
+        advanceField();
+      };
+
       const advanceField = () => {
         if (fieldIdx >= fields.length) {
           clearTimeout(timer);
@@ -311,21 +602,11 @@ export async function executeProfileFieldFillViaCDP(
           resolve(entries);
           return;
         }
-        const field = fields[fieldIdx];
-        const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
-        // Include tagName in result so the handler can branch on SELECT vs INPUT.
-        const iframeCheck = `(function() {
-          var el = ${selectorExpr};
-          if (!el) return { ok: false, reason: 'element not found' };
-          var node = el;
-          while (node.parentNode) {
-            if (node.tagName === 'IFRAME') return { ok: false, reason: 'IFRAME_NOT_SUPPORTED' };
-            node = node.parentNode;
-          }
-          return { ok: true, tagName: el.tagName };
-        })()`;
-        phase = "iframe_check";
-        send("Runtime.evaluate", { expression: iframeCheck, returnByValue: true }, sessionId!);
+        // Resolve-once: enumerate candidate fields (metadata only). Scoring + kind verification
+        // happen in TS when the result returns. No selector is trusted blindly here.
+        currentSelectorExpr = "null";
+        phase = "resolve";
+        send("Runtime.evaluate", { expression: ENUMERATE_CANDIDATES_JS, returnByValue: true }, sessionId!);
       };
 
       ws.on("open", () => {
@@ -354,7 +635,7 @@ export async function executeProfileFieldFillViaCDP(
         if (id === insertMsgId) {
           insertMsgId = null;
           const field = fields[fieldIdx];
-          const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+          const selectorExpr = currentSelectorExpr;
           if (msg.error) {
             // Input.insertText not supported — fall back to setter fill (value embedded in JS).
             const resolvedValue = resolvedValues.get(field.key) ?? "";
@@ -389,15 +670,45 @@ export async function executeProfileFieldFillViaCDP(
 
         const evalResult = result?.result as Record<string, unknown> | undefined;
         if (evalResult?.type === "object" && evalResult?.value !== undefined && sessionId) {
-          const val = evalResult.value as { ok?: boolean; reason?: string; tagName?: string };
           const field = fields[fieldIdx];
+
+          // Resolve phase — the eval returned an array of candidate descriptors (metadata only).
+          if (phase === "resolve") {
+            const descriptors = (evalResult.value as ProfileFieldCandidate[]) ?? [];
+            const resolution = pickProfileFieldCandidate(field.key, descriptors, {
+              selector_hint: field.selector_hint,
+              label: field.label,
+              placeholder: field.placeholder,
+            });
+            if (!resolution.fill_id) {
+              recordNotFound(resolution.reason ?? "NO_CONFIDENT_MATCH");
+              return;
+            }
+            currentSelectorExpr = fillIdSelectorExpr(resolution.fill_id);
+            // Include tagName so the next handler can branch on SELECT vs INPUT.
+            const iframeCheck = `(function() {
+              var el = ${currentSelectorExpr};
+              if (!el) return { ok: false, reason: 'element not found' };
+              var node = el;
+              while (node.parentNode) {
+                if (node.tagName === 'IFRAME') return { ok: false, reason: 'IFRAME_NOT_SUPPORTED' };
+                node = node.parentNode;
+              }
+              return { ok: true, tagName: el.tagName };
+            })()`;
+            phase = "iframe_check";
+            send("Runtime.evaluate", { expression: iframeCheck, returnByValue: true }, sessionId);
+            return;
+          }
+
+          const val = evalResult.value as { ok?: boolean; reason?: string; tagName?: string };
 
           if (phase === "iframe_check") {
             if (!val?.ok) {
               recordFailed(`CDP iframe check: ${val?.reason ?? "unknown"}`);
               return;
             }
-            const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+            const selectorExpr = currentSelectorExpr;
             const resolvedValue = resolvedValues.get(field.key) ?? "";
 
             if (val.tagName === "SELECT") {
@@ -467,7 +778,7 @@ export async function executeProfileFieldFillViaCDP(
               viewport?: { width: number; height: number };
             } | undefined;
 
-            const selectorExpr = buildSelectorExpr(field.selector_hint, field.label, field.placeholder);
+            const selectorExpr = currentSelectorExpr;
             const focusExpr = `(function() {
               var el = ${selectorExpr};
               if (!el) return { ok: false, reason: 'element not found' };

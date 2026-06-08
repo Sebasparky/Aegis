@@ -4197,7 +4197,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
         const bs = getTaskBrowserSession(body.browser_session_id.trim(), MOCK_USER_ID);
         if (!bs) return sendError(reply, 404, "TASK_BROWSER_SESSION_NOT_FOUND", "Task browser session not found.");
-        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "Session does not belong to your delegation.");
+        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "This browser session belongs to a different delegation. Ensure the Aegis MCP token (AEGIS_AGENT_TOKEN) matches the antigen-browser token so this action and the browser session run under the same delegation.");
         if (bs.status !== "ready") return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready'.`);
         resolvedBrowserSessionId = bs.browser_session_id;
       }
@@ -5002,7 +5002,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (typeof body.browser_session_id === "string" && body.browser_session_id.trim()) {
         const bs = getTaskBrowserSession(body.browser_session_id.trim(), MOCK_USER_ID);
         if (!bs) return sendError(reply, 404, "TASK_BROWSER_SESSION_NOT_FOUND", "Task browser session not found.");
-        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "Session does not belong to your delegation.");
+        if (bs.delegation_id !== delegation.id) return sendError(reply, 403, "TASK_BROWSER_SESSION_FORBIDDEN", "This browser session belongs to a different delegation. Ensure the Aegis MCP token (AEGIS_AGENT_TOKEN) matches the antigen-browser token so this action and the browser session run under the same delegation.");
         if (bs.status !== "ready") return sendError(reply, 400, "TASK_BROWSER_SESSION_NOT_READY", `Session status is '${bs.status}'; must be 'ready'.`);
         resolvedBrowserSessionId = bs.browser_session_id;
       }

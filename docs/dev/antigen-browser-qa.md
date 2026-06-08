@@ -241,6 +241,44 @@ input-driven search via a visible `ag_*` search input, which returns
 
 ---
 
+## Current checkout blocker / next milestone
+
+**Status (2026-06-07):** the IKEA checkout-boundary QA reached the contact/shipping form. The
+following are **verified**: add-to-bag, cart, checkout start, continue-as-guest, and arriving at the
+customer-information / billing-address form. Navigation, `antigen_snapshot`, viewport-bounded
+realistic pointer paths, and realistic `browser_type` on the search input all worked.
+
+**What blocked profile fill, and the fix (Checkout Profile Field Fill v1):**
+
+1. **MCP token mismatch (root cause of `INVALID_TOKEN`).** The `antigen-browser` adapter and the
+   `aegis` MCP server were configured with **different delegation tokens** (`pass_demo_001` vs
+   `pass_demo_002`), so `request_profile_field_fill` ran under a different delegation than the one
+   that owned the browser session. Fixed by aligning both to **one delegation** (`pass_demo_001`,
+   `delg_demo_001`). Both adapters now run a **startup token self-check** against
+   `GET /api/agent/v1/me` and print the resolved `agent`/`delegation` to stderr — a mismatch is now
+   loud at boot instead of a confusing `INVALID_TOKEN` mid-checkout. The
+   `TASK_BROWSER_SESSION_FORBIDDEN` error now names the token-mismatch cause explicitly.
+2. **Checkout DOM volatility.** Delivery/billing panels re-render and regenerate element ids, so a
+   captured snapshot ref or `#id` selector missed (`ELEMENT_NOT_FOUND` / `ANTIGEN_REF_EXPIRED` /
+   `ANTIGEN_REF_STALE` / `ROLE_KIND_MISMATCH`). The profile-field-fill executor now **resolves fields
+   semantically**: it enumerates candidate fields once (structural metadata only — never values) and
+   a pure scorer (`pickProfileFieldCandidate`) picks the best match by autocomplete, accessible
+   label, placeholder, and name/id, then **verifies kind consistency and fails closed** on a
+   mismatch. Resolution is reused via a stable `[data-antigen-fill-id]` handle, immune to id
+   regeneration. This recovery lives **only** inside the profile-field-fill executor — generic
+   `browser_type` / `browser_click` / `ag_*` ref validation are unchanged and remain fail-closed.
+
+**Scope of this increment:** contact/shipping profile fields only
+(`email, phone, first_name, last_name, shipping_address_line1/2, city, region, postal_code,
+country`). **Payment card fill and final place-order/purchase approval are NOT in scope and are NOT
+proven.** Do not claim payment entry or place-order protection has been tested.
+
+**Local fixture:** `apps/mock-store/hydrated-checkout.html` re-renders contact/shipping inputs with
+fresh ids every 2.5s while keeping labels/placeholders/autocomplete stable — use it to demonstrate
+the executor resolves fields that a fixed-id selector or generic `browser_type` would miss.
+
+---
+
 ## Next QA milestone
 
 Extend the verified IKEA flow **into checkout**, under Antigen mediation:

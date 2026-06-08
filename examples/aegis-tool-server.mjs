@@ -5250,7 +5250,44 @@ async function createDemoWebsiteViolationReceipt({
   };
 }
 
+// ─── Startup token self-check ─────────────────────────────────────────────────
+// Resolve the configured AEGIS_AGENT_TOKEN against the API so a token mismatch surfaces
+// loudly at boot instead of as a confusing INVALID_TOKEN mid-checkout. The antigen-browser
+// adapter does the same — both servers MUST resolve to the SAME delegation, otherwise the
+// browser session (owned by one delegation) is invisible to profile-fill (run by the other).
+// Sanitized: logs only the token id (the demo pass id already in MCP config), the resolved
+// agent_name and delegation_id. Never logs secrets. Non-fatal: warns but still serves tools.
+async function agentTokenSelfCheck() {
+  try {
+    const res = await fetch(`${API_BASE}/api/agent/v1/me`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    if (res.status === 401) {
+      process.stderr.write(
+        `[aegis-tool-server] FATAL-TOKEN: AEGIS_AGENT_TOKEN='${TOKEN}' does not resolve to a delegation ` +
+        `(401 from /api/agent/v1/me). Run 'npm run seed:demo' and reload the API, and ensure this token ` +
+        `MATCHES the antigen-browser AEGIS_AGENT_TOKEN so both run under the same delegation.\n`
+      );
+      return;
+    }
+    const body = await res.json();
+    const id = body?.data ?? body;
+    process.stderr.write(
+      `[aegis-tool-server] token_self_check ok token='${TOKEN}' ` +
+      `agent='${id?.agent_name ?? "?"}' delegation='${id?.delegation_id ?? "?"}' ` +
+      `status='${id?.delegation_status ?? "?"}'. This MUST match the antigen-browser adapter's delegation.\n`
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[aegis-tool-server] token_self_check skipped — API unreachable at ${API_BASE} (${err.message}). ` +
+      `Start the API and reload if profile-fill returns INVALID_TOKEN.\n`
+    );
+  }
+}
+
 // ─── Start ───────────────────────────────────────────────────────────────────
+
+await agentTokenSelfCheck();
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

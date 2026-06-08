@@ -23,6 +23,7 @@ import {
   clickBoxWithPointer,
   injectPointerDebugBanner,
   renderPersistentPointerCursor,
+  resolvePointerTimingMode,
   type ElementBox,
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
@@ -94,7 +95,7 @@ async function dispatchPointerClickToBox(opts: {
     viewport_width: vw,
     viewport_height: vh,
     browser_session_id: sessionId,
-    interaction_mode: "realistic",
+    interaction_mode: resolvePointerTimingMode(),
   });
 
   let clickPathCount: number | undefined;
@@ -405,6 +406,12 @@ export async function realisticClickByDescription(params: {
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
+  // Dev-only latency markers (gated). Sanitized: stage labels + durations only.
+  const timeOn = timingEnabled();
+  const tEnter = process.hrtime.bigint();
+  let tAfterSelect = tEnter;
+  let tBeforePointer = tEnter;
+
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
@@ -421,6 +428,7 @@ export async function realisticClickByDescription(params: {
 
   const { target: pageTarget, reason: targetReason } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
+  tAfterSelect = process.hrtime.bigint();
 
   const findExpr = buildElementFindExpr(elementDescription, selectorHint);
   if (cdpDiagnostics) {
@@ -456,6 +464,19 @@ export async function realisticClickByDescription(params: {
     const finish = (result: RealisticClickResult) => {
       clearTimeout(timer);
       ws.close();
+      if (timeOn) {
+        const tEnd = process.hrtime.bigint();
+        const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
+        // Sanitized: stage labels + durations + booleans only. No URLs/coords/text.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] realistic_click_by_description total=${ms(tEnter, tEnd)}ms` +
+            ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
+            ` connect_find_attach=${ms(tAfterSelect, tBeforePointer)}ms` +
+            ` pointer_and_urlread=${ms(tBeforePointer, tEnd)}ms` +
+            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}`,
+        );
+      }
       resolve(result);
     };
 
@@ -545,6 +566,7 @@ export async function realisticClickByDescription(params: {
           });
         const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
+        tBeforePointer = process.hrtime.bigint();
         void (async () => {
           try {
             const clickResult = await dispatchPointerClickToBox({
@@ -687,7 +709,7 @@ export async function realisticClickKnownBox(params: {
             ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
             ` connect_attach_phase4b=${ms(tAfterSelect, tBeforePointer)}ms` +
             ` pointer_and_urlread=${ms(tBeforePointer, tEnd)}ms` +
-            ` overlay=${debugOverlay} success=${result.success}`,
+            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}`,
         );
       }
       resolve(result);
@@ -1011,7 +1033,7 @@ export async function realisticTypeKnownBox(params: {
           viewport_width: vw,
           viewport_height: vh,
           browser_session_id: sessionId,
-          interaction_mode: "realistic",
+          interaction_mode: resolvePointerTimingMode(),
         });
 
         const sendCdp = (method: string, p: Record<string, unknown>) => {
@@ -1627,7 +1649,7 @@ export async function realisticTypeTextViaCDP(params: {
           viewport_width: vw,
           viewport_height: vh,
           browser_session_id: sessionId,
-          interaction_mode: "realistic",
+          interaction_mode: resolvePointerTimingMode(),
         });
 
         const sendCdp = (method: string, p: Record<string, unknown>) => {
@@ -1802,7 +1824,7 @@ export async function realisticTypeTextViaCDP(params: {
                       viewport_width: btn.vw,
                       viewport_height: btn.vh,
                       browser_session_id: sessionId,
-                      interaction_mode: "realistic",
+                      interaction_mode: resolvePointerTimingMode(),
                     });
                     const fallbackBox: ElementBox = { x: btn.x, y: btn.y, width: btn.width, height: btn.height };
                     await clickBoxWithPointer(fallbackState, fallbackBox, sendCdp, sleep, {

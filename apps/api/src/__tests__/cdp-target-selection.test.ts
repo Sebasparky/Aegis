@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { pickBestPageTarget, readLiveCdpPageUrl } from "../runtime/cdpTargetSelection.js";
+import { pickBestPageTarget, readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
 
 const blank = { id: "t1", url: "about:blank", type: "page" };
 const newtab = { id: "t2", url: "chrome://newtab/", type: "page" };
@@ -172,5 +172,69 @@ describe("readLiveCdpPageUrl (live CDP page-target URL source)", () => {
   it("returns null when the CDP list payload is not an array", async () => {
     stubFetchList({ unexpected: true });
     await expect(readLiveCdpPageUrl(CDP)).resolves.toBeNull();
+  });
+});
+
+describe("resolveSnapshotCdpTarget (one-shot snapshot target resolution)", () => {
+  const CDP = "http://localhost:9222";
+  const WS = "ws://localhost:9222/devtools/browser/abc";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Branch on the requested URL: /json/version → ws endpoint; /json/list → targets.
+  function stubFetch(targets: unknown, opts: { wsUrl?: string | undefined } = {}): ReturnType<typeof vi.fn> {
+    const wsUrl = "wsUrl" in opts ? opts.wsUrl : WS;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/json/version")) {
+        return { json: async () => ({ webSocketDebuggerUrl: wsUrl }) } as unknown as Response;
+      }
+      return { json: async () => targets } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("fetches /json/list exactly once and returns the ws endpoint + pickBestPageTarget selection", async () => {
+    const fetchMock = stubFetch([
+      { id: "t1", url: "about:blank", type: "page" },
+      { id: "t2", url: "https://www.ikea.com/us/en/search/?q=coffee%20mug", type: "page" },
+    ]);
+
+    const resolved = await resolveSnapshotCdpTarget(CDP);
+
+    expect(resolved).not.toBeNull();
+    expect(resolved!.browserWsUrl).toBe(WS);
+    // Same authoritative selection the click/type/scroll guards use.
+    expect(resolved!.target.id).toBe("t2");
+    expect(resolved!.target.url).toBe("https://www.ikea.com/us/en/search/?q=coffee%20mug");
+
+    // The snapshot path must hit /json/list a SINGLE time (the dedupe guarantee).
+    const listCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/list"));
+    const versionCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"));
+    expect(listCalls).toHaveLength(1);
+    expect(versionCalls).toHaveLength(1);
+  });
+
+  it("returns null (fail-safe) when the CDP transport throws", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    await expect(resolveSnapshotCdpTarget(CDP)).resolves.toBeNull();
+  });
+
+  it("returns null when no browser WebSocket endpoint is advertised", async () => {
+    stubFetch([{ id: "t1", url: "https://x.test/", type: "page" }], { wsUrl: undefined });
+    await expect(resolveSnapshotCdpTarget(CDP)).resolves.toBeNull();
+  });
+
+  it("returns null when there is no usable page target", async () => {
+    stubFetch([{ id: "w", url: "https://x.test/worker.js", type: "service_worker" }]);
+    await expect(resolveSnapshotCdpTarget(CDP)).resolves.toBeNull();
+  });
+
+  it("returns null when the CDP list payload is not an array", async () => {
+    stubFetch({ unexpected: true });
+    await expect(resolveSnapshotCdpTarget(CDP)).resolves.toBeNull();
   });
 });

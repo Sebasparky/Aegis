@@ -54,7 +54,7 @@ import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } 
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
-import { readLiveCdpPageUrl } from "../runtime/cdpTargetSelection.js";
+import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
@@ -4496,12 +4496,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     const timing = new BrowserTimingScope("antigen_snapshot");
 
+    // Resolve the live CDP target ONCE (browser WS endpoint + the single page
+    // target) using the same pickBestPageTarget selection the click/type/scroll
+    // guards use. Threaded into DOM extraction, page-metadata, and the stored URL
+    // so all three bind to the SAME page. Fail-safe: on null (transport/parse
+    // failure or no usable target) each extraction falls back to its own fetch
+    // and liveUrl falls back to readLiveCdpPageUrl — legacy behavior preserved.
+    const resolved = await resolveSnapshotCdpTarget(session.cdp_url);
+    timing.mark("target_resolve");
+    const resolvedTarget = resolved
+      ? { browserWsUrl: resolved.browserWsUrl, pageTarget: { id: resolved.target.id, url: resolved.target.url } }
+      : undefined;
+
     let candidates: AntigenSnapshotCandidate[];
     try {
       candidates = await extractAntigenSnapshotCandidatesViaCDP({
         cdpUrl: session.cdp_url,
         maxCandidates,
         viewportOnly,
+        resolvedTarget,
       });
       timing.mark("candidate_extract");
     } catch {
@@ -4519,17 +4532,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // snapshot — candidate extraction above is the authoritative path. The raw
     // viewport/scroll numbers are consumed server-side to derive qualitative
     // fields only; they are never emitted to the agent.
-    const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url });
+    const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url, resolvedTarget });
     timing.mark("page_metadata");
 
-    // Capture the LIVE page URL from the active CDP target — the same
-    // pickBestPageTarget source the click/type/scroll live-URL guards compare
-    // against — so the snapshot stores the page the refs were actually captured
-    // on. Cached session.current_url can lag a navigation (Enter-submit, SPA
-    // route change, redirect) and would otherwise make the next action fail with
-    // a false ANTIGEN_REF_PAGE_CHANGED. Fail-safe: fall back to cached session
-    // metadata only when the live read is unavailable.
-    const liveUrl = (await readLiveCdpPageUrl(session.cdp_url)) ?? session.current_url ?? null;
+    // The LIVE page URL is taken from the SAME single resolved target the DOM
+    // extraction bound to — the same pickBestPageTarget source the click/type/
+    // scroll live-URL guards compare against — so the snapshot stores the exact
+    // page the refs were captured on. Cached session.current_url can lag a
+    // navigation (Enter-submit, SPA route change, redirect) and would otherwise
+    // make the next action fail with a false ANTIGEN_REF_PAGE_CHANGED. Fail-safe:
+    // only when target resolution was unavailable do we fall back to a fresh
+    // readLiveCdpPageUrl, then to cached session metadata.
+    const liveUrl =
+      resolved?.target.url ?? (await readLiveCdpPageUrl(session.cdp_url)) ?? session.current_url ?? null;
     timing.mark("live_url_capture");
     // Keep cached session metadata in lockstep with the live URL so the next
     // snapshot (and trace) sees the same page the refs were captured on.

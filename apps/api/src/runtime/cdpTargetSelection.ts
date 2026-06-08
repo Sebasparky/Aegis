@@ -164,3 +164,44 @@ export async function readLiveCdpPageUrl(cdpUrl: string): Promise<string | null>
   const { target } = pickBestPageTarget(targets, {});
   return target?.url ?? null;
 }
+
+/** The browser WS endpoint + the single live page target the snapshot binds to. */
+export interface ResolvedCdpPageTarget {
+  browserWsUrl: string;
+  target: CdpPageTarget;
+}
+
+/**
+ * One-shot resolution of the browser WebSocket endpoint + the authoritative live
+ * page target, using the SAME `pickBestPageTarget` selection the click/type/scroll
+ * guards use. This lets the snapshot path fetch `/json/version` + `/json/list`
+ * EXACTLY ONCE and thread a single target into DOM extraction, page-metadata
+ * extraction, and live-URL capture — so all three describe the same page (instead
+ * of selecting a target three times with two different pickers).
+ *
+ * The result is intended to be used within a single snapshot request only — never
+ * cached across requests or navigations.
+ *
+ * Fail-safe: returns null on any transport/parse failure, when no browser WS
+ * endpoint is advertised, or when no usable page target exists — so the caller
+ * falls back conservatively (per-call fetch) without failing the snapshot. Never
+ * throws, never logs secrets.
+ */
+export async function resolveSnapshotCdpTarget(cdpUrl: string): Promise<ResolvedCdpPageTarget | null> {
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: CdpPageTarget[];
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<CdpPageTarget[]>),
+    ]);
+  } catch {
+    return null;
+  }
+  const browserWsUrl = versionData?.webSocketDebuggerUrl;
+  if (!browserWsUrl || !Array.isArray(targets)) return null;
+  // Empty opts == the exact selection the click/type/scroll guards use.
+  const { target } = pickBestPageTarget(targets, {});
+  if (!target) return null;
+  return { browserWsUrl, target };
+}

@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": ["ANTIGEN_*"],
   "tasks": {
     "dev": {
       "persistent": true,

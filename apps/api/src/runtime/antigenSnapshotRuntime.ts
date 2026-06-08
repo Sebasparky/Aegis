@@ -105,6 +105,18 @@ export interface AntigenPageMeta {
   text_excerpt?: string;
 }
 
+/**
+ * Pre-resolved CDP target (browser WS endpoint + the single page target) threaded
+ * in by the snapshot handler so DOM extraction, page-metadata extraction, and the
+ * stored snapshot URL all bind to the SAME live target — selected once via
+ * `pickBestPageTarget`. When omitted, the extraction function falls back to its own
+ * `/json/list` fetch + `pickAntigenPageTarget` (unchanged legacy behavior).
+ */
+export interface PreResolvedSnapshotTarget {
+  browserWsUrl: string;
+  pageTarget: { id: string; url: string };
+}
+
 export interface ExtractAntigenSnapshotCandidatesParams {
   /** CDP http endpoint, e.g. http://localhost:9222 (not a ws:// URL). */
   cdpUrl: string;
@@ -112,6 +124,8 @@ export interface ExtractAntigenSnapshotCandidatesParams {
   maxCandidates?: number;
   /** If true (default), only elements intersecting the current viewport. */
   viewportOnly?: boolean;
+  /** Optional single target to bind to; skips this function's own fetch+pick. */
+  resolvedTarget?: PreResolvedSnapshotTarget;
 }
 
 /**
@@ -675,37 +689,50 @@ export function buildAntigenExtractionExpr(opts: {
 export async function extractAntigenSnapshotCandidatesViaCDP(
   params: ExtractAntigenSnapshotCandidatesParams,
 ): Promise<AntigenSnapshotCandidate[]> {
-  const { cdpUrl } = params;
+  const { cdpUrl, resolvedTarget } = params;
   const maxCandidates = params.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const viewportOnly = params.viewportOnly ?? true;
 
-  let versionData: { webSocketDebuggerUrl?: string };
-  let targets: Array<{ id: string; url: string; type: string }>;
-  try {
-    [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
-      fetch(`${cdpUrl}/json/list`).then(
-        (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
-      ),
-    ]);
-  } catch (err) {
-    throw Object.assign(new Error(`CDP fetch failed: ${(err as Error).message}`), {
-      code: "CDP_FETCH_FAILED",
-    });
-  }
+  // Fast path: the snapshot handler already resolved a single live target (via
+  // pickBestPageTarget) and threads it in so DOM extraction binds to the SAME
+  // target as page-metadata and the stored URL. Otherwise fall back to this
+  // function's own one-shot fetch + pickAntigenPageTarget (legacy behavior).
+  let browserWsUrl: string;
+  let pageTarget: { id: string; url: string };
+  if (resolvedTarget) {
+    browserWsUrl = resolvedTarget.browserWsUrl;
+    pageTarget = resolvedTarget.pageTarget;
+  } else {
+    let versionData: { webSocketDebuggerUrl?: string };
+    let targets: Array<{ id: string; url: string; type: string }>;
+    try {
+      [versionData, targets] = await Promise.all([
+        fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+        fetch(`${cdpUrl}/json/list`).then(
+          (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
+        ),
+      ]);
+    } catch (err) {
+      throw Object.assign(new Error(`CDP fetch failed: ${(err as Error).message}`), {
+        code: "CDP_FETCH_FAILED",
+      });
+    }
 
-  const browserWsUrl = versionData.webSocketDebuggerUrl;
-  if (!browserWsUrl) {
-    throw Object.assign(new Error("No browser WebSocket debugger URL from CDP."), {
-      code: "CDP_FETCH_FAILED",
-    });
-  }
+    const ws = versionData.webSocketDebuggerUrl;
+    if (!ws) {
+      throw Object.assign(new Error("No browser WebSocket debugger URL from CDP."), {
+        code: "CDP_FETCH_FAILED",
+      });
+    }
 
-  const pageTarget = pickAntigenPageTarget(targets);
-  if (!pageTarget) {
-    throw Object.assign(new Error("No page targets found via CDP."), {
-      code: "NO_PAGE_TARGET",
-    });
+    const picked = pickAntigenPageTarget(targets);
+    if (!picked) {
+      throw Object.assign(new Error("No page targets found via CDP."), {
+        code: "NO_PAGE_TARGET",
+      });
+    }
+    browserWsUrl = ws;
+    pageTarget = picked;
   }
 
   const expr = buildAntigenExtractionExpr({ maxCandidates, viewportOnly });
@@ -868,21 +895,28 @@ function sanitizePageMeta(raw: unknown): AntigenPageMeta | undefined {
  * never fail a snapshot (candidate extraction is the authoritative path).
  */
 export async function extractAntigenPageMetaViaCDP(
-  params: { cdpUrl: string },
+  params: { cdpUrl: string; resolvedTarget?: PreResolvedSnapshotTarget },
 ): Promise<AntigenPageMeta | undefined> {
-  const { cdpUrl } = params;
+  const { cdpUrl, resolvedTarget } = params;
   try {
-    let versionData: { webSocketDebuggerUrl?: string };
-    let targets: Array<{ id: string; url: string; type: string }>;
-    [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
-      fetch(`${cdpUrl}/json/list`).then(
-        (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
-      ),
-    ]);
-
-    const browserWsUrl = versionData.webSocketDebuggerUrl;
-    const pageTarget = pickAntigenPageTarget(targets);
+    // Bind to the snapshot handler's single resolved target when provided so the
+    // page-meta read describes the SAME page as the candidate extraction; else
+    // fall back to a self-contained fetch + pick (legacy behavior).
+    let browserWsUrl: string | undefined;
+    let pageTarget: { id: string; url: string } | undefined;
+    if (resolvedTarget) {
+      browserWsUrl = resolvedTarget.browserWsUrl;
+      pageTarget = resolvedTarget.pageTarget;
+    } else {
+      const [versionData, targets] = await Promise.all([
+        fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+        fetch(`${cdpUrl}/json/list`).then(
+          (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
+        ),
+      ]);
+      browserWsUrl = versionData.webSocketDebuggerUrl;
+      pageTarget = pickAntigenPageTarget(targets);
+    }
     if (!browserWsUrl || !pageTarget) return undefined;
 
     const expr = buildAntigenPageMetaExpr();

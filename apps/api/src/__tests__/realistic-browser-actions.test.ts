@@ -1787,7 +1787,10 @@ describe("browser_click overlay observability — integration", () => {
     expect(result.success).toBe(true);
   });
 
-  it("inject_result is logged (dev-only) but no overlay diagnostics leak into the result object", async () => {
+  it("default (non-strict) overlay is fire-and-forget: no awaited inject_result log, no diagnostics leak into the result", async () => {
+    // 3b: pointer dispatch must NOT await the verified-injection path by default.
+    // ANTIGEN_POINTER_DEBUG_STRICT is unset here → the verified inject_result log
+    // is never emitted; the overlay still renders via fire-and-forget injection.
     mockState.nextOverlayValue = { created: true, body_present: true, already_existed: false, top_frame: true, visibility_state: "visible", hidden: false };
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
@@ -1797,18 +1800,40 @@ describe("browser_click overlay observability — integration", () => {
 
     expect(result.success).toBe(true);
 
-    // Diagnostics ARE present in dev logs (target_url from DEFAULT_TARGETS = example.com).
+    // The awaited verified-injection log is NOT emitted in default mode.
     const injectLog = logSpy.mock.calls.find(([label]) => label === "[PointerDebugOverlay] inject_result");
-    expect(injectLog).toBeDefined();
-    expect(injectLog?.[1]).toMatchObject({ created: true, visibility_state: "visible", top_frame: true, target_url: "https://example.com" });
+    expect(injectLog).toBeUndefined();
 
-    // …but NONE of those diagnostics appear in the agent-facing result object.
+    // And no overlay diagnostics leak into the agent-facing result object.
     const FORBIDDEN = [
       "created", "body_present", "visibility_state", "top_frame", "exception_present",
       "attempted", "target_url", "target_reason", "inject_result", "already_existed",
       "x", "y", "cdp_url",
     ];
     for (const key of FORBIDDEN) expect(Object.keys(result)).not.toContain(key);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("visibility_state");
+    expect(serialized).not.toContain("example.com");
+    expect(serialized).not.toContain("inject_result");
+  });
+
+  it("strict mode (ANTIGEN_POINTER_DEBUG_STRICT=true) awaits + logs inject_result, still no leak into result", async () => {
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_STRICT", "true");
+    mockState.nextOverlayValue = { created: true, body_present: true, already_existed: false, top_frame: true, visibility_state: "visible", hidden: false };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const resultPromise = realisticClickByDescription({ cdpUrl: "http://localhost:9222", elementDescription: "Add to bag" });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+
+    // Verified-injection diagnostics ARE logged in strict mode (dev-only console).
+    const injectLog = logSpy.mock.calls.find(([label]) => label === "[PointerDebugOverlay] inject_result");
+    expect(injectLog).toBeDefined();
+    expect(injectLog?.[1]).toMatchObject({ created: true, visibility_state: "visible", top_frame: true, target_url: "https://example.com" });
+
+    // …but still NONE of those diagnostics appear in the agent-facing result object.
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("visibility_state");
     expect(serialized).not.toContain("example.com");

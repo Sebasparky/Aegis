@@ -32,15 +32,16 @@ vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   };
 });
 
-// Mock ONLY the live CDP page-URL read so tests can drive the live URL
-// deterministically without a real browser. The rest of cdpTargetSelection
-// (pickBestPageTarget) stays real.
+// Mock the live CDP page-URL read AND the one-shot snapshot target resolver so
+// tests can drive the live URL / unified target deterministically without a real
+// browser. The rest of cdpTargetSelection (pickBestPageTarget) stays real.
 const liveUrlMock = vi.hoisted(() => vi.fn());
+const resolveTargetMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/cdpTargetSelection.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/cdpTargetSelection.js")>(
     "../runtime/cdpTargetSelection.js",
   );
-  return { ...actual, readLiveCdpPageUrl: liveUrlMock };
+  return { ...actual, readLiveCdpPageUrl: liveUrlMock, resolveSnapshotCdpTarget: resolveTargetMock };
 });
 
 import Fastify from "fastify";
@@ -182,6 +183,10 @@ beforeEach(() => {
   // Live-URL read defaults to unavailable (null) so the endpoint falls back to the
   // seeded session.current_url — preserving the behavior the other tests assert.
   liveUrlMock.mockResolvedValue(null);
+  // Target resolution defaults to unavailable (null) so existing tests exercise the
+  // legacy fallback path (extraction self-fetch + readLiveCdpPageUrl). The dedupe
+  // tests below override this with a concrete target.
+  resolveTargetMock.mockResolvedValue(null);
 });
 
 describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
@@ -809,5 +814,66 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — live snapshot URL capt
     if (resolved.status === "ok") {
       expect(isAntigenPageChanged(resolved.snapshot_url, liveAtAction)).toBe(false);
     }
+  });
+});
+
+// 3a — snapshot CDP target dedupe: DOM extraction, page metadata, and the stored
+// snapshot URL must all bind to the SAME single resolved target, and the separate
+// readLiveCdpPageUrl fetch is not used when resolution succeeds.
+describe("POST /api/agent/v1/runtime/browser-snapshot — unified CDP target (3a)", () => {
+  const TARGET_URL = "https://www.ikea.com/us/en/cat/home-textiles-tl001/";
+  const TARGET = { browserWsUrl: "ws://localhost:9222/devtools/browser/xyz", target: { id: "tgt_live", url: TARGET_URL, type: "page" } };
+
+  async function snapshot() {
+    return server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+  }
+
+  it("threads the single resolved target into DOM extraction AND page metadata, and stores its URL", async () => {
+    seedSession({ current_url: "https://www.ikea.com/us/en/" }); // stale cached URL
+    resolveTargetMock.mockResolvedValueOnce(TARGET);
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+
+    // The stored + returned URL is the resolved target's URL — not the stale cache.
+    expect(res.json().data.url).toBe(TARGET_URL);
+    const resolved = resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1");
+    expect(resolved.status).toBe("ok");
+    if (resolved.status === "ok") expect(resolved.snapshot_url).toBe(TARGET_URL);
+
+    // Both extraction calls received the SAME pre-resolved target (id + url).
+    const expectedResolved = { browserWsUrl: TARGET.browserWsUrl, pageTarget: { id: TARGET.target.id, url: TARGET_URL } };
+    expect(extractMock).toHaveBeenCalledWith(expect.objectContaining({ resolvedTarget: expectedResolved }));
+    expect(pageMetaMock).toHaveBeenCalledWith(expect.objectContaining({ resolvedTarget: expectedResolved }));
+  });
+
+  it("does NOT make the separate readLiveCdpPageUrl fetch when target resolution succeeds", async () => {
+    seedSession();
+    resolveTargetMock.mockResolvedValueOnce(TARGET);
+
+    await snapshot();
+
+    // The dedupe guarantee: the URL came from the already-resolved target, so the
+    // extra /json/list round-trip (readLiveCdpPageUrl) is never issued.
+    expect(liveUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to readLiveCdpPageUrl + cached URL when target resolution is unavailable", async () => {
+    seedSession({ current_url: "https://fallback.test/cached/" });
+    resolveTargetMock.mockResolvedValueOnce(null); // resolution failed → legacy path
+    liveUrlMock.mockResolvedValueOnce(null); // live read also unavailable
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+
+    // Legacy fallback preserved: extraction self-fetches (resolvedTarget undefined),
+    // readLiveCdpPageUrl is attempted, then cached session.current_url is used.
+    expect(extractMock).toHaveBeenCalledWith(expect.objectContaining({ resolvedTarget: undefined }));
+    expect(liveUrlMock).toHaveBeenCalledTimes(1);
+    expect(res.json().data.url).toBe("https://fallback.test/cached/");
   });
 });

@@ -15,6 +15,7 @@ import {
   clickBoxWithPointer,
   clickPointWithPointer,
   makePointerRuntimeState,
+  resolvePointerTimingMode,
 } from "../runtime/nativePointerRuntime.js";
 import type { ElementBox, TimedPoint } from "../runtime/nativePointerRuntime.js";
 import {
@@ -364,6 +365,60 @@ describe("makePointerRuntimeState", () => {
     expect(state.current_x).toBe(42);
     expect(state.interaction_mode).toBe("careful");
     expect(state.current_y).toBe(0); // default preserved
+  });
+});
+
+// ─── resolvePointerTimingMode (dev/QA fast pointer timing) ───────────────────
+
+describe("resolvePointerTimingMode", () => {
+  const PRIOR = process.env.ANTIGEN_POINTER_TIMING;
+  afterEach(() => {
+    if (PRIOR === undefined) delete process.env.ANTIGEN_POINTER_TIMING;
+    else process.env.ANTIGEN_POINTER_TIMING = PRIOR;
+  });
+
+  it("defaults to realistic when unset", () => {
+    delete process.env.ANTIGEN_POINTER_TIMING;
+    expect(resolvePointerTimingMode()).toBe("realistic");
+  });
+
+  it("maps fast -> native profile (case/whitespace-insensitive)", () => {
+    process.env.ANTIGEN_POINTER_TIMING = "fast";
+    expect(resolvePointerTimingMode()).toBe("native");
+    process.env.ANTIGEN_POINTER_TIMING = "  FAST ";
+    expect(resolvePointerTimingMode()).toBe("native");
+  });
+
+  it("returns realistic for explicit realistic and for unknown values", () => {
+    process.env.ANTIGEN_POINTER_TIMING = "realistic";
+    expect(resolvePointerTimingMode()).toBe("realistic");
+    process.env.ANTIGEN_POINTER_TIMING = "warp_speed";
+    expect(resolvePointerTimingMode()).toBe("realistic");
+  });
+
+  it("fast profile produces strictly less total animation delay than the default", () => {
+    // The resolver only selects an animation profile (MODE_TIMING) — both are real,
+    // fully-validated modes; fast simply shortens per-point/hover/click-gap delays.
+    process.env.ANTIGEN_POINTER_TIMING = "fast";
+    const fastMode = resolvePointerTimingMode();
+    delete process.env.ANTIGEN_POINTER_TIMING;
+    const defaultMode = resolvePointerTimingMode();
+
+    const { path: fastPath } = generatePointerPath(START, END, { mode: fastMode, random: () => 0.5 });
+    const { path: defPath } = generatePointerPath(START, END, { mode: defaultMode, random: () => 0.5 });
+    const sum = (p: TimedPoint[]) => p.reduce((s, pt) => s + pt.delay_ms, 0);
+
+    expect(fastMode).not.toBe(defaultMode);
+    expect(sum(fastPath)).toBeLessThan(sum(defPath));
+  });
+
+  it("only returns valid interaction modes (no validation/path-shape side effects)", () => {
+    // It is a pure env→mode mapping: it never returns a non-mode value, so it
+    // cannot disable a guard or change what is clickable — only animation timing.
+    for (const v of ["fast", "realistic", "", "nonsense", "Fast"]) {
+      process.env.ANTIGEN_POINTER_TIMING = v;
+      expect(["native", "realistic"]).toContain(resolvePointerTimingMode());
+    }
   });
 });
 

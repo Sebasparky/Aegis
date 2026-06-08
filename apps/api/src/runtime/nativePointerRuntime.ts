@@ -65,6 +65,41 @@ const MODE_TIMING: Record<PointerInteractionMode, ModeTiming> = {
   careful:   { point_count: 28, total_move_ms: 750,  hover_ms: 300, click_gap_ms: 150 },
 };
 
+/**
+ * Resolves the pointer ANIMATION timing profile from ANTIGEN_POINTER_TIMING.
+ *
+ * This affects ONLY pointer animation duration (per-point move delays, hover, and
+ * click-gap via MODE_TIMING). It does NOT change validation, allowed actions,
+ * Phase 4B revalidation, the URL/page-change guard, TTL/superseded guards,
+ * logical-ref recovery eligibility, or any sensitive-action gate — those run
+ * identically before pointer dispatch regardless of profile.
+ *
+ *   ANTIGEN_POINTER_TIMING=fast       → "native" profile (~120ms move) for dev/QA
+ *   ANTIGEN_POINTER_TIMING=realistic  → "realistic" profile (~400ms move)
+ *   unset / anything else             → "realistic" (production-safe default)
+ */
+export function resolvePointerTimingMode(): PointerInteractionMode {
+  const v = (process.env.ANTIGEN_POINTER_TIMING ?? "").trim().toLowerCase();
+  if (v === "fast") return "native";
+  if (v === "realistic") return "realistic";
+  return "realistic";
+}
+
+/**
+ * Whether the pointer debug overlay should block pointer dispatch.
+ *
+ * Default (false): overlay injection + per-event updates are best-effort
+ * fire-and-forget — the click never awaits overlay work and an overlay failure
+ * never fails or delays the click. The overlay still renders by default in
+ * visible sessions; it just no longer sits in the click's critical path.
+ *
+ * Strict (ANTIGEN_POINTER_DEBUG_STRICT=true): the verified-injection path is
+ * awaited and its status read back/logged, for deliberate overlay debugging.
+ */
+export function isPointerDebugOverlayStrict(): boolean {
+  return process.env.ANTIGEN_POINTER_DEBUG_STRICT === "true";
+}
+
 // Dev-only pointer debug overlay — controlled by ANTIGEN_POINTER_DEBUG_OVERLAY=true.
 // Injects a visible dot into the page to trace native pointer paths during manual verification.
 // Never includes secret or profile values in evaluated expressions.
@@ -603,11 +638,15 @@ export async function clickBoxWithPointer(
   let effectiveSendCdp = sendCdp;
   if (options?.debugOverlay) {
     console.log("[PointerDebugOverlay] enabled");
-    // Verified injection path: read back whether the overlay DOM was actually created
-    // and the page is visible. Fail-open — the helper never throws and never hangs the
-    // click; on failure we log and proceed. Falls back to fire-and-forget when no
-    // request/response channel was supplied.
-    if (options.sendCdpAndWait) {
+    // Default (non-strict): best-effort fire-and-forget injection — pointer
+    // dispatch NEVER awaits overlay work, so the overlay sits outside the click's
+    // critical path. The overlay still renders by default in visible sessions; an
+    // injection failure cannot fail or delay the click.
+    //
+    // Strict (ANTIGEN_POINTER_DEBUG_STRICT=true) only: use the verified-injection
+    // path that awaits a CDP response and reads back whether the overlay DOM was
+    // actually created and the page is visible — for deliberate overlay debugging.
+    if (isPointerDebugOverlayStrict() && options.sendCdpAndWait) {
       const status = await ensurePointerDebugOverlayWithStatus(options.sendCdpAndWait);
       console.log("[PointerDebugOverlay] inject_result", {
         ...status,

@@ -3403,6 +3403,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // Return an existing ready session for this delegation rather than provisioning a duplicate.
     const existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
     if (existing) {
+      // Metadata-only runtime-binding log (no paths, PIDs, cookies, storage, or secrets).
+      console.log(
+        `[RuntimeEndpoint] reused browser_runtime_id=${existing.browser_session_id}` +
+          ` delegation_id=${delegation.id} cdp_url=${existing.cdp_url}` +
+          ` runtime_mode=${existing.runtime_mode ?? "local_runtime_endpoint"}` +
+          ` reused_existing=true existing_mode=${existing.mode} requested_visible=${debug_visible}`,
+      );
+      if (debug_visible && existing.mode === "headless") {
+        console.warn(
+          `[RuntimeEndpoint] mode_mismatch: visible requested but existing session ${existing.browser_session_id}` +
+            ` on ${existing.cdp_url} is headless — close the stale session on port 9222` +
+            ` (e.g. lsof -ti tcp:9222 | xargs kill) and restart QA to get a visible window.`,
+        );
+      }
       recordBrowserTraceEvent(existing.browser_session_id, {
         event_type: "browser_endpoint_created",
         browser_runtime_id: existing.browser_session_id,
@@ -3457,6 +3471,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const session = result.session;
+    // Metadata-only runtime-binding log (no paths, PIDs, cookies, storage, or secrets).
+    console.log(
+      `[RuntimeEndpoint] created browser_runtime_id=${session.browser_session_id}` +
+        ` delegation_id=${delegation.id} cdp_url=${session.cdp_url}` +
+        ` runtime_mode=${session.runtime_mode ?? "local_runtime_endpoint"}` +
+        ` reused_existing=false requested_visible=${debug_visible} session_mode=${session.mode}` +
+        ` port_auto_selected=${result.port_auto_selected === true}`,
+    );
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "browser_endpoint_created",
       browser_runtime_id: session.browser_session_id,

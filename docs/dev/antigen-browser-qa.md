@@ -157,6 +157,20 @@ In the `antigen-browser` MCP server's **stderr**, at startup you must see:
 [antigen-browser@<VERSION>] qa_flags require_realistic_navigation=true require_antigen_tools=true browser_trace=true
 ```
 
+Then, once the first browser tool initializes the runtime, you must also see:
+
+```
+[antigen-browser@<VERSION>] headed_intent=visible cdp_url=http://localhost:9222 browser_runtime_id=tbsess_... reused_existing=false
+[antigen-browser@<VERSION>] expected to be VISIBLE/headed — a Chrome window should be on screen. ...
+```
+
+- `headed_intent=visible` confirms the adapter sent `mode:"visible"` to the runtime
+  endpoint (the launch decision is server-side; the adapter propagates the intent). If you
+  see `headed_intent=headless`, `ANTIGEN_BROWSER_HEADLESS` is not `false` in the adapter env.
+- The matching **API** log line proves the launch mode: `[TaskBrowser] launched … mode=visible
+  headless_arg=false …`. If the API shows `mode=headless` while the adapter requested
+  `visible`, a **stale headless session was reused** (`[RuntimeEndpoint] mode_mismatch …`) —
+  kill Chrome on 9222 and restart (see the visibility checklist below).
 - `headless=false realism=realistic` confirms visible + realistic-input mode.
 - `require_realistic_navigation=true require_antigen_tools=true browser_trace=true`
   confirms hard mode.
@@ -165,6 +179,54 @@ In the `antigen-browser` MCP server's **stderr**, at startup you must see:
   (step 4) and restart the session.
 - If you see **neither** the banner nor the FATAL block, the agent is on **raw
   Playwright** — fix the config and restart.
+
+---
+
+## Headed runtime visibility checklist
+
+If actions appear to succeed but **no Chrome window is visible**, the runtime almost
+certainly launched **headless**. The headed/headless choice is made **server-side** in
+`createTaskBrowserSession` (`apps/api/src/runtime/taskBrowserSessions.ts`); the adapter's
+`ANTIGEN_BROWSER_HEADLESS` env only governs adapter-side realism. The adapter now
+propagates intent by sending `mode:"visible"` to the runtime endpoint when
+`ANTIGEN_BROWSER_HEADLESS=false`, so a **fresh** launch is headed — but a **reused** stale
+headless session on 9222 stays invisible. Run through this before each visible QA:
+
+1. **Kill any stale Chrome bound to 9222** (so reuse can't bind a leftover headless session):
+
+   ```sh
+   lsof -ti tcp:9222 | xargs kill        # then confirm the port is free:
+   lsof -nP -iTCP:9222 -sTCP:LISTEN || echo "9222 free"
+   ```
+
+2. **Restart the API and the Claude MCP servers.** Start the API with
+   `ANTIGEN_BROWSER_HEADLESS=false` (step 1 of the reproduce section) as belt-and-suspenders —
+   the adapter `mode:"visible"` propagation is the primary mechanism, but a headed API env is a
+   valid fallback. Restart the agent's MCP session so adapter env changes are picked up.
+
+3. **Run the diagnostic:**
+
+   ```sh
+   npm run diagnose:antigen-browser        # add --no-provision for a pure read-only pass
+   ```
+
+4. **What good output looks like:**
+   - `token … pass_demo_001` resolves to `agent_id agent_demo_001` / `delegation_id delg_demo_001`;
+   - CDP reachable on `http://localhost:9222`;
+   - **exactly one usable page target** (a real page, not `about:blank`/`chrome://`);
+   - runtime endpoint returns the **same** `cdp_url` (`http://localhost:9222`);
+   - **Warnings: none**;
+   - adapter stderr shows `headless=false`, `headed_intent=visible`, and `token_self_check ok`;
+   - API log shows `[TaskBrowser] launched … mode=visible headless_arg=false`.
+
+5. **What bad output means:**
+   - **multiple page targets** → `@playwright/mcp` may bind the wrong tab; close extra tabs;
+   - **`chrome://settings/help` selected** → target-selection confusion; open the real page first;
+   - **CDP unreachable** → no browser on 9222; start QA / re-provision;
+   - **runtime endpoint `cdp_url` differs** from the diagnostic's → adapter and inspection are on
+     different Chrome instances; kill strays and restart;
+   - **API log shows `mode=headless`** (or `[RuntimeEndpoint] mode_mismatch …`) → env not reaching
+     the launch, or a stale headless session was reused → repeat step 1 and restart.
 
 ---
 
@@ -219,6 +281,7 @@ input-driven search via a visible `ag_*` search input, which returns
 | Wrapper script won't launch; "Operation not permitted" | macOS blocks Claude's MCP launcher from executing the `.sh` directly | Use the **inline `/bin/bash -lc … exec node …`** form (step 4) instead of pointing at the wrapper. |
 | `401 INVALID_TOKEN` on `/runtime/browser-endpoint` | No `passes` record for `pass_demo_001` (`agentDelegations` exists but `passes` was empty) | `npm run seed:demo`, then restart/reload the API. Verify with the step-3 curl. |
 | No visible Chrome / no `cdp_url` | CDP port **9222** not listening; runtime not provisioned | Confirm the API is running with the step-1 env; re-call the browser-endpoint; check that `headless=false`. |
+| Actions succeed but **no Chrome window appears** | Runtime launched **headless** (API env not set), or a **stale headless session on 9222 was reused** | Run the [Headed runtime visibility checklist](#headed-runtime-visibility-checklist): kill Chrome on 9222, restart API+MCP, run `npm run diagnose:antigen-browser`, confirm API log `mode=visible`. |
 | Click/scroll fails on a known element | **Stale / out-of-viewport `ag_*` ref** | Take a **fresh `antigen_snapshot`** and/or `browser_scroll_to_ref`, then use the new ref. Never reuse a stale ref — ref validation is fail-closed (stale/expired/out-of-viewport/not-found/not-clickable/invalid all reject). |
 | Adapter says realism `DISABLED` / no interception | `headless` not `false`, or `realism` is `fast`/`disabled`/`false` | Set `ANTIGEN_BROWSER_HEADLESS=false` and `ANTIGEN_INPUT_REALISM=realistic`. Visible mode is required for realistic interception **and** for watching QA. |
 

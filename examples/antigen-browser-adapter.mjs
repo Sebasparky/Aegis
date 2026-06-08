@@ -570,6 +570,12 @@ async function doChildInitHandshake() {
 }
 
 async function _doInitRuntime() {
+  // Propagate the operator's visibility intent to the launch decision. The
+  // headed/headless choice is made server-side in createTaskBrowserSession; the
+  // adapter's ANTIGEN_BROWSER_HEADLESS env only governs adapter-side realism. Send
+  // mode:"visible" so a fresh launch is headed even if the API process was started
+  // without ANTIGEN_BROWSER_HEADLESS=false. (API env remains a valid fallback.)
+  const headedRequested = HEADLESS_ENV === "false";
   let res;
   try {
     res = await fetch(`${BASE}/api/agent/v1/runtime/browser-endpoint`, {
@@ -578,7 +584,7 @@ async function _doInitRuntime() {
         "Content-Type": "application/json",
         Authorization: `Bearer ${TOKEN}`,
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify(headedRequested ? { mode: "visible" } : {}),
     });
   } catch (err) {
     throw new Error(`Could not reach Antigen API at ${BASE}. Is the Aegis server running? (${err.message})`);
@@ -611,6 +617,20 @@ async function _doInitRuntime() {
     `[antigen-browser@${ADAPTER_VERSION}] Runtime ready` +
     ` (${runtime_mode ?? "local_runtime_endpoint"}, ${sessionLabel}, id=${browser_runtime_id})` +
     ` — attaching @playwright/mcp to ${cdp_url}\n`
+  );
+
+  // Auditable headed-intent line. The adapter cannot observe the server-side launch
+  // mode directly, but it can state what it requested and what it is binding to.
+  // Metadata only — no cookies, storage, page values, or secrets.
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] headed_intent=${headedRequested ? "visible" : "headless"}` +
+    ` cdp_url=${cdp_url} browser_runtime_id=${browser_runtime_id} reused_existing=${!!reused_existing}\n`
+  );
+  process.stderr.write(
+    headedRequested
+      ? `[antigen-browser@${ADAPTER_VERSION}] expected to be VISIBLE/headed — a Chrome window should be on screen.` +
+        ` If none appears, a stale headless session may have been reused (kill Chrome on 9222 and restart).\n`
+      : `[antigen-browser@${ADAPTER_VERSION}] expected to be HEADLESS — no Chrome window will appear (set ANTIGEN_BROWSER_HEADLESS=false for visible QA).\n`
   );
 
   if (INTERCEPTION_ENABLED) {

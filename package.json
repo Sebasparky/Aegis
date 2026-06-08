@@ -12,7 +12,8 @@
     "seed:demo": "node apps/api/scripts/seed-demo-data.mjs",
     "chrome:agent": "node apps/api/scripts/start-aegis-debug-chrome.mjs",
     "chrome:agent:dev": "node apps/api/scripts/start-aegis-debug-chrome.mjs --persistent-dev",
-    "qa:validate-mcp": "node scripts/validate-antigen-qa-mcp.mjs"
+    "qa:validate-mcp": "node scripts/validate-antigen-qa-mcp.mjs",
+    "diagnose:antigen-browser": "node scripts/diagnose-antigen-browser-runtime.mjs"
   },
   "devDependencies": {
     "serve": "^14.2.6",

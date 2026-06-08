@@ -456,6 +456,15 @@ async function launchChrome(
     await waitForCdpReady(cdpPort);
 
     updateStatus(session, "ready");
+    // Metadata-only launch log so QA can prove headed vs headless from API logs.
+    // No user_data_dir, PIDs, cookies, storage, page values, or secrets.
+    console.log(
+      `[TaskBrowser] launched browser_session_id=${browser_session_id}` +
+        ` mode=${mode} headless_arg=${!debug_visible}` +
+        ` cdp_url=${cdp_url} port=${cdpPort}` +
+        ` delegation_id=${opts.delegation_id ?? "(none)"}` +
+        ` persistent_profile=${profileOpts.persistent_profile_enabled === true}`,
+    );
     return session;
   } catch (err: unknown) {
     session.status = "failed";

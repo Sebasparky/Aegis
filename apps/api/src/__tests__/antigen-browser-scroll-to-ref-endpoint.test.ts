@@ -183,6 +183,20 @@ describe("POST /api/agent/v1/runtime/browser-scroll-to-ref", () => {
     expect(res.json().error.code).toBe("SESSION_NOT_READY");
   });
 
+  it("fails closed with RUNTIME_SESSION_CHANGED when the runtime was relaunched (stale id + ready replacement)", async () => {
+    // Stale id → closed session; a fresh ready runtime exists for the same delegation.
+    seedSession({ status: "closed" });
+    seedSession({ browser_session_id: "tbsess_scroll_relaunched", status: "ready" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    // Ref-consuming endpoints must NOT silently rebind the stale ag_* ref.
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("RUNTIME_SESSION_CHANGED");
+  });
+
   it("resolves a valid ag_* ref and calls scrollKnownBoxIntoView with the internal box", async () => {
     seedSession();
     seedSnapshot([
@@ -208,7 +222,26 @@ describe("POST /api/agent/v1/runtime/browser-scroll-to-ref", () => {
       box: { width: 120, height: 44, doc_y: 1800 },
       sessionId: SESSION_ID,
       userId: MOCK_USER_ID,
+      // The snapshot URL is forwarded so the runtime's live-URL guard can fail
+      // closed on a page change, exactly like the click/type ag_* paths.
+      expectedUrl: "https://www.ikea.com/us/en/",
     }));
+  });
+
+  it("maps a runtime ANTIGEN_REF_PAGE_CHANGED result to a 422 with re-snapshot guidance", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    // The runtime fails closed when the live CDP page no longer matches the
+    // snapshot page (navigation or path/query mismatch).
+    scrollKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(res.json().error.message.toLowerCase()).toContain("antigen_snapshot");
   });
 
   it("returns 422 ANTIGEN_REF_INVALID for a malformed ref", async () => {
@@ -239,7 +272,7 @@ describe("POST /api/agent/v1/runtime/browser-scroll-to-ref", () => {
 
   it("returns 422 ANTIGEN_REF_EXPIRED for a stale snapshot", async () => {
     seedSession();
-    // Snapshot created 1 hour ago → expired (TTL is 10s).
+    // Snapshot created 1 hour ago → expired (TTL is 90s).
     seedSnapshot([candidate()], new Date(Date.now() - 60 * 60_000));
     const res = await server.inject({
       method: "POST", url: URL,

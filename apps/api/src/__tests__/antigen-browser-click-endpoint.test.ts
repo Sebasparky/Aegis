@@ -361,8 +361,8 @@ describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () =>
 
   it("returns 422 ANTIGEN_REF_EXPIRED when the snapshot is past its TTL", async () => {
     seedSession();
-    // Seed a snapshot created well in the past so it is already expired now.
-    seedSnapshot([candidate()], new Date(Date.now() - 60_000));
+    // Seed a snapshot created past the 90s wall-clock TTL so it is already expired.
+    seedSnapshot([candidate()], new Date(Date.now() - 120_000));
     const res = await server.inject({
       method: "POST", url: URL,
       headers: { authorization: BEARER },
@@ -371,6 +371,49 @@ describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () =>
     expect(res.statusCode).toBe(422);
     expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("still resolves a ref ~15s into the snapshot (within the 90s TTL)", async () => {
+    seedSession();
+    // 15s old: previously past the 10s TTL, now within the 90s budget so ordinary
+    // agent reasoning between snapshot and click does not expire the ref.
+    seedSnapshot([candidate()], new Date(Date.now() - 15_000));
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the snapshot URL as expectedUrl for the live-URL guard", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({
+      expectedUrl: "https://www.ikea.com/us/en/",
+    }));
+  });
+
+  it("maps a runtime ANTIGEN_REF_PAGE_CHANGED result to a 422 with re-snapshot guidance", async () => {
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(res.json().error.message.toLowerCase()).toContain("antigen_snapshot");
+    // A page-change (failed) click must not refresh session.current_url.
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe("https://www.ikea.com/us/en/");
   });
 
   it("returns 422 ANTIGEN_REF_NOT_CLICKABLE for a disabled element", async () => {
@@ -535,5 +578,19 @@ describe("POST /api/agent/v1/runtime/browser-click — non-ag behavior unchanged
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("fails closed with RUNTIME_SESSION_CHANGED when the runtime was relaunched (stale id + ready replacement)", async () => {
+    seedSnapshot([candidate()]);
+    seedSession({ status: "closed" });
+    seedSession({ browser_session_id: "tbsess_click_relaunched", status: "ready" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+    // The stale ag_* ref must not be carried across runtimes.
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("RUNTIME_SESSION_CHANGED");
   });
 });

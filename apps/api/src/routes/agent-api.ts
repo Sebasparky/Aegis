@@ -45,9 +45,9 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, closeTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -332,6 +332,61 @@ function toSafeReceiptSummary(r: RouteRunReceipt): SafeReceiptSummary {
     ...(r.observation_mode_summary ? { observation_mode_summary: r.observation_mode_summary } : {}),
     jws_present: false, // JWS is stored in Supabase row metadata; not available in in-memory path
   };
+}
+
+// Terminal runtime statuses: a session in any of these is no longer usable and
+// must never be treated as a live target. Used by resolveReadyRuntimeSession to
+// decide when to attempt a rebind to the delegation's current ready runtime.
+const TERMINAL_RUNTIME_STATUSES = new Set<TaskBrowserSession["status"]>([
+  "closed",
+  "expired",
+  "failed",
+]);
+
+/**
+ * Discriminated resolution of a caller-supplied browser_runtime_id against the
+ * delegation's live runtime state. Centralizes the "stale runtime id" handling
+ * shared by the Antigen runtime endpoints (snapshot, click, type, scroll-to-ref).
+ *
+ *  - `ready`     — the id maps to an owned, ready session; use it directly.
+ *  - `rebound`   — the id is stale (terminal) or unknown, but the delegation has a
+ *                  current ready runtime. Snapshot may transparently rebind to it
+ *                  (it produces a fresh snapshot_id/ref set). Ref-consuming endpoints
+ *                  must NOT silently carry stale ag_* refs across the change — they
+ *                  surface RUNTIME_SESSION_CHANGED and tell the agent to re-snapshot.
+ *  - `starting`  — the session exists but is still launching; a true transient
+ *                  not-ready (a rebind would target the wrong session).
+ *  - `forbidden` — the id maps to a session owned by a different delegation.
+ *  - `none`      — no usable session and no rebind candidate; recoverable via a
+ *                  fresh get_runtime_browser_endpoint provision.
+ *
+ * Never returns cdp_url/paths/PIDs — callers read only session metadata.
+ */
+type RuntimeSessionResolution =
+  | { kind: "ready"; session: TaskBrowserSession }
+  | { kind: "rebound"; session: TaskBrowserSession; previous_runtime_id: string }
+  | { kind: "starting"; session: TaskBrowserSession }
+  | { kind: "forbidden" }
+  | { kind: "none" };
+
+function resolveReadyRuntimeSession(
+  runtimeId: string,
+  delegationId: string,
+  userId: string,
+): RuntimeSessionResolution {
+  const direct = getTaskBrowserSession(runtimeId, userId);
+  if (direct) {
+    if (direct.delegation_id !== delegationId) return { kind: "forbidden" };
+    if (direct.status === "ready") return { kind: "ready", session: direct };
+    if (direct.status === "starting") return { kind: "starting", session: direct };
+    // Terminal (closed/expired/failed) — fall through to the rebind attempt.
+  }
+  // Stale or unknown id: bind to the delegation's current ready runtime, if any.
+  // findReadySessionByDelegationId is already scoped to delegation + user, so a
+  // rebind can never cross delegations.
+  const ready = findReadySessionByDelegationId(delegationId, userId);
+  if (ready) return { kind: "rebound", session: ready, previous_runtime_id: runtimeId };
+  return { kind: "none" };
 }
 
 export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
@@ -3397,26 +3452,52 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     if (!delegation) return;
 
     const body = (req.body ?? {}) as { mode?: string; persistent_profile?: boolean };
-    const debug_visible = body.mode === "visible";
+    // Tri-state requested mode: explicit "visible"/"headless", or undefined when the
+    // caller expresses no preference. An absent mode (e.g. the adapter's reinit posts
+    // {}) must NEVER flip an existing visible session back to headless — so undefined
+    // means "reuse whatever exists", never "headless requested".
+    const requested_mode: "visible" | "headless" | undefined =
+      body.mode === "visible" ? "visible" : body.mode === "headless" ? "headless" : undefined;
+    const debug_visible = requested_mode === "visible";
     const persistent_profile = body.persistent_profile === true;
 
-    // Return an existing ready session for this delegation rather than provisioning a duplicate.
-    const existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
+    // Return an existing ready session for this delegation rather than provisioning a
+    // duplicate — UNLESS the caller explicitly requested a visibility mode that differs
+    // from the existing runtime's effective mode.
+    let existing = findReadySessionByDelegationId(delegation.id, MOCK_USER_ID);
+    if (existing && requested_mode !== undefined && requested_mode !== existing.mode) {
+      // Mode mismatch on an ephemeral local runtime: relaunch rather than silently
+      // honoring the wrong mode. Close fully (frees the port) before re-provisioning;
+      // createTaskBrowserSession then relaunches on the freed port (same cdp_url keeps
+      // any attached agent browser tooling valid). Metadata-only log — no paths/PIDs.
+      console.log(
+        `[RuntimeEndpoint] mode_change relaunch delegation_id=${delegation.id}` +
+          ` old_runtime_id=${existing.browser_session_id} existing_mode=${existing.mode}` +
+          ` requested_mode=${requested_mode}`,
+      );
+      recordBrowserTraceEvent(existing.browser_session_id, {
+        event_type: "browser_endpoint_created",
+        browser_runtime_id: existing.browser_session_id,
+        tool: "get_runtime_browser_endpoint",
+        result_code: "relaunched_mode_change",
+      });
+      try {
+        await closeTaskBrowserSession(existing.browser_session_id, MOCK_USER_ID);
+      } catch {
+        // Best-effort close — proceed to relaunch regardless. createTaskBrowserSession
+        // performs its own port sweep/recycle before binding.
+      }
+      existing = undefined;
+    }
     if (existing) {
       // Metadata-only runtime-binding log (no paths, PIDs, cookies, storage, or secrets).
       console.log(
         `[RuntimeEndpoint] reused browser_runtime_id=${existing.browser_session_id}` +
           ` delegation_id=${delegation.id} cdp_url=${existing.cdp_url}` +
           ` runtime_mode=${existing.runtime_mode ?? "local_runtime_endpoint"}` +
-          ` reused_existing=true existing_mode=${existing.mode} requested_visible=${debug_visible}`,
+          ` reused_existing=true existing_mode=${existing.mode}` +
+          ` requested_mode=${requested_mode ?? "(none)"}`,
       );
-      if (debug_visible && existing.mode === "headless") {
-        console.warn(
-          `[RuntimeEndpoint] mode_mismatch: visible requested but existing session ${existing.browser_session_id}` +
-            ` on ${existing.cdp_url} is headless — close the stale session on port 9222` +
-            ` (e.g. lsof -ti tcp:9222 | xargs kill) and restart QA to get a visible window.`,
-        );
-      }
       recordBrowserTraceEvent(existing.browser_session_id, {
         event_type: "browser_endpoint_created",
         browser_runtime_id: existing.browser_session_id,
@@ -3427,9 +3508,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ok: true,
         data: {
           browser_runtime_id: existing.browser_session_id,
+          browser_session_id: existing.browser_session_id,
           cdp_url: existing.cdp_url,
           status: existing.status,
           runtime_mode: existing.runtime_mode ?? "local_runtime_endpoint",
+          ...(requested_mode !== undefined ? { requested_mode } : {}),
+          effective_mode: existing.mode,
+          session_ready: existing.status === "ready",
           ephemeral: true as const,
           reused_existing: true,
           port_auto_selected: false,
@@ -3489,9 +3574,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       ok: true,
       data: {
         browser_runtime_id: session.browser_session_id,
+        browser_session_id: session.browser_session_id,
         cdp_url: session.cdp_url,
         status: session.status,
         runtime_mode: session.runtime_mode ?? "local_runtime_endpoint",
+        ...(requested_mode !== undefined ? { requested_mode } : {}),
+        effective_mode: session.mode,
+        session_ready: session.status === "ready",
         ephemeral: true as const,
         reused_existing: false,
         port_auto_selected: result.port_auto_selected === true,
@@ -3535,8 +3624,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
     }
 
-    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) {
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (runtimeResolution.kind === "none") {
       recordBrowserTraceEvent(body.browser_runtime_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: body.browser_runtime_id,
@@ -3545,8 +3635,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
     }
-    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
-    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "starting") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "rebound") {
+      // Fail closed: the runtime changed since this ref was captured. Never resolve a
+      // stale ag_* ref against a different runtime. RUNTIME_SESSION_CHANGED is agent-
+      // recoverable but must NOT be auto-retried with the same ref — reinitialize the
+      // runtime if needed, take a fresh antigen_snapshot, then act on the new refs.
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_click",
+        error_code: "RUNTIME_SESSION_CHANGED",
+      });
+      return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
+    }
+    const session = runtimeResolution.session; // ready
 
     // Antigen exact-ref path (Phase 4A): when ref is an Antigen ref (ag_<n>),
     // resolve the exact element box from the latest active snapshot for this
@@ -3599,6 +3702,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         sessionId: session.browser_session_id,
         userId: MOCK_USER_ID,
         debugOverlay: resolveOverlayEnabled(session),
+        // Live-URL guard: fail closed if the page navigated since the snapshot.
+        expectedUrl: resolution.snapshot_url,
         // Phase 4B: snapshot metadata for live-element revalidation before click.
         expected: {
           tag: el.tag,
@@ -3613,7 +3718,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       if (!refResult.success) {
         // No successful pointer dispatch on any failure (out-of-viewport / stale aborts before dispatch).
         const failCode =
-          refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT" ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+          refResult.error === "ANTIGEN_REF_PAGE_CHANGED" ? "ANTIGEN_REF_PAGE_CHANGED"
+          : refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT" ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
           : refResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
           : refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
           : "REALISTIC_CLICK_FAILED";
@@ -3623,6 +3729,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
           pointer_dispatch: false, error_code: failCode,
         });
+        if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+        }
         if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
         }
@@ -3728,8 +3837,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
     }
 
-    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) {
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (runtimeResolution.kind === "none") {
       recordBrowserTraceEvent(body.browser_runtime_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: body.browser_runtime_id,
@@ -3738,8 +3848,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
     }
-    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
-    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "starting") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "rebound") {
+      // Fail closed: the runtime changed since this ref was captured. Never resolve a
+      // stale ag_* ref against a different runtime. RUNTIME_SESSION_CHANGED is agent-
+      // recoverable but must NOT be auto-retried with the same ref — reinitialize the
+      // runtime if needed, take a fresh antigen_snapshot, then act on the new refs.
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_scroll_to_ref",
+        error_code: "RUNTIME_SESSION_CHANGED",
+      });
+      return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
+    }
+    const session = runtimeResolution.session; // ready
 
     const refRaw = typeof body.ref === "string" ? body.ref : undefined;
     if (!refRaw || !/^ag_\d+$/.test(refRaw)) {
@@ -3782,14 +3905,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       box: { width: el.box.width, height: el.box.height, doc_y: el.box.doc_y as number },
       sessionId: session.browser_session_id,
       userId: MOCK_USER_ID,
+      // Live-URL guard: fail closed if the page navigated since the snapshot, so a
+      // scroll never proceeds on a page that click/type would reject.
+      expectedUrl: resolution.snapshot_url,
     });
 
     if (!scrollResult.success) {
+      const scrollFailCode = scrollResult.error === "ANTIGEN_REF_PAGE_CHANGED" ? "ANTIGEN_REF_PAGE_CHANGED" : "ANTIGEN_SCROLL_FAILED";
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
         tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
-        context: el.context, error_code: "ANTIGEN_SCROLL_FAILED",
+        context: el.context, error_code: scrollFailCode,
       });
+      if (scrollResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+      }
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_SCROLL_FAILED", message: "Antigen could not scroll the ref into view. Take a fresh antigen_snapshot and retry." } });
     }
 
@@ -3820,6 +3950,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       element_description?: unknown;
       selector_hint?: unknown;
       submit?: unknown;
+      ref?: unknown;
     };
 
     if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
@@ -3829,8 +3960,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return sendError(reply, 400, "MISSING_FIELD", "text is required and must be a string.");
     }
 
-    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) {
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (runtimeResolution.kind === "none") {
       recordBrowserTraceEvent(body.browser_runtime_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: body.browser_runtime_id,
@@ -3839,8 +3971,142 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
     }
-    if (session.delegation_id !== delegation.id) return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
-    if (session.status !== "ready") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "starting") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "rebound") {
+      // Fail closed: the runtime changed since this ref was captured. Never resolve a
+      // stale ag_* ref against a different runtime. RUNTIME_SESSION_CHANGED is agent-
+      // recoverable but must NOT be auto-retried with the same ref — reinitialize the
+      // runtime if needed, take a fresh antigen_snapshot, then act on the new refs.
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_type",
+        error_code: "RUNTIME_SESSION_CHANGED",
+      });
+      return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
+    }
+    const session = runtimeResolution.session; // ready
+
+    const submitFlag = body.submit === true;
+
+    // Antigen exact-ref path (Phase 4A/4B): when ref is an Antigen ref (ag_<n>),
+    // resolve the exact typeable element box from the latest active snapshot for
+    // this session+user and type into it via the realistic known-box typing
+    // runtime. No scoring, no fuzzy matching, no text rediscovery — exact ref
+    // only, mirroring the browser-click ag_* path. Non-ag refs / no ref fall
+    // through to the description path below. text is never logged beyond
+    // char_count_bucket.
+    const refRaw = typeof body.ref === "string" ? body.ref : undefined;
+    if (refRaw && refRaw.startsWith("ag_")) {
+      if (!/^ag_\d+$/.test(refRaw)) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_INVALID",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw}'; expected ag_<number>.` } });
+      }
+
+      const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
+      if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_NOT_FOUND",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+      }
+      if (resolution.status === "expired") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_EXPIRED",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      }
+
+      const el = resolution.element;
+      if (!el.enabled || !el.typeable || el.box.width <= 0 || el.box.height <= 0) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, element_name: el.name, context: el.context,
+          href_path: el.href_path ?? undefined, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_NOT_TYPEABLE",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_TYPEABLE", message: `Antigen ref '${refRaw}' is not a typeable field. Take a fresh antigen_snapshot and use a typeable ref.` } });
+      }
+
+      const refResult = await realisticTypeKnownBox({
+        cdpUrl: session.cdp_url,
+        box: el.box,
+        text: body.text,
+        sessionId: session.browser_session_id,
+        userId: MOCK_USER_ID,
+        submit: submitFlag,
+        debugOverlay: resolveOverlayEnabled(session),
+        // Live-URL guard: fail closed if the page navigated since the snapshot.
+        expectedUrl: resolution.snapshot_url,
+        // Phase 4B: snapshot metadata for live-element revalidation before typing.
+        expected: {
+          tag: el.tag,
+          kind: el.kind,
+          role: el.role,
+          name: el.name,
+          normalized_name: el.normalized_name,
+          href_path: el.href_path,
+        },
+      });
+
+      if (!refResult.success) {
+        // No successful keystroke dispatch on any failure (out-of-viewport / stale
+        // aborts before dispatch).
+        const failCode =
+          refResult.error === "ANTIGEN_REF_PAGE_CHANGED" ? "ANTIGEN_REF_PAGE_CHANGED"
+          : refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT" ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+          : refResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
+          : refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
+          : "REALISTIC_TYPE_FAILED";
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, char_count_bucket: refResult.char_count_bucket,
+          element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+          pointer_dispatch: false, error_code: failCode,
+        });
+        if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+        }
+        if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
+        }
+        if (refResult.error === "ANTIGEN_REF_STALE") {
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry." } });
+        }
+        return reply.status(422).send({ ok: false, error: { code: failCode, message: refResult.error ?? "Realistic typing failed." }, data: { char_count_bucket: refResult.char_count_bucket, duration_ms: refResult.duration_ms } });
+      }
+
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+        tool: "browser_type", char_count_bucket: refResult.char_count_bucket,
+        submit: typeof refResult.submitted === "boolean" ? refResult.submitted : submitFlag,
+        element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+        pointer_dispatch: refResult.pointer_path_point_count !== undefined,
+        result_code: "realistic_type_success",
+      });
+
+      return reply.send({
+        ok: true,
+        data: {
+          char_count_bucket: refResult.char_count_bucket,
+          duration_ms: refResult.duration_ms,
+          ...(refResult.focused !== undefined ? { focused: refResult.focused } : {}),
+          ...(refResult.submitted !== undefined ? { submitted: refResult.submitted } : {}),
+          ...(refResult.submit_method !== undefined ? { submit_method: refResult.submit_method } : {}),
+          ...(refResult.pointer_path_point_count !== undefined ? { pointer_path_point_count: refResult.pointer_path_point_count } : {}),
+          ...(refResult.pointer_start_source !== undefined ? { pointer_start_source: refResult.pointer_start_source } : {}),
+          ...(refResult.pointer_state_persisted !== undefined ? { pointer_state_persisted: refResult.pointer_state_persisted } : {}),
+        },
+      });
+    }
 
     const elementDescription =
       typeof body.element_description === "string" && body.element_description.trim()
@@ -3850,7 +4116,6 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       typeof body.selector_hint === "string" && body.selector_hint.trim()
         ? body.selector_hint.trim()
         : undefined;
-    const submitFlag = body.submit === true;
 
     // text is never logged beyond char_count_bucket — see realisticBrowserActions.ts invariants
     const result = await realisticTypeTextViaCDP({
@@ -4021,8 +4286,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // viewport_only defaults true; only an explicit false opts out.
     const viewportOnly = body.viewport_only === false ? false : true;
 
-    const session = getTaskBrowserSession(body.browser_runtime_id, MOCK_USER_ID);
-    if (!session) {
+    // Resolve the caller's runtime id against live state. Snapshot is the ONE
+    // endpoint that may transparently rebind a stale id to the delegation's current
+    // ready runtime — it captures a fresh snapshot_id/ref set bound to that session,
+    // so no stale refs are carried across the change. "starting" stays a true
+    // transient not-ready; "none" stays recoverable (re-provision).
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") {
+      return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    }
+    if (runtimeResolution.kind === "starting") {
+      return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    }
+    if (runtimeResolution.kind === "none") {
       recordBrowserTraceEvent(body.browser_runtime_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: body.browser_runtime_id,
@@ -4031,14 +4307,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
     }
-    if (session.delegation_id !== delegation.id) {
-      return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
-    }
-    if (session.status !== "ready") {
-      return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${session.status}'; must be 'ready'.`);
-    }
+    const session = runtimeResolution.session; // ready | rebound
+    const rebound = runtimeResolution.kind === "rebound";
     if (!session.cdp_url) {
       return sendError(reply, 400, "SESSION_NOT_READY", "Browser runtime session has no active CDP endpoint.");
+    }
+    if (rebound) {
+      // Metadata-only rebind audit — no paths, PIDs, or cdp_url.
+      console.log(
+        `[AntigenSnapshot] rebound stale_runtime_id=${runtimeResolution.previous_runtime_id}` +
+          ` -> browser_runtime_id=${session.browser_session_id} delegation_id=${delegation.id}`,
+      );
     }
 
     let candidates: AntigenSnapshotCandidate[];
@@ -4067,7 +4346,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     const { snapshot, elements } = createAntigenSnapshotRecord({
       browser_session_id: session.browser_session_id,
-      browser_runtime_id: body.browser_runtime_id,
+      // Bind the record to the RESOLVED session — never the (possibly stale) request
+      // id — so resolveAntigenRefForSession finds refs under the runtime that was
+      // actually snapshotted, including after a rebind.
+      browser_runtime_id: session.browser_session_id,
       user_id: MOCK_USER_ID,
       url: session.current_url ?? null,
       title: null, // v1: document.title extraction is out of scope
@@ -4131,10 +4413,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       ok: true,
       data: {
         snapshot_id: snapshot.snapshot_id,
+        // The runtime this snapshot is actually bound to. After a rebind this differs
+        // from the request id — callers should adopt it for subsequent ref actions.
+        browser_runtime_id: session.browser_session_id,
+        rebound,
+        effective_mode: session.mode,
+        snapshot_ready: true,
         url: snapshot.url,
         title: snapshot.title,
         expires_at: snapshot.expires_at,
         snapshot_ttl_ms: ANTIGEN_SNAPSHOT_TTL_MS,
+        // Remaining lifetime at response time so the adapter/agent can plan a
+        // proactive re-snapshot before a long reasoning step rather than
+        // discovering expiry on a failed action.
+        ref_expires_in_ms: Math.max(0, new Date(snapshot.expires_at).getTime() - Date.now()),
         element_count: snapshot.element_count,
         page_summary: pageMap.page_summary,
         current_scroll: pageMap.current_scroll,

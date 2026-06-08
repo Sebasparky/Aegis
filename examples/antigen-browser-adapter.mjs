@@ -485,7 +485,7 @@ let runtimeInitDone = false; // true after child handshake + stdout piped
 let currentUrl = null;
 let lastNavHints = null;
 let lastNavHintsAt = 0;
-const NAV_HINTS_TTL_MS = 10000; // mirrors backend ANTIGEN_SNAPSHOT_TTL_MS (~10s)
+const NAV_HINTS_TTL_MS = 90000; // mirrors backend ANTIGEN_SNAPSHOT_TTL_MS (~90s)
 
 // ─── Pending navigation registry ──────────────────────────────────────────────
 // Tracks in-flight browser_navigate calls by requestId so handleChildLine can
@@ -1010,7 +1010,17 @@ async function noteToolDisposition(args) {
   await recordToolDisposition(args).catch(() => {});
 }
 
-/** True only for a 404 whose error code is SESSION_NOT_FOUND (reads a clone). */
+/**
+ * True only for a 404 whose error code is SESSION_NOT_FOUND (reads a clone).
+ *
+ * Deliberately narrow: only SESSION_NOT_FOUND drives the one-shot reinit+retry in
+ * antigenRuntimePost. The ref-consuming endpoints (browser_click/type/scroll) return
+ * RUNTIME_SESSION_CHANGED (409) when the runtime changed under a stale ag_* ref —
+ * that is agent-recoverable but must NOT be auto-retried here, because retrying with
+ * the same stale ref would either fail again or act on the wrong element. Correct
+ * recovery for RUNTIME_SESSION_CHANGED is: reinitialize the runtime if needed, take a
+ * fresh antigen_snapshot, then act on the new refs. Do not add it to this matcher.
+ */
 async function isSessionNotFound(apiRes) {
   if (apiRes.status !== 404) return false;
   const eb = await apiRes.clone().json().catch(() => ({}));
@@ -1260,6 +1270,23 @@ async function handleLine(line) {
           ` element_count=${data?.element_count ?? 0}\n`
         );
         await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+        // Adopt the runtime id this snapshot actually bound to. After a server-side
+        // rebind (our cached id pointed at a closed/relaunched runtime) the snapshot
+        // is captured against the delegation's current ready runtime; updating our
+        // cached id keeps subsequent ref actions pointed at the live runtime instead
+        // of re-triggering a rebind on every call. Metadata only — clipped ids.
+        if (
+          typeof data.browser_runtime_id === "string" &&
+          data.browser_runtime_id &&
+          data.browser_runtime_id !== browser_runtime_id
+        ) {
+          process.stderr.write(
+            `[antigen-browser@${ADAPTER_VERSION}] runtime_rebound` +
+            ` old_runtime_id=${clipRuntimeId(browser_runtime_id)}` +
+            ` new_runtime_id=${clipRuntimeId(data.browser_runtime_id)} rebound=${data.rebound === true}\n`
+          );
+          browser_runtime_id = data.browser_runtime_id;
+        }
         // Cache a compact, safe set of navigation hints so the next
         // browser_navigate can tell a shortcut deeplink from a legitimate jump.
         // Derivation reads allowlisted page-map fields only; never throws into
@@ -1500,6 +1527,8 @@ async function handleLine(line) {
       // failure. Never surfaces coordinates or live DOM.
       const clickErrMsg = errCode === "SESSION_NOT_FOUND"
         ? sessionNotFoundMessage("browser_click")
+        : errCode === "ANTIGEN_REF_PAGE_CHANGED"
+        ? "Antigen realistic browser_click failed: the page navigated since this snapshot, so the ag_* ref is no longer valid. Take a new antigen_snapshot and retry."
         : errCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
         ? "Antigen realistic browser_click failed: the ag_* ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry."
         : errCode === "ANTIGEN_REF_STALE"
@@ -1527,6 +1556,7 @@ async function handleLine(line) {
   // ── browser_fill interception ──────────────────────────────────────────────
   if (INTERCEPTION_ENABLED && toolName === "browser_fill") {
     const fillText  = msg?.params?.arguments?.value ?? "";
+    const fillRef   = msg?.params?.arguments?.ref ?? "";
     const argKeys   = Object.keys(msg?.params?.arguments ?? {}).join(",");
     const requestId = msg.id;
     const bucket    = charCountBucket(fillText.length);
@@ -1537,9 +1567,14 @@ async function handleLine(line) {
     );
 
     try {
+      // Antigen exact-ref path: forward an ag_<n> ref so the backend types into
+      // the stored snapshot box (same known-box path as browser_type), instead of
+      // relying on the currently-focused element. Non-ag refs are not forwarded.
+      const fillBody = { text: fillText };
+      if (typeof fillRef === "string" && /^ag_\d+$/.test(fillRef)) fillBody.ref = fillRef;
       const apiRes = await antigenRuntimePost(
         "/api/agent/v1/runtime/browser-type",
-        { text: fillText },
+        fillBody,
         { tool: "browser_fill" },
       );
 
@@ -1630,6 +1665,12 @@ async function handleLine(line) {
       const typeBody = { text: typeText, submit: typeSubmit };
       if (hasTarget) typeBody.element_description = typeElement;
       if (selectorHint) typeBody.selector_hint = selectorHint;
+      // Antigen exact-ref path: forward an ag_<n> ref straight through to the
+      // backend, which resolves it against the latest snapshot and types into the
+      // stored box via the realistic known-box typing runtime — mirroring
+      // browser_click. The adapter never resolves the ref or touches Playwright.
+      // Non-ag refs (CSS selectors) still route through selector_hint above.
+      if (typeof typeRef === "string" && /^ag_\d+$/.test(typeRef)) typeBody.ref = typeRef;
 
       const apiRes = await antigenRuntimePost(
         "/api/agent/v1/runtime/browser-type",

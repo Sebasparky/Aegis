@@ -17,6 +17,7 @@ vi.mock("../lib/loginDiagnostics.js", () => ({
 // ─── Mock task browser runtime ────────────────────────────────────────────────
 
 const createMock = vi.hoisted(() => vi.fn());
+const closeMock = vi.hoisted(() => vi.fn());
 const findReadyByDelegationMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../runtime/taskBrowserSessions.js", async () => {
@@ -29,7 +30,7 @@ vi.mock("../runtime/taskBrowserSessions.js", async () => {
   return {
     ...actual,
     createTaskBrowserSession: createMock,
-    closeTaskBrowserSession: vi.fn(),
+    closeTaskBrowserSession: closeMock,
     getTaskBrowserSessionForReuse: vi.fn(),
     findReadySessionByDelegationId: findReadyByDelegationMock,
     findChromeBinary: vi.fn().mockReturnValue("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
@@ -202,6 +203,7 @@ beforeEach(() => {
   taskBrowserSessions.clear();
   vi.clearAllMocks();
   findReadyByDelegationMock.mockReturnValue(undefined);
+  closeMock.mockResolvedValue({});
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -285,6 +287,103 @@ describe("POST /api/agent/v1/runtime/browser-endpoint", () => {
     expect(body.data.browser_runtime_id).toBe("tbsess_rbe_001");
     // createTaskBrowserSession must not have been called
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT silently reuse a headless runtime when visible is requested — relaunches", async () => {
+    const existingHeadless = makeFreshSession({ browser_session_id: "tbsess_headless", mode: "headless" });
+    findReadyByDelegationMock.mockReturnValueOnce(existingHeadless);
+    const fresh = makeFreshSession({ browser_session_id: "tbsess_visible", mode: "visible" });
+    createMock.mockResolvedValueOnce({ session: fresh, user_message: "ok", mode: "visible" });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-endpoint",
+      headers: { authorization: BEARER },
+      payload: { mode: "visible" },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    // The headless runtime was closed and a visible one provisioned — not reused.
+    expect(closeMock).toHaveBeenCalledWith("tbsess_headless", MOCK_USER_ID);
+    expect(createMock).toHaveBeenCalledWith(expect.objectContaining({ debug_visible: true }));
+    expect(body.data.reused_existing).toBe(false);
+    expect(body.data.effective_mode).toBe("visible");
+    expect(body.data.requested_mode).toBe("visible");
+    expect(body.data.browser_runtime_id).toBe("tbsess_visible");
+  });
+
+  it("closes the stale runtime BEFORE provisioning the replacement (binding cleared first)", async () => {
+    findReadyByDelegationMock.mockReturnValueOnce(makeFreshSession({ browser_session_id: "tbsess_headless", mode: "headless" }));
+    createMock.mockResolvedValueOnce({ session: makeFreshSession({ mode: "visible" }), user_message: "ok", mode: "visible" });
+
+    await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-endpoint",
+      headers: { authorization: BEARER },
+      payload: { mode: "visible" },
+    });
+
+    expect(closeMock).toHaveBeenCalledTimes(1);
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(closeMock.mock.invocationCallOrder[0]).toBeLessThan(createMock.mock.invocationCallOrder[0]);
+  });
+
+  it("MAY reuse when the requested mode matches the existing runtime's mode", async () => {
+    findReadyByDelegationMock.mockReturnValueOnce(makeFreshSession({ mode: "headless" }));
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-endpoint",
+      headers: { authorization: BEARER },
+      payload: { mode: "headless" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.reused_existing).toBe(true);
+    expect(body.data.effective_mode).toBe("headless");
+    expect(body.data.requested_mode).toBe("headless");
+    expect(closeMock).not.toHaveBeenCalled();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("an absent mode ({}, e.g. adapter reinit) never flips an existing visible session to headless", async () => {
+    findReadyByDelegationMock.mockReturnValueOnce(makeFreshSession({ mode: "visible" }));
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-endpoint",
+      headers: { authorization: BEARER },
+      // No mode field — "no preference", must reuse whatever exists.
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.reused_existing).toBe(true);
+    expect(body.data.effective_mode).toBe("visible");
+    expect(body.data.requested_mode).toBeUndefined();
+    expect(closeMock).not.toHaveBeenCalled();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("exposes effective mode + readiness metadata on a freshly provisioned runtime", async () => {
+    const session = makeFreshSession({ mode: "visible" });
+    createMock.mockResolvedValueOnce({ session, user_message: "ok", mode: "visible" });
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-endpoint",
+      headers: { authorization: BEARER },
+      payload: { mode: "visible" },
+    });
+
+    const body = res.json();
+    expect(body.data.effective_mode).toBe("visible");
+    expect(body.data.requested_mode).toBe("visible");
+    expect(body.data.session_ready).toBe(true);
+    expect(body.data.browser_session_id).toBe("tbsess_rbe_001");
+    expect(body.data.reused_existing).toBe(false);
   });
 
   it("sets port_auto_selected=true when Chrome lands on an alternate port", async () => {

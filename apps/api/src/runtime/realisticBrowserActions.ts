@@ -32,6 +32,7 @@ import {
   type AntigenKnownBoxRevalidationExpected,
   type AntigenRevalidationEvalValue,
 } from "./antigenKnownBoxRevalidation.js";
+import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
 import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import {
@@ -582,6 +583,10 @@ export async function realisticClickKnownBox(params: {
   sessionId?: string;
   userId?: string;
   expected?: AntigenKnownBoxRevalidationExpected;
+  // Snapshot-time page URL. When supplied, the live CDP target URL is compared
+  // against it and a navigation away from the snapshot page fails closed with
+  // ANTIGEN_REF_PAGE_CHANGED before any pointer movement.
+  expectedUrl?: string | null;
   // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env (see route handler).
   debugOverlay?: boolean;
 }): Promise<RealisticClickResult> {
@@ -589,7 +594,7 @@ export async function realisticClickKnownBox(params: {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, box, sessionId, userId, expected } = params;
+  const { cdpUrl, box, sessionId, userId, expected, expectedUrl } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -610,6 +615,14 @@ export async function realisticClickKnownBox(params: {
 
   const { target: pageTarget, reason: targetReason } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
+
+  // Live-URL guard: the snapshot's boxes are only valid on the page they were
+  // captured on. pageTarget.url is the authoritative live URL from the active CDP
+  // target at action time (not cached session metadata), so a navigation away
+  // from the snapshot page fails closed here before any pointer movement.
+  if (isAntigenPageChanged(expectedUrl, pageTarget.url)) {
+    return { success: false, error: "ANTIGEN_REF_PAGE_CHANGED" };
+  }
 
   // Phase 4B: when `expected` snapshot metadata is supplied, this eval also
   // inspects the live element under the stored box center (elementFromPoint) for
@@ -762,6 +775,323 @@ export async function realisticClickKnownBox(params: {
   });
 }
 
+/**
+ * Realistic per-character typing into a KNOWN element box from an Antigen
+ * snapshot ref (browser_type / browser_fill exact-ref path).
+ *
+ * This is the typing counterpart of realisticClickKnownBox: it reuses the exact
+ * Phase 4A/4B contract — connect, read viewport, and (when `expected` snapshot
+ * metadata is supplied) revalidate the live element under the stored box center
+ * via elementFromPoint BEFORE any pointer movement. A stale or off-viewport box
+ * fails closed (ANTIGEN_REF_STALE / ANTIGEN_REF_OUT_OF_VIEWPORT) and never types.
+ *
+ * On a valid box it pointer-moves + clicks the box to focus the field (purpose
+ * "input_focus", same as the description-typing focus step), then dispatches the
+ * text via dispatchTextCharsViaCDP and optionally Enter via dispatchEnterViaCDP
+ * with the same submit/button-fallback behavior as realisticTypeTextViaCDP.
+ *
+ * No element finding, no fuzzy text re-discovery: the box is authoritative. The
+ * caller (browser-type endpoint) is responsible for resolving the ag_* ref to a
+ * typeable snapshot element and supplying its stored box + expected metadata.
+ */
+export async function realisticTypeKnownBox(params: {
+  cdpUrl: string;
+  box: ElementBox;
+  text: string;
+  sessionId?: string;
+  userId?: string;
+  submit?: boolean;
+  expected?: AntigenKnownBoxRevalidationExpected;
+  // Snapshot-time page URL. When supplied, the live CDP target URL is compared
+  // against it and a navigation away from the snapshot page fails closed with
+  // ANTIGEN_REF_PAGE_CHANGED before any pointer movement / typing.
+  expectedUrl?: string | null;
+  // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env (see route handler).
+  debugOverlay?: boolean;
+}): Promise<RealisticTypeResult> {
+  const charCountBucket = getCharCountBucket(params.text.length);
+
+  if (getInputRealismMode() === "direct") {
+    return { success: false, error: "REALISM_DISABLED", char_count_bucket: charCountBucket, duration_ms: 0 };
+  }
+
+  const { cdpUrl, box, text, sessionId, userId, submit, expected, expectedUrl } = params;
+  const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
+  const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
+  const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
+
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: Array<{ id: string; url: string; type: string }>;
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
+    ]);
+  } catch (err) {
+    return { success: false, error: `CDP_FETCH_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: 0 };
+  }
+
+  const browserWsUrl = versionData.webSocketDebuggerUrl;
+  if (!browserWsUrl) {
+    return { success: false, error: "No browser WebSocket debugger URL from CDP.", char_count_bucket: charCountBucket, duration_ms: 0 };
+  }
+
+  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  if (!pageTarget) {
+    return { success: false, error: "No page targets found via CDP.", char_count_bucket: charCountBucket, duration_ms: 0 };
+  }
+
+  // Live-URL guard: the snapshot's boxes are only valid on the page they were
+  // captured on. pageTarget.url is the authoritative live URL from the active CDP
+  // target at action time (not cached session metadata), so a navigation away
+  // from the snapshot page fails closed here before any pointer movement / typing.
+  if (isAntigenPageChanged(expectedUrl, pageTarget.url)) {
+    return { success: false, error: "ANTIGEN_REF_PAGE_CHANGED", char_count_bucket: charCountBucket, duration_ms: 0 };
+  }
+
+  // Phase 4B: when `expected` snapshot metadata is supplied, this eval also
+  // inspects the live element under the stored box center (elementFromPoint) for
+  // stale-ref revalidation; it still returns vw/vh for pointer clamping. With no
+  // `expected`, it is the Phase 4A geometry-only viewport read. No DOM mutation.
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const viewportExpr = expected
+    ? buildAntigenRevalidationExpr(centerX, centerY)
+    : "(function(){return {vw:window.innerWidth,vh:window.innerHeight};})()";
+
+  return new Promise<RealisticTypeResult>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let cdpSessionId: string | null = null;
+    let attachId: number;
+    let viewportId: number;
+    let finishCalled = false;
+    const startMs = Date.now();
+    // One-time CDP response handlers for sendAndWait calls inside the typing IIFE.
+    const oneTimeHandlers = new Map<number, (result: Record<string, unknown> | undefined) => void>();
+
+    const timer = setTimeout(() => {
+      ws.terminate();
+      resolve({ success: false, error: "Realistic type timed out after 15 seconds.", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+    }, 15_000);
+
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+      const id = msgId++;
+      const msg: Record<string, unknown> = { id, method, params: p };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+      return id;
+    };
+
+    const finish = (result: RealisticTypeResult) => {
+      if (finishCalled) return;
+      finishCalled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(result);
+    };
+
+    ws.on("open", () => {
+      attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const result = msg.result as Record<string, unknown> | undefined;
+
+      // Dispatch one-time handlers (sendAndWait) before named stage handlers.
+      if (oneTimeHandlers.has(id)) {
+        const handler = oneTimeHandlers.get(id)!;
+        oneTimeHandlers.delete(id);
+        handler(result);
+        return;
+      }
+
+      if (id === attachId) {
+        if (!result?.sessionId) {
+          finish({ success: false, error: "CDP attach failed.", char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          return;
+        }
+        cdpSessionId = result.sessionId as string;
+        viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
+        return;
+      }
+
+      if (id === viewportId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value as ({ vw?: number; vh?: number } & Partial<AntigenRevalidationEvalValue>) | undefined;
+        const vw = val?.vw ?? 1280;
+        const vh = val?.vh ?? 800;
+
+        // Phase 4B: fail closed before any pointer movement / typing when the live
+        // element under the stored box center is not broadly compatible with the
+        // snapshot element. Revalidation only runs when `expected` was supplied.
+        if (expected && val?.status) {
+          const revalidation = evaluateKnownBoxRevalidation({
+            eval: val as AntigenRevalidationEvalValue,
+            expected,
+          });
+          if (revalidation.status === "stale") {
+            if (cdpDiagnostics) {
+              console.log("[RealisticType] antigen ref stale", {
+                surface: "browser_type",
+                reason: revalidation.reason,
+                ...(revalidation.diagnostic ?? {}),
+              });
+            }
+            const error =
+              revalidation.reason === "BOX_OUT_OF_VIEWPORT"
+                ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+                : "ANTIGEN_REF_STALE";
+            finish({ success: false, error, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+            return;
+          }
+        }
+
+        if (cdpDiagnostics) {
+          console.log("[RealisticType] antigen ref box, focusing for type", {
+            surface: "browser_type",
+            box_width: Math.round(box.width),
+            box_height: Math.round(box.height),
+          });
+        }
+
+        // Two-tier pointer state load: taskBrowserSessions preferred when userId is
+        // available; browsingPointerState as fast in-process fallback.
+        let savedTypeState: { x: number; y: number } | undefined;
+        if (sessionId && userId) {
+          const saved = getTaskBrowserSessionPointerState(sessionId, userId);
+          if (saved?.initialized) savedTypeState = { x: saved.x, y: saved.y };
+        }
+        if (!savedTypeState && sessionId) savedTypeState = browsingPointerState.get(sessionId);
+        const typePointerStartSource: "session" | "viewport_center" = savedTypeState ? "session" : "viewport_center";
+
+        const state = makePointerRuntimeState({
+          current_x: savedTypeState?.x ?? vw / 2,
+          current_y: savedTypeState?.y ?? vh / 2,
+          viewport_width: vw,
+          viewport_height: vh,
+          browser_session_id: sessionId,
+          interaction_mode: "realistic",
+        });
+
+        const sendCdp = (method: string, p: Record<string, unknown>) => {
+          void sendMsg(method, p, cdpSessionId!);
+        };
+        const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
+
+        void (async () => {
+          try {
+            const sendAndWait = (method: string, p: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+              new Promise((res) => {
+                const reqId = sendMsg(method, p, cdpSessionId!);
+                oneTimeHandlers.set(reqId, res);
+              });
+
+            // Focus the field by realistic pointer click on the stored box.
+            let focusPathCount: number | undefined;
+            await clickBoxWithPointer(state, box, sendCdp, sleep, {
+              debugOverlay,
+              debugLabel: "type_focus",
+              templateTraces: getLoadedPointerTraces(),
+              purpose: "input_focus",
+              onFocusComplete: (info) => { focusPathCount = info.path_point_count; },
+            });
+            let typeStatePersisted = false;
+            if (sessionId) {
+              browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+              if (userId) {
+                setTaskBrowserSessionPointerState(sessionId, userId, {
+                  x: state.current_x,
+                  y: state.current_y,
+                  initialized: true,
+                  updated_at: new Date().toISOString(),
+                });
+                typeStatePersisted = true;
+              }
+            }
+
+            // Capture URL before typing — only when submit=true, for post-Enter navigation check.
+            let urlBefore: string | null = null;
+            if (submit) {
+              const r = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+              urlBefore = (r?.result as Record<string, unknown>)?.value as string ?? null;
+            }
+
+            const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
+            let submitted = false;
+            let submitMethod: "enter" | "button_fallback" | undefined;
+            if (submit) {
+              await dispatchEnterViaCDP(sendCdp, sleep);
+              submitted = true;
+              submitMethod = "enter";
+
+              // Fallback: if Enter did not navigate, try a visible search/submit button.
+              if (urlBefore !== null) {
+                await sleep(300);
+                const r2 = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
+                const urlAfter = (r2?.result as Record<string, unknown>)?.value as string ?? null;
+                if (urlAfter !== null && urlAfter === urlBefore) {
+                  const r3 = await sendAndWait("Runtime.evaluate", { expression: SEARCH_BUTTON_FIND_EXPR, returnByValue: true });
+                  const btn = (r3?.result as Record<string, unknown>)?.value as { x: number; y: number; width: number; height: number; vw: number; vh: number } | null | undefined;
+                  if (btn && btn.width > 0 && btn.height > 0) {
+                    const fallbackBox: ElementBox = { x: btn.x, y: btn.y, width: btn.width, height: btn.height };
+                    await clickBoxWithPointer(state, fallbackBox, sendCdp, sleep, {
+                      debugOverlay,
+                      debugLabel: "submit_button_fallback",
+                      templateTraces: getLoadedPointerTraces(),
+                      purpose: "button_click",
+                    });
+                    if (sessionId) {
+                      browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
+                      if (userId) {
+                        setTaskBrowserSessionPointerState(sessionId, userId, {
+                          x: state.current_x,
+                          y: state.current_y,
+                          initialized: true,
+                          updated_at: new Date().toISOString(),
+                        });
+                      }
+                    }
+                    submitMethod = "button_fallback";
+                  }
+                }
+              }
+            }
+
+            finish({
+              success: true,
+              char_count_bucket: typing.char_count_bucket,
+              duration_ms: typing.duration_ms,
+              focused: true,
+              submitted,
+              ...(submitMethod !== undefined ? { submit_method: submitMethod } : {}),
+              ...(focusPathCount !== undefined ? { pointer_path_point_count: focusPathCount } : {}),
+              pointer_start_source: typePointerStartSource,
+              pointer_state_persisted: typeStatePersisted,
+            });
+          } catch (err) {
+            finish({ success: false, error: `CDP_TYPE_FAILED: ${(err as Error).message}`, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+          }
+        })();
+        return;
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      finish({ success: false, error: `WS_ERROR: ${err.message}`, char_count_bucket: charCountBucket, duration_ms: 0 });
+    });
+  });
+}
+
 // ─── Antigen scroll-to-ref (Phase 5C) ────────────────────────────────────────
 
 /**
@@ -805,8 +1135,13 @@ export async function scrollKnownBoxIntoView(params: {
   box: { width: number; height: number; doc_y: number };
   sessionId?: string;
   userId?: string;
+  // Snapshot-time page URL. When supplied, the live CDP target URL is compared
+  // against it and a navigation away from the snapshot page fails closed with
+  // ANTIGEN_REF_PAGE_CHANGED before any scroll. Mirrors the click/type guard so
+  // every ag_* ref consumer fails closed identically on a page change.
+  expectedUrl?: string | null;
 }): Promise<{ success: boolean; error?: string }> {
-  const { cdpUrl, box } = params;
+  const { cdpUrl, box, expectedUrl } = params;
 
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
@@ -826,6 +1161,15 @@ export async function scrollKnownBoxIntoView(params: {
 
   const { target: pageTarget } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "ANTIGEN_SCROLL_FAILED: No page targets found via CDP." };
+
+  // Live-URL guard: the snapshot's box geometry is only valid on the page it was
+  // captured on. pageTarget.url is the authoritative live URL from the active CDP
+  // target at action time (not cached session metadata). Fail closed here so a
+  // scroll never silently proceeds on a page that click/type would then reject
+  // with ANTIGEN_REF_PAGE_CHANGED.
+  if (isAntigenPageChanged(expectedUrl, pageTarget.url)) {
+    return { success: false, error: "ANTIGEN_REF_PAGE_CHANGED" };
+  }
 
   // Read-only viewport + page scroll height. No element lookup, no mutation.
   const readExpr =

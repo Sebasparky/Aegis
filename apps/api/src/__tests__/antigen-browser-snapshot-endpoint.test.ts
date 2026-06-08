@@ -39,6 +39,7 @@ import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime
 import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 import {
   getAntigenSnapshotElement,
+  resolveAntigenRefForSession,
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
@@ -188,7 +189,12 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     expect(body.data.element_count).toBe(3);
     expect(body.data.url).toBe("https://www.ikea.com/us/en/search/?q=desk%20lamp");
     expect(body.data.title).toBeNull();
-    expect(body.data.snapshot_ttl_ms).toBe(10_000);
+    expect(body.data.snapshot_ttl_ms).toBe(90_000);
+    // Remaining lifetime is surfaced for proactive re-snapshot planning and is
+    // bounded by the TTL.
+    expect(typeof body.data.ref_expires_in_ms).toBe("number");
+    expect(body.data.ref_expires_in_ms).toBeGreaterThan(0);
+    expect(body.data.ref_expires_in_ms).toBeLessThanOrEqual(90_000);
     expect(body.data.elements.map((e: { ref: string }) => e.ref)).toEqual(["ag_1", "ag_2", "ag_3"]);
   });
 
@@ -426,7 +432,7 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     // External response shape is unchanged on the second call.
     expect(bodyB.ok).toBe(true);
     expect(idB).toMatch(/^snap_/);
-    expect(bodyB.data.snapshot_ttl_ms).toBe(10_000);
+    expect(bodyB.data.snapshot_ttl_ms).toBe(90_000);
     expect(bodyB.data.elements.map((e: { ref: string }) => e.ref)).toEqual(["ag_1", "ag_2", "ag_3"]);
   });
 
@@ -450,6 +456,88 @@ describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("SESSION_NOT_READY");
+  });
+});
+
+// ─── Stale-runtime rebind (Bug 2) ─────────────────────────────────────────────
+// After a runtime is closed and relaunched, a caller's cached browser_runtime_id
+// points at a terminal session. antigen_snapshot must transparently rebind to the
+// delegation's current ready runtime (it produces a fresh ref set bound to that
+// session) rather than failing with a stale SESSION_NOT_READY.
+describe("POST /api/agent/v1/runtime/browser-snapshot — stale runtime rebind", () => {
+  const NEW_SESSION_ID = "tbsess_snap_new";
+
+  it("rebinds a terminal runtime id to the delegation's current ready runtime and succeeds", async () => {
+    // Stale cached id → now-closed session; a fresh visible runtime is live.
+    seedSession({ browser_session_id: SESSION_ID, status: "closed" });
+    seedSession({ browser_session_id: NEW_SESSION_ID, status: "ready", mode: "visible", current_url: "https://example.com/" });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.rebound).toBe(true);
+    expect(body.data.browser_runtime_id).toBe(NEW_SESSION_ID);
+    expect(body.data.effective_mode).toBe("visible");
+    expect(body.data.snapshot_ready).toBe(true);
+
+    // Refs must be bound to the RESOLVED session — resolvable under the new id,
+    // not under the stale one.
+    expect(resolveAntigenRefForSession(NEW_SESSION_ID, MOCK_USER_ID, "ag_1").status).toBe("ok");
+    expect(resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1").status).toBe("no_snapshot");
+  });
+
+  it("returns 404 SESSION_NOT_FOUND for a terminal runtime id with no ready replacement (recoverable)", async () => {
+    seedSession({ browser_session_id: SESSION_ID, status: "closed" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("does not rebind a 'starting' session — stays a true transient SESSION_NOT_READY", async () => {
+    seedSession({ browser_session_id: SESSION_ID, status: "starting" });
+    seedSession({ browser_session_id: NEW_SESSION_ID, status: "ready" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("SESSION_NOT_READY");
+  });
+
+  it("a non-rebound ready snapshot reports rebound=false and its own runtime id", async () => {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const body = res.json();
+    expect(body.data.rebound).toBe(false);
+    expect(body.data.browser_runtime_id).toBe(SESSION_ID);
+    expect(body.data.snapshot_ready).toBe(true);
+  });
+
+  it("never leaks cdp_url, user_data_dir, or cdp_port in a rebound response", async () => {
+    seedSession({ browser_session_id: SESSION_ID, status: "closed" });
+    seedSession({ browser_session_id: NEW_SESSION_ID, status: "ready", mode: "visible" });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of ["cdp_url", "user_data_dir", "cdp_port", "password", "secret_ref"]) {
+      expect(raw).not.toContain(f);
+    }
   });
 });
 

@@ -1220,6 +1220,47 @@ describe("realisticTypeTextViaCDP — pointer_path_point_count and overlay propa
 
     expect(overlayEvals.length).toBeGreaterThan(0);
   });
+
+  // The fix decouples overlay activation from the lone API env var: the route
+  // handler passes an explicit debugOverlay (driven by the session's visible mode).
+  // These two assert the param overrides the env in BOTH directions.
+  const overlayEvalCount = () =>
+    mockState.allSentMessages
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.method === "Runtime.evaluate")
+      .map((m) => (m?.params as Record<string, unknown> | undefined)?.expression as string | undefined)
+      .filter((expr): expr is string => typeof expr === "string" && expr.includes("__aegis_pointer_debug_dot"))
+      .length;
+
+  it("debugOverlay:true injects the overlay even when the env var is unset", async () => {
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "");
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hi",
+      elementDescription: "Search",
+      debugOverlay: true,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(overlayEvalCount()).toBeGreaterThan(0);
+  });
+
+  it("debugOverlay:false suppresses the overlay even when the env var is true", async () => {
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "true");
+    const resultPromise = realisticTypeTextViaCDP({
+      cdpUrl: "http://localhost:9222",
+      text: "hi",
+      elementDescription: "Search",
+      debugOverlay: false,
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(overlayEvalCount()).toBe(0);
+  });
 });
 
 // ─── 22. Persistent pointer continuity — taskBrowserSessions integration ──────

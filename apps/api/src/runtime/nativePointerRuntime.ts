@@ -155,13 +155,21 @@ export async function ensurePointerDebugOverlayWithStatus(
 // Short-lived dev-only "overlay active" banner. Lets headed QA distinguish "overlay
 // never injected" from "path too fast / dot hidden". Fire-and-forget and fail-open — a
 // banner failure never affects the click. Auto-removes after ~1.5s. pointer-events:none
-// so it can never intercept input or alter dispatch.
-const OVERLAY_BANNER_EXPR = `(function(){try{if(!document.body)return;var old=document.getElementById('${OVERLAY_BANNER_ID}');if(old&&old.parentNode)old.parentNode.removeChild(old);var b=document.createElement('div');b.id='${OVERLAY_BANNER_ID}';b.textContent='Antigen pointer overlay active';b.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);background:rgba(255,80,0,0.92);color:#fff;font:600 12px/1.4 monospace;padding:4px 10px;border-radius:0 0 6px 6px;pointer-events:none;z-index:2147483647;box-shadow:0 2px 8px rgba(0,0,0,0.4);';document.body.appendChild(b);setTimeout(function(){if(b&&b.parentNode)b.parentNode.removeChild(b);},1500);}catch(e){}})()`;
+// so it can never intercept input or alter dispatch. The banner text is a fixed display
+// string — never a page value, cookie, storage, or secret — and is JSON-encoded.
+function buildPointerDebugBannerExpr(text: string): string {
+  return `(function(){try{if(!document.body)return;var old=document.getElementById('${OVERLAY_BANNER_ID}');if(old&&old.parentNode)old.parentNode.removeChild(old);var b=document.createElement('div');b.id='${OVERLAY_BANNER_ID}';b.textContent=${JSON.stringify(text)};b.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);background:rgba(255,80,0,0.92);color:#fff;font:600 12px/1.4 monospace;padding:4px 10px;border-radius:0 0 6px 6px;pointer-events:none;z-index:2147483647;box-shadow:0 2px 8px rgba(0,0,0,0.4);';document.body.appendChild(b);setTimeout(function(){if(b&&b.parentNode)b.parentNode.removeChild(b);},1500);}catch(e){}})()`;
+}
 
-function injectPointerDebugBanner(
+// Exported so the post-navigation mediation banner (injected after @playwright/mcp
+// navigates, which destroys the prior overlay DOM) can reuse the exact same safe,
+// fail-open banner primitive instead of a second ad-hoc injection. `text` is a fixed
+// display label only.
+export function injectPointerDebugBanner(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
+  text = "Antigen pointer overlay active",
 ): void {
-  sendCdp("Runtime.evaluate", { expression: OVERLAY_BANNER_EXPR });
+  sendCdp("Runtime.evaluate", { expression: buildPointerDebugBannerExpr(text) });
 }
 
 function updatePointerDebugOverlay(

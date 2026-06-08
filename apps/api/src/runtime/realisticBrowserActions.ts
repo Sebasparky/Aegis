@@ -21,6 +21,8 @@ import WebSocket from "ws";
 import {
   makePointerRuntimeState,
   clickBoxWithPointer,
+  injectPointerDebugBanner,
+  renderPersistentPointerCursor,
   type ElementBox,
 } from "./nativePointerRuntime.js";
 import { pickBestPageTarget } from "./cdpTargetSelection.js";
@@ -379,6 +381,9 @@ export async function realisticClickByDescription(params: {
   sessionId?: string;
   userId?: string;
   selectorHint?: string;
+  // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env. The route handler
+  // passes this so headed/visible sessions show the overlay without the env var.
+  debugOverlay?: boolean;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
@@ -386,7 +391,7 @@ export async function realisticClickByDescription(params: {
 
   const { cdpUrl, elementDescription, sessionId, userId, selectorHint } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
-  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
+  const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
   let versionData: { webSocketDebuggerUrl?: string };
@@ -577,6 +582,8 @@ export async function realisticClickKnownBox(params: {
   sessionId?: string;
   userId?: string;
   expected?: AntigenKnownBoxRevalidationExpected;
+  // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env (see route handler).
+  debugOverlay?: boolean;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
@@ -584,7 +591,7 @@ export async function realisticClickKnownBox(params: {
 
   const { cdpUrl, box, sessionId, userId, expected } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
-  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
+  const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
   let versionData: { webSocketDebuggerUrl?: string };
@@ -910,6 +917,89 @@ export async function scrollKnownBoxIntoView(params: {
   });
 }
 
+// ─── Post-navigation mediation banner (visible-session trust signal) ──────────
+
+/**
+ * Best-effort, fail-open injection of the Antigen mediation banner (and an
+ * optional persistent pointer cursor) into the current page after a navigation.
+ *
+ * @playwright/mcp owns browser_navigate and the new page DOM destroys any prior
+ * overlay, so the API re-injects a brief "Antigen is mediating this browser"
+ * banner here when the session is visible. This is purely a visual trust signal:
+ * it NEVER navigates, clicks, types, or mutates page state, and reuses the same
+ * short-lived raw-CDP-WS attach pattern as scrollKnownBoxIntoView (no new agent-
+ * facing tool, no Playwright handle exposed). Any failure resolves silently so the
+ * caller's navigation-state response is never blocked or failed.
+ *
+ * Metadata-only: the banner text and cursor are fixed display elements — no
+ * cookies, storage, page values, or secrets are read or written.
+ */
+export async function injectNavigationMediationBannerViaCDP(
+  params: { cdpUrl: string; pointer?: { x: number; y: number } },
+): Promise<void> {
+  const { cdpUrl, pointer } = params;
+
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: Array<{ id: string; url: string; type: string }>;
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
+    ]);
+  } catch {
+    return; // fail-open — never block navigation-state on a banner failure
+  }
+
+  const browserWsUrl = versionData.webSocketDebuggerUrl;
+  if (!browserWsUrl) return;
+  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  if (!pageTarget) return;
+
+  await new Promise<void>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let attachId: number;
+    let settled = false;
+
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      resolve();
+    };
+    // Bounded — a hung/unreachable CDP never stalls the caller.
+    const timer = setTimeout(done, 4000);
+
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+      const id = msgId++;
+      const msg: Record<string, unknown> = { id, method, params: p };
+      if (sid) msg.sessionId = sid;
+      try { ws.send(JSON.stringify(msg)); } catch {}
+      return id;
+    };
+
+    ws.on("open", () => {
+      attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.id !== attachId) return;
+      const sid = (msg.result as Record<string, unknown> | undefined)?.sessionId as string | undefined;
+      if (!sid) { done(); return; }
+      const sendCdp = (method: string, p: Record<string, unknown>) => { void sendMsg(method, p, sid); };
+      injectPointerDebugBanner(sendCdp, "Antigen is mediating this browser");
+      if (pointer) renderPersistentPointerCursor(sendCdp, pointer, { label: "post_nav" });
+      // Brief flush window so the fire-and-forget evals reach Chrome before close.
+      setTimeout(done, 150);
+    });
+
+    ws.on("error", () => done());
+  });
+}
+
 /**
  * Types text character-by-character into a target element via CDP.
  *
@@ -932,6 +1022,8 @@ export async function realisticTypeTextViaCDP(params: {
   elementDescription?: string;
   selectorHint?: string;
   submit?: boolean;
+  // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env (see route handler).
+  debugOverlay?: boolean;
 }): Promise<RealisticTypeResult> {
   const charCountBucket = getCharCountBucket(params.text.length);
 
@@ -941,7 +1033,7 @@ export async function realisticTypeTextViaCDP(params: {
 
   const { cdpUrl, text, elementDescription, selectorHint, submit, sessionId, userId } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
-  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
+  const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
   let versionData: { webSocketDebuggerUrl?: string };

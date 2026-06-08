@@ -47,7 +47,7 @@ import {
 } from "../runtime/authenticatedSessions.js";
 import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -3512,6 +3512,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   // no secret resolution, no credential authorization. Caller falls back to
   // @playwright/mcp on any non-2xx response.
 
+  // Resolve whether the dev pointer overlay should be injected for this action.
+  // Tri-state: an explicit ANTIGEN_POINTER_DEBUG_OVERLAY env wins in both
+  // directions; otherwise the overlay follows the headed window (visible session).
+  // This decouples overlay activation from the lone API env var so headed QA shows
+  // the overlay without separately setting it on the API process — mirroring how
+  // headed launch is driven by the session's visible mode.
+  const resolveOverlayEnabled = (s: { mode: "headless" | "visible" }): boolean => {
+    const env = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    if (env === "true") return true;
+    if (env === "false") return false;
+    return s.mode === "visible";
+  };
+
   server.post("/api/agent/v1/runtime/browser-click", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
@@ -3585,6 +3598,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         box: el.box,
         sessionId: session.browser_session_id,
         userId: MOCK_USER_ID,
+        debugOverlay: resolveOverlayEnabled(session),
         // Phase 4B: snapshot metadata for live-element revalidation before click.
         expected: {
           tag: el.tag,
@@ -3658,6 +3672,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       sessionId: session.browser_session_id,
       userId: MOCK_USER_ID,
       selectorHint,
+      debugOverlay: resolveOverlayEnabled(session),
     });
 
     if (!result.success) {
@@ -3846,6 +3861,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       elementDescription,
       selectorHint,
       submit: submitFlag,
+      debugOverlay: resolveOverlayEnabled(session),
     });
 
     if (!result.success) {
@@ -3946,6 +3962,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       initialized: true,
       updated_at: new Date().toISOString(),
     });
+
+    // Visible-session trust signal: @playwright/mcp owns the navigation and the new
+    // page DOM destroyed any prior overlay, so re-inject a brief "Antigen is
+    // mediating this browser" banner + cursor. Fire-and-forget and fail-open — never
+    // awaited, so a slow/failed banner can never block or fail this response (the
+    // adapter calls this with a short timeout).
+    if (resolveOverlayEnabled(session)) {
+      void injectNavigationMediationBannerViaCDP({
+        cdpUrl: session.cdp_url,
+        pointer: { x: proxyX, y: proxyY },
+      }).catch(() => {});
+    }
 
     return reply.send({
       ok: true,

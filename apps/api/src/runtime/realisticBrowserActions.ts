@@ -30,6 +30,7 @@ import {
   buildAntigenRevalidationExpr,
   evaluateKnownBoxRevalidation,
   type AntigenKnownBoxRevalidationExpected,
+  type AntigenKnownBoxRevalidationReason,
   type AntigenRevalidationEvalValue,
 } from "./antigenKnownBoxRevalidation.js";
 import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
@@ -163,6 +164,11 @@ export const SEARCH_BUTTON_FIND_EXPR = "(function(){"
 export interface RealisticClickResult {
   success: boolean;
   error?: string;
+  // Internal-only: the raw Phase 4B reason behind an ANTIGEN_REF_STALE /
+  // ANTIGEN_REF_OUT_OF_VIEWPORT failure. Used by the endpoint to surface a
+  // SANITIZED stale_reason / stability_hint and to drive logical-ref recovery.
+  // Never returned to the agent as-is (it is mapped through sanitizeStaleReason).
+  stale_reason?: AntigenKnownBoxRevalidationReason;
   pointer_start_source?: "session" | "viewport_center";
   pointer_path_point_count?: number;
   pointer_state_persisted?: boolean;
@@ -199,6 +205,9 @@ export interface RealisticTypeResult {
   error?: string;
   char_count_bucket: string;
   duration_ms: number;
+  // Internal-only: raw Phase 4B reason behind a stale/out-of-viewport failure.
+  // Surfaced only as a SANITIZED stale_reason by the endpoint, never as-is.
+  stale_reason?: AntigenKnownBoxRevalidationReason;
   focused?: boolean;             // true if this call performed a click to focus the target field
   submitted?: boolean;           // true if Enter was dispatched after typing
   submit_method?: "enter" | "button_fallback"; // present when submitted=true
@@ -729,7 +738,7 @@ export async function realisticClickKnownBox(params: {
               revalidation.reason === "BOX_OUT_OF_VIEWPORT"
                 ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
                 : "ANTIGEN_REF_STALE";
-            finish({ success: false, error });
+            finish({ success: false, error, stale_reason: revalidation.reason });
             return;
           }
         }
@@ -951,7 +960,7 @@ export async function realisticTypeKnownBox(params: {
               revalidation.reason === "BOX_OUT_OF_VIEWPORT"
                 ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
                 : "ANTIGEN_REF_STALE";
-            finish({ success: false, error, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
+            finish({ success: false, error, stale_reason: revalidation.reason, char_count_bucket: charCountBucket, duration_ms: Date.now() - startMs });
             return;
           }
         }

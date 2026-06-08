@@ -18,6 +18,13 @@
 // raw typed text. URLs are reduced to host + clipped path with all query strings
 // and fragments stripped.
 
+import {
+  ANTIGEN_RECOVERY_STATES,
+  ANTIGEN_SANITIZED_STALE_REASONS,
+  type AntigenRecoveryState,
+  type AntigenSanitizedStaleReason,
+} from "./antigenLogicalRecovery.js";
+
 const MAX_EVENTS_PER_SESSION = 200;
 const MAX_SESSIONS = 50;
 // Retention is based on LAST ACTIVITY, not creation time — a trace that keeps
@@ -160,6 +167,12 @@ export interface BrowserTraceEvent {
   // Present on `browser_navigation_disposition` events.
   navigation_disposition?: NavigationDisposition;
   navigation_reason?: string;
+  // Same-page logical-ref recovery fields (enum-gated). Present on browser_click
+  // events when an ANTIGEN_REF_STALE was hit: `recovery_state` records the
+  // recovery disposition and `stale_reason` is the SANITIZED stale signal (no
+  // coordinates, boxes, values, or internal matching details).
+  recovery_state?: AntigenRecoveryState;
+  stale_reason?: AntigenSanitizedStaleReason;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -309,6 +322,14 @@ export function recordBrowserTraceEvent(
     }
     const navReason = clip(event.navigation_reason);
     if (navReason !== undefined) safe.navigation_reason = navReason;
+    // Enum-gate recovery_state + sanitized stale_reason — never clip arbitrary
+    // strings into these (they carry no coordinates/values).
+    if (event.recovery_state !== undefined && ANTIGEN_RECOVERY_STATES.has(event.recovery_state)) {
+      safe.recovery_state = event.recovery_state;
+    }
+    if (event.stale_reason !== undefined && ANTIGEN_SANITIZED_STALE_REASONS.has(event.stale_reason)) {
+      safe.stale_reason = event.stale_reason;
+    }
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {

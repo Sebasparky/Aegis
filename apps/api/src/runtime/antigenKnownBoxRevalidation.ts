@@ -218,21 +218,19 @@ function namesCompatible(expected: string, live: string): boolean {
 }
 
 /**
- * Compares the live element (raw, from the IIFE) against the snapshot's expected
- * metadata. Pure — no CDP. Fails closed on strong mismatch. Diagnostics carry
- * only kinds + accessible names; the caller keeps them out of agent-facing output.
+ * Compares a single live element (raw, from any page-side IIFE) against the
+ * snapshot's expected metadata. Pure — no CDP, no geometry. Fails closed on
+ * strong mismatch. This is the single source of truth for "is this live element
+ * logically the same element the snapshot ref pointed at" — reused both by
+ * Phase 4B known-box revalidation (the element under the stored box center) and
+ * by same-page logical-ref recovery (candidate elements found elsewhere on the
+ * page). Diagnostics carry only kinds + accessible names; callers keep them out
+ * of agent-facing output.
  */
-export function evaluateKnownBoxRevalidation(input: {
-  eval: AntigenRevalidationEvalValue;
-  expected: AntigenKnownBoxRevalidationExpected;
-}): AntigenKnownBoxRevalidationResult {
-  const { expected } = input;
-  const ev = input.eval;
-
-  if (ev.status === "out_of_viewport") return { status: "stale", reason: "BOX_OUT_OF_VIEWPORT" };
-  if (ev.status === "no_element") return { status: "stale", reason: "NO_ELEMENT_AT_POINT" };
-
-  const live = ev.live;
+export function compareLiveToExpected(
+  live: RawLiveElement,
+  expected: AntigenKnownBoxRevalidationExpected,
+): AntigenKnownBoxRevalidationResult {
   const liveKind = inferKind(live);
   const liveNormalizedName = normalizeName(live.name);
   const liveHrefPath = hrefPath(live.href);
@@ -269,4 +267,21 @@ export function evaluateKnownBoxRevalidation(input: {
   }
 
   return { status: "ok" };
+}
+
+/**
+ * Compares the live element (raw, from the IIFE) against the snapshot's expected
+ * metadata. Pure — no CDP. Fails closed on strong mismatch. Diagnostics carry
+ * only kinds + accessible names; the caller keeps them out of agent-facing output.
+ */
+export function evaluateKnownBoxRevalidation(input: {
+  eval: AntigenRevalidationEvalValue;
+  expected: AntigenKnownBoxRevalidationExpected;
+}): AntigenKnownBoxRevalidationResult {
+  const ev = input.eval;
+
+  if (ev.status === "out_of_viewport") return { status: "stale", reason: "BOX_OUT_OF_VIEWPORT" };
+  if (ev.status === "no_element") return { status: "stale", reason: "NO_ELEMENT_AT_POINT" };
+
+  return compareLiveToExpected(ev.live, input.expected);
 }

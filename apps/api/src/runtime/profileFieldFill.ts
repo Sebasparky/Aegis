@@ -241,6 +241,33 @@ function normAlnum(s: string): string {
   return (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Secondary-line ("address line 2" / apt / unit / suite / optional) indicators. Used to
+// disambiguate the shared "Street address" label that the primary line-1 and the optional
+// line-2 field carry on hydrated checkout pages (e.g. IKEA), where neither field has a
+// distinguishing autocomplete attribute and ids are regenerated on every re-render.
+const LINE2_INDICATORS = [
+  "street address 2", "address line 2", "address 2", "line 2",
+  "apartment", "apt", "unit", "suite", "optional",
+];
+
+// Does this candidate's stable text/name signals look like a secondary address line?
+// Structural metadata ONLY — never inspects the field value. Combined label/aria/placeholder/
+// section text is lowercased defensively so mixed-case input matches the lowercase indicators
+// (in-page enumeration already lowercases, but unit tests may pass raw descriptors).
+function hasLine2Indicator(c: ProfileFieldCandidate): boolean {
+  const text = [c.label_text, c.aria_label, c.placeholder, c.section_text]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const nameId = normAlnum(c.name + c.id); // normAlnum already lowercases
+  return (
+    LINE2_INDICATORS.some((k) => text.includes(k)) ||
+    ["addressline2", "address2", "apt", "apartment", "unit", "suite", "line2"].some((k) =>
+      nameId.includes(k),
+    )
+  );
+}
+
 // The last meaningful token of an autocomplete attribute (strips "shipping"/"billing"/"section-*" prefixes).
 function lastAutocompleteToken(autocomplete: string): string {
   const toks = (autocomplete || "").split(/\s+/).filter(Boolean);
@@ -299,6 +326,20 @@ function scoreCandidate(
   if (acTok && spec.autocomplete.includes(acTok)) {
     return { score: 90, strategy: "autocomplete" };
   }
+
+  // Address line 1 vs line 2 disambiguation — label/placeholder/name-id tiers only.
+  // Placed after the autocomplete tier so a correct autocomplete attribute stays authoritative
+  // (and verifyKindConsistency still rejects line1↔address-line2 cross-fills).
+  const line2 = hasLine2Indicator(c);
+  if (kind === "shipping_address_line1" && line2) {
+    // Secondary-line field — never treat it as line 1. Breaks the shared "Street address" tie.
+    return { score: 0, strategy: "none" };
+  }
+  if (kind === "shipping_address_line2" && line2) {
+    // Distinctive secondary-line text — strong, unique label-tier signal.
+    return { score: 72, strategy: "address_line2" };
+  }
+
   if (labelish && spec.keywords.some((k) => labelish.includes(k))) {
     return { score: 70, strategy: "label" };
   }

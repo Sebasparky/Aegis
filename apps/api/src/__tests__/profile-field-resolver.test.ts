@@ -55,6 +55,44 @@ describe("pickProfileFieldCandidate — semantic resolution", () => {
     expect(pickProfileFieldCandidate("shipping_address_line2", candidates, {}).fill_id).toBe("agfill_1");
   });
 
+  it("resolves address line1 to the primary 'Street address' when a 'Street address 2 (optional)' sibling is present (label-only, no autocomplete)", () => {
+    // Mirrors the live IKEA shape: both fields share 'Street address' label, ids randomized,
+    // no distinguishing autocomplete. Line-2 indicator on the optional field breaks the tie.
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "field_a1b2", name: "address1", label_text: "street address" }),
+      cand({ fill_id: "agfill_1", id: "field_c3d4", name: "address2", label_text: "street address 2 (optional)" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line1", candidates, {});
+    expect(res.fill_id).toBe("agfill_0");
+  });
+
+  it("resolves address line2 to the 'Street address 2 (optional)' sibling in that same label-only fixture", () => {
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "field_a1b2", name: "address1", label_text: "street address" }),
+      cand({ fill_id: "agfill_1", id: "field_c3d4", name: "address2", label_text: "street address 2 (optional)" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line2", candidates, {});
+    expect(res.fill_id).toBe("agfill_1");
+  });
+
+  it("fails closed (NO_CONFIDENT_MATCH) for line1 when the only address-like field is 'Street address 2 (optional)'", () => {
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "field_c3d4", name: "address2", label_text: "street address 2 (optional)" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line1", candidates, {});
+    expect(res.fill_id).toBeNull();
+    expect(res.reason).toBe("NO_CONFIDENT_MATCH");
+  });
+
+  it("fails closed for line2 when only a bare 'Street address' field exists (deliberate: do not steal the primary line when no line-2 field is present)", () => {
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "field_a1b2", name: "address1", label_text: "street address" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line2", candidates, {});
+    expect(res.fill_id).toBeNull();
+    expect(res.reason).toBe("NO_CONFIDENT_MATCH");
+  });
+
   it("honours a selector_hint that uniquely matches a candidate id", () => {
     const candidates = [
       cand({ fill_id: "agfill_0", id: "first", autocomplete: "given-name" }),

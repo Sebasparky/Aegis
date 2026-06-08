@@ -1454,9 +1454,16 @@ async function getRuntimeBrowserEndpoint({ mode, persistent_profile } = {}) {
 
   return {
     browser_runtime_id: d.browser_runtime_id,
+    browser_session_id: d.browser_session_id ?? d.browser_runtime_id,
     cdp_url: d.cdp_url,
     status: d.status,
     runtime_mode: d.runtime_mode,
+    // Effective visibility metadata so the caller can verify the runtime honored the
+    // requested mode (visible vs headless) rather than silently reusing a mismatched
+    // session. requested_mode is present only when the caller asked for a specific mode.
+    ...(d.requested_mode !== undefined ? { requested_mode: d.requested_mode } : {}),
+    effective_mode: d.effective_mode,
+    session_ready: d.session_ready === true,
     ephemeral: d.ephemeral,
     reused_existing: reused,
     port_auto_selected: autoPort,

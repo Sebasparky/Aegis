@@ -31,8 +31,66 @@ import { newId } from "../store/index.js";
 
 // ─── TTL ─────────────────────────────────────────────────────────────────────
 
-/** Default snapshot lifetime. Boxes go stale fast (scroll, layout, navigation). */
-export const ANTIGEN_SNAPSHOT_TTL_MS = 10_000;
+/**
+ * Wall-clock backstop for a snapshot's refs. This is a generous, generic upper
+ * bound for an active browsing session — NOT the primary staleness mechanism.
+ * Real staleness is enforced DOM-truthfully by (1) Phase 4B known-box
+ * revalidation on every click/type, (2) snapshot superseding (a new snapshot
+ * drops the prior one for the session+user), and (3) the live-URL guard
+ * (isAntigenPageChanged). The wall-clock TTL only bounds how long a box may sit
+ * before a forced re-snapshot; it must be long enough to survive ordinary agent
+ * reasoning between snapshot and action, so it does not fire merely because the
+ * agent spent a few seconds thinking.
+ */
+export const ANTIGEN_SNAPSHOT_TTL_MS = 90_000;
+
+/**
+ * Live-URL guard for Antigen refs. Returns true when the live page URL differs
+ * from the snapshot URL in a way that should invalidate stored boxes, so a ref
+ * from page A can never be acted on after navigating to page B — independent of
+ * the wall-clock TTL.
+ *
+ * Normalization (generic, not site-specific):
+ *  - Hash (#fragment) is ignored — in-page anchors do not move layout boxes.
+ *  - A single trailing slash on the path is tolerated ("/a" == "/a/").
+ *  - Origin (protocol + host + port), path, and query string ARE significant —
+ *    checkout/search/SPA flows routinely encode navigation state in the query,
+ *    so a query change counts as a page change.
+ *
+ * Conservative no-op cases (returns false, never blocks): missing snapshot URL
+ * or missing live URL. Phase 4B revalidation still guards element identity in
+ * those cases, so we do not over-block on incomparable inputs.
+ */
+export function isAntigenPageChanged(
+  snapshotUrl: string | null | undefined,
+  liveUrl: string | null | undefined,
+): boolean {
+  if (!snapshotUrl || !liveUrl) return false;
+  if (snapshotUrl === liveUrl) return false;
+
+  const norm = (raw: string): { origin: string; path: string; query: string } | null => {
+    try {
+      const u = new URL(raw);
+      let path = u.pathname;
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+      return { origin: u.origin, path, query: u.search };
+    } catch {
+      return null;
+    }
+  };
+
+  const a = norm(snapshotUrl);
+  const b = norm(liveUrl);
+
+  // If either URL is unparseable, fall back to a hash-stripped, trailing-slash
+  // tolerant string compare and fail closed on any remaining difference.
+  if (!a || !b) {
+    const strip = (s: string) => s.replace(/#.*$/, "").replace(/\/+$/, "");
+    return strip(snapshotUrl) !== strip(liveUrl);
+  }
+
+  return a.origin !== b.origin || a.path !== b.path || a.query !== b.query;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -249,7 +307,13 @@ export function listAntigenSnapshotElements(
  * realistic pointer click path.
  */
 export type AntigenRefResolution =
-  | { status: "ok"; element: AntigenSnapshotElementRecord }
+  | {
+      status: "ok";
+      element: AntigenSnapshotElementRecord;
+      /** Snapshot-time page URL — the "expected" side of the live-URL guard. */
+      snapshot_url: string | null;
+      snapshot_id: string;
+    }
   | { status: "no_snapshot" }
   | { status: "expired" }
   | { status: "ref_not_found" };
@@ -282,7 +346,12 @@ export function resolveAntigenRefForSession(
 
   const element = stored.elementsByRef.get(ref);
   if (!element) return { status: "ref_not_found" };
-  return { status: "ok", element };
+  return {
+    status: "ok",
+    element,
+    snapshot_url: stored.snapshot.url,
+    snapshot_id: stored.snapshot.snapshot_id,
+  };
 }
 
 // ─── Freshness ───────────────────────────────────────────────────────────────

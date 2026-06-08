@@ -21,6 +21,7 @@ import {
   getAntigenSnapshotElement,
   listAntigenSnapshotElements,
   isAntigenSnapshotExpired,
+  isAntigenPageChanged,
   deleteExpiredAntigenSnapshots,
   deleteAntigenSnapshotsForSession,
   resolveAntigenRefForSession,
@@ -426,5 +427,64 @@ describe("resolveAntigenRefForSession (Phase 4A)", () => {
     if (res.status !== "ok") throw new Error("expected ok");
     const external = toExternalAntigenSnapshotElement(res.element);
     expect(JSON.stringify(external)).not.toContain("box");
+  });
+
+  it("surfaces the snapshot URL and id on an ok resolution (for the live-URL guard)", () => {
+    const { snapshot } = createFor([makeCandidate()], {
+      browser_session_id: SESSION,
+      url: "https://shop.test/cart",
+    });
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_1");
+    if (res.status !== "ok") throw new Error("expected ok");
+    expect(res.snapshot_url).toBe("https://shop.test/cart");
+    expect(res.snapshot_id).toBe(snapshot.snapshot_id);
+  });
+
+  it("supersedes prior refs when a new snapshot is taken — even well within the TTL", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    const first = createFor([makeCandidate({ name: "Old" })], { browser_session_id: SESSION, now: t0 });
+    // A fresh snapshot 1s later (far inside the 90s TTL) retires the prior one.
+    const t1 = new Date(t0.getTime() + 1_000);
+    createFor([makeCandidate({ name: "New" })], { browser_session_id: SESSION, now: t1 });
+
+    // The old snapshot's elements are gone despite being nowhere near the TTL.
+    expect(getAntigenSnapshotElement(first.snapshot.snapshot_id, "ag_1", USER)).toBeUndefined();
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_1", new Date(t1.getTime() + 1_000));
+    if (res.status !== "ok") throw new Error("expected ok");
+    expect(res.element.name).toBe("New");
+  });
+});
+
+describe("isAntigenPageChanged (live-URL guard)", () => {
+  const SNAP = "https://shop.test/checkout?step=2";
+
+  it("returns false when the live URL exactly matches the snapshot URL", () => {
+    expect(isAntigenPageChanged(SNAP, SNAP)).toBe(false);
+  });
+
+  it("returns false for a hash-only change (in-page anchor does not move boxes)", () => {
+    expect(isAntigenPageChanged("https://shop.test/p/1", "https://shop.test/p/1#reviews")).toBe(false);
+  });
+
+  it("tolerates a single trailing-slash difference on the path", () => {
+    expect(isAntigenPageChanged("https://shop.test/cart", "https://shop.test/cart/")).toBe(false);
+  });
+
+  it("returns true for a different path (real navigation)", () => {
+    expect(isAntigenPageChanged("https://shop.test/cart", "https://shop.test/payment")).toBe(true);
+  });
+
+  it("returns true for a query-string change (checkout/search/SPA state)", () => {
+    expect(isAntigenPageChanged(SNAP, "https://shop.test/checkout?step=3")).toBe(true);
+  });
+
+  it("returns true for an origin (host) change", () => {
+    expect(isAntigenPageChanged("https://shop.test/cart", "https://evil.test/cart")).toBe(true);
+  });
+
+  it("does not block when either URL is missing (Phase 4B still guards)", () => {
+    expect(isAntigenPageChanged(null, SNAP)).toBe(false);
+    expect(isAntigenPageChanged(SNAP, null)).toBe(false);
+    expect(isAntigenPageChanged(null, null)).toBe(false);
   });
 });

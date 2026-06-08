@@ -478,6 +478,53 @@ describe("isAntigenPageChanged (live-URL guard)", () => {
     expect(isAntigenPageChanged(SNAP, "https://shop.test/checkout?step=3")).toBe(true);
   });
 
+  it("treats '+' and '%20' as equivalent query encodings on the same page", () => {
+    // Regression: search submit lands on "+"-encoded query; SPA settles to "%20".
+    // Same logical page, must not be a page change (also covers trailing slash).
+    expect(
+      isAntigenPageChanged(
+        "https://site.test/search?q=blahaj+soft+toy",
+        "https://site.test/search/?q=blahaj%20soft%20toy",
+      ),
+    ).toBe(false);
+  });
+
+  it("treats decoded vs percent-encoded equivalent Unicode query values as the same page", () => {
+    expect(
+      isAntigenPageChanged(
+        "https://site.test/search?city=Münich",
+        "https://site.test/search?city=M%C3%BCnich",
+      ),
+    ).toBe(false);
+  });
+
+  it("treats query params in a different order (same decoded set) as the same page", () => {
+    expect(
+      isAntigenPageChanged(
+        "https://site.test/search?a=1&b=2",
+        "https://site.test/search?b=2&a=1",
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves duplicate query params as a multiset (?a=1&a=2 differs from ?a=1)", () => {
+    expect(
+      isAntigenPageChanged(
+        "https://site.test/search?a=1&a=2",
+        "https://site.test/search?a=1",
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true when a decoded query value genuinely differs (multi-param)", () => {
+    expect(
+      isAntigenPageChanged(
+        "https://shop.test/checkout?step=2&ref=cart",
+        "https://shop.test/checkout?step=3&ref=cart",
+      ),
+    ).toBe(true);
+  });
+
   it("returns true for an origin (host) change", () => {
     expect(isAntigenPageChanged("https://shop.test/cart", "https://evil.test/cart")).toBe(true);
   });

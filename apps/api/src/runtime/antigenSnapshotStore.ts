@@ -53,9 +53,12 @@ export const ANTIGEN_SNAPSHOT_TTL_MS = 90_000;
  * Normalization (generic, not site-specific):
  *  - Hash (#fragment) is ignored — in-page anchors do not move layout boxes.
  *  - A single trailing slash on the path is tolerated ("/a" == "/a/").
- *  - Origin (protocol + host + port), path, and query string ARE significant —
- *    checkout/search/SPA flows routinely encode navigation state in the query,
- *    so a query change counts as a page change.
+ *  - Origin (protocol + host + port) and path ARE significant.
+ *  - The query is significant by its DECODED parameter multiset, not its raw
+ *    string — checkout/search/SPA flows encode navigation state in the query,
+ *    so a genuine parameter change counts as a page change. Equivalent encodings
+ *    ("+" vs "%20", percent-encoded Unicode) and parameter order are NOT changes;
+ *    duplicate params are preserved as a multiset (?a=1&a=2 differs from ?a=1).
  *
  * Conservative no-op cases (returns false, never blocks): missing snapshot URL
  * or missing live URL. Phase 4B revalidation still guards element identity in
@@ -73,7 +76,20 @@ export function isAntigenPageChanged(
       const u = new URL(raw);
       let path = u.pathname;
       if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-      return { origin: u.origin, path, query: u.search };
+      // Compare the query by its decoded parameter multiset, not the raw string.
+      // URLSearchParams decodes "+" and "%20" to a space and resolves percent-encoded
+      // Unicode, so equivalent encodings collapse to the same value. Sorting the
+      // [key, value] pairs makes parameter order insignificant while preserving
+      // duplicate params as a multiset; re-encoding each component canonicalizes the
+      // form and avoids "&"/"=" delimiter ambiguity in the comparison signature.
+      const entries = [...u.searchParams.entries()];
+      entries.sort((x, y) =>
+        x[0] !== y[0] ? (x[0] < y[0] ? -1 : 1) : x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0,
+      );
+      const query = entries
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join("&");
+      return { origin: u.origin, path, query };
     } catch {
       return null;
     }

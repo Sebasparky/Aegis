@@ -8,7 +8,7 @@ import {
   ensurePersistentProfileDir,
 } from "./browserProfilePersistence.js";
 import { createServer } from "net";
-import type { TaskBrowserSession, TaskBrowserSessionStatus } from "@aegis/types";
+import type { TaskBrowserSession, TaskBrowserSessionStatus, ActionIntent, RiskState } from "@aegis/types";
 import { newId, MOCK_USER_ID } from "../store/index.js";
 
 // ─── Chrome binary detection ──────────────────────────────────────────────────
@@ -626,6 +626,67 @@ export function setTaskBrowserSessionCurrentUrl(id: string, currentUrl: string):
   const session = taskBrowserSessions.get(id);
   if (session) {
     session.current_url = currentUrl;
+    taskBrowserSessions.set(id, session);
+  }
+}
+
+// Monotonic ordering of advisory workflow risk states. Risk state only moves
+// forward — observing a cart action after checkout never regresses to cart_ready.
+const RISK_STATE_ORDER: RiskState[] = [
+  "browsing",
+  "cart_ready",
+  "checkout_started",
+  "shipping_info_filled",
+  "payment_required",
+  "payment_method_available",
+  "final_review",
+  "commit_ready",
+];
+
+function riskRank(state: RiskState | undefined): number {
+  if (!state) return 0;
+  const idx = RISK_STATE_ORDER.indexOf(state);
+  return idx < 0 ? 0 : idx;
+}
+
+/**
+ * Advances the session's advisory risk state based on an observed action intent.
+ * Coarse and monotonic — used only to sharpen ambiguous classification and for
+ * enum-only trace context. No values, no secrets. Best-effort: a missing session
+ * is a no-op.
+ */
+export function advanceRiskState(id: string, actionIntent: ActionIntent): void {
+  const session = taskBrowserSessions.get(id);
+  if (!session) return;
+  let next: RiskState | undefined;
+  switch (actionIntent) {
+    case "cart_mutation":
+      next = "cart_ready";
+      break;
+    case "checkout_transition":
+      next = "checkout_started";
+      break;
+    case "payment_method_use":
+      next = "payment_method_available";
+      break;
+    case "final_commit":
+      next = "commit_ready";
+      break;
+    default:
+      next = undefined;
+  }
+  if (next && riskRank(next) > riskRank(session.risk_state)) {
+    session.risk_state = next;
+    taskBrowserSessions.set(id, session);
+  }
+}
+
+/** Advances risk state to shipping_info_filled when an address profile field is filled. */
+export function markShippingInfoFilled(id: string): void {
+  const session = taskBrowserSessions.get(id);
+  if (!session) return;
+  if (riskRank("shipping_info_filled") > riskRank(session.risk_state)) {
+    session.risk_state = "shipping_info_filled";
     taskBrowserSessions.set(id, session);
   }
 }

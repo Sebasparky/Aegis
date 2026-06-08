@@ -594,3 +594,61 @@ describe("POST /api/agent/v1/runtime/browser-click — non-ag behavior unchanged
     expect(res.json().error.code).toBe("RUNTIME_SESSION_CHANGED");
   });
 });
+
+describe("POST /api/agent/v1/runtime/browser-click — capability-state gate", () => {
+  it("does NOT dispatch the pointer for a final-commit target (Place order) and routes to the handoff", async () => {
+    seedSession();
+    seedSnapshot([candidate({ name: "Place order", normalized_name: "place order" })]);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Place order" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.mode).toBe("blocked_by_antigen_platform");
+    expect(body.data.dispatched).toBe(false);
+    expect(body.data.action_intent).toBe("final_commit");
+    expect(body.data.recommended_handoff).toBe("request_purchase_confirmation");
+    // The pointer was never dispatched — no realistic click of any kind.
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expect(clickByDescriptionMock).not.toHaveBeenCalled();
+    // Response carries no element name / href / box — enum + canned reason only.
+    expect(JSON.stringify(body.data)).not.toContain("Place order");
+  });
+
+  it("STILL dispatches the pointer for a reversible checkout transition (Continue to checkout)", async () => {
+    seedSession();
+    seedSnapshot([candidate({ name: "Continue to checkout", normalized_name: "continue to checkout" })]);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Continue to checkout" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.mode).toBe("realistic_pointer_click");
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks publish_send and routes to sensitive_workflow_required without dispatching", async () => {
+    seedSession();
+    seedSnapshot([candidate({ name: "Publish", normalized_name: "publish" })]);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Publish" },
+    });
+
+    const body = res.json();
+    expect(body.data.mode).toBe("blocked_by_antigen_platform");
+    expect(body.data.action_intent).toBe("publish_send");
+    expect(body.data.recommended_handoff).toBe("sensitive_workflow_required");
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+});

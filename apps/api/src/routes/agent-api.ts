@@ -45,7 +45,9 @@ import {
   observeAuthenticatedSession,
   navigateAuthenticatedSession,
 } from "../runtime/authenticatedSessions.js";
-import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, closeTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
+import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowserSession, closeTaskBrowserSession, findReadySessionByDelegationId, setTaskBrowserSessionCurrentUrl, getTaskBrowserSessionPointerState, setTaskBrowserSessionPointerState, advanceRiskState, type CreateTaskBrowserResult } from "../runtime/taskBrowserSessions.js";
+import { classifyActionIntent } from "../detection/actionIntent.js";
+import { evaluateActionGate } from "../detection/actionGate.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
@@ -57,6 +59,7 @@ import { readLiveCdpPageUrl } from "../runtime/cdpTargetSelection.js";
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
 import { recordBrowserTraceEvent, sanitizeTraceUrl } from "../runtime/browserRunTrace.js";
+import { BrowserTimingScope } from "../runtime/browserTiming.js";
 // Same-page logical-ref recovery (env-gated, default-off). When enabled, a
 // recoverable ANTIGEN_REF_STALE on a clearly low-risk click target is retried
 // against a unique logically-equivalent element re-found on the same page; the
@@ -3718,6 +3721,53 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         href_path: el.href_path,
       };
 
+      // ── Capability-state action gate (runs BEFORE pointer dispatch) ──────────
+      // Classifies the action intent from STRUCTURAL element metadata only and
+      // refuses clear final / irreversible / identity-committing actions, routing
+      // the agent to the existing handoff tool (which owns the user approval,
+      // SensitiveGrant, and signed receipt). Reversible navigation / cart /
+      // checkout-transition falls through to the unchanged URL/TTL/viewport/Phase
+      // 4B click path below. The gate never creates an approval, never prompts the
+      // user, and never touches secrets. For clicks the only outcomes are
+      // allowed_without_user_prompt (fall through) or blocked_by_antigen_platform.
+      const gate = evaluateActionGate(
+        classifyActionIntent({
+          action: "click",
+          text: el.name,
+          normalized_text: el.normalized_name,
+          role: el.role,
+          kind: el.kind,
+          tag: el.tag,
+          href_path: el.href_path,
+          context: el.context ? { label: el.context.label, section: el.context.section } : undefined,
+          url: session.current_url,
+          risk_state: session.risk_state,
+        }),
+        session.risk_state,
+      );
+      if (gate.disposition === "blocked_by_antigen_platform") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_tool_disposition",
+          browser_runtime_id: session.browser_session_id,
+          tool: "browser_click",
+          disposition: "blocked_by_antigen_platform",
+          action_intent: gate.action_intent,
+        });
+        advanceRiskState(session.browser_session_id, gate.action_intent);
+        return reply.send({
+          ok: true,
+          data: {
+            mode: "blocked_by_antigen_platform",
+            dispatched: false,
+            action_intent: gate.action_intent,
+            ...(gate.recommended_handoff ? { recommended_handoff: gate.recommended_handoff } : {}),
+            reason: gate.reason,
+          },
+        });
+      }
+      // Allowed: record the observed intent for advisory risk-state, then dispatch.
+      advanceRiskState(session.browser_session_id, gate.action_intent);
+
       let refResult = await realisticClickKnownBox({
         cdpUrl: session.cdp_url,
         box: el.box,
@@ -3863,6 +3913,41 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     const selectorHint = typeof body.selector_hint === "string" && body.selector_hint.length > 0
       ? body.selector_hint
       : undefined;
+
+    // Capability-state action gate (description path). Only the description text
+    // is available here (no structural metadata), so classification is best-
+    // effort and fails closed on clear final/irreversible verbs. The ag_* path is
+    // the primary, fully-structural surface.
+    const descGate = evaluateActionGate(
+      classifyActionIntent({
+        action: "click",
+        text: body.element_description,
+        url: session.current_url,
+        risk_state: session.risk_state,
+      }),
+      session.risk_state,
+    );
+    if (descGate.disposition === "blocked_by_antigen_platform") {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_tool_disposition",
+        browser_runtime_id: session.browser_session_id,
+        tool: "browser_click",
+        disposition: "blocked_by_antigen_platform",
+        action_intent: descGate.action_intent,
+      });
+      advanceRiskState(session.browser_session_id, descGate.action_intent);
+      return reply.send({
+        ok: true,
+        data: {
+          mode: "blocked_by_antigen_platform",
+          dispatched: false,
+          action_intent: descGate.action_intent,
+          ...(descGate.recommended_handoff ? { recommended_handoff: descGate.recommended_handoff } : {}),
+          reason: descGate.reason,
+        },
+      });
+    }
+    advanceRiskState(session.browser_session_id, descGate.action_intent);
 
     const result = await realisticClickByDescription({
       cdpUrl: session.cdp_url,
@@ -4409,6 +4494,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       );
     }
 
+    const timing = new BrowserTimingScope("antigen_snapshot");
+
     let candidates: AntigenSnapshotCandidate[];
     try {
       candidates = await extractAntigenSnapshotCandidatesViaCDP({
@@ -4416,6 +4503,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         maxCandidates,
         viewportOnly,
       });
+      timing.mark("candidate_extract");
     } catch {
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "antigen_snapshot", browser_runtime_id: session.browser_session_id,
@@ -4432,6 +4520,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // viewport/scroll numbers are consumed server-side to derive qualitative
     // fields only; they are never emitted to the agent.
     const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url });
+    timing.mark("page_metadata");
 
     // Capture the LIVE page URL from the active CDP target — the same
     // pickBestPageTarget source the click/type/scroll live-URL guards compare
@@ -4441,6 +4530,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // a false ANTIGEN_REF_PAGE_CHANGED. Fail-safe: fall back to cached session
     // metadata only when the live read is unavailable.
     const liveUrl = (await readLiveCdpPageUrl(session.cdp_url)) ?? session.current_url ?? null;
+    timing.mark("live_url_capture");
     // Keep cached session metadata in lockstep with the live URL so the next
     // snapshot (and trace) sees the same page the refs were captured on.
     if (liveUrl && liveUrl !== session.current_url) {
@@ -4468,6 +4558,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       viewportOnly,
       url: snapshot.url,
     });
+
+    timing.mark("record_store_and_pagemap");
 
     // External elements + per-element qualitative status (additive, safe).
     const externalElements = elements.map((el) => {
@@ -4511,6 +4603,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       },
       result_code: "antigen_snapshot_success",
     });
+
+    timing.mark("serialize");
+    // Sanitized: stage labels + durations + scalar counts only. No URLs/refs/geometry.
+    timing.end({ element_count: snapshot.element_count, viewport_only: viewportOnly, rebound });
 
     return reply.send({
       ok: true,

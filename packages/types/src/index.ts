@@ -2334,6 +2334,80 @@ export interface ChallengeEmailResolution {
 
 // ─── Task Browser Lifecycle v1 ────────────────────────────────────────────────
 
+// ─── Capability-state action gating ──────────────────────────────────────────
+// Generic, site-agnostic classification of what a browser action would DO, so
+// Antigen gates on capability state (is the next action final/irreversible or a
+// raw-sensitive-data exposure?) rather than on flat button-label denylists.
+
+/**
+ * What a browser action is attempting to do. Derived from structural element
+ * metadata only (tag/kind/role/normalized name/href path/context) — never field
+ * values. Reversible intents are clickable without a user prompt; final/sensitive
+ * intents are routed to the existing Aegis handoff tools.
+ */
+export type ActionIntent =
+  | "navigation"               // reversible: links, benign buttons
+  | "cart_mutation"            // reversible: add/remove/update cart
+  | "checkout_transition"      // reversible: continue/proceed to checkout (a funnel step, NOT payment)
+  | "protected_fill"           // platform-controlled fill of name/email/phone/address
+  | "payment_method_use"       // platform-controlled fill/selection of a payment instrument
+  | "final_commit"             // place order / pay now / confirm purchase / submit payment
+  | "publish_send"             // publish/post/tweet/send under the user's identity
+  | "account_security_change"  // password/2FA/recovery/delete-account/oauth/connect-app
+  | "high_liability_submit";   // submit/accept on legal/medical/financial/government forms
+
+/** Whether the action is undoable. `uncertain` fails closed for high-risk targets. */
+export type ActionReversibility = "reversible" | "final" | "uncertain";
+
+export interface ActionIntentClassification {
+  action_intent: ActionIntent;
+  reversibility: ActionReversibility;
+  risk_level: RiskLevel;
+  confidence: "high" | "low";
+  signals: string[];
+}
+
+/** What the gate decides should happen to a classified action. */
+export type GateDisposition =
+  | "allowed_without_user_prompt"   // dispatch normally (still subject to URL/TTL/viewport/Phase 4B)
+  | "platform_control_required"     // value must be Aegis-filled, not agent-clicked/typed
+  | "blocked_by_antigen_platform";  // do NOT dispatch; return a directive to a handoff tool
+
+/**
+ * Recommended next step for a blocked/platform-controlled action. Either a
+ * concrete existing handoff tool, or "sensitive_workflow_required" when there is
+ * no dedicated tool yet (publish/send, account security, high-liability submit).
+ */
+export type RecommendedHandoff =
+  | "request_purchase_confirmation"
+  | "request_payment_card_fill"
+  | "request_profile_field_fill"
+  | "request_secret_field_injection"
+  | "sensitive_workflow_required";
+
+export interface ActionGateResult {
+  disposition: GateDisposition;
+  action_intent: ActionIntent;
+  recommended_handoff?: RecommendedHandoff;
+  /** Fixed canned string keyed by intent — never derived from page text/URL/HTML. */
+  reason: string;
+}
+
+/**
+ * Coarse, advisory per-session workflow risk state. Advanced monotonically as
+ * intents are observed; used to sharpen ambiguous classification and recorded
+ * (enum-only) in the trace. The gate degrades gracefully if absent.
+ */
+export type RiskState =
+  | "browsing"
+  | "cart_ready"
+  | "checkout_started"
+  | "shipping_info_filled"
+  | "payment_required"
+  | "payment_method_available"
+  | "final_review"
+  | "commit_ready";
+
 export type TaskBrowserSessionStatus =
   | "starting"
   | "ready"
@@ -2377,6 +2451,8 @@ export interface TaskBrowserSession {
   persistent_profile_enabled?: boolean;
   /** Diagnostics: "fresh" = new profile dir; "reused" = prior session's cookies/storage carried over. */
   profile_state?: "fresh" | "reused";
+  /** Advisory workflow risk state, advanced as action intents are observed. Coarse, enum-only. */
+  risk_state?: RiskState;
 }
 
 // ─── Payment Card Fill Handoff v1 ────────────────────────────────────────────

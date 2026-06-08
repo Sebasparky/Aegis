@@ -1497,6 +1497,27 @@ async function handleLine(line) {
 
       if (apiRes.ok) {
         const resBody                  = await apiRes.json().catch(() => ({}));
+        // Capability-state gate: a 200 with mode=blocked_by_antigen_platform means
+        // Antigen classified this as a final / irreversible / identity-committing
+        // action and DID NOT dispatch the pointer. Surface it as an explicit error
+        // so the agent never believes the click happened, and point at the handoff
+        // that performs the action safely under Antigen custody.
+        if (resBody?.data?.mode === "blocked_by_antigen_platform") {
+          const intent  = resBody.data.action_intent ?? "sensitive_action";
+          const handoff = resBody.data.recommended_handoff ?? "sensitive_workflow_required";
+          process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] blocked_by_antigen_platform intent=${intent} handoff=${handoff}\n`);
+          await noteToolDisposition({ tool: "browser_click", surface: "antigen_adapter", disposition: "blocked_by_antigen_platform", resultCode: intent });
+          const directive = handoff === "sensitive_workflow_required"
+            ? "It requires user approval through a verified Aegis sensitive workflow. Do not retry browser_click on this target."
+            : `Call ${handoff} to perform this safely under Antigen custody. Do not retry browser_click on this target.`;
+          writeSyntheticErrorResponse(
+            "browser_click",
+            requestId,
+            "BLOCKED_BY_ANTIGEN_PLATFORM",
+            `the pointer was NOT dispatched. This action is classified as '${intent}' (final/irreversible or identity-committing). ${directive}`,
+          );
+          return;
+        }
         const resPointerCount          = resBody?.data?.pointer_path_point_count;
         const resPointerStartSource    = resBody?.data?.pointer_start_source;
         const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;

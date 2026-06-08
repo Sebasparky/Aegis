@@ -1407,6 +1407,59 @@ describe("H. browser_click adapter-owned — no Playwright fallthrough", () => {
     assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
   });
 
+  test("capability-state gate: blocked_by_antigen_platform surfaces isError and the handoff, NOT a success", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickStatus: 200,
+      browserClickBody: {
+        ok: true,
+        data: {
+          mode: "blocked_by_antigen_platform",
+          dispatched: false,
+          action_intent: "final_commit",
+          recommended_handoff: "request_purchase_confirmation",
+          reason: "This is a final purchase/payment commitment.",
+        },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 53, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Place order", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 53);
+    assert.ok(resp, `expected response for id=53, stdout was: ${stdoutBuf}`);
+    // Must be an error — the agent must never be told the click succeeded.
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("BLOCKED_BY_ANTIGEN_PLATFORM"), `expected block code in: ${text}`);
+    assert.ok(text.includes("request_purchase_confirmation"), `expected handoff in: ${text}`);
+    assert.ok(!text.includes("realistic_success"), `must not report a successful click: ${text}`);
+  });
+
   test("INTERCEPTION_ENABLED=true, API success with pointer metadata: output includes pointer fields", { timeout: 7000 }, async () => {
     const { server, port } = await createMockApiServer();  // default body has pointer_path_point_count=42, pointer_start_source=session
 

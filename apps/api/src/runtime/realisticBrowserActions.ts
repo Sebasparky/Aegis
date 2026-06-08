@@ -34,6 +34,7 @@ import {
   type AntigenRevalidationEvalValue,
 } from "./antigenKnownBoxRevalidation.js";
 import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
+import { timingEnabled } from "./browserTiming.js";
 import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import {
@@ -608,6 +609,12 @@ export async function realisticClickKnownBox(params: {
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
+  // Dev-only latency markers (gated). Sanitized: stage labels + durations only.
+  const timeOn = timingEnabled();
+  const tEnter = process.hrtime.bigint();
+  let tAfterSelect = tEnter;
+  let tBeforePointer = tEnter;
+
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
@@ -624,6 +631,7 @@ export async function realisticClickKnownBox(params: {
 
   const { target: pageTarget, reason: targetReason } = pickBestPageTarget(targets, {});
   if (!pageTarget) return { success: false, error: "No page targets found via CDP." };
+  tAfterSelect = process.hrtime.bigint();
 
   // Live-URL guard: the snapshot's boxes are only valid on the page they were
   // captured on. pageTarget.url is the authoritative live URL from the active CDP
@@ -669,6 +677,19 @@ export async function realisticClickKnownBox(params: {
     const finish = (result: RealisticClickResult) => {
       clearTimeout(timer);
       ws.close();
+      if (timeOn) {
+        const tEnd = process.hrtime.bigint();
+        const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
+        // Sanitized: stage labels + durations + booleans only. No URLs/coords/refs.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] realistic_click_known_box total=${ms(tEnter, tEnd)}ms` +
+            ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
+            ` connect_attach_phase4b=${ms(tAfterSelect, tBeforePointer)}ms` +
+            ` pointer_and_urlread=${ms(tBeforePointer, tEnd)}ms` +
+            ` overlay=${debugOverlay} success=${result.success}`,
+        );
+      }
       resolve(result);
     };
 
@@ -761,6 +782,7 @@ export async function realisticClickKnownBox(params: {
           });
         const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
+        tBeforePointer = process.hrtime.bigint();
         void (async () => {
           try {
             const clickResult = await dispatchPointerClickToBox({

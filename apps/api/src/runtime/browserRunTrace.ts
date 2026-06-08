@@ -18,6 +18,7 @@
 // raw typed text. URLs are reduced to host + clipped path with all query strings
 // and fragments stripped.
 
+import type { ActionIntent } from "@aegis/types";
 import {
   ANTIGEN_RECOVERY_STATES,
   ANTIGEN_SANITIZED_STALE_REASONS,
@@ -76,7 +77,8 @@ export type BrowserToolDisposition =
   | "adapter_child_forwarded"
   | "raw_fallback"
   | "failed"
-  | "blocked_by_antigen_required";
+  | "blocked_by_antigen_required"
+  | "blocked_by_antigen_platform";
 
 const BROWSER_TOOL_SURFACES = new Set<BrowserToolSurface>([
   "aegis_backend",
@@ -91,6 +93,19 @@ const BROWSER_TOOL_DISPOSITIONS = new Set<BrowserToolDisposition>([
   "raw_fallback",
   "failed",
   "blocked_by_antigen_required",
+  "blocked_by_antigen_platform",
+]);
+
+const ACTION_INTENTS = new Set<ActionIntent>([
+  "navigation",
+  "cart_mutation",
+  "checkout_transition",
+  "protected_fill",
+  "payment_method_use",
+  "final_commit",
+  "publish_send",
+  "account_security_change",
+  "high_liability_submit",
 ]);
 
 /**
@@ -173,6 +188,10 @@ export interface BrowserTraceEvent {
   // coordinates, boxes, values, or internal matching details).
   recovery_state?: AntigenRecoveryState;
   stale_reason?: AntigenSanitizedStaleReason;
+  // Capability-state gate classification (enum-gated). Present on browser_click
+  // and browser_tool_disposition events when the action gate ran. Enum only —
+  // never carries page text, labels, hrefs, or values.
+  action_intent?: ActionIntent;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -329,6 +348,10 @@ export function recordBrowserTraceEvent(
     }
     if (event.stale_reason !== undefined && ANTIGEN_SANITIZED_STALE_REASONS.has(event.stale_reason)) {
       safe.stale_reason = event.stale_reason;
+    }
+    // Enum-gate action_intent — never clip arbitrary strings into this.
+    if (event.action_intent !== undefined && ACTION_INTENTS.has(event.action_intent)) {
+      safe.action_intent = event.action_intent;
     }
 
     let entry = traces.get(browserRuntimeId);

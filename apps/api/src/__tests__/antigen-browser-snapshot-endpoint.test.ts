@@ -32,6 +32,17 @@ vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   };
 });
 
+// Mock ONLY the live CDP page-URL read so tests can drive the live URL
+// deterministically without a real browser. The rest of cdpTargetSelection
+// (pickBestPageTarget) stays real.
+const liveUrlMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/cdpTargetSelection.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/cdpTargetSelection.js")>(
+    "../runtime/cdpTargetSelection.js",
+  );
+  return { ...actual, readLiveCdpPageUrl: liveUrlMock };
+});
+
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
@@ -41,6 +52,7 @@ import {
   getAntigenSnapshotElement,
   resolveAntigenRefForSession,
   clearAntigenSnapshotStoreForTests,
+  isAntigenPageChanged,
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { agentDelegations, passes } from "../store/index.js";
@@ -167,6 +179,9 @@ beforeEach(() => {
   extractMock.mockResolvedValue(DEFAULT_CANDIDATES);
   // Page meta is best-effort; default to none so the array-mock path is exercised.
   pageMetaMock.mockResolvedValue(undefined);
+  // Live-URL read defaults to unavailable (null) so the endpoint falls back to the
+  // seeded session.current_url — preserving the behavior the other tests assert.
+  liveUrlMock.mockResolvedValue(null);
 });
 
 describe("POST /api/agent/v1/runtime/browser-snapshot", () => {
@@ -702,6 +717,97 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — v2 page map", () => {
       "cdp_url", "user_data_dir", "secret_ref", "9222",
     ]) {
       expect(raw).not.toContain(f);
+    }
+  });
+});
+
+/**
+ * Regression: snapshot URL capture must come from the LIVE CDP page target, not
+ * the cached session.current_url. Before this fix the endpoint stored
+ * session.current_url, which lags a navigation (Enter-submit/SPA/redirect); the
+ * very next ref action then compared a stale snapshot_url against the live URL
+ * and failed with a FALSE ANTIGEN_REF_PAGE_CHANGED before recovery could run.
+ *
+ * These tests drive readLiveCdpPageUrl deterministically and assert against the
+ * REAL snapshot store + the REAL isAntigenPageChanged guard (the same guard the
+ * click/type/scroll paths use), so they prove the end-to-end behavior, not a
+ * reimplementation of it.
+ */
+describe("POST /api/agent/v1/runtime/browser-snapshot — live snapshot URL capture", () => {
+  const URL_A = "https://www.ikea.com/us/en/"; // stale cached homepage
+  const URL_B = "https://www.ikea.com/us/en/search/?q=coffee%20mug"; // live search page
+
+  async function snapshot() {
+    return server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+  }
+
+  // (1) Snapshot stores the live CDP URL, not the stale session.current_url, and
+  // brings session.current_url into lockstep with it.
+  it("stores the live CDP URL (not stale session.current_url) and updates the session", async () => {
+    seedSession({ current_url: URL_A });
+    liveUrlMock.mockResolvedValueOnce(URL_B);
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    // Response + stored record carry the LIVE URL.
+    expect(body.data.url).toBe(URL_B);
+    const resolved = resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1");
+    expect(resolved.status).toBe("ok");
+    if (resolved.status === "ok") expect(resolved.snapshot_url).toBe(URL_B);
+
+    // Cached session metadata is updated to the live URL (no longer stale).
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe(URL_B);
+  });
+
+  // (2) A fresh snapshot taken on URL B (after navigating from A) must NOT make a
+  // subsequent URL-B action report PAGE_CHANGED.
+  it("fresh snapshot on URL B does not make a URL B action report PAGE_CHANGED", async () => {
+    seedSession({ current_url: URL_A }); // cached value is still A (the bug trigger)
+    liveUrlMock.mockResolvedValueOnce(URL_B);
+
+    await snapshot();
+    const resolved = resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1");
+    expect(resolved.status).toBe("ok");
+    if (resolved.status === "ok") {
+      // Same guard the click/type/scroll paths use; live URL is still B.
+      expect(isAntigenPageChanged(resolved.snapshot_url, URL_B)).toBe(false);
+    }
+  });
+
+  // (3) A ref captured on URL A, used after a real navigation to URL B, MUST still
+  // report PAGE_CHANGED — the fix must not weaken true page-change detection.
+  it("a ref snapshotted on URL A still reports PAGE_CHANGED when live URL is B", async () => {
+    seedSession({ current_url: URL_A });
+    liveUrlMock.mockResolvedValueOnce(URL_A); // snapshot genuinely taken on A
+
+    await snapshot();
+    const resolved = resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1");
+    expect(resolved.status).toBe("ok");
+    if (resolved.status === "ok") {
+      expect(resolved.snapshot_url).toBe(URL_A);
+      expect(isAntigenPageChanged(resolved.snapshot_url, URL_B)).toBe(true);
+    }
+  });
+
+  // (4) Equivalent query encodings ("+" vs "%20", trailing slash) on the same page
+  // must still compare equal — decoded-query normalization is preserved.
+  it("equivalent query encoding on the same page is not a PAGE_CHANGED", async () => {
+    const liveAtSnapshot = "https://site.test/search?q=blahaj+soft+toy";
+    const liveAtAction = "https://site.test/search/?q=blahaj%20soft%20toy";
+    seedSession({ current_url: URL_A });
+    liveUrlMock.mockResolvedValueOnce(liveAtSnapshot);
+
+    await snapshot();
+    const resolved = resolveAntigenRefForSession(SESSION_ID, MOCK_USER_ID, "ag_1");
+    expect(resolved.status).toBe("ok");
+    if (resolved.status === "ok") {
+      expect(isAntigenPageChanged(resolved.snapshot_url, liveAtAction)).toBe(false);
     }
   });
 });

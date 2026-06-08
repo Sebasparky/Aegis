@@ -10,8 +10,8 @@
  *   6. No-target / empty list
  */
 
-import { describe, it, expect } from "vitest";
-import { pickBestPageTarget } from "../runtime/cdpTargetSelection.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { pickBestPageTarget, readLiveCdpPageUrl } from "../runtime/cdpTargetSelection.js";
 
 const blank = { id: "t1", url: "about:blank", type: "page" };
 const newtab = { id: "t2", url: "chrome://newtab/", type: "page" };
@@ -124,5 +124,53 @@ describe("pickBestPageTarget", () => {
     });
     expect(result.reason).toBe("exact_url_match");
     expect(result.target?.id).toBe("tx");
+  });
+});
+
+
+describe("readLiveCdpPageUrl (live CDP page-target URL source)", () => {
+  const CDP = "http://localhost:9222";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function stubFetchList(targets: unknown): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ json: async () => targets }) as unknown as Response),
+    );
+  }
+
+  it("returns the active page target URL via the same pickBestPageTarget source", async () => {
+    // about:blank is unusable; the live search page is the authoritative target.
+    stubFetchList([
+      { id: "t1", url: "about:blank", type: "page" },
+      { id: "t2", url: "https://www.ikea.com/us/en/search/?q=coffee%20mug", type: "page" },
+    ]);
+    await expect(readLiveCdpPageUrl(CDP)).resolves.toBe(
+      "https://www.ikea.com/us/en/search/?q=coffee%20mug",
+    );
+  });
+
+  it("returns null (fail-safe) when the CDP transport throws", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    await expect(readLiveCdpPageUrl(CDP)).resolves.toBeNull();
+  });
+
+  it("returns null when there are no usable page targets", async () => {
+    stubFetchList([{ id: "w", url: "https://x.test/worker.js", type: "service_worker" }]);
+    await expect(readLiveCdpPageUrl(CDP)).resolves.toBeNull();
+  });
+
+  it("returns null when the CDP list payload is not an array", async () => {
+    stubFetchList({ unexpected: true });
+    await expect(readLiveCdpPageUrl(CDP)).resolves.toBeNull();
   });
 });

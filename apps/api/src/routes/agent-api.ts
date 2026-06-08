@@ -52,10 +52,22 @@ import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } 
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
+import { readLiveCdpPageUrl } from "../runtime/cdpTargetSelection.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
 import { recordBrowserTraceEvent, sanitizeTraceUrl } from "../runtime/browserRunTrace.js";
+// Same-page logical-ref recovery (env-gated, default-off). When enabled, a
+// recoverable ANTIGEN_REF_STALE on a clearly low-risk click target is retried
+// against a unique logically-equivalent element re-found on the same page; the
+// unchanged realisticClickKnownBox + Phase 4B remain the authoritative gate.
+import {
+  isLogicalRefRecoveryEnabled,
+  classifyLogicalRecoveryEligibility,
+  recoverAntigenRefBox,
+  sanitizeStaleReason,
+  type AntigenRecoveryState,
+} from "../runtime/antigenLogicalRecovery.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3696,7 +3708,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_CLICKABLE", message: `Antigen ref '${refRaw}' is not clickable.` } });
       }
 
-      const refResult = await realisticClickKnownBox({
+      // Phase 4B: snapshot metadata for live-element revalidation before click.
+      const expected = {
+        tag: el.tag,
+        kind: el.kind,
+        role: el.role,
+        name: el.name,
+        normalized_name: el.normalized_name,
+        href_path: el.href_path,
+      };
+
+      let refResult = await realisticClickKnownBox({
         cdpUrl: session.cdp_url,
         box: el.box,
         sessionId: session.browser_session_id,
@@ -3704,16 +3726,66 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         debugOverlay: resolveOverlayEnabled(session),
         // Live-URL guard: fail closed if the page navigated since the snapshot.
         expectedUrl: resolution.snapshot_url,
-        // Phase 4B: snapshot metadata for live-element revalidation before click.
-        expected: {
-          tag: el.tag,
-          kind: el.kind,
-          role: el.role,
-          name: el.name,
-          normalized_name: el.normalized_name,
-          href_path: el.href_path,
-        },
+        expected,
       });
+
+      // Same-page logical-ref recovery (env-gated, default-off). A recoverable
+      // ANTIGEN_REF_STALE on a CLEARLY low-risk click target is retried against a
+      // unique logically-equivalent element re-found on the same page. Strict
+      // Phase 4B already ran above and failed; recovery only PROPOSES a fresh box
+      // and re-runs the unchanged realisticClickKnownBox (Phase 4B is still the
+      // authoritative gate). recovery_state records the disposition; the raw stale
+      // reason is surfaced only as a SANITIZED stale_reason / stability_hint.
+      let recoveryState: AntigenRecoveryState = "disabled";
+      let recoveredFromStaleReason: ReturnType<typeof sanitizeStaleReason> | undefined;
+      if (!refResult.success && refResult.error === "ANTIGEN_REF_STALE") {
+        const eligibility = isLogicalRefRecoveryEnabled()
+          ? classifyLogicalRecoveryEligibility(expected, "click")
+          : null;
+        if (!eligibility) {
+          recoveryState = "disabled";
+        } else if (!eligibility.eligible) {
+          recoveryState = "skipped_ineligible";
+        } else {
+          const originalStale = sanitizeStaleReason(refResult.stale_reason);
+          const recovery = await recoverAntigenRefBox({
+            cdpUrl: session.cdp_url,
+            expected,
+            expectedUrl: resolution.snapshot_url,
+            riskClass: eligibility.risk_class,
+          });
+          if (recovery.status === "recovered") {
+            // Re-run the trusted click path on the proposed box. Phase 4B runs
+            // again and remains the final safety gate; we attempt recovery once.
+            const retry = await realisticClickKnownBox({
+              cdpUrl: session.cdp_url,
+              box: recovery.box,
+              sessionId: session.browser_session_id,
+              userId: MOCK_USER_ID,
+              debugOverlay: resolveOverlayEnabled(session),
+              expectedUrl: resolution.snapshot_url,
+              expected,
+            });
+            if (retry.success) {
+              refResult = retry;
+              recoveryState = "recovered";
+              recoveredFromStaleReason = originalStale;
+            } else {
+              recoveryState = "failed_revalidation";
+            }
+          } else if (recovery.status === "ambiguous") {
+            recoveryState = "failed_ambiguous";
+          } else if (recovery.status === "not_found") {
+            recoveryState = "failed_not_found";
+          } else if (recovery.status === "out_of_viewport") {
+            recoveryState = "failed_out_of_viewport";
+          } else if (recovery.status === "page_changed") {
+            recoveryState = "failed_page_changed";
+          } else {
+            recoveryState = "failed_cdp";
+          }
+        }
+      }
 
       if (!refResult.success) {
         // No successful pointer dispatch on any failure (out-of-viewport / stale aborts before dispatch).
@@ -3723,20 +3795,27 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           : refResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
           : refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
           : "REALISTIC_CLICK_FAILED";
+        // Sanitized stale signal for stale / out-of-viewport (enum only, no values).
+        const staleSignal =
+          failCode === "ANTIGEN_REF_STALE" || failCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
+            ? sanitizeStaleReason(refResult.stale_reason)
+            : undefined;
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_click", browser_runtime_id: session.browser_session_id,
           tool: "browser_click", click_path: "ag_ref", ref: refRaw,
           element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
           pointer_dispatch: false, error_code: failCode,
+          ...(failCode === "ANTIGEN_REF_STALE" ? { recovery_state: recoveryState } : {}),
+          ...(staleSignal ? { stale_reason: staleSignal.stale_reason } : {}),
         });
         if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
         }
         if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...(staleSignal ?? {}) } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...(staleSignal ?? {}), recovery_state: recoveryState } });
         }
         const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
         return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed." } });
@@ -3754,6 +3833,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
         pointer_dispatch: true, result_code: "realistic_success",
         url_after: sanitizeTraceUrl(refResult.current_url),
+        ...(recoveryState === "recovered" ? { recovery_state: recoveryState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
       });
 
       return reply.send({
@@ -3763,6 +3843,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(refResult.pointer_start_source !== undefined ? { pointer_start_source: refResult.pointer_start_source } : {}),
           ...(refResult.pointer_path_point_count !== undefined ? { pointer_path_point_count: refResult.pointer_path_point_count } : {}),
           ...(refResult.pointer_state_persisted !== undefined ? { pointer_state_persisted: refResult.pointer_state_persisted } : {}),
+          // Recovery telemetry: present only when same-page logical recovery saved
+          // this action, so we can measure how often it helps. Enum + sanitized
+          // stale reason only — never boxes/coordinates/hrefs.
+          ...(recoveryState === "recovered"
+            ? {
+                recovery_state: recoveryState,
+                ...(recoveredFromStaleReason ? { recovered_from_stale_reason: recoveredFromStaleReason.stale_reason } : {}),
+              }
+            : {}),
         },
       });
     }
@@ -4344,6 +4433,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // fields only; they are never emitted to the agent.
     const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url });
 
+    // Capture the LIVE page URL from the active CDP target — the same
+    // pickBestPageTarget source the click/type/scroll live-URL guards compare
+    // against — so the snapshot stores the page the refs were actually captured
+    // on. Cached session.current_url can lag a navigation (Enter-submit, SPA
+    // route change, redirect) and would otherwise make the next action fail with
+    // a false ANTIGEN_REF_PAGE_CHANGED. Fail-safe: fall back to cached session
+    // metadata only when the live read is unavailable.
+    const liveUrl = (await readLiveCdpPageUrl(session.cdp_url)) ?? session.current_url ?? null;
+    // Keep cached session metadata in lockstep with the live URL so the next
+    // snapshot (and trace) sees the same page the refs were captured on.
+    if (liveUrl && liveUrl !== session.current_url) {
+      setTaskBrowserSessionCurrentUrl(session.browser_session_id, liveUrl);
+    }
+
     const { snapshot, elements } = createAntigenSnapshotRecord({
       browser_session_id: session.browser_session_id,
       // Bind the record to the RESOLVED session — never the (possibly stale) request
@@ -4351,7 +4454,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // actually snapshotted, including after a rebind.
       browser_runtime_id: session.browser_session_id,
       user_id: MOCK_USER_ID,
-      url: session.current_url ?? null,
+      url: liveUrl,
       title: null, // v1: document.title extraction is out of scope
       candidates,
     });

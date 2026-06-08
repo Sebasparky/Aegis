@@ -135,3 +135,32 @@ function logSelection(
     cdp_candidate_urls: candidates.map((c) => c.url),
   });
 }
+
+/**
+ * Reads the live URL of the active CDP page target.
+ *
+ * This is the SAME source the realistic click/type/scroll guards treat as
+ * authoritative: fetch the CDP target list and run it through
+ * `pickBestPageTarget`. Exposing it as a helper lets the snapshot path store the
+ * live page URL at snapshot time instead of cached session metadata
+ * (`session.current_url`), which can lag behind a navigation (Enter-submit,
+ * client-side route change, redirect) and otherwise produce a false
+ * ANTIGEN_REF_PAGE_CHANGED on the very next action.
+ *
+ * Fail-safe: returns null on any transport/parse failure or when no usable page
+ * target exists, so callers can fall back conservatively without failing their
+ * operation. Never throws, never logs secrets.
+ */
+export async function readLiveCdpPageUrl(cdpUrl: string): Promise<string | null> {
+  let targets: CdpPageTarget[];
+  try {
+    const res = await fetch(`${cdpUrl}/json/list`);
+    targets = (await res.json()) as CdpPageTarget[];
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(targets)) return null;
+  // Empty opts == the exact selection the click/type/scroll path uses.
+  const { target } = pickBestPageTarget(targets, {});
+  return target?.url ?? null;
+}

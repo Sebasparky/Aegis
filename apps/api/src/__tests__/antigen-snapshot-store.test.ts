@@ -25,6 +25,7 @@ import {
   deleteExpiredAntigenSnapshots,
   deleteAntigenSnapshotsForSession,
   resolveAntigenRefForSession,
+  refreshAntigenSnapshotLease,
   toExternalAntigenSnapshotElement,
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
@@ -446,6 +447,32 @@ describe("resolveAntigenRefForSession (Phase 4A)", () => {
     expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", later).status).toBe("expired");
   });
 
+  it("carries the element + snapshot_url + snapshot_id on an expired-but-present ref (for flag-gated recovery)", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    const { snapshot } = createFor([makeCandidate({ name: "Add to bag" })], {
+      browser_session_id: SESSION,
+      url: "https://shop.test/cart",
+      now: t0,
+    });
+    const later = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_1", later);
+    expect(res.status).toBe("expired");
+    if (res.status !== "expired") throw new Error("expected expired");
+    expect(res.element?.name).toBe("Add to bag");
+    expect(res.snapshot_url).toBe("https://shop.test/cart");
+    expect(res.snapshot_id).toBe(snapshot.snapshot_id);
+  });
+
+  it("returns expired WITHOUT an element when the ref is not in the expired snapshot", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    createFor([makeCandidate()], { browser_session_id: SESSION, now: t0 });
+    const later = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    const res = resolveAntigenRefForSession(SESSION, USER, "ag_99", later);
+    expect(res.status).toBe("expired");
+    if (res.status !== "expired") throw new Error("expected expired");
+    expect(res.element).toBeUndefined();
+  });
+
   it("returns ref_not_found for a missing ref in a live snapshot", () => {
     createFor([makeCandidate()], { browser_session_id: SESSION });
     expect(resolveAntigenRefForSession(SESSION, USER, "ag_99").status).toBe("ref_not_found");
@@ -482,6 +509,41 @@ describe("resolveAntigenRefForSession (Phase 4A)", () => {
     const res = resolveAntigenRefForSession(SESSION, USER, "ag_1", new Date(t1.getTime() + 1_000));
     if (res.status !== "ok") throw new Error("expected ok");
     expect(res.element.name).toBe("New");
+  });
+});
+
+describe("refreshAntigenSnapshotLease", () => {
+  const SESSION = "tbsess_lease_001";
+
+  it("extends an expired snapshot's lease so a subsequent resolve returns ok", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    const { snapshot } = createFor([makeCandidate()], { browser_session_id: SESSION, now: t0 });
+    const later = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    // Expired before refresh.
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", later).status).toBe("expired");
+
+    // Refresh the lease from `later` — element + snapshot expires_at both move forward.
+    expect(refreshAntigenSnapshotLease(snapshot.snapshot_id, USER, later)).toBe(true);
+
+    // Resolves ok again at the same instant the lease was refreshed.
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", later).status).toBe("ok");
+    // ...and stays ok until the new window elapses.
+    const justInside = new Date(later.getTime() + ANTIGEN_SNAPSHOT_TTL_MS - 1);
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", justInside).status).toBe("ok");
+    const past = new Date(later.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", past).status).toBe("expired");
+  });
+
+  it("returns false for an unknown snapshot id", () => {
+    expect(refreshAntigenSnapshotLease("snap_does_not_exist", USER)).toBe(false);
+  });
+
+  it("returns false (and does not extend) for the wrong user", () => {
+    const t0 = new Date("2026-06-02T00:00:00.000Z");
+    const { snapshot } = createFor([makeCandidate()], { browser_session_id: SESSION, now: t0 });
+    const later = new Date(t0.getTime() + ANTIGEN_SNAPSHOT_TTL_MS + 1);
+    expect(refreshAntigenSnapshotLease(snapshot.snapshot_id, OTHER_USER, later)).toBe(false);
+    expect(resolveAntigenRefForSession(SESSION, USER, "ag_1", later).status).toBe("expired");
   });
 });
 

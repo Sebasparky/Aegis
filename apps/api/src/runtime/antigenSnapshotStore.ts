@@ -360,7 +360,22 @@ export type AntigenRefResolution =
       snapshot_id: string;
     }
   | { status: "no_snapshot" }
-  | { status: "expired" }
+  | {
+      /**
+       * The snapshot exceeded its wall-clock TTL. The element record may still be
+       * present (the snapshot has not been GC'd yet): when it is, `element` +
+       * `snapshot_url` + `snapshot_id` are populated so a flag-gated TTL-expiry
+       * recovery can re-run the FULL safety stack (action gate, live-URL guard,
+       * Phase 4B, logical-recovery eligibility) and, only on success, refresh the
+       * lease. The box on `element` is never surfaced to agents. When the ref is
+       * not in the snapshot at all, these fields are omitted and the caller must
+       * fail closed.
+       */
+      status: "expired";
+      element?: AntigenSnapshotElementRecord;
+      snapshot_url?: string | null;
+      snapshot_id?: string;
+    }
   | { status: "ref_not_found" };
 
 /**
@@ -387,7 +402,19 @@ export function resolveAntigenRefForSession(
     }
   }
   if (!stored) return { status: "no_snapshot" };
-  if (isAntigenSnapshotExpired(stored.snapshot, now)) return { status: "expired" };
+  if (isAntigenSnapshotExpired(stored.snapshot, now)) {
+    // TTL-expired but not yet GC'd: carry the element (when the ref is still in
+    // the snapshot) so a flag-gated recovery can re-validate against the live
+    // page. Time alone never authorizes the action — the safety stack does.
+    const expiredElement = stored.elementsByRef.get(ref);
+    if (!expiredElement) return { status: "expired" };
+    return {
+      status: "expired",
+      element: expiredElement,
+      snapshot_url: stored.snapshot.url,
+      snapshot_id: stored.snapshot.snapshot_id,
+    };
+  }
 
   const element = stored.elementsByRef.get(ref);
   if (!element) return { status: "ref_not_found" };
@@ -397,6 +424,32 @@ export function resolveAntigenRefForSession(
     snapshot_url: stored.snapshot.url,
     snapshot_id: stored.snapshot.snapshot_id,
   };
+}
+
+/**
+ * Extends the lease on a snapshot and all its elements by another full TTL
+ * window from `now`. Called ONLY after an expired ref has been semantically
+ * re-validated and its action successfully dispatched (flag-gated), so an
+ * actively-used ref in a live flow stays alive while idle refs still GC at the
+ * TTL. Never resurrects a ref that failed validation — the caller gates on a
+ * successful realistic* result before invoking this. Returns false when the
+ * snapshot is absent or owned by another user.
+ */
+export function refreshAntigenSnapshotLease(
+  snapshotId: string,
+  userId: string,
+  now?: Date,
+): boolean {
+  const stored = snapshots.get(snapshotId);
+  if (!stored || stored.snapshot.user_id !== userId) return false;
+  const expiresAt = new Date(
+    (now ?? new Date()).getTime() + ANTIGEN_SNAPSHOT_TTL_MS,
+  ).toISOString();
+  stored.snapshot.expires_at = expiresAt;
+  for (const element of stored.elementsByRef.values()) {
+    element.expires_at = expiresAt;
+  }
+  return true;
 }
 
 // ─── Freshness ───────────────────────────────────────────────────────────────

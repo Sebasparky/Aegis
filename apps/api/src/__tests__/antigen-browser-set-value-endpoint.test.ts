@@ -13,7 +13,7 @@
  * snapshot store is real (seeded via createAntigenSnapshotRecord).
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 
 vi.mock("../store/persistence.js", () => ({
   schedulePersist: vi.fn(),
@@ -306,5 +306,60 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "x" });
     expect(res.statusCode).toBe(422);
     expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+  });
+});
+
+describe("POST /api/agent/v1/runtime/browser-set-value — TTL-expiry recovery", () => {
+  const EXPIRED = () => new Date(Date.now() - 120_000);
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+  });
+
+  it("flag OFF: an expired ref hard-fails ANTIGEN_REF_EXPIRED with no set (strict default)", async () => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "x" });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(setValueMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON: an expired non-sensitive field is re-validated, set, and reports ttl_expired_recovered", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Sebastian" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ttl_recovery_state).toBe("ttl_expired_recovered");
+    expect(setValueMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("flag ON: an expired ref on a CHANGED page fails closed with page_changed", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    setValueMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED", duration_ms: 0 });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "x" });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(res.json().error.ttl_recovery_state).toBe("page_changed");
+  });
+
+  it("flag ON: an expired ref on a SENSITIVE field fails closed with sensitive_requires_fresh_ref (no set)", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Card number", normalized_name: "card number",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ], EXPIRED());
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4111111111111111" });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(res.json().error.ttl_recovery_state).toBe("sensitive_requires_fresh_ref");
+    expect(setValueMock).not.toHaveBeenCalled();
   });
 });

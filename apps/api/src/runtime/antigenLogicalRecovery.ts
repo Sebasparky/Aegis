@@ -297,6 +297,41 @@ export const ANTIGEN_SANITIZED_STALE_REASONS: ReadonlySet<AntigenSanitizedStaleR
   "out_of_viewport",
 ]);
 
+// ─── TTL-expiry recovery state (for responses + trace; enum-gated) ───────────
+//
+// A TTL-expired ref is never authorized by elapsed time. When the recovery flag
+// (`ANTIGEN_LOGICAL_REF_RECOVERY`) is on AND the element record still exists, the
+// expired ref is forced through the SAME safety stack a fresh ref passes (action
+// gate, live-URL guard, Phase 4B, logical-recovery eligibility). These states
+// distinguish the outcomes for trace/telemetry — enum only, no URLs, coords,
+// names, values, or screenshots.
+
+export type AntigenTtlRecoveryState =
+  | "ttl_expired_recovered" // expired ref re-validated against the live page and dispatched
+  | "ttl_expired_recovery_failed" // re-validation failed for a non-specific reason
+  | "semantic_mismatch" // Phase 4B found a different element at the box (target changed meaning)
+  | "page_changed" // live URL no longer matches the snapshot URL
+  | "sensitive_requires_fresh_ref"; // sensitive/final action — never dispatched from an expired ref
+
+export const ANTIGEN_TTL_RECOVERY_STATES: ReadonlySet<AntigenTtlRecoveryState> = new Set([
+  "ttl_expired_recovered",
+  "ttl_expired_recovery_failed",
+  "semantic_mismatch",
+  "page_changed",
+  "sensitive_requires_fresh_ref",
+]);
+
+/**
+ * Maps a failed realistic* error code into the agent-safe TTL-recovery failure
+ * vocabulary. PAGE_CHANGED and STALE are the meaning-changed signals we surface
+ * distinctly; everything else collapses to the generic failure state.
+ */
+export function mapTtlRecoveryFailureReason(error: string | undefined): AntigenTtlRecoveryState {
+  if (error === "ANTIGEN_REF_PAGE_CHANGED") return "page_changed";
+  if (error === "ANTIGEN_REF_STALE") return "semantic_mismatch";
+  return "ttl_expired_recovery_failed";
+}
+
 // ─── Page-side search IIFE ───────────────────────────────────────────────────
 
 /** Upper bound on candidates returned from the page (rare fallback path). */

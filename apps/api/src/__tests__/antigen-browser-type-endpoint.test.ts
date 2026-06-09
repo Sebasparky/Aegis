@@ -15,7 +15,7 @@
  *   never the fuzzy description path (realisticTypeTextViaCDP).
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 
 vi.mock("../store/persistence.js", () => ({
   schedulePersist: vi.fn(),
@@ -574,6 +574,73 @@ describe("POST /api/agent/v1/runtime/browser-type — non-ag fuzzy fallback unch
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("MISSING_FIELD");
+    expect(typeKnownBoxMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/agent/v1/runtime/browser-type — TTL-expiry recovery", () => {
+  const EXPIRED = () => new Date(Date.now() - 120_000);
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+  });
+
+  it("flag OFF: an expired ref hard-fails ANTIGEN_REF_EXPIRED with no keystroke (strict default)", async () => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", text: "hi@a.co" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(typeKnownBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON: an expired non-sensitive field is re-validated, typed, and reports ttl_expired_recovered", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", text: "hi@a.co" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ttl_recovery_state).toBe("ttl_expired_recovered");
+    expect(typeKnownBoxMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("flag ON: an expired ref on a CHANGED page fails closed with page_changed", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([inputCandidate()], EXPIRED());
+    typeKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED", char_count_bucket: "1-4", duration_ms: 0 });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", text: "hi@a.co" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(res.json().error.ttl_recovery_state).toBe("page_changed");
+  });
+
+  it("flag ON: an expired ref on a SENSITIVE field fails closed with sensitive_requires_fresh_ref (no keystroke)", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Password", normalized_name: "password",
+        value_meta: { sensitive: true, sensitivity: "credential", value_present: false, value_length: 0 },
+      }),
+    ], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", text: "hunter2" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(res.json().error.ttl_recovery_state).toBe("sensitive_requires_fresh_ref");
     expect(typeKnownBoxMock).not.toHaveBeenCalled();
   });
 });

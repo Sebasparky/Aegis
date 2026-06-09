@@ -10,7 +10,7 @@
  *   realisticClickKnownBox — never the description path, never a DOM/Playwright click.
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 
 vi.mock("../store/persistence.js", () => ({
   schedulePersist: vi.fn(),
@@ -649,6 +649,100 @@ describe("POST /api/agent/v1/runtime/browser-click — capability-state gate", (
     expect(body.data.mode).toBe("blocked_by_antigen_platform");
     expect(body.data.action_intent).toBe("publish_send");
     expect(body.data.recommended_handoff).toBe("sensitive_workflow_required");
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/agent/v1/runtime/browser-click — TTL-expiry recovery", () => {
+  const EXPIRED = () => new Date(Date.now() - 120_000); // past the 90s TTL
+  // A low-risk navigation link (classifies as `navigation`, gate allows).
+  const navLink = () =>
+    candidate({
+      tag: "a", kind: "link", role: "link", name: "Desks & desk chairs",
+      normalized_name: "desks & desk chairs", href_path: "/us/en/cat/workspace-desks-chairs-fu004/",
+      box: { x: 100, y: 200, width: 80, height: 40 },
+    });
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+  });
+
+  it("flag OFF: an expired ref hard-fails ANTIGEN_REF_EXPIRED with no dispatch (strict default)", async () => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+    seedSession();
+    seedSnapshot([navLink()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(res.json().error.ttl_recovery_state).toBeUndefined();
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON: an expired low-risk ref is re-validated, dispatched, and reports ttl_expired_recovered", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([navLink()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.mode).toBe("realistic_pointer_click");
+    expect(body.data.ttl_recovery_state).toBe("ttl_expired_recovered");
+    // The full safety stack ran: Phase 4B `expected` was passed to the known-box path.
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({
+      expected: expect.objectContaining({ name: "Desks & desk chairs" }),
+    }));
+  });
+
+  it("flag ON: an expired ref on a CHANGED page fails closed with page_changed", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([navLink()], EXPIRED());
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED" });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(body.error.ttl_recovery_state).toBe("page_changed");
+  });
+
+  it("flag ON: an expired ref that fails Phase 4B fails closed with semantic_mismatch", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([navLink()], EXPIRED());
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_STALE" });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_REF_STALE");
+    expect(body.error.ttl_recovery_state).toBe("semantic_mismatch");
+  });
+
+  it("flag ON: an expired ref on a FINAL-COMMIT target fails closed with sensitive_requires_fresh_ref (no dispatch)", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([candidate({ name: "Place order", normalized_name: "place order" })], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Place order" },
+    });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(body.error.ttl_recovery_state).toBe("sensitive_requires_fresh_ref");
+    // Never dispatched and never routed to a handoff from stale metadata.
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
   });
 });

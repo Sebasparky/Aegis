@@ -12,7 +12,7 @@
  * never returns coordinates/box/cdp_url.
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 
 vi.mock("../store/persistence.js", () => ({
   schedulePersist: vi.fn(),
@@ -341,5 +341,53 @@ describe("POST /api/agent/v1/runtime/browser-scroll-to-ref", () => {
     ]) {
       expect(raw).not.toContain(forbidden);
     }
+  });
+});
+
+describe("POST /api/agent/v1/runtime/browser-scroll-to-ref — TTL-expiry recovery", () => {
+  const EXPIRED = () => new Date(Date.now() - 120_000);
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+  });
+
+  it("flag OFF: an expired ref hard-fails ANTIGEN_REF_EXPIRED with no scroll (strict default)", async () => {
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+    seedSession();
+    seedSnapshot([candidate()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_EXPIRED");
+    expect(scrollKnownBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON: an expired low-risk ref is re-validated, scrolled, and reports ttl_expired_recovered", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([candidate()], EXPIRED());
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.ttl_recovery_state).toBe("ttl_expired_recovered");
+    expect(scrollKnownBoxMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("flag ON: an expired ref on a CHANGED page fails closed with page_changed", async () => {
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([candidate()], EXPIRED());
+    scrollKnownBoxMock.mockResolvedValueOnce({ success: false, error: "ANTIGEN_REF_PAGE_CHANGED" });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_PAGE_CHANGED");
+    expect(res.json().error.ttl_recovery_state).toBe("page_changed");
   });
 });

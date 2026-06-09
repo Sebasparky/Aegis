@@ -219,6 +219,26 @@ describe("executeProtectedRealisticFill — INPUT realistic path", () => {
     expect(maskBlurExpr!).toContain("Object.defineProperty(el, 'value'");
   });
 
+  it("installs the DOM value mask for protected non-PAN INPUT fields (cardholder_name, expiry)", async () => {
+    // Cardholder name and a text-input expiry are part of the agent-opaque card bundle:
+    // maskDomValue is true even though they are not KMS secrets, so element.value reads
+    // empty while the native setter keeps the real submittable value.
+    for (const f of [
+      { value: "Jane Cardholder", fieldLabel: "cardholder_name" },
+      { value: "12/29", fieldLabel: "expiry_combined" },
+    ]) {
+      mockState.reset();
+      vi.useFakeTimers();
+      const p = executeProtectedRealisticFill(baseParams({ maskDomValue: true, ...f }));
+      await vi.runAllTimersAsync();
+      await p;
+      const maskBlurExpr = evalExprs().find((e) => e.includes("data-antigen-filled") && !e.includes("new Event('input'"));
+      expect(maskBlurExpr, f.fieldLabel).toBeDefined();
+      expect(maskBlurExpr!, f.fieldLabel).toContain("Object.defineProperty(el, 'value'");
+      vi.useRealTimers();
+    }
+  });
+
   it("does NOT install the DOM value mask for non-sensitive fields (maskDomValue: false)", async () => {
     vi.useFakeTimers();
     const p = executeProtectedRealisticFill(baseParams({ maskDomValue: false, value: "12345", fieldLabel: "billing_zip" }));
@@ -342,6 +362,44 @@ describe("executeProtectedRealisticFill — SELECT branch", () => {
     // The select commit eval ran; result carries no raw value.
     expect(evalExprs().some((e) => e.includes("select_option_not_found"))).toBe(true);
     expect(JSON.stringify(result)).not.toContain("raw_value");
+  });
+
+  it("installs the SELECT value-getter mask AFTER commit-verify when maskDomValue is true", async () => {
+    // A protected expiry rendered as a <select> must also be agent-opaque: the value
+    // getter is masked so element.value / browser_evaluate read empty, while native
+    // submission still uses the selected option (selectedIndex).
+    mockState.iframeResult = { ok: true, tagName: "SELECT" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(
+      baseParams({ value: "12", maskDomValue: true, fieldLabel: "expiry_month" }),
+    );
+    await vi.runAllTimersAsync();
+    const result = await p;
+    expect(result.success).toBe(true);
+
+    const selectExpr = evalExprs().find((e) => e.includes("select_option_not_found"));
+    expect(selectExpr).toBeDefined();
+    // Masks the SELECT instance value getter via the HTMLSelectElement prototype setter.
+    expect(selectExpr!).toContain("HTMLSelectElement.prototype");
+    expect(selectExpr!).toContain("Object.defineProperty(el, 'value'");
+    // Ordering: the getter mask is installed strictly AFTER the commit verification
+    // (which reads el.value) — otherwise the verify would see an empty value and fail.
+    expect(selectExpr!.indexOf("select_commit_unverified")).toBeLessThan(
+      selectExpr!.indexOf("Object.defineProperty(el, 'value'"),
+    );
+  });
+
+  it("does NOT install the SELECT value-getter mask when maskDomValue is false", async () => {
+    mockState.iframeResult = { ok: true, tagName: "SELECT" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(
+      baseParams({ value: "12", maskDomValue: false, fieldLabel: "expiry_month" }),
+    );
+    await vi.runAllTimersAsync();
+    await p;
+    const selectExpr = evalExprs().find((e) => e.includes("select_option_not_found"));
+    expect(selectExpr).toBeDefined();
+    expect(selectExpr!).not.toContain("Object.defineProperty(el, 'value'");
   });
 });
 

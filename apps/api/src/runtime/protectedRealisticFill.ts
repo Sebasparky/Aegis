@@ -245,6 +245,24 @@ export async function executeProtectedRealisticFill(
     } catch (e) {}`
     : "";
 
+  // SELECT: optional DOM `value` getter mask (protected expiry dropdowns) so the chosen
+  // option value cannot be read back through element.value / browser_evaluate / snapshots.
+  // Mirrors the input getter mask but on HTMLSelectElement.prototype. Native form
+  // submission serializes the *selected option* (selectedIndex), not this JS getter, so
+  // the submittable value is left intact. MUST be installed only after the commit-verify
+  // (which reads el.value) has already passed — same accepted tradeoff as PAN/CVV inputs.
+  const valueGetterMaskSelectBlock = maskDomValue
+    ? `
+    try {
+      var selSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      Object.defineProperty(el, 'value', {
+        get: function() { return ''; },
+        set: function(v) { selSetter.call(el, v); },
+        configurable: true,
+      });
+    } catch (e) {}`
+    : "";
+
   const maskBlurExpr = `(function() {
     var el = ${selectorExpr};
     if (!el) return { ok: false, reason: 'element not found' };${maskBlock}
@@ -307,7 +325,7 @@ export async function executeProtectedRealisticFill(
     el.dispatchEvent(new Event('blur', { bubbles: true }));
     el.setAttribute('data-antigen-filled', 'true');${visualMaskSelectBlock}
     var committed = (el.value === match.value) && (el.selectedIndex === idx) && el.selectedIndex >= 0 && String(match.value).length > 0;
-    if (!committed) return { ok: false, reason: 'select_commit_unverified' };
+    if (!committed) return { ok: false, reason: 'select_commit_unverified' };${valueGetterMaskSelectBlock}
     return { ok: true, verified: true };
   })()`;
 

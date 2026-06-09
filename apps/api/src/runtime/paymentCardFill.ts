@@ -181,18 +181,32 @@ export async function executePaymentCardFillViaCDP(
       selectorExpr = `document.querySelector('input[type="text"],input[type="tel"],input:not([type])')`;
     }
 
-    // Card number and CVV are masked in the DOM after fill (value getter → '') to prevent
-    // element.value readback. Non-secret fields (expiry, cardholder_name, billing_zip) are
-    // not masked — checkout pages must read and submit them. Expiry <select> controls are
-    // never masked (handled by the primitive's SELECT branch).
-    const maskDomValue = fillRequest.field === "card_number" || fillRequest.field === "cvv";
+    // The whole protected payment-card bundle is agent-opaque: every field that comes
+    // from the protected card vault is DOM-readback masked after fill (value getter → ''
+    // for inputs; a select getter mask for <select> expiry) so the raw value cannot be
+    // read back through element.value / browser_evaluate / snapshots. The underlying
+    // control keeps the real, submittable value (native setter / selected option intact).
+    // billing_zip is NOT a card secret — checkout pages must read and submit it, so it
+    // stays readable.
+    const maskDomValue =
+      fillRequest.field === "card_number" ||
+      fillRequest.field === "cvv" ||
+      fillRequest.field === "expiry_month" ||
+      fillRequest.field === "expiry_year" ||
+      fillRequest.field === "expiry_combined" ||
+      fillRequest.field === "cardholder_name";
+
+    // Only PAN and CVV are KMS-resolved true secrets — they drive the slower "password"
+    // typing realism. Expiry/cardholder are non-secret metadata: keep normal typing timing
+    // even though they are now DOM-readback masked (masking is decoupled from typing).
+    const secretField = fillRequest.field === "card_number" || fillRequest.field === "cvv";
 
     // Visually mask ALL protected payment-card fields after fill so the rendered
     // value never appears in the live browser UI or in an agent-facing screenshot:
     // PAN, CVV, expiry, and cardholder name. (billing_zip is not a card secret and
     // is left visible.) This is purely visual — the submittable value is untouched —
     // and tags each field `data-antigen-masked="true"` for the screenshot redaction
-    // layer. Independent of `maskDomValue` (DOM-read protection for PAN/CVV only).
+    // layer. Tracks `maskDomValue` for the same four protected fields (billing_zip excluded).
     const visualMask =
       fillRequest.field === "card_number" ||
       fillRequest.field === "cvv" ||
@@ -214,7 +228,7 @@ export async function executePaymentCardFillViaCDP(
       maskDomValue,
       visualMask,
       debugOverlay: opts?.debugOverlay,
-      typingProfile: maskDomValue ? "password" : "username",
+      typingProfile: secretField ? "password" : "username",
       requestId: fillRequest.fill_request_id,
       domain: fillRequest.domain,
       fieldLabel: fillRequest.field,

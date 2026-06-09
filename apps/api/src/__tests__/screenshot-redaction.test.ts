@@ -216,14 +216,17 @@ describe.skipIf(!EXE)("Redacted Screenshot — real browser vision channel", () 
     });
     expect(panRes.success).toBe(true);
 
-    // Fill the cardholder name: visually masked but NOT DOM-value masked (the site
-    // must still read/submit it).
+    // Fill the cardholder name: part of the protected card bundle, so it is now BOTH
+    // DOM-value masked (agent-opaque readback) and visually masked. The underlying
+    // control still holds the real, submittable value (proven via the prototype getter
+    // in the assertion below). Typing realism stays "username" (masking is decoupled
+    // from typing profile — only PAN/CVV use the slower password timing).
     const nameRes = await executeProtectedRealisticFill({
       browserWsUrl: wsUrl,
       pageTargetId: targetId,
       selectorExpr: `document.querySelector('#cardname')`,
       value: CARDHOLDER,
-      maskDomValue: false,
+      maskDomValue: true,
       visualMask: true,
       typingProfile: "username",
       requestId: "vis_test_name",
@@ -270,13 +273,26 @@ describe.skipIf(!EXE)("Redacted Screenshot — real browser vision channel", () 
     expect(panTextSecurity).toBe("disc");
   });
 
-  it("hides the PAN from a DOM read but keeps the cardholder value submittable", async () => {
+  it("hides both protected fields from a DOM read but keeps the real value submittable", async () => {
     // PAN: the value getter is masked → element.value reads empty (agent DOM read).
     const panValue = await evalOnPage(cdpUrl, `document.querySelector('#cardnumber').value`);
     expect(panValue).toBe("");
-    // Cardholder: visually masked only — the real value is intact for the website.
+    // Cardholder is now part of the agent-opaque bundle: element.value also reads empty.
     const nameValue = await evalOnPage(cdpUrl, `document.querySelector('#cardname').value`);
-    expect(nameValue).toBe(CARDHOLDER);
+    expect(nameValue).toBe("");
+    // ...but the real value is intact for the website: the native prototype getter
+    // (which form submission uses) still returns the cardholder name.
+    const nameSubmittable = await evalOnPage(
+      cdpUrl,
+      `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').get.call(document.querySelector('#cardname'))`,
+    );
+    expect(nameSubmittable).toBe(CARDHOLDER);
+    // PAN likewise stays submittable under the mask.
+    const panSubmittable = await evalOnPage(
+      cdpUrl,
+      `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').get.call(document.querySelector('#cardnumber'))`,
+    );
+    expect(panSubmittable).toBe(FAKE_PAN);
   });
 
   it("returns a redacted screenshot: the PAN field region is blacked out", async () => {

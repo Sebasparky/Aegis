@@ -580,6 +580,53 @@ describe("extraction — value_meta", () => {
   });
 });
 
+// ─── 8c. Masked / placeholder values do not count as filled ───────────────────
+
+describe("extraction — value_meta masked/placeholder phone", () => {
+  const phone = (value: string) =>
+    makeEl({ tag: "input", type: "tel", value, attrs: { "aria-label": "Phone", name: "phone" } });
+
+  it("empty phone → not present", () => {
+    const [c] = extractCandidates([phone("")]);
+    expect(c.value_meta?.value_present).toBe(false);
+    expect(c.value_meta?.value_length).toBe(0);
+    expect(c.value_meta?.value_placeholder_only).toBeUndefined();
+  });
+
+  it("placeholder-only mask → not present, flagged, raw length kept", () => {
+    const [c] = extractCandidates([phone("+1-___-___-____")]);
+    expect(c.value_meta?.value_present).toBe(false);
+    expect(c.value_meta?.value_placeholder_only).toBe(true);
+    expect(c.value_meta?.value_length).toBe("+1-___-___-____".length);
+  });
+
+  it("partially-filled mask → not present, flagged", () => {
+    const [c] = extractCandidates([phone("+1-555-___-____")]);
+    expect(c.value_meta?.value_present).toBe(false);
+    expect(c.value_meta?.value_placeholder_only).toBe(true);
+  });
+
+  it("complete formatted phone → present", () => {
+    const [c] = extractCandidates([phone("+1-555-123-4567")]);
+    expect(c.value_meta?.value_present).toBe(true);
+    expect(c.value_meta?.value_placeholder_only).toBeUndefined();
+  });
+
+  it("complete bare-digit phone → present", () => {
+    const [c] = extractCandidates([phone("15551234567")]);
+    expect(c.value_meta?.value_present).toBe(true);
+    expect(c.value_meta?.value_placeholder_only).toBeUndefined();
+  });
+
+  it("email/username with an underscore is NOT misclassified as placeholder", () => {
+    const [c] = extractCandidates([
+      makeEl({ tag: "input", type: "email", value: "a_b@example.com", attrs: { "aria-label": "Email" } }),
+    ]);
+    expect(c.value_meta?.value_present).toBe(true);
+    expect(c.value_meta?.value_placeholder_only).toBeUndefined();
+  });
+});
+
 // ─── 9. Candidate cap ──────────────────────────────────────────────────────────
 
 describe("extraction — cap", () => {

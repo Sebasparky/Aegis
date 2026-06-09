@@ -151,6 +151,26 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
   return reply.status(status).send({ ok: false, error: { code, message, ...(details ? { details } : {}) } });
 }
 
+// Refusal returned when a generic fill/type tool targets a sensitive field. Payment fields
+// route to the protected payment-card fill path (request_payment_card_fill); credential /
+// identity / financial fields route to the secret-injection path (request_secret_field_injection).
+// The value is never set and never echoed. `sensitivity` comes from value_meta.sensitivity
+// (credential | payment | identity | financial) — see antigenSnapshotRuntime classifySensitivity.
+function sensitiveFieldRefusal(sensitivity: string | null | undefined): { code: string; message: string } {
+  if (sensitivity === "payment") {
+    return {
+      code: "SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL",
+      message:
+        "This is a payment card field. Aegis does not fill it through generic browser tools — use request_payment_card_fill so the saved card is filled through the protected, approval-gated path. Raw card values are never revealed to the agent.",
+    };
+  }
+  return {
+    code: "SENSITIVE_FIELD_REQUIRES_INJECTION",
+    message:
+      "This field is sensitive (credential/identity). Aegis does not fill it through generic browser tools — use request_secret_field_injection / the Aegis injection path instead.",
+  };
+}
+
 // ─── Navigation Proxy Landing Zones ──────────────────────────────────────────
 
 const NAVIGATION_LANDING_ZONES = [
@@ -4210,6 +4230,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_TYPEABLE", message: `Antigen ref '${refRaw}' is not a typeable field. Take a fresh antigen_snapshot and use a typeable ref.` } });
       }
 
+      // SENSITIVE BOUNDARY: never append keystrokes into a credential/payment/identity/
+      // financial field through this generic tool. Payment fields route to the protected
+      // payment-card fill path; credential/identity route to secret injection. No keystroke
+      // is dispatched and the text is never echoed.
+      if (el.value_meta?.sensitive === true) {
+        const refusal = sensitiveFieldRefusal(el.value_meta.sensitivity);
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, element_name: el.name, context: el.context,
+          href_path: el.href_path ?? undefined, pointer_dispatch: false,
+          error_code: refusal.code,
+        });
+        return reply.status(422).send({ ok: false, error: refusal });
+      }
+
       const refResult = await realisticTypeKnownBox({
         cdpUrl: session.cdp_url,
         box: el.box,
@@ -4347,10 +4382,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   // the native property setter (React/Vue-safe), then reads back and verifies.
   // Idempotent — a second identical call reports changed=false and mutates nothing.
   // This is NOT browser_type (which appends keystrokes). Ref-only: callers must
-  // supply an ag_* ref from the latest antigen_snapshot. Sensitive fields are
-  // refused (SENSITIVE_FIELD_REQUIRES_INJECTION) and routed to the injection path —
-  // credential/payment/identity values never flow through this generic tool, and
-  // their values are never echoed back. The requested/actual value is never logged.
+  // supply an ag_* ref from the latest antigen_snapshot. Sensitive fields are refused:
+  // payment fields → SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL (request_payment_card_fill);
+  // credential/identity/financial → SENSITIVE_FIELD_REQUIRES_INJECTION (request_secret_field_injection).
+  // Credential/payment/identity values never flow through this generic tool, and their
+  // values are never echoed back. The requested/actual value is never logged.
   server.post("/api/agent/v1/runtime/browser-set-value", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
@@ -4427,12 +4463,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // field through this generic tool. Route to the Aegis CDP injection path. The
     // value is never set and never echoed.
     if (el.value_meta?.sensitive === true) {
+      const refusal = sensitiveFieldRefusal(el.value_meta.sensitivity);
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
         tool: "browser_set_value", element_name: el.name, context: el.context,
-        error_code: "SENSITIVE_FIELD_REQUIRES_INJECTION",
+        error_code: refusal.code,
       });
-      return reply.status(422).send({ ok: false, error: { code: "SENSITIVE_FIELD_REQUIRES_INJECTION", message: "This field is sensitive (credential/payment/identity). Aegis does not fill it through browser_set_value — use request_secret_field_injection / the Aegis injection path instead." } });
+      return reply.status(422).send({ ok: false, error: refusal });
     }
 
     // value is never logged beyond changed/verified/element_kind.

@@ -373,6 +373,83 @@ export async function seedDefaultData(): Promise<void> {
   }
 
   await seedProfileMemory();
+  await seedDemoPaymentMethod();
+}
+
+// Demo payment-method top-up. Idempotent and self-healing, mirroring seedProfileMemory:
+// runs on fresh seed AND after loading older store files. Ensures user_001 has ONE usable,
+// KMS-backed fake demo card so the protected payment-card fill path can resolve it.
+//
+// Fake/test card ONLY (4242 4242 4242 4242 / CVV 123) — never a real PAN/CVV. The raw values
+// live only in the KMS-encrypted blobs; nothing here is logged.
+//
+// Repairs the legacy display-only `pay_method_demo_001` capability record IN PLACE (same id)
+// if it is missing the secret refs the fill path needs, rather than duplicating it. Never
+// overwrites a user-added active default card.
+export async function seedDemoPaymentMethod(): Promise<void> {
+  const NOW = new Date().toISOString();
+  const kms = getKmsProvider();
+
+  const PM_ID = "pay_method_demo_001";
+  const CARD_NUMBER_REF = "devvault://demo-card-number";
+  const CVV_REF = "devvault://demo-card-cvv";
+  // KMS context MUST match the execute path (agent-api.ts) which resolves with
+  // { user_id: pm.user_id, pass_id: pm.payment_method_id, domain: "aegis.payment" }.
+  const KMS_CTX = { user_id: "user_001", pass_id: PM_ID, domain: "aegis.payment" } as const;
+
+  // Idempotent guard: if user_001 already has a usable active default card backed by a
+  // resolvable card_number secret, do nothing — never clobber a user-added card.
+  const hasUsableDefault = Array.from(paymentMethods.values()).some((pm) => {
+    const raw = pm as unknown as Record<string, unknown>;
+    return (
+      raw.user_id === "user_001" &&
+      pm.is_default === true &&
+      pm.status === "active" &&
+      typeof raw.card_number_ref === "string" &&
+      typeof raw.cvv_ref === "string" &&
+      encryptedSecretVault.has(raw.card_number_ref as string)
+    );
+  });
+  if (hasUsableDefault) return;
+
+  try {
+    // Encrypt the fake card secrets if absent (mirrors the demo-password seed block).
+    if (!encryptedSecretVault.has(CARD_NUMBER_REF)) {
+      const blob = await kms.encryptSecret("4242424242424242", { ...KMS_CTX, purpose: "payment_card_number" });
+      encryptedSecretVault.set(CARD_NUMBER_REF, blob);
+    }
+    if (!encryptedSecretVault.has(CVV_REF)) {
+      const blob = await kms.encryptSecret("123", { ...KMS_CTX, purpose: "payment_cvv" });
+      encryptedSecretVault.set(CVV_REF, blob);
+    }
+
+    // Repair-in-place: build/overwrite the demo record under the SAME id so the UI and the
+    // fill path agree on one card. Preserve created_at if a legacy record exists.
+    const existing = paymentMethods.get(PM_ID) as unknown as Record<string, unknown> | undefined;
+    const demoCard: PaymentMethod = {
+      payment_method_id: PM_ID,
+      user_id: "user_001",
+      label: "Aegis Demo Card",
+      cardholder_name: "Alex Demo",
+      brand: "visa",
+      last4: "4242",
+      exp_month: 12,
+      exp_year: 2027,
+      billing_zip: "48104",
+      billing_country: "US",
+      is_default: true,
+      status: "active",
+      card_number_ref: CARD_NUMBER_REF,
+      cvv_ref: CVV_REF,
+      capability_ref: PM_ID,
+      created_at: typeof existing?.created_at === "string" ? (existing.created_at as string) : "2026-04-30T13:00:00.000Z",
+      updated_at: NOW,
+    };
+    paymentMethods.set(PM_ID, demoCard);
+  } catch (err) {
+    console.error("[persistence] Failed to seed demo payment method — KMS may not be configured:", err);
+    // Server continues in degraded state — card fill will fail with PAYMENT_METHOD_NOT_FOUND.
+  }
 }
 
 async function seedProfileMemory(): Promise<void> {
@@ -392,7 +469,14 @@ async function seedProfileMemory(): Promise<void> {
   ];
 
   for (const { id, kind, value } of FIELDS) {
-    if (privateProfileMemory.has(id)) continue;
+    // Idempotent by (user_id, field_kind), NOT by memory_id: this top-up runs on
+    // every startup, and a user may have supplied their own value for this kind
+    // (via the missing-value prompt) under a different memory_id. Never overwrite
+    // a user-provided value — only seed a kind that has no entry yet.
+    const alreadyHasKind = Array.from(privateProfileMemory.values()).some(
+      (m) => m.user_id === "user_001" && m.field_kind === kind,
+    );
+    if (alreadyHasKind) continue;
     try {
       const blob = await kms.encryptSecret(value, {
         user_id: "user_001",
@@ -820,6 +904,20 @@ export async function loadStore(): Promise<void> {
 
     ensureWebsiteTrustSeeds();
     await ensureWebsiteTrustProfileSeeds();
+
+    // Self-healing: top up fake regression-safe profile memory for user_001.
+    // The fresh-seed path runs seedProfileMemory(), but stores written before
+    // profile seeding existed (or that never captured these fields) would load
+    // with empty profile memory — forcing a mid-run pending_user prompt during
+    // checkout. Idempotent by (user_id, field_kind), so it never overwrites a
+    // value the user supplied.
+    await seedProfileMemory();
+
+    // Self-healing: top up / repair the fake demo payment method for user_001. Older store
+    // files hold a legacy display-only `pay_method_demo_001` capability record with no
+    // card_number_ref/cvv_ref, which the protected fill path cannot resolve. Idempotent and
+    // non-destructive — never overwrites a user-added active default card.
+    await seedDemoPaymentMethod();
 
     const errorCount = Array.from(sessions.values()).filter(
       (s) => (s as any).status === "error"

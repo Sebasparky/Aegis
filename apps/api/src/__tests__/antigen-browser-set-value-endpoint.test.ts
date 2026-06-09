@@ -267,6 +267,24 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     expect(JSON.stringify(body)).not.toContain("hunter2");
   });
 
+  it("REFUSES a payment field and routes to the payment-card fill path", async () => {
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Card number",
+        normalized_name: "card number",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ]);
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4242424242424242" });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL");
+    expect(body.error.message).toContain("request_payment_card_fill");
+    expect(setValueMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(body)).not.toContain("4242424242424242");
+  });
+
   it("surfaces VALUE_MISMATCH from the runtime as a structured 422", async () => {
     seedSession();
     seedSnapshot([inputCandidate()]);

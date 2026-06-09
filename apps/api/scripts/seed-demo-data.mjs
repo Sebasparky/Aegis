@@ -940,16 +940,29 @@ const publishedSkillVersions = [
   ]
 ];
 
-// Demo payment method capability — metadata only, no PAN, no CVV.
+// Demo payment method — full PaymentMethod shape, metadata only (no PAN, no CVV).
+// card_number_ref / cvv_ref point to devvault refs; the server encrypts the fake test
+// values (4242 4242 4242 4242 / 123) into encryptedSecretVault on startup via
+// seedDemoPaymentMethod() in persistence.ts — mirroring how the demo login password is
+// seeded by secret_ref only. Never write a raw PAN/CVV here.
 const DEMO_PAYMENT_METHOD = {
   payment_method_id: "pay_method_demo_001",
   user_id: "user_001",
   label: "Aegis Demo Card",
-  network: "visa",
+  cardholder_name: "Alex Demo",
+  brand: "visa",
   last4: "4242",
+  exp_month: 12,
+  exp_year: 2027,
+  billing_zip: "48104",
   billing_country: "US",
-  capability_ref: "demo-payment-method",
-  created_at: "2026-04-30T13:00:00.000Z"
+  is_default: true,
+  status: "active",
+  card_number_ref: "devvault://demo-card-number",
+  cvv_ref: "devvault://demo-card-cvv",
+  capability_ref: "pay_method_demo_001",
+  created_at: "2026-04-30T13:00:00.000Z",
+  updated_at: "2026-04-30T13:00:00.000Z"
 };
 
 // Pre-installed skills so agents can request runs without manual UI installation.

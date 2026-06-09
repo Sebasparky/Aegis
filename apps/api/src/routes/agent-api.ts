@@ -74,6 +74,7 @@ import {
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
+import { captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
 import { executeProfileFieldFillViaCDP, validateProfileFillSelector } from "../runtime/profileFieldFill.js";
 import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
 import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
@@ -4861,6 +4862,104 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     });
   });
 
+  // ─── Redacted Screenshot — vision-channel protection ──────────────────────────
+  // browser_take_screenshot is intercepted by the Antigen adapter and routed here so
+  // protected sensitive values (PAN/CVV/expiry/cardholder/password) that the page
+  // renders are never returned to the agent through the vision channel. Redaction is
+  // keyed to the REGISTERED protected fields only (`data-antigen-masked="true"`) —
+  // never the whole page — and combines a pre-capture DOM overlay with a pixel pass.
+  // FAIL-CLOSED: no Aegis runtime / no live target / redaction failure → error, never
+  // an unredacted image. The response carries only the redacted image + an aggregate
+  // count; no field values, boxes, cdp_url, or raw base64 are ever logged.
+  server.post("/api/agent/v1/runtime/browser-screenshot", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as { browser_runtime_id?: unknown };
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+
+    // The screenshot path is Aegis-mediated only. Any not-ready / unknown runtime
+    // fails closed — there is no native screenshot fallback. (browser-snapshot is the
+    // one endpoint that rebinds a stale id; a screenshot must not silently retarget.)
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") {
+      return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    }
+    if (runtimeResolution.kind === "starting" || runtimeResolution.kind === "none" || !runtimeResolution.session.cdp_url) {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_take_screenshot",
+        error_code: "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME",
+      });
+      return sendError(
+        reply,
+        422,
+        "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME",
+        "Screenshots must go through the Aegis-mediated runtime so protected sensitive fields are redacted. Start a task browser session and retry.",
+      );
+    }
+    const session = runtimeResolution.session;
+
+    // Resolve the live CDP target the same way the snapshot/click guards do.
+    const resolved = await resolveSnapshotCdpTarget(session.cdp_url);
+    if (!resolved) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: session.browser_session_id,
+        tool: "browser_take_screenshot",
+        error_code: "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME",
+      });
+      return sendError(
+        reply,
+        422,
+        "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME",
+        "No live page target is available for the Aegis-mediated runtime. Take an antigen_snapshot to confirm the session, then retry.",
+      );
+    }
+
+    const shot = await captureRedactedScreenshot({
+      browserWsUrl: resolved.browserWsUrl,
+      pageTargetId: resolved.target.id,
+    });
+
+    if (!shot.ok) {
+      // Counts/booleans only — never boxes, values, or base64.
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: session.browser_session_id,
+        tool: "browser_take_screenshot",
+        error_code: "SCREENSHOT_REDACTION_FAILED",
+      });
+      return sendError(
+        reply,
+        502,
+        "SCREENSHOT_REDACTION_FAILED",
+        "Antigen could not capture a redacted screenshot. To protect filled sensitive values it will not return an unredacted image.",
+      );
+    }
+
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_tool_disposition",
+      browser_runtime_id: session.browser_session_id,
+      tool: "browser_take_screenshot",
+      result_code: "screenshot_redacted",
+      redacted_field_count: shot.redacted_field_count,
+    });
+
+    return reply.send({
+      ok: true,
+      data: {
+        browser_runtime_id: session.browser_session_id,
+        mime_type: shot.mimeType,
+        image_base64: shot.base64,
+        redacted_field_count: shot.redacted_field_count,
+      },
+    });
+  });
+
   // ─── Payment Card Fill Handoff v1 ─────────────────────────────────────────────
   // Agent-facing endpoints for requesting, polling, and executing card field fills.
   // Purchase confirmation is NOT implemented — card fill does not authorize any purchase.
@@ -5301,14 +5400,23 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       // CDP fill — resolvedValue used here and immediately discarded; never returned in response
       let cdpUrlOverride: string | undefined;
+      // Overlay follows the session's visible mode via the same tri-state helper the
+      // click/type paths use — so a headed QA session shows the pointer/cursor overlay
+      // during card fill without a separate env var. Defaults off when no tracked session.
+      let overlayForFill = false;
       if (fillRequest.browser_session_id) {
         const bs = getTaskBrowserSession(fillRequest.browser_session_id, MOCK_USER_ID);
-        if (bs?.status === "ready") cdpUrlOverride = bs.cdp_url;
+        if (bs?.status === "ready") {
+          cdpUrlOverride = bs.cdp_url;
+          overlayForFill = resolveOverlayEnabled(bs);
+        }
       } else if (fillRequest.external_cdp_url) {
         cdpUrlOverride = fillRequest.external_cdp_url;
       }
 
-      const fillResult = await executePaymentCardFillViaCDP(fillRequest, resolvedValue, cdpUrlOverride);
+      const fillResult = await executePaymentCardFillViaCDP(fillRequest, resolvedValue, cdpUrlOverride, {
+        debugOverlay: overlayForFill,
+      });
       // resolvedValue is no longer referenced after this point
 
       const completedAt = new Date().toISOString();

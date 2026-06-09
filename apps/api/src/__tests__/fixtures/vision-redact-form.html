@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Vision Redact Checkout</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; background: #ffffff; color: #111; padding: 24px; }
+    h1 { font-size: 20px; }
+    label { display: block; margin: 14px 0 4px; }
+    input { display: block; font-size: 20px; padding: 8px; width: 320px; border: 1px solid #999; color: #0a3; }
+    button { margin-top: 18px; font-size: 16px; padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <h1>Checkout</h1>
+  <label for="cardnumber">Card number</label>
+  <input id="cardnumber" name="cardnumber" autocomplete="cc-number" type="text" />
+
+  <label for="cardname">Name on card</label>
+  <input id="cardname" name="ccname" autocomplete="cc-name" type="text" />
+
+  <button id="pay" type="button">Pay</button>
+</body>
+</html>

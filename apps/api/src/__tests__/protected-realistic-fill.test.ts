@@ -245,6 +245,86 @@ describe("executeProtectedRealisticFill — INPUT realistic path", () => {
   });
 });
 
+// ─── 1b. Visual mask (vision-channel protection) + overlay tri-state ─────────
+
+describe("executeProtectedRealisticFill — visual mask (vision channel)", () => {
+  function maskBlurExprOf(): string | undefined {
+    // The mask/blur eval marks data-antigen-filled and does NOT dispatch an input
+    // event (that distinguishes it from the setter-fallback eval).
+    return evalExprs().find((e) => e.includes("data-antigen-filled") && !e.includes("new Event('input'"));
+  }
+
+  it("applies text-security + data-antigen-masked when visualMask is true (INPUT)", async () => {
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams({ visualMask: true }));
+    await vi.runAllTimersAsync();
+    await p;
+    const expr = maskBlurExprOf();
+    expect(expr).toBeDefined();
+    expect(expr!).toContain("-webkit-text-security");
+    expect(expr!).toContain("data-antigen-masked");
+    // The visual mask never embeds the raw value.
+    expect(expr!).not.toContain(CARD);
+  });
+
+  it("does NOT visually mask when visualMask is unset (default)", async () => {
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams({ visualMask: false }));
+    await vi.runAllTimersAsync();
+    await p;
+    const expr = maskBlurExprOf();
+    expect(expr).toBeDefined();
+    expect(expr!).not.toContain("-webkit-text-security");
+    expect(expr!).not.toContain("data-antigen-masked");
+  });
+
+  it("tags a SELECT (expiry) with data-antigen-masked when visualMask is true", async () => {
+    mockState.iframeResult = { ok: true, tagName: "SELECT" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(
+      baseParams({ value: "12", maskDomValue: false, visualMask: true, fieldLabel: "expiry_month" }),
+    );
+    await vi.runAllTimersAsync();
+    await p;
+    const selectExpr = evalExprs().find((e) => e.includes("select_option_not_found"));
+    expect(selectExpr).toBeDefined();
+    expect(selectExpr!).toContain("data-antigen-masked");
+    expect(selectExpr!).toContain("color"); // transparent + text-shadow visual mask
+  });
+});
+
+describe("executeProtectedRealisticFill — overlay tri-state honored on fill path", () => {
+  function overlayInjected(): boolean {
+    // The pointer overlay is injected via Runtime.evaluate of the dot-ensure IIFE.
+    return evalExprs().some((e) => e.includes("__aegis_pointer_debug_dot"));
+  }
+
+  it("injects the pointer overlay when debugOverlay:true even with the env var unset", async () => {
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams({ debugOverlay: true }));
+    await vi.runAllTimersAsync();
+    await p;
+    expect(overlayInjected()).toBe(true);
+  });
+
+  it("does NOT inject the overlay when debugOverlay:false and the env var is unset", async () => {
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams({ debugOverlay: false }));
+    await vi.runAllTimersAsync();
+    await p;
+    expect(overlayInjected()).toBe(false);
+  });
+
+  it("falls back to the env var when debugOverlay is omitted", async () => {
+    vi.stubEnv("ANTIGEN_POINTER_DEBUG_OVERLAY", "true");
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams()); // no debugOverlay param
+    await vi.runAllTimersAsync();
+    await p;
+    expect(overlayInjected()).toBe(true);
+  });
+});
+
 // ─── 2. SELECT branch: real option selection, no typing, no pointer ──────────
 
 describe("executeProtectedRealisticFill — SELECT branch", () => {

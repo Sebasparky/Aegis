@@ -1193,6 +1193,31 @@ function writeSyntheticErrorResponse(toolName, requestId, code, message) {
 }
 
 /**
+ * Writes a synthetic MCP tools/call image response (redacted screenshot).
+ * ONLY called after the Aegis backend returns a REDACTED image. The base64 the
+ * agent receives already has every registered protected field blacked out. The
+ * trailing text note states how many fields were redacted (aggregate only — never
+ * boxes, coordinates, or values). stdout is MCP protocol only.
+ */
+function writeSyntheticImageResponse(requestId, base64, mimeType, redactedFieldCount) {
+  const count = typeof redactedFieldCount === "number" ? redactedFieldCount : 0;
+  const note =
+    `Antigen returned a redacted screenshot: ${count} protected field(s) blacked out. ` +
+    `Filled sensitive values (card number, CVV, expiry, cardholder name, passwords) are never visible to the agent through the vision channel.`;
+  const response = JSON.stringify({
+    jsonrpc: "2.0",
+    id: requestId,
+    result: {
+      content: [
+        { type: "image", data: base64, mimeType: mimeType || "image/png" },
+        { type: "text", text: note },
+      ],
+    },
+  });
+  process.stdout.write(response + "\n");
+}
+
+/**
  * Shared handler for the EXACT-REPLACEMENT field tools: browser_fill,
  * browser_set_value, and browser_clear. All three route to the Antigen backend's
  * /browser-set-value endpoint (exact replace + read-back verify), NOT the append
@@ -2006,6 +2031,90 @@ async function handleLine(line) {
     }
     await noteToolDisposition({ tool: "browser_snapshot", surface: "adapter_child_playwright", disposition: "adapter_child_forwarded", resultCode: "forwarded" });
     child.stdin.write(line);
+    return;
+  }
+
+  // ── browser_take_screenshot: adapter-owned — never forwarded to @playwright/mcp ─
+  // Native @playwright/mcp would capture the live page, where a protected fill (PAN,
+  // CVV, expiry, cardholder, password) is still RENDERED — leaking the value through
+  // the vision channel even though the structured channels are protected. We route
+  // every screenshot through the Aegis backend, which redacts the registered
+  // protected fields (DOM overlay + pixel pass) and returns a redacted image.
+  // FAIL-CLOSED: no runtime / redaction failure → a synthetic error, NEVER the native
+  // screenshot. Unconditional (not gated on INTERCEPTION_ENABLED): redaction must
+  // apply in headless sessions too.
+  if (toolName === "browser_take_screenshot") {
+    const requestId = msg.id;
+
+    if (!browser_runtime_id) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_unavailable reason=no_runtime\n`
+      );
+      await noteToolDisposition({ tool: "browser_take_screenshot", surface: "antigen_adapter", disposition: "failed", errorCode: "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME" });
+      writeSyntheticErrorResponse(
+        "browser_take_screenshot",
+        requestId,
+        "SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME",
+        "Screenshots must go through the Aegis-mediated runtime so protected sensitive fields are redacted. Start a task browser session and retry.",
+      );
+      return;
+    }
+
+    process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_attempt\n`);
+
+    try {
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/browser-screenshot",
+        {},
+        { tool: "browser_take_screenshot" },
+      );
+
+      if (apiRes.ok) {
+        const resBody = await apiRes.json().catch(() => ({}));
+        const d = resBody?.data ?? {};
+        if (typeof d.image_base64 === "string" && d.image_base64.length > 0) {
+          process.stderr.write(
+            `[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_success` +
+            ` redacted_field_count=${d.redacted_field_count ?? 0}\n`
+          );
+          await noteToolDisposition({ tool: "browser_take_screenshot", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+          writeSyntheticImageResponse(requestId, d.image_base64, d.mime_type, d.redacted_field_count);
+          return;
+        }
+        // Backend reported ok but returned no image — fail closed, never native.
+        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_error reason=NO_IMAGE\n`);
+        await noteToolDisposition({ tool: "browser_take_screenshot", surface: "antigen_adapter", disposition: "failed", errorCode: "SCREENSHOT_REDACTION_FAILED" });
+        writeSyntheticErrorResponse(
+          "browser_take_screenshot",
+          requestId,
+          "SCREENSHOT_REDACTION_FAILED",
+          "Antigen could not produce a redacted screenshot. It will not return an unredacted image.",
+        );
+        return;
+      }
+
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      const errMsg = errBody?.error?.message ?? `Antigen browser_take_screenshot failed (${errCode}).`;
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_error reason=${errCode}\n`);
+      await noteToolDisposition({ tool: "browser_take_screenshot", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
+      // No @playwright/mcp fallthrough — an unredacted native screenshot is the leak this replaces.
+      writeSyntheticErrorResponse(
+        "browser_take_screenshot",
+        requestId,
+        errCode,
+        errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage("browser_take_screenshot") : errMsg,
+      );
+    } catch (_err) {
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_take_screenshot_error reason=INTERCEPT_ERROR\n`);
+      await noteToolDisposition({ tool: "browser_take_screenshot", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_SCREENSHOT_INTERCEPT_ERROR" });
+      writeSyntheticErrorResponse(
+        "browser_take_screenshot",
+        requestId,
+        "ANTIGEN_SCREENSHOT_INTERCEPT_ERROR",
+        "Antigen browser_take_screenshot encountered a network error. It will not return an unredacted native screenshot.",
+      );
+    }
     return;
   }
 

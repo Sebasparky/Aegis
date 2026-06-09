@@ -886,3 +886,40 @@ describe("Card fill authorization cannot authorize purchase execution", () => {
     expect(body.data.purchase_not_authorized).toBe(true);
   });
 });
+
+// ─── Tests: Redacted screenshot endpoint fails closed ─────────────────────────
+// browser_take_screenshot routes here so protected card values rendered on the page
+// are never returned to the agent. Without an Aegis-mediated runtime there is no
+// native fallback — the endpoint fails closed.
+
+describe("POST /api/agent/v1/runtime/browser-screenshot — fail closed", () => {
+  it("requires browser_runtime_id (400 MISSING_FIELD)", async () => {
+    seedDelegation();
+    const res = await agentPost("/api/agent/v1/runtime/browser-screenshot", {});
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.error.code).toBe("MISSING_FIELD");
+  });
+
+  it("fails closed with SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME when no ready runtime exists", async () => {
+    seedDelegation();
+    const res = await agentPost("/api/agent/v1/runtime/browser-screenshot", {
+      browser_runtime_id: "tbsess_does_not_exist",
+    });
+    expect(res.statusCode).toBe(422);
+    const body = JSON.parse(res.payload);
+    expect(body.error.code).toBe("SCREENSHOT_REQUIRES_ANTIGEN_RUNTIME");
+    // No image, and never an unredacted base64 payload.
+    expect(JSON.stringify(body)).not.toContain("image_base64");
+  });
+
+  it("rejects an unauthenticated request", async () => {
+    seedDelegation();
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-screenshot",
+      payload: { browser_runtime_id: "tbsess_x" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});

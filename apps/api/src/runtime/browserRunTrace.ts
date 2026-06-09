@@ -196,6 +196,10 @@ export interface BrowserTraceEvent {
   // and browser_tool_disposition events when the action gate ran. Enum only —
   // never carries page text, labels, hrefs, or values.
   action_intent?: ActionIntent;
+  // Number of registered protected fields redacted from a screenshot. Aggregate
+  // count only — never boxes, coordinates, values, or base64. Present on
+  // browser_tool_disposition events for browser_take_screenshot.
+  redacted_field_count?: number;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -356,6 +360,10 @@ export function recordBrowserTraceEvent(
     // Enum-gate action_intent — never clip arbitrary strings into this.
     if (event.action_intent !== undefined && ACTION_INTENTS.has(event.action_intent)) {
       safe.action_intent = event.action_intent;
+    }
+    // Aggregate count only — bounded, non-negative integer; never boxes/values.
+    if (Number.isFinite(event.redacted_field_count)) {
+      safe.redacted_field_count = Math.max(0, Math.floor(event.redacted_field_count as number));
     }
 
     let entry = traces.get(browserRuntimeId);

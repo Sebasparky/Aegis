@@ -91,6 +91,7 @@ export async function executePaymentCardFillViaCDP(
   fillRequest: PaymentCardFillRequest,
   resolvedValue: string,
   cdpUrlOverride?: string,
+  opts?: { debugOverlay?: boolean },
 ): Promise<{
   success: boolean;
   error?: string;
@@ -186,6 +187,20 @@ export async function executePaymentCardFillViaCDP(
     // never masked (handled by the primitive's SELECT branch).
     const maskDomValue = fillRequest.field === "card_number" || fillRequest.field === "cvv";
 
+    // Visually mask ALL protected payment-card fields after fill so the rendered
+    // value never appears in the live browser UI or in an agent-facing screenshot:
+    // PAN, CVV, expiry, and cardholder name. (billing_zip is not a card secret and
+    // is left visible.) This is purely visual — the submittable value is untouched —
+    // and tags each field `data-antigen-masked="true"` for the screenshot redaction
+    // layer. Independent of `maskDomValue` (DOM-read protection for PAN/CVV only).
+    const visualMask =
+      fillRequest.field === "card_number" ||
+      fillRequest.field === "cvv" ||
+      fillRequest.field === "expiry_month" ||
+      fillRequest.field === "expiry_year" ||
+      fillRequest.field === "expiry_combined" ||
+      fillRequest.field === "cardholder_name";
+
     // Enter the value through the shared realistic-fill primitive: realistic pointer
     // move → click/focus → character-by-character typing → input/change/blur (or real
     // option selection for <select>). The resolvedValue flows only into the primitive
@@ -197,6 +212,8 @@ export async function executePaymentCardFillViaCDP(
       selectorExpr,
       value: resolvedValue,
       maskDomValue,
+      visualMask,
+      debugOverlay: opts?.debugOverlay,
       typingProfile: maskDomValue ? "password" : "username",
       requestId: fillRequest.fill_request_id,
       domain: fillRequest.domain,

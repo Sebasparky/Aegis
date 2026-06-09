@@ -53,6 +53,21 @@ export interface ProtectedRealisticFillParams {
   value: string;
   /** Install the post-fill DOM `value` getter mask (card_number / cvv / password). */
   maskDomValue: boolean;
+  /**
+   * Visually mask the field after fill so the rendered value never appears in the
+   * live browser UI or in agent-facing screenshots. Independent of `maskDomValue`:
+   * the underlying submittable value is untouched (text-security is purely visual).
+   * Tags the element `data-antigen-masked="true"` so the screenshot redaction layer
+   * can find exactly the registered protected fields (never the whole page).
+   */
+  visualMask?: boolean;
+  /**
+   * Render the pointer/cursor debug overlay during the focus pointer move. When
+   * omitted, falls back to the ANTIGEN_POINTER_DEBUG_OVERLAY env. Callers should
+   * pass `resolveOverlayEnabled(session)` so headed (visible) sessions show the
+   * overlay without a separate env var — matching the click/type paths.
+   */
+  debugOverlay?: boolean;
   /** Timing-jitter profile only — never logged as a value. */
   typingProfile: "username" | "password";
   /** Safe-to-log request identifier. */
@@ -121,10 +136,13 @@ export async function executeProtectedRealisticFill(
     domain,
     browserSessionId,
     userId,
+    visualMask,
   } = params;
 
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
-  const debugOverlay = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
+  // Honor the caller's resolved tri-state (visible-session aware) when provided;
+  // otherwise preserve the legacy env-only behavior so nothing else regresses.
+  const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms) + slowMoMs));
 
   // ── Eval expressions (none embed the value except the setter fallback, which is
@@ -181,8 +199,10 @@ export async function executeProtectedRealisticFill(
     return { ok: el.value.length > 0, reason: el.value.length > 0 ? 'value_present' : 'empty_after_typing' };
   })()`;
 
-  // INPUT: mask (optional) + dispatch change/blur + mark filled. No value here.
-  const maskBlock = maskDomValue
+  // INPUT: optional DOM `value` getter mask (card_number / cvv / password) so the
+  // value cannot be read back through element.value / snapshots. Submission uses the
+  // native control value, which is left intact.
+  const valueGetterMaskBlock = maskDomValue
     ? `
     var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     Object.defineProperty(el, 'value', {
@@ -190,6 +210,39 @@ export async function executeProtectedRealisticFill(
       set: function(v) { setter.call(el, v); },
       configurable: true,
     });`
+    : "";
+
+  // INPUT: visual mask — bullets in the live UI + a tag so the screenshot redaction
+  // layer can find exactly this registered protected field. text-security is purely
+  // visual; the submittable value is unchanged. The title + outline are the human
+  // "Antigen filled this" affordance. Never embeds or reads the value.
+  const visualMaskInputBlock = visualMask
+    ? `
+    try {
+      el.style.setProperty('-webkit-text-security', 'disc', 'important');
+      el.style.setProperty('text-security', 'disc', 'important');
+      el.style.setProperty('outline', '2px solid #ff5000', 'important');
+      el.style.setProperty('outline-offset', '1px', 'important');
+      el.setAttribute('title', 'Filled by Antigen');
+      el.setAttribute('data-antigen-masked', 'true');
+    } catch (e) {}`
+    : "";
+
+  const maskBlock = valueGetterMaskBlock + visualMaskInputBlock;
+
+  // SELECT: text-security does not mask a <select>'s rendered option, so make the
+  // chosen option text illegible (transparent + blur) and tag it for the screenshot
+  // redaction layer. The option value is left intact for submission. Never reads it.
+  const visualMaskSelectBlock = visualMask
+    ? `
+    try {
+      el.style.setProperty('color', 'transparent', 'important');
+      el.style.setProperty('text-shadow', '0 0 7px rgba(0,0,0,0.6)', 'important');
+      el.style.setProperty('outline', '2px solid #ff5000', 'important');
+      el.style.setProperty('outline-offset', '1px', 'important');
+      el.setAttribute('title', 'Filled by Antigen');
+      el.setAttribute('data-antigen-masked', 'true');
+    } catch (e) {}`
     : "";
 
   const maskBlurExpr = `(function() {
@@ -252,7 +305,7 @@ export async function executeProtectedRealisticFill(
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('blur', { bubbles: true }));
-    el.setAttribute('data-antigen-filled', 'true');
+    el.setAttribute('data-antigen-filled', 'true');${visualMaskSelectBlock}
     var committed = (el.value === match.value) && (el.selectedIndex === idx) && el.selectedIndex >= 0 && String(match.value).length > 0;
     if (!committed) return { ok: false, reason: 'select_commit_unverified' };
     return { ok: true, verified: true };

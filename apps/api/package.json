@@ -20,11 +20,13 @@
     "fastify": "^4.27.0",
     "jose": "^5.0.0",
     "playwright": "^1.59.1",
+    "pngjs": "^7.0.0",
     "resend": "^4.0.0",
     "stripe": "^17.7.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/pngjs": "^6.0.5",
     "tsx": "^4.7.0",
     "typescript": "*",
     "vitest": "^4.1.5"

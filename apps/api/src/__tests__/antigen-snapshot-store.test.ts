@@ -286,6 +286,36 @@ describe("external view", () => {
     expect(serialized).not.toContain("https://www.ikea.com");
     expect(serialized).not.toContain("ref=nav");
   });
+
+  it("exposes the current value of a NON-sensitive field", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        tag: "input", kind: "input", role: "textbox", typeable: true, clickable: false,
+        href: null, href_path: null, name: "First name",
+        value_meta: { sensitive: false, sensitivity: null, value: "Sebastian", value_present: true, value_length: 9, required: true },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.value).toEqual({ sensitive: false, present: true, length: 9, text: "Sebastian", required: true });
+  });
+
+  it("REDACTS a sensitive field's value to present/length only in the external view", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        tag: "input", kind: "input", role: "textbox", typeable: true, clickable: false,
+        href: null, href_path: null, name: "Password",
+        // A malicious/buggy upstream could leave a value on a sensitive meta;
+        // the external view must still drop it.
+        value_meta: { sensitive: true, sensitivity: "credential", value: "hunter2", value_present: true, value_length: 7 },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.value?.sensitive).toBe(true);
+    expect(ext.value?.present).toBe(true);
+    expect(ext.value?.length).toBe(7);
+    expect(ext.value?.text).toBeUndefined();
+    expect(JSON.stringify(ext)).not.toContain("hunter2");
+  });
 });
 
 describe("document-space geometry (Phase 5C)", () => {

@@ -232,6 +232,16 @@ Before making any changes:
 - Sensitive fields and buttons have `allowed_actions: ["read", "request_fill"]` or `["read", "request_click"]` — must go through Aegis route steps
 - Do not use observation dry run output as a substitute for a proper Aegis-verified route
 
+**Antigen exact-fill / snapshot-value invariants (Exact Form-Fill v1 implemented):**
+
+- `browser_type` APPENDS keystrokes (search boxes, keyboard input only); `browser_fill` / `browser_set_value` are EXACT REPLACEMENT (clear + native-setter set + dispatch input/change + read-back verify); `browser_clear` is set-value with `""`. Do not route `browser_fill` to the append `/browser-type` endpoint — it must hit `/api/agent/v1/runtime/browser-set-value`.
+- The adapter must NOT fall through to `@playwright/mcp`'s native fill on a set-value failure — that path appends and is the corruption bug this replaces; surface a loud synthetic error instead.
+- `setFieldValueKnownBox` is the exact-replacement runtime: it uses the native prototype value setter (`HTMLInputElement/HTMLTextAreaElement.prototype` descriptor) + bubbling `input`/`change` events (React/Vue-safe), skips when current === requested (`changed:false`, no events), and returns `VALUE_MISMATCH` when read-back ≠ requested. It performs NO pointer movement and must NOT persist/clobber pointer state. Its `actual_value` is RAW — the endpoint is the masking/refusal authority.
+- The set-value endpoint REFUSES sensitive fields (`value_meta.sensitive === true`) with `SENSITIVE_FIELD_REQUIRES_INJECTION` and never calls the runtime or echoes a value — credential/payment/identity values go through `request_secret_field_injection`, never the generic fill tools.
+- Antigen snapshot value visibility is the DELIBERATE, SCOPED exception to "snapshots never read `.value`": it applies ONLY to the Antigen snapshot (`antigenSnapshotRuntime.ts` / `ExternalAntigenSnapshotElement.value`), NOT to `AgentSafeObservationSnapshot` (still `filled` boolean only — do not change `agentSafeObservation.ts`).
+- Sensitive snapshot fields expose ONLY `present`/`length`/flags — never `text`, `selected_value`, `selected_text`, or `validation_message`. Redaction is enforced in three layers: the page IIFE, `sanitizeValueMeta` (TS), and `toExternalAntigenSnapshotElement` (external view). `classifySensitivity` reuses the `agentSafeObservation.ts` patterns and reads property OR attribute.
+- Do not rebuild: Exact Form-Fill v1 (snapshot value visibility + browser_set_value/browser_clear + setFieldValueKnownBox).
+
 **Authenticated session boundary invariants:**
 
 - Authenticated session boundary is **experimental/secondary** — primary login path for agent-controlled browsers is `request_secret_field_injection`

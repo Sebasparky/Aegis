@@ -49,7 +49,7 @@ import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowser
 import { classifyActionIntent } from "../detection/actionIntent.js";
 import { evaluateActionGate } from "../detection/actionGate.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -4338,6 +4338,173 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
         ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
         ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
+      },
+    });
+  });
+
+  // ─── Antigen exact-replacement field set (browser_set_value / browser_fill) ──
+  // EXACT REPLACEMENT semantics: clears the field and sets the requested value via
+  // the native property setter (React/Vue-safe), then reads back and verifies.
+  // Idempotent — a second identical call reports changed=false and mutates nothing.
+  // This is NOT browser_type (which appends keystrokes). Ref-only: callers must
+  // supply an ag_* ref from the latest antigen_snapshot. Sensitive fields are
+  // refused (SENSITIVE_FIELD_REQUIRES_INJECTION) and routed to the injection path —
+  // credential/payment/identity values never flow through this generic tool, and
+  // their values are never echoed back. The requested/actual value is never logged.
+  server.post("/api/agent/v1/runtime/browser-set-value", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    const body = (req.body ?? {}) as {
+      browser_runtime_id?: unknown;
+      ref?: unknown;
+      value?: unknown;
+      select_by_label?: unknown;
+    };
+
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (body.value === undefined || body.value === null || typeof body.value !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "value is required and must be a string.");
+    }
+    const refRaw = typeof body.ref === "string" ? body.ref : undefined;
+    if (!refRaw || !refRaw.startsWith("ag_")) {
+      return sendError(reply, 400, "REF_REQUIRED", "browser-set-value is ref-only: supply an ag_<n> ref from the latest antigen_snapshot.");
+    }
+    if (!/^ag_\d+$/.test(refRaw)) {
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_INVALID", message: `Malformed Antigen ref '${refRaw}'; expected ag_<number>.` } });
+    }
+    const selectByLabel = body.select_by_label === true;
+
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    if (runtimeResolution.kind === "none") {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected", browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_set_value", error_code: "SESSION_NOT_FOUND",
+      });
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
+    if (runtimeResolution.kind === "starting") return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    if (runtimeResolution.kind === "rebound") {
+      recordBrowserTraceEvent(body.browser_runtime_id, {
+        event_type: "browser_tool_rejected", browser_runtime_id: body.browser_runtime_id,
+        tool: "browser_set_value", error_code: "RUNTIME_SESSION_CHANGED",
+      });
+      return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
+    }
+    const session = runtimeResolution.session; // ready
+
+    const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
+    if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", error_code: "ANTIGEN_REF_NOT_FOUND",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+    }
+    if (resolution.status === "expired") {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", error_code: "ANTIGEN_REF_EXPIRED",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+    }
+
+    const el = resolution.element;
+    const fillableKinds = new Set(["input", "textarea", "select", "editable"]);
+    if (!fillableKinds.has(el.kind) || !el.enabled || el.box.width <= 0 || el.box.height <= 0) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", element_name: el.name, context: el.context,
+        error_code: "NOT_FILLABLE",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "NOT_FILLABLE", message: `Antigen ref '${refRaw}' is not an exact-fillable field (input/textarea/select). Take a fresh antigen_snapshot and use a fillable ref.` } });
+    }
+
+    // SENSITIVE BOUNDARY: never exact-fill a credential/payment/identity/financial
+    // field through this generic tool. Route to the Aegis CDP injection path. The
+    // value is never set and never echoed.
+    if (el.value_meta?.sensitive === true) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", element_name: el.name, context: el.context,
+        error_code: "SENSITIVE_FIELD_REQUIRES_INJECTION",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "SENSITIVE_FIELD_REQUIRES_INJECTION", message: "This field is sensitive (credential/payment/identity). Aegis does not fill it through browser_set_value — use request_secret_field_injection / the Aegis injection path instead." } });
+    }
+
+    // value is never logged beyond changed/verified/element_kind.
+    const setResult = await setFieldValueKnownBox({
+      cdpUrl: session.cdp_url,
+      box: el.box,
+      value: body.value,
+      selectByLabel,
+      sessionId: session.browser_session_id,
+      userId: MOCK_USER_ID,
+      expectedUrl: resolution.snapshot_url,
+      expected: {
+        tag: el.tag,
+        kind: el.kind,
+        role: el.role,
+        name: el.name,
+        normalized_name: el.normalized_name,
+        href_path: el.href_path,
+      },
+    });
+
+    if (!setResult.success) {
+      const failCode =
+        setResult.error === "ANTIGEN_REF_PAGE_CHANGED" ? "ANTIGEN_REF_PAGE_CHANGED"
+        : setResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT" ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+        : setResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
+        : setResult.error === "NOT_FILLABLE" ? "NOT_FILLABLE"
+        : setResult.error === "ELEMENT_DETACHED" ? "ELEMENT_DETACHED"
+        : setResult.error === "VALUE_MISMATCH" ? "VALUE_MISMATCH"
+        : "SET_VALUE_FAILED";
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", element_name: el.name, context: el.context,
+        error_code: failCode,
+      });
+      const messages: Record<string, string> = {
+        ANTIGEN_REF_PAGE_CHANGED: "The page changed since this snapshot. Take a fresh antigen_snapshot.",
+        ANTIGEN_REF_OUT_OF_VIEWPORT: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.",
+        ANTIGEN_REF_STALE: "Antigen ref is stale. Take a new antigen_snapshot and retry.",
+        NOT_FILLABLE: "The element under this ref is not an exact-fillable field.",
+        ELEMENT_DETACHED: "No element was found at the ref's position; the element was likely removed. Take a fresh antigen_snapshot.",
+        VALUE_MISMATCH: "Aegis set the field but the read-back value did not match the requested value (the field may reject or reformat input). Inspect the snapshot value and retry.",
+      };
+      return reply.status(422).send({
+        ok: false,
+        error: { code: failCode, message: messages[failCode] ?? "Exact field set failed." },
+        data: {
+          ...(setResult.changed !== undefined ? { changed: setResult.changed } : {}),
+          ...(setResult.verified !== undefined ? { verified: setResult.verified } : {}),
+          ...(setResult.element_kind !== undefined ? { element_kind: setResult.element_kind } : {}),
+          // actual_value is safe to surface here: sensitive fields were refused above.
+          ...(setResult.actual_value !== undefined ? { actual_value: setResult.actual_value } : {}),
+          duration_ms: setResult.duration_ms,
+        },
+      });
+    }
+
+    recordBrowserTraceEvent(session.browser_session_id, {
+      event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+      tool: "browser_set_value", element_name: el.name, context: el.context,
+      result_code: "set_value_success",
+    });
+
+    return reply.send({
+      ok: true,
+      data: {
+        changed: setResult.changed === true,
+        verified: setResult.verified === true,
+        requested_value: body.value,
+        actual_value: setResult.actual_value ?? body.value,
+        ...(setResult.element_kind !== undefined ? { element_kind: setResult.element_kind } : {}),
+        duration_ms: setResult.duration_ms,
       },
     });
   });

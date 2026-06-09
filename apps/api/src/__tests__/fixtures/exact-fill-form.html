@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Antigen Exact-Fill Fixture</title>
+</head>
+<body>
+  <h1>Checkout — contact &amp; billing</h1>
+  <form id="checkout">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" value="schacon@umich.edu" />
+
+    <label for="first">First name</label>
+    <input id="first" name="firstName" type="text" autocomplete="given-name" value="Sebastian" />
+
+    <label for="last">Last name</label>
+    <input id="last" name="lastName" type="text" autocomplete="family-name" value="Chacon" />
+
+    <label for="zip">ZIP</label>
+    <input id="zip" name="postalCode" type="text" autocomplete="postal-code" value="48180" />
+
+    <label for="city">City</label>
+    <input id="city" name="city" type="text" autocomplete="address-level2" value="" />
+
+    <label for="state">State</label>
+    <select id="state" name="state" autocomplete="address-level1">
+      <option value="">Choose…</option>
+      <option value="MI">Michigan</option>
+      <option value="OH">Ohio</option>
+      <option value="CA">California</option>
+    </select>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" value="hunter2-SECRET" />
+
+    <!-- React-like controlled input: a JS "state" variable owns the value and
+         reverts the DOM unless a real `input` event fired (i.e. unless the value
+         was set through the native setter + dispatched events). -->
+    <label for="controlled">Controlled</label>
+    <input id="controlled" name="controlled" type="text" value="initial" />
+
+    <!-- Coercing input: forces its value to uppercase on every input event, so a
+         lowercase set produces a read-back mismatch (proves VALUE_MISMATCH). -->
+    <label for="upper">Upper</label>
+    <input id="upper" name="upper" type="text" value="" />
+  </form>
+
+  <script>
+    (function () {
+      var ctrl = document.getElementById("controlled");
+      var state = ctrl.value;
+      ctrl.addEventListener("input", function () { state = ctrl.value; });
+      setInterval(function () { if (ctrl.value !== state) ctrl.value = state; }, 5);
+    })();
+    (function () {
+      var up = document.getElementById("upper");
+      up.addEventListener("input", function () {
+        var u = up.value.toUpperCase();
+        if (up.value !== u) up.value = u;
+      });
+    })();
+  </script>
+</body>
+</html>

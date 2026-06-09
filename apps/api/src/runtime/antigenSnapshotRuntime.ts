@@ -78,6 +78,14 @@ export interface AntigenSnapshotCandidate {
    * Never carries input values, secrets, raw DOM, hrefs, or coordinates.
    */
   context?: AntigenSnapshotContext;
+  /**
+   * Safe, redacted current-value metadata for field-like candidates so the agent
+   * can SEE whether a field is already filled (and skip it during exact fill).
+   * Present only for input/textarea/select/contenteditable. Sensitive fields
+   * (credential/payment/identity/financial) expose only present/length/flags —
+   * never the raw value. See AntigenRawValueMeta.
+   */
+  value_meta?: AntigenRawValueMeta;
 }
 
 /** Bounded disambiguation context. label≤120, section≤80, nearby_text≤160. */
@@ -85,6 +93,48 @@ export interface AntigenSnapshotContext {
   label?: string;
   section?: string;
   nearby_text?: string;
+}
+
+/**
+ * Safe, redacted current-value metadata for a field-like candidate.
+ *
+ * Added so the agent can detect already-filled fields and use the exact-
+ * replacement (browser_set_value) path idempotently instead of appending.
+ *
+ * REDACTION RULE — enforced in the page IIFE AND re-enforced by
+ * `sanitizeValueMeta`: when `sensitive` is true, ONLY `value_present`,
+ * `value_length`, `checked`, `required`, `readonly`, `aria_invalid` survive.
+ * `value`, `selected_value`, `selected_text`, and `validation_message` are
+ * dropped. This metadata NEVER carries a password, card number, CVV, or any
+ * credential/payment/identity value. This is the deliberate, scoped exception
+ * to the "snapshot never reads .value" rule — it applies ONLY to the Antigen
+ * snapshot, not to AgentSafeObservationSnapshot.
+ */
+export interface AntigenRawValueMeta {
+  /** True when the field classifies as credential/payment/identity/financial. */
+  sensitive: boolean;
+  /** Sensitivity kind when sensitive: credential | payment | identity | financial. */
+  sensitivity: string | null;
+  /** Non-sensitive text input / textarea / contenteditable current value (clipped). */
+  value?: string;
+  /** Whether the field currently holds any value (length > 0). Safe for sensitive. */
+  value_present?: boolean;
+  /** Current value length. Safe for sensitive fields — carries no content. */
+  value_length?: number;
+  /** <select> currently-selected option value (non-sensitive only). */
+  selected_value?: string | null;
+  /** <select> currently-selected option visible text (non-sensitive only, clipped). */
+  selected_text?: string | null;
+  /** checkbox / radio checked state. */
+  checked?: boolean;
+  /** required attribute present. */
+  required?: boolean;
+  /** readonly attribute present. */
+  readonly?: boolean;
+  /** aria-invalid="true". */
+  aria_invalid?: boolean;
+  /** Native validity message (non-sensitive only, clipped). */
+  validation_message?: string;
 }
 
 /**
@@ -148,6 +198,8 @@ export interface RawAntigenCandidate {
   box: { x: number; y: number; width: number; height: number; doc_x?: number; doc_y?: number };
   /** Raw, page-derived disambiguation context (bounded in the IIFE). */
   context?: AntigenSnapshotContext;
+  /** Raw, page-derived redacted value metadata for field-like elements. */
+  value_meta?: AntigenRawValueMeta | null;
 }
 
 const DEFAULT_MAX_CANDIDATES = 200;
@@ -156,6 +208,10 @@ const DEFAULT_MAX_CANDIDATES = 200;
 const CONTEXT_LABEL_MAX = 120;
 const CONTEXT_SECTION_MAX = 80;
 const CONTEXT_NEARBY_MAX = 160;
+
+// ─── Value-meta bounds (shared by IIFE + TS sanitizer) ───────────────────────
+const VALUE_TEXT_MAX = 200;
+const VALIDATION_MESSAGE_MAX = 120;
 
 /**
  * The candidate selector list from docs/antigen-snapshot/extraction-strategy.md.
@@ -248,6 +304,47 @@ export function sanitizeContext(
   if (section) out.section = section;
   if (nearby) out.nearby_text = nearby;
   return out.label || out.section || out.nearby_text ? out : undefined;
+}
+
+/**
+ * Re-clamps and HARD-REDACTS raw page-derived value metadata (defense-in-depth
+ * against a malicious page that ignores the IIFE redaction). When `sensitive` is
+ * true, `value`, `selected_value`, `selected_text`, and `validation_message` are
+ * dropped unconditionally — only `value_present`/`value_length`/`checked`/
+ * `required`/`readonly`/`aria_invalid` survive. Never carries credential,
+ * payment, or identity values.
+ */
+export function sanitizeValueMeta(
+  raw: AntigenRawValueMeta | null | undefined,
+): AntigenRawValueMeta | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const sensitive = raw.sensitive === true;
+  const out: AntigenRawValueMeta = {
+    sensitive,
+    sensitivity: typeof raw.sensitivity === "string" ? raw.sensitivity : null,
+  };
+  const clipText = (value: unknown, max: number): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.replace(/\s+/g, " ").trim().slice(0, max);
+    return trimmed ? trimmed : undefined;
+  };
+  if (typeof raw.value_present === "boolean") out.value_present = raw.value_present;
+  if (typeof raw.value_length === "number" && raw.value_length >= 0) out.value_length = raw.value_length;
+  if (typeof raw.checked === "boolean") out.checked = raw.checked;
+  if (raw.required === true) out.required = true;
+  if (raw.readonly === true) out.readonly = true;
+  if (raw.aria_invalid === true) out.aria_invalid = true;
+  // Value-bearing fields survive ONLY for non-sensitive controls.
+  if (!sensitive) {
+    const value = clipText(raw.value, VALUE_TEXT_MAX);
+    if (value !== undefined) out.value = value;
+    if (typeof raw.selected_value === "string") out.selected_value = raw.selected_value.slice(0, VALUE_TEXT_MAX);
+    const selectedText = clipText(raw.selected_text, VALUE_TEXT_MAX);
+    if (selectedText !== undefined) out.selected_text = selectedText;
+    const validationMessage = clipText(raw.validation_message, VALIDATION_MESSAGE_MAX);
+    if (validationMessage !== undefined) out.validation_message = validationMessage;
+  }
+  return out;
 }
 
 /** Pathname-only portion of an href. Origin and query string are dropped. */
@@ -384,6 +481,9 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
   // key off candidates that have no disambiguation context.
   const context = sanitizeContext(raw.context, raw.name);
   if (context) candidate.context = context;
+  // Redacted current-value metadata for field-like candidates (skip-aware fill).
+  const valueMeta = sanitizeValueMeta(raw.value_meta);
+  if (valueMeta) candidate.value_meta = valueMeta;
   return candidate;
 }
 
@@ -413,6 +513,8 @@ export function buildAntigenExtractionExpr(opts: {
   const labelMax = JSON.stringify(CONTEXT_LABEL_MAX);
   const sectionMax = JSON.stringify(CONTEXT_SECTION_MAX);
   const nearbyMax = JSON.stringify(CONTEXT_NEARBY_MAX);
+  const valueMax = JSON.stringify(VALUE_TEXT_MAX);
+  const validationMax = JSON.stringify(VALIDATION_MESSAGE_MAX);
 
   return `(function(){
     var SELECTOR=${selector};
@@ -421,6 +523,8 @@ export function buildAntigenExtractionExpr(opts: {
     var CTX_LABEL_MAX=${labelMax};
     var CTX_SECTION_MAX=${sectionMax};
     var CTX_NEARBY_MAX=${nearbyMax};
+    var VALUE_MAX=${valueMax};
+    var VALIDATION_MAX=${validationMax};
     var CTX_WALK_DEPTH=8;
     // Page scroll offset, captured once for this snapshot. Box x/y stay
     // viewport-relative (used by the realistic pointer click); doc_x/doc_y add
@@ -475,6 +579,74 @@ export function buildAntigenExtractionExpr(opts: {
       if(txt(it)) return txt(it);
       var ph=attr(el,'placeholder'); if(txt(ph)) return txt(ph);
       return '';
+    }
+    // ─── Redacted current-value metadata (skip-aware exact fill) ───────────
+    // Sensitivity classification transcribed from agentSafeObservation.ts so
+    // credential/payment/identity/financial fields are NEVER read into a value.
+    function classifySensitivity(el){
+      // Read property OR attribute — properties reflect in real browsers; the
+      // attr fallback keeps classification correct under DOM emulators/tests and
+      // for framework-managed inputs.
+      var type=(el.type||attr(el,'type')||'').toLowerCase();
+      var name=(el.name||attr(el,'name')||'').toLowerCase();
+      var id=(el.id||attr(el,'id')||'').toLowerCase();
+      var ac=(el.autocomplete||attr(el,'autocomplete')||'').toLowerCase();
+      var ph=(el.placeholder||attr(el,'placeholder')||'').toLowerCase();
+      var combined=' '+name+' '+id+' '+ac+' '+ph+' ';
+      if(type==='password'||/current-password|new-password|one-time-code/.test(ac)) return 'credential';
+      if(/cc-number|cardnumber|card.number|cc-name/.test(combined)) return 'payment';
+      if(/cc-csc|cvv|cvc|security.code|card.cvc/.test(combined)) return 'payment';
+      if(/cc-exp/.test(ac)) return 'payment';
+      if(/ssn|social.security|passport|license|dob|birthdate|date.of.birth/.test(combined)) return 'identity';
+      if(/routing|account.number|bank.account|account_number/.test(combined)) return 'financial';
+      if(/password|passcode|pin |secret|token|key/.test(combined)) return 'credential';
+      if(/card|payment|billing|checkout/.test(combined)) return 'payment';
+      return null;
+    }
+    function valueMetaOf(el,tag,type,editable){
+      var isInput=tag==='input', isTextarea=tag==='textarea', isSelect=tag==='select';
+      if(!(isInput||isTextarea||isSelect||editable)) return null;
+      // Buttons/hidden are not value fields.
+      if(isInput&&(type==='submit'||type==='button'||type==='reset'||type==='hidden')) return null;
+      var sensitivity=null; try{ sensitivity=classifySensitivity(el); }catch(e){ sensitivity=null; }
+      if(!sensitivity&&type==='password') sensitivity='credential';
+      var sensitive=!!sensitivity;
+      var meta={ sensitive:sensitive, sensitivity:sensitivity };
+      try{ if(el.required===true) meta.required=true; }catch(e){}
+      try{ if(el.readOnly===true) meta.readonly=true; }catch(e){}
+      if(attr(el,'aria-invalid')==='true') meta.aria_invalid=true;
+      // checkbox / radio
+      if(isInput&&(type==='checkbox'||type==='radio')){
+        try{ meta.checked=el.checked===true; }catch(e){}
+        return meta;
+      }
+      // select
+      if(isSelect){
+        try{
+          var idx=el.selectedIndex;
+          if(idx!=null&&idx>=0&&el.options&&el.options[idx]){
+            var opt=el.options[idx];
+            var ov=opt.value!=null?String(opt.value):'';
+            meta.value_present=ov.length>0;
+            meta.value_length=ov.length;
+            if(!sensitive){
+              meta.selected_value=ov;
+              var stx=txt(opt.textContent); if(stx) meta.selected_text=clip(stx,VALUE_MAX);
+            }
+          }
+        }catch(e){}
+        return meta;
+      }
+      // text input / textarea / contenteditable
+      var cur='';
+      try{ cur=editable?(el.innerText!=null?String(el.innerText):(el.textContent||'')):(el.value!=null?String(el.value):''); }catch(e){ cur=''; }
+      meta.value_present=cur.length>0;
+      meta.value_length=cur.length;
+      if(!sensitive){
+        var cv=txt(cur); if(cv) meta.value=clip(cv,VALUE_MAX);
+        try{ var vm=el.validationMessage; if(vm){ var vmt=txt(vm); if(vmt) meta.validation_message=clip(vmt,VALIDATION_MAX); } }catch(e){}
+      }
+      return meta;
     }
     // ─── Disambiguation context (bounded, visible-text only) ───────────────
     function isHeading(node){
@@ -656,6 +828,7 @@ export function buildAntigenExtractionExpr(opts: {
       try{ contentEditable=(el.isContentEditable===true)||(attr(el,'contenteditable')==='true'); }catch(e){ contentEditable=false; }
       var theName=nameOf(el,tag,type);
       var ctx=null; try{ ctx=extractContext(el,theName); }catch(e){ ctx=null; }
+      var vmeta=null; try{ vmeta=valueMetaOf(el,tag,type,contentEditable); }catch(e){ vmeta=null; }
       out.push({
         tag: tag,
         type: type,
@@ -668,7 +841,8 @@ export function buildAntigenExtractionExpr(opts: {
         read_only: el.readOnly===true,
         name: theName,
         box: { x:r.left, y:r.top, width:r.width, height:r.height, doc_x:r.left+SX, doc_y:r.top+SY },
-        context: ctx
+        context: ctx,
+        value_meta: vmeta
       });
     }
     return out;

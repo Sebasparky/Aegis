@@ -79,20 +79,31 @@ Fields where `id`, `name`, or `autocomplete` contain `ssn`, `social`, `passport`
 
 ---
 
-## Element Values Are Never Read
+## Element Values: redacted current-value metadata (Exact Form-Fill v1)
 
-The IIFE extractor must never access `.value` on any element except for these safe cases:
+> **Updated for Exact Form-Fill v1.** The snapshot now exposes a redacted
+> `value_meta` for field-like candidates so the agent can detect already-filled
+> fields and use the idempotent exact-replacement tools (`browser_set_value`)
+> instead of appending. This is a DELIBERATE, SCOPED change to the original
+> "never read `.value`" rule, and applies ONLY to the Antigen snapshot — NOT to
+> `AgentSafeObservationSnapshot` (which still exposes a `filled` boolean only).
+
+The `name` accessible label is still resolved without reading the value (button
+labels excepted, as before). The redaction rules for `value_meta` are:
 
 | Case | Rule |
 |------|------|
-| `input[type="submit"]` | `.value` is the button label — safe to read for `name` |
-| `input[type="button"]` | `.value` is the button label — safe to read for `name` |
-| `input[type="reset"]` | `.value` is the button label — safe to read |
-| All other input types | `.value` **must not be read** |
-| `textarea` | `.value` **must not be read** |
-| `select` | `.value` (selected option) **must not be read** |
+| Non-sensitive `input`/`textarea` | current `.value` exposed (clipped to 200 chars) as `value_meta.value` |
+| `contenteditable` | current `innerText` exposed (clipped) |
+| `select` | selected option `value`/visible text exposed (non-sensitive only) |
+| `checkbox`/`radio` | `checked` boolean exposed |
+| Sensitive fields (credential/payment/identity/financial, or `type=password`) | ONLY `value_present`/`value_length` + flags — `value`/`selected_value`/`selected_text`/`validation_message` are **never** exposed |
+| `input[type="hidden"]` | skipped entirely (unchanged) |
 
-For `<select>` elements, extract the `<option>` texts (for scoring only, not for value), but do not expose which option is currently selected.
+Sensitivity is classified by `classifySensitivity` (same patterns as
+`agentSafeObservation.ts`). Redaction is enforced in THREE layers: the page IIFE,
+`sanitizeValueMeta` (TS, defense-in-depth), and `toExternalAntigenSnapshotElement`
+(external view). A raw password/card/CVV value must never appear in any layer.
 
 ---
 

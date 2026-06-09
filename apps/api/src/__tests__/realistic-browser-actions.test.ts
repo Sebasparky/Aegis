@@ -161,6 +161,8 @@ import {
   realisticClickByDescription,
   realisticClickKnownBox,
   realisticTypeTextViaCDP,
+  setFieldValueKnownBox,
+  buildAntigenSetValueExpr,
   computeScrollTargetY,
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
@@ -722,6 +724,86 @@ describe("no forbidden fields in results", () => {
     const result = await realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text: "secret-text-value" });
     for (const key of FORBIDDEN) expect(Object.keys(result)).not.toContain(key);
     expect(JSON.stringify(result)).not.toContain("secret-text-value");
+  });
+});
+
+// ─── 11b. setFieldValueKnownBox — exact replacement ──────────────────────────
+
+describe("buildAntigenSetValueExpr — injection safety", () => {
+  it("JSON-encodes the value so it cannot break out of the string literal", () => {
+    const value = `'; alert(1); //`;
+    const expr = buildAntigenSetValueExpr(10, 20, value, false);
+    expect(expr).toContain(JSON.stringify(value));
+    expect(expr).not.toContain(`var V=';`);
+  });
+});
+
+describe("setFieldValueKnownBox — exact replacement (no keystrokes, no pointer)", () => {
+  const BOX = { x: 100, y: 100, width: 60, height: 24 };
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", makeFetchMock(DEFAULT_VERSION, DEFAULT_TARGETS));
+    vi.stubEnv("ANTIGEN_INPUT_REALISM", "");
+  });
+
+  // The viewport eval (no `expected` → geometry-only) and the set-value eval both
+  // read mockState.nextEvalResponse; a single combined object satisfies both: the
+  // viewport handler reads vw/vh, the set-value handler reads status/changed/etc.
+  function evalValue(over: Record<string, unknown>) {
+    return { vw: 1280, vh: 800, ...over };
+  }
+
+  it("replaces exactly and verifies, dispatching NO keystrokes and persisting NO pointer state", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: true, actual: "Chacon", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Chacon", sessionId: "s1", userId: "u1" });
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.verified).toBe(true);
+    expect(result.actual_value).toBe("Chacon");
+    expect(result.element_kind).toBe("input");
+    // Exact replacement is a single Runtime.evaluate — never keystrokes.
+    const keyEvents = mockState.allSentMessages.filter((m) => m.includes("Input.dispatchKeyEvent"));
+    expect(keyEvents).toHaveLength(0);
+    // No pointer movement → no pointer-state persistence.
+    expect(taskMockState.setCalls).toHaveLength(0);
+  });
+
+  it("skips when the current value already equals the requested value (changed=false)", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: false, verified: true, actual: "Chacon", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Chacon" });
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(false);
+    expect(result.verified).toBe(true);
+  });
+
+  it("returns VALUE_MISMATCH when the read-back differs from the requested value", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: false, actual: "Seb", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Sebastian" });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("VALUE_MISMATCH");
+    expect(result.verified).toBe(false);
+  });
+
+  it("returns NOT_FILLABLE when no fillable control sits under the box", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "not_fillable" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "x" });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("NOT_FILLABLE");
+  });
+
+  it("returns ELEMENT_DETACHED when nothing is at the box point", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "no_element" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "x" });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("ELEMENT_DETACHED");
+  });
+
+  it("never carries forbidden keys in the result object", async () => {
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: true, actual: "ok", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "supersecretval" });
+    for (const key of ["cdp_url", "user_data_dir", "profile_key", "pass_id", "secret_ref", "storageState", "cookies"]) {
+      expect(Object.keys(result)).not.toContain(key);
+    }
   });
 });
 

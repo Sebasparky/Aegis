@@ -26,6 +26,7 @@ import type {
   AntigenCandidateKind,
   AntigenSnapshotCandidate,
   AntigenSnapshotContext,
+  AntigenRawValueMeta,
 } from "./antigenSnapshotRuntime.js";
 import { newId } from "../store/index.js";
 
@@ -161,6 +162,13 @@ export interface AntigenSnapshotElementRecord {
    */
   context?: AntigenSnapshotContext;
 
+  /**
+   * Redacted current-value metadata for field-like elements (skip-aware exact
+   * fill). Sensitive fields already carry only present/length/flags here; the
+   * external view re-enforces that boundary.
+   */
+  value_meta?: AntigenRawValueMeta;
+
   created_at: string;
   expires_at: string;
 }
@@ -182,6 +190,24 @@ export interface ExternalAntigenSnapshotElement {
   };
   /** Agent-facing context — label/section only; never `nearby_text`. */
   context?: { label?: string; section?: string };
+  /**
+   * Agent-facing current-value metadata. For sensitive fields ONLY
+   * `present`/`length`/`required`/`readonly`/`invalid`/`sensitive` appear —
+   * `text`/`selected_value`/`selected_text`/`validation_message` are omitted.
+   */
+  value?: {
+    present?: boolean;
+    length?: number;
+    text?: string;
+    selected_value?: string | null;
+    selected_text?: string | null;
+    checked?: boolean;
+    required?: boolean;
+    readonly?: boolean;
+    invalid?: boolean;
+    validation_message?: string;
+    sensitive: boolean;
+  };
 }
 
 // ─── In-memory store ─────────────────────────────────────────────────────────
@@ -263,6 +289,7 @@ export function createAntigenSnapshotRecord(params: CreateAntigenSnapshotParams)
     },
 
     context: c.context,
+    value_meta: c.value_meta,
 
     created_at: createdAt,
     expires_at: expiresAt,
@@ -439,6 +466,27 @@ export function toExternalAntigenSnapshotElement(
     if (el.context.label) ctx.label = el.context.label;
     if (el.context.section) ctx.section = el.context.section;
     out.context = ctx;
+  }
+  // Agent-facing current-value metadata. SENSITIVE BOUNDARY: when the field is
+  // sensitive, only present/length/flags are emitted — never text, selected
+  // value/text, or validation message (those would echo a credential value).
+  const vm = el.value_meta;
+  if (vm) {
+    const sensitive = vm.sensitive === true;
+    const value: NonNullable<ExternalAntigenSnapshotElement["value"]> = { sensitive };
+    if (typeof vm.value_present === "boolean") value.present = vm.value_present;
+    if (typeof vm.value_length === "number") value.length = vm.value_length;
+    if (typeof vm.checked === "boolean") value.checked = vm.checked;
+    if (vm.required === true) value.required = true;
+    if (vm.readonly === true) value.readonly = true;
+    if (vm.aria_invalid === true) value.invalid = true;
+    if (!sensitive) {
+      if (typeof vm.value === "string") value.text = vm.value;
+      if (typeof vm.selected_value === "string") value.selected_value = vm.selected_value;
+      if (typeof vm.selected_text === "string") value.selected_text = vm.selected_text;
+      if (typeof vm.validation_message === "string") value.validation_message = vm.validation_message;
+    }
+    out.value = value;
   }
   return out;
 }

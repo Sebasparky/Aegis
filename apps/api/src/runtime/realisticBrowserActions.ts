@@ -219,6 +219,28 @@ export interface RealisticTypeResult {
 }
 
 /**
+ * Result of an EXACT-REPLACEMENT field set (browser_set_value / browser_fill /
+ * browser_clear). This is the deterministic, idempotent counterpart of
+ * RealisticTypeResult: it never appends keystrokes. `actual_value` is RAW — the
+ * endpoint is the masking/refusal authority for sensitive fields and must never
+ * echo it for them. The function itself never logs `actual_value`.
+ */
+export interface SetFieldValueResult {
+  success: boolean;
+  error?: string;
+  // Internal-only sanitized stale reason (Phase 4B), surfaced only via endpoint.
+  stale_reason?: AntigenKnownBoxRevalidationReason;
+  fillable?: boolean;
+  changed?: boolean;
+  verified?: boolean;
+  actual_value?: string;          // RAW — endpoint masks/refuses for sensitive fields
+  actual_value_present?: boolean;
+  actual_value_length?: number;
+  element_kind?: "input" | "textarea" | "select" | "contenteditable";
+  duration_ms: number;
+}
+
+/**
  * Builds the JS IIFE expression for Runtime.evaluate that finds a visible
  * interactive element and returns its bounding box or a sentinel.
  *
@@ -1141,6 +1163,313 @@ export async function realisticTypeKnownBox(params: {
 
     ws.on("error", (err: Error) => {
       finish({ success: false, error: `WS_ERROR: ${err.message}`, char_count_bucket: charCountBucket, duration_ms: 0 });
+    });
+  });
+}
+
+// ─── Antigen exact-replacement field set (browser_set_value) ─────────────────
+
+/**
+ * Builds the raw JS-string IIFE that performs the EXACT field replacement in the
+ * page via Runtime.evaluate. Mirrors buildAntigenRevalidationExpr's
+ * elementFromPoint + ancestor-walk approach, then:
+ *  - skips when the current value already equals V (idempotent: changed=false),
+ *  - for input/textarea uses the NATIVE prototype value setter so React/Vue
+ *    controlled components observe the change, then dispatches bubbling
+ *    input + change events,
+ *  - for <select> matches by option value (or visible text when BY_LABEL),
+ *  - for contenteditable sets innerText + dispatches input/change,
+ *  - reads back and reports verified = (readback === V).
+ *
+ * It NEVER appends keystrokes and NEVER reads a value it is not about to set
+ * (the only value read is the target field's own current value, used for the
+ * skip check and read-back — the endpoint refuses sensitive fields up front so
+ * this never runs against a credential/payment/identity field).
+ *
+ * centerX/centerY/value are JSON.stringify-encoded — never raw-concatenated.
+ */
+export function buildAntigenSetValueExpr(
+  centerX: number,
+  centerY: number,
+  value: string,
+  selectByLabel: boolean,
+): string {
+  const cx = JSON.stringify(centerX);
+  const cy = JSON.stringify(centerY);
+  const v = JSON.stringify(value);
+  const byLabel = JSON.stringify(selectByLabel === true);
+
+  return `(function(){
+    var CX=${cx}, CY=${cy}, V=${v}, BY_LABEL=${byLabel};
+    var vw=window.innerWidth, vh=window.innerHeight;
+    if(!(CX>=0&&CX<=vw&&CY>=0&&CY<=vh)) return {status:"out_of_viewport"};
+    var hit=null; try{ hit=document.elementFromPoint(CX,CY); }catch(e){}
+    if(!hit) return {status:"no_element"};
+    var FILLABLE='input,textarea,select,[contenteditable="true"]';
+    var node=hit, hops=0, el=null;
+    while(node&&hops<5){ try{ if(node.matches&&node.matches(FILLABLE)){ el=node; break; } }catch(e){} node=node.parentElement; hops++; }
+    if(!el) return {status:"not_fillable"};
+    var tag=(el.tagName||'').toLowerCase();
+    var type=''; try{ type=(el.type||'').toLowerCase(); }catch(e){ type=''; }
+    if(tag==='input'&&(type==='submit'||type==='button'||type==='reset'||type==='hidden'||type==='checkbox'||type==='radio')) return {status:"not_fillable"};
+    var editable=false; try{ editable=(el.isContentEditable===true); }catch(e){ editable=false; }
+    try{ el.focus(); }catch(e){}
+    // select: match by option value (default) or visible text (BY_LABEL)
+    if(tag==='select'){
+      var matched=-1;
+      try{
+        for(var i=0;i<el.options.length;i++){
+          var o=el.options[i];
+          var ot=(o.textContent==null?'':String(o.textContent)).replace(/\\s+/g,' ').trim();
+          var ok=BY_LABEL?(ot===V):(o.value===V);
+          if(ok){ matched=i; break; }
+        }
+      }catch(e){}
+      if(matched<0) return {status:"option_not_found", actual:String(el.value)};
+      if(el.selectedIndex===matched) return {status:"ok", changed:false, verified:true, actual:String(el.value), kind:"select"};
+      el.selectedIndex=matched;
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+      try{ el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+      var sv=String(el.value);
+      return {status:"ok", changed:true, verified:(sv===el.options[matched].value), actual:sv, kind:"select"};
+    }
+    // contenteditable
+    if(editable){
+      var ccur=(el.innerText!=null?String(el.innerText):'');
+      if(ccur===V) return {status:"ok", changed:false, verified:true, actual:ccur, kind:"contenteditable"};
+      try{ el.innerText=V; }catch(e){}
+      try{ el.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+      try{ el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+      var crb=(el.innerText!=null?String(el.innerText):'');
+      return {status:"ok", changed:true, verified:(crb===V), actual:crb, kind:"contenteditable"};
+    }
+    // input / textarea — native prototype setter (React/Vue controlled-safe)
+    var cur=''; try{ cur=(el.value!=null?String(el.value):''); }catch(e){ cur=''; }
+    if(cur===V) return {status:"ok", changed:false, verified:true, actual:cur, kind:(tag==='textarea'?'textarea':'input')};
+    var setter=null;
+    try{
+      var proto=(tag==='textarea')?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+      var d=Object.getOwnPropertyDescriptor(proto,'value');
+      setter=d&&d.set;
+    }catch(e){ setter=null; }
+    try{
+      if(setter){ setter.call(el,''); setter.call(el,V); }
+      else { el.value=''; el.value=V; }
+    }catch(e){ try{ el.value=V; }catch(e2){} }
+    try{ el.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+    try{ el.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    var rb=''; try{ rb=(el.value!=null?String(el.value):''); }catch(e){ rb=''; }
+    return {status:"ok", changed:true, verified:(rb===V), actual:rb, kind:(tag==='textarea'?'textarea':'input')};
+  })()`;
+}
+
+/**
+ * Exact-replacement field set into a KNOWN element box from an Antigen snapshot
+ * ref (browser_set_value / browser_fill / browser_clear path).
+ *
+ * Reuses realisticTypeKnownBox's Phase 4A/4B contract — connect, read viewport,
+ * and (when `expected` snapshot metadata is supplied) revalidate the live
+ * element under the stored box center via elementFromPoint BEFORE any mutation.
+ * A stale / off-viewport box fails closed (ANTIGEN_REF_STALE /
+ * ANTIGEN_REF_OUT_OF_VIEWPORT) and never sets a value. The live-URL guard
+ * (ANTIGEN_REF_PAGE_CHANGED) also fails closed before mutation.
+ *
+ * Unlike the type path there is NO pointer movement and NO keystroke dispatch:
+ * the set runs as a single Runtime.evaluate (buildAntigenSetValueExpr). It is
+ * therefore deterministic and idempotent — a second call with the same value
+ * reports changed=false and dispatches no events. Pointer state is deliberately
+ * left untouched (no focus click) so the next click does not jump.
+ *
+ * The endpoint is responsible for refusing sensitive fields up front; this
+ * function does not classify sensitivity and returns the raw read-back value so
+ * the endpoint can verify — the endpoint must mask/omit it for sensitive fields.
+ */
+export async function setFieldValueKnownBox(params: {
+  cdpUrl: string;
+  box: ElementBox;
+  value: string;
+  selectByLabel?: boolean;
+  sessionId?: string;
+  userId?: string;
+  expected?: AntigenKnownBoxRevalidationExpected;
+  expectedUrl?: string | null;
+}): Promise<SetFieldValueResult> {
+  const { cdpUrl, box, value, selectByLabel, expected, expectedUrl } = params;
+  const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
+
+  let versionData: { webSocketDebuggerUrl?: string };
+  let targets: Array<{ id: string; url: string; type: string }>;
+  try {
+    [versionData, targets] = await Promise.all([
+      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
+    ]);
+  } catch (err) {
+    return { success: false, error: `CDP_FETCH_FAILED: ${(err as Error).message}`, duration_ms: 0 };
+  }
+
+  const browserWsUrl = versionData.webSocketDebuggerUrl;
+  if (!browserWsUrl) {
+    return { success: false, error: "No browser WebSocket debugger URL from CDP.", duration_ms: 0 };
+  }
+
+  const { target: pageTarget } = pickBestPageTarget(targets, {});
+  if (!pageTarget) {
+    return { success: false, error: "No page targets found via CDP.", duration_ms: 0 };
+  }
+
+  // Live-URL guard: stored boxes are only valid on the page they were captured on.
+  if (isAntigenPageChanged(expectedUrl, pageTarget.url)) {
+    return { success: false, error: "ANTIGEN_REF_PAGE_CHANGED", duration_ms: 0 };
+  }
+
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const viewportExpr = expected
+    ? buildAntigenRevalidationExpr(centerX, centerY)
+    : "(function(){return {vw:window.innerWidth,vh:window.innerHeight};})()";
+  const setValueExpr = buildAntigenSetValueExpr(centerX, centerY, value, selectByLabel === true);
+
+  return new Promise<SetFieldValueResult>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let cdpSessionId: string | null = null;
+    let attachId: number;
+    let viewportId: number;
+    let setValueId: number;
+    let finishCalled = false;
+    const startMs = Date.now();
+
+    const timer = setTimeout(() => {
+      ws.terminate();
+      resolve({ success: false, error: "Set value timed out after 15 seconds.", duration_ms: Date.now() - startMs });
+    }, 15_000);
+
+    const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+      const id = msgId++;
+      const msg: Record<string, unknown> = { id, method, params: p };
+      if (sid) msg.sessionId = sid;
+      ws.send(JSON.stringify(msg));
+      return id;
+    };
+
+    const finish = (result: SetFieldValueResult) => {
+      if (finishCalled) return;
+      finishCalled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(result);
+    };
+
+    ws.on("open", () => {
+      attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const result = msg.result as Record<string, unknown> | undefined;
+
+      if (id === attachId) {
+        if (!result?.sessionId) {
+          finish({ success: false, error: "CDP attach failed.", duration_ms: Date.now() - startMs });
+          return;
+        }
+        cdpSessionId = result.sessionId as string;
+        viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
+        return;
+      }
+
+      if (id === viewportId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value as ({ vw?: number; vh?: number } & Partial<AntigenRevalidationEvalValue>) | undefined;
+
+        // Phase 4B: fail closed before any mutation when the live element under
+        // the stored box center is not broadly compatible with the snapshot.
+        if (expected && val?.status) {
+          const revalidation = evaluateKnownBoxRevalidation({
+            eval: val as AntigenRevalidationEvalValue,
+            expected,
+          });
+          if (revalidation.status === "stale") {
+            if (cdpDiagnostics) {
+              console.log("[SetFieldValue] antigen ref stale", {
+                surface: "browser_set_value",
+                reason: revalidation.reason,
+                ...(revalidation.diagnostic ?? {}),
+              });
+            }
+            const error =
+              revalidation.reason === "BOX_OUT_OF_VIEWPORT"
+                ? "ANTIGEN_REF_OUT_OF_VIEWPORT"
+                : "ANTIGEN_REF_STALE";
+            finish({ success: false, error, stale_reason: revalidation.reason, duration_ms: Date.now() - startMs });
+            return;
+          }
+        }
+
+        setValueId = sendMsg("Runtime.evaluate", { expression: setValueExpr, returnByValue: true }, cdpSessionId!);
+        return;
+      }
+
+      if (id === setValueId) {
+        const evalResult = result?.result as Record<string, unknown> | undefined;
+        const val = evalResult?.value as
+          | { status?: string; changed?: boolean; verified?: boolean; actual?: string; kind?: string }
+          | undefined;
+        const dur = Date.now() - startMs;
+        if (!val || typeof val.status !== "string") {
+          finish({ success: false, error: "SET_VALUE_EVAL_FAILED", duration_ms: dur });
+          return;
+        }
+        const kind = (typeof val.kind === "string" ? val.kind : undefined) as SetFieldValueResult["element_kind"];
+        switch (val.status) {
+          case "out_of_viewport":
+            finish({ success: false, error: "ANTIGEN_REF_OUT_OF_VIEWPORT", duration_ms: dur });
+            return;
+          case "no_element":
+            finish({ success: false, error: "ELEMENT_DETACHED", duration_ms: dur });
+            return;
+          case "not_fillable":
+            finish({ success: false, error: "NOT_FILLABLE", duration_ms: dur });
+            return;
+          case "option_not_found":
+            finish({ success: false, error: "VALUE_MISMATCH", fillable: true, changed: false, verified: false, element_kind: "select", duration_ms: dur });
+            return;
+          case "ok": {
+            const verified = val.verified === true;
+            const actual = typeof val.actual === "string" ? val.actual : "";
+            if (!verified) {
+              finish({
+                success: false, error: "VALUE_MISMATCH", fillable: true,
+                changed: val.changed === true, verified: false, element_kind: kind,
+                actual_value: actual, actual_value_present: actual.length > 0, actual_value_length: actual.length,
+                duration_ms: dur,
+              });
+              return;
+            }
+            finish({
+              success: true, fillable: true, changed: val.changed === true, verified: true, element_kind: kind,
+              actual_value: actual, actual_value_present: actual.length > 0, actual_value_length: actual.length,
+              duration_ms: dur,
+            });
+            return;
+          }
+          default:
+            finish({ success: false, error: "SET_VALUE_EVAL_FAILED", duration_ms: dur });
+            return;
+        }
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      finish({ success: false, error: `WS_ERROR: ${err.message}`, duration_ms: 0 });
     });
   });
 }

@@ -237,13 +237,14 @@ const STATIC_BROWSER_TOOLS = [
   },
   {
     name: "browser_type",
-    description: "Type text into editable element",
+    description:
+      "APPEND keystrokes into a field (human-style typing). Use ONLY for search boxes, keyboard shortcuts, and natural typing where appending is intended — NOT for filling form fields with a known value. browser_type does not clear the field first, so typing into a prefilled field DUPLICATES its content. To set a form field (contact/address/checkout) to an exact value, use browser_fill / browser_set_value instead.",
     inputSchema: {
       type: "object",
       properties: {
         element: { type: "string", description: "Human-readable element description" },
         ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-        text: { type: "string", description: "Text to type into the element" },
+        text: { type: "string", description: "Text to type (appended) into the element" },
         slowly: { type: "boolean", description: "Whether to type character-by-character. Useful for triggering auto-complete" },
         submit: { type: "boolean", description: "Whether to submit the form after typing. Equivalent to pressing Enter" },
       },
@@ -252,15 +253,43 @@ const STATIC_BROWSER_TOOLS = [
   },
   {
     name: "browser_fill",
-    description: "Fill an input field with text",
+    description:
+      "Set a form field to an EXACT value (replaces existing content; does NOT append). Idempotent: if the field already equals the value it is left unchanged (changed=false). Use this for contact/address/checkout/profile fields where the final value is known. Before filling, inspect the snapshot's `value` for the ref and SKIP fields already correct. After filling, the response includes `actual_value`, `changed`, and `verified` — confirm `verified` before proceeding. Sensitive fields (password/card/CVV/identity) are refused here — use the Aegis credential injection path instead. Requires an ag_* ref from the latest antigen_snapshot.",
     inputSchema: {
       type: "object",
       properties: {
         element: { type: "string", description: "Human-readable element description" },
-        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-        value: { type: "string", description: "Value to fill into the input field" },
+        ref: { type: "string", description: "Exact target element reference (ag_*) from the page snapshot" },
+        value: { type: "string", description: "Exact final value the field should hold" },
       },
       required: ["value"],
+    },
+  },
+  {
+    name: "browser_set_value",
+    description:
+      "Set a form field to an EXACT value (alias of browser_fill — exact replacement, not append). Idempotent and verified: clears the field, sets the requested value via the native setter (React/Vue-safe), reads back, and returns `actual_value`/`changed`/`verified`. Use for known form values; skip fields the snapshot shows are already correct. Sensitive fields are refused. Requires an ag_* ref.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference (ag_*) from the page snapshot" },
+        value: { type: "string", description: "Exact final value the field should hold" },
+        select_by_label: { type: "boolean", description: "For <select>: match the option by its visible text instead of its value" },
+      },
+      required: ["value"],
+    },
+  },
+  {
+    name: "browser_clear",
+    description:
+      "Clear a form field to empty (exact replacement with \"\"). Idempotent — an already-empty field is left unchanged. Requires an ag_* ref from the latest antigen_snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Human-readable element description" },
+        ref: { type: "string", description: "Exact target element reference (ag_*) from the page snapshot" },
+      },
     },
   },
   {
@@ -1164,6 +1193,87 @@ function writeSyntheticErrorResponse(toolName, requestId, code, message) {
 }
 
 /**
+ * Shared handler for the EXACT-REPLACEMENT field tools: browser_fill,
+ * browser_set_value, and browser_clear. All three route to the Antigen backend's
+ * /browser-set-value endpoint (exact replace + read-back verify), NOT the append
+ * /browser-type endpoint. Ref-only and Antigen-owned: there is intentionally NO
+ * @playwright/mcp fallthrough — the native @playwright/mcp fill is an append path
+ * and silently falling back to it is exactly the bug this replaces. Sensitive
+ * fields are refused by the backend (SENSITIVE_FIELD_REQUIRES_INJECTION) and
+ * routed to the credential injection path. The requested/actual value is never
+ * logged (only a char-count bucket).
+ */
+async function handleExactSetValue(toolName, msg) {
+  const requestId = msg.id;
+  const args = msg?.params?.arguments ?? {};
+  // browser_clear sets the empty string; fill/set_value take `value`.
+  const value = toolName === "browser_clear" ? "" : (args.value ?? "");
+  const ref = args.ref ?? "";
+  const selectByLabel = args.select_by_label === true;
+  const argKeys = Object.keys(args).join(",");
+  const bucket = charCountBucket(String(value).length);
+
+  process.stderr.write(
+    `[antigen-browser@${ADAPTER_VERSION}] exact_set_value_attempt source=${toolName}` +
+    ` arg_keys=${argKeys} char_count_bucket=${bucket}\n`,
+  );
+
+  try {
+    const body = { value: String(value) };
+    if (typeof ref === "string" && ref.length > 0) body.ref = ref;
+    if (selectByLabel) body.select_by_label = true;
+    const apiRes = await antigenRuntimePost(
+      "/api/agent/v1/runtime/browser-set-value",
+      body,
+      { tool: toolName },
+    );
+
+    if (apiRes.ok) {
+      const resBody = await apiRes.json().catch(() => ({}));
+      const d = resBody?.data ?? {};
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] exact_set_value_success source=${toolName}` +
+        ` changed=${d.changed} verified=${d.verified}\n`,
+      );
+      await noteToolDisposition({ tool: toolName, surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+      writeSyntheticResponse(
+        requestId,
+        buildSyntheticSuccessText(toolName, {
+          changed: d.changed,
+          verified: d.verified,
+          actualValue: typeof d.actual_value === "string" ? d.actual_value : undefined,
+          elementKind: d.element_kind,
+          version: ADAPTER_VERSION,
+        }),
+      );
+      return;
+    }
+
+    const errBody = await apiRes.json().catch(() => ({}));
+    const errCode = errBody?.error?.code ?? String(apiRes.status);
+    const errMsg = errBody?.error?.message ?? `Antigen ${toolName} failed (${errCode}).`;
+    process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=${errCode} source=${toolName}\n`);
+    await noteToolDisposition({ tool: toolName, surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
+    // No @playwright/mcp fallthrough — exact replacement must stay Antigen-owned.
+    writeSyntheticErrorResponse(
+      toolName,
+      requestId,
+      errCode,
+      errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage(toolName) : errMsg,
+    );
+  } catch (_err) {
+    process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=INTERCEPT_ERROR source=${toolName}\n`);
+    await noteToolDisposition({ tool: toolName, surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_SET_VALUE_INTERCEPT_ERROR" });
+    writeSyntheticErrorResponse(
+      toolName,
+      requestId,
+      "ANTIGEN_SET_VALUE_INTERCEPT_ERROR",
+      `Antigen ${toolName} encountered a network error.`,
+    );
+  }
+}
+
+/**
  * Routes a single JSON-RPC line.
  *
  * Gate: ensureRuntime() is called ONLY when method === "tools/call" and
@@ -1574,75 +1684,22 @@ async function handleLine(line) {
     return;
   }
 
-  // ── browser_fill interception ──────────────────────────────────────────────
-  if (INTERCEPTION_ENABLED && toolName === "browser_fill") {
-    const fillText  = msg?.params?.arguments?.value ?? "";
-    const fillRef   = msg?.params?.arguments?.ref ?? "";
-    const argKeys   = Object.keys(msg?.params?.arguments ?? {}).join(",");
-    const requestId = msg.id;
-    const bucket    = charCountBucket(fillText.length);
-
-    process.stderr.write(
-      `[antigen-browser@${ADAPTER_VERSION}] realistic_type_attempt source=browser_fill` +
-      ` arg_keys=${argKeys} char_count_bucket=${bucket}\n`
-    );
-
-    try {
-      // Antigen exact-ref path: forward an ag_<n> ref so the backend types into
-      // the stored snapshot box (same known-box path as browser_type), instead of
-      // relying on the currently-focused element. Non-ag refs are not forwarded.
-      const fillBody = { text: fillText };
-      if (typeof fillRef === "string" && /^ag_\d+$/.test(fillRef)) fillBody.ref = fillRef;
-      const apiRes = await antigenRuntimePost(
-        "/api/agent/v1/runtime/browser-type",
-        fillBody,
-        { tool: "browser_fill" },
+  // ── browser_fill / browser_set_value / browser_clear: EXACT replacement ─────
+  // Adapter-owned exact-replacement field set. Routes to /browser-set-value (NOT
+  // the append /browser-type path) and never falls through to @playwright/mcp:
+  // its native fill appends, which is the corruption bug this replaces. When
+  // interception is disabled there is no Aegis runtime, so surface a clear error.
+  if (toolName === "browser_fill" || toolName === "browser_set_value" || toolName === "browser_clear") {
+    if (!INTERCEPTION_ENABLED) {
+      writeSyntheticErrorResponse(
+        toolName,
+        msg.id,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        `Antigen ${toolName} requires ANTIGEN_BROWSER_HEADLESS=false and a valid Aegis browser session.`,
       );
-
-      if (apiRes.ok) {
-        const resBody   = await apiRes.json().catch(() => ({}));
-        const resBucket = resBody?.data?.char_count_bucket ?? bucket;
-        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_success source=browser_fill char_count_bucket=${resBucket}\n`);
-        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
-        writeSyntheticResponse(
-          requestId,
-          buildSyntheticSuccessText("browser_fill", { bucket: resBucket, version: ADAPTER_VERSION }),
-        );
-        return;
-      }
-      const errBody = await apiRes.json().catch(() => ({}));
-      const errCode = errBody?.error?.code ?? apiRes.status;
-      // A persistent stale runtime session must NOT silently fall through to the
-      // @playwright/mcp child — surface it loudly so the agent reinitializes.
-      if (errCode === "SESSION_NOT_FOUND") {
-        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_error reason=SESSION_NOT_FOUND source=browser_fill\n`);
-        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "failed", errorCode: "SESSION_NOT_FOUND" });
-        writeSyntheticErrorResponse("browser_fill", requestId, "SESSION_NOT_FOUND", sessionNotFoundMessage("browser_fill"));
-        return;
-      }
-      // QA hard mode: never fall through to the UNTRACED @playwright/mcp child
-      // after an Antigen failure — fail loudly so the fill stays Antigen-owned and
-      // traceable. Default mode preserves the existing child fallback.
-      if (antigenHardModeEnabled()) {
-        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED prior=${errCode} source=browser_fill\n`);
-        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
-        writeSyntheticErrorResponse("browser_fill", requestId, "ANTIGEN_TOOL_REQUIRED", "Antigen realistic browser_fill failed and QA hard mode forbids the untraced @playwright/mcp fallback. Take a fresh antigen_snapshot and retry through an Antigen-owned tool.");
-        return;
-      }
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=${errCode} source=browser_fill\n`);
-      await noteToolDisposition({ tool: "browser_fill", surface: "adapter_child_playwright", disposition: "raw_fallback", errorCode: String(errCode) });
-    } catch (err) {
-      if (antigenHardModeEnabled()) {
-        process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED prior=INTERCEPT_ERROR source=browser_fill\n`);
-        await noteToolDisposition({ tool: "browser_fill", surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
-        writeSyntheticErrorResponse("browser_fill", requestId, "ANTIGEN_TOOL_REQUIRED", "Antigen realistic browser_fill encountered a network error and QA hard mode forbids the untraced @playwright/mcp fallback.");
-        return;
-      }
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_type_fallback reason=INTERCEPT_ERROR source=browser_fill\n`);
-      await noteToolDisposition({ tool: "browser_fill", surface: "adapter_child_playwright", disposition: "raw_fallback", errorCode: "INTERCEPT_ERROR" });
+      return;
     }
-
-    child.stdin.write(line);
+    await handleExactSetValue(toolName, msg);
     return;
   }
 

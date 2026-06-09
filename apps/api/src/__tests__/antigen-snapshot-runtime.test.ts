@@ -79,6 +79,7 @@ import {
   computeEnabled,
   mapRawToCandidate,
   sanitizeContext,
+  sanitizeValueMeta,
   ANTIGEN_CANDIDATE_SELECTOR,
   type RawAntigenCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -516,7 +517,10 @@ describe("extraction — sensitive value protection", () => {
     const [c] = extractCandidates([el]);
     expect(c.name).toBe("Password");
     expect(JSON.stringify(c)).not.toContain("hunter2-SECRET");
-    expect(JSON.stringify(c)).not.toContain("value");
+    // value_meta is present (redacted): sensitive, present/length only — no raw value.
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.value).toBeUndefined();
+    expect(c.value_meta?.value_present).toBe(true);
   });
 
   it("excludes hidden inputs entirely and never reads their value", () => {
@@ -538,6 +542,41 @@ describe("extraction — sensitive value protection", () => {
     const [c] = extractCandidates([el]);
     expect(c.name).toBe("Card number");
     expect(JSON.stringify(c)).not.toContain("4111111111111111");
+    // Classified sensitive (payment) and value redacted to present/length only.
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.value).toBeUndefined();
+  });
+});
+
+// ─── 8b. Redacted current-value metadata (skip-aware exact fill) ──────────────
+
+describe("extraction — value_meta", () => {
+  it("captures the current value of a NON-sensitive text input", () => {
+    const el = makeEl({
+      tag: "input",
+      type: "text",
+      value: "Sebastian",
+      attrs: { "aria-label": "First name" },
+    });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.value_meta?.value).toBe("Sebastian");
+    expect(c.value_meta?.value_present).toBe(true);
+    expect(c.value_meta?.value_length).toBe(9);
+  });
+
+  it("reports value_present=false and no value for an empty input", () => {
+    const el = makeEl({ tag: "input", type: "text", value: "", attrs: { "aria-label": "City" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.value_meta?.value).toBeUndefined();
+    expect(c.value_meta?.value_present).toBe(false);
+    expect(c.value_meta?.value_length).toBe(0);
+  });
+
+  it("does not attach value_meta to buttons/links", () => {
+    const [btn] = extractCandidates([makeEl({ tag: "button", textContent: "Continue" })]);
+    expect(btn.value_meta).toBeUndefined();
   });
 });
 
@@ -617,7 +656,7 @@ describe("extraction — output hygiene", () => {
     const allowedKeys = new Set([
       "index", "tag", "kind", "role", "name", "normalized_name", "id",
       "href", "href_path", "visible", "enabled", "typeable", "clickable", "box",
-      "context",
+      "context", "value_meta",
     ]);
     for (const c of out) {
       for (const key of Object.keys(c)) {
@@ -859,6 +898,50 @@ describe("extraction — disambiguation context", () => {
     expect(expr).not.toContain("solhetta");
     expect(expr).not.toContain("tertial");
     expect(expr).not.toContain("add to bag");
+  });
+});
+
+describe("sanitizeValueMeta — defense-in-depth redaction", () => {
+  it("keeps value text for non-sensitive fields", () => {
+    const out = sanitizeValueMeta({
+      sensitive: false,
+      sensitivity: null,
+      value: "  Sebastian  ",
+      value_present: true,
+      value_length: 9,
+      required: true,
+    });
+    expect(out?.value).toBe("Sebastian");
+    expect(out?.value_present).toBe(true);
+    expect(out?.required).toBe(true);
+  });
+
+  it("HARD-DROPS value/selected_text/validation_message when sensitive (keeps present/length)", () => {
+    const out = sanitizeValueMeta({
+      sensitive: true,
+      sensitivity: "credential",
+      value: "hunter2",
+      selected_value: "secret",
+      selected_text: "secret label",
+      validation_message: "too short",
+      value_present: true,
+      value_length: 7,
+      readonly: true,
+    });
+    expect(out?.sensitive).toBe(true);
+    expect(out?.value).toBeUndefined();
+    expect(out?.selected_value).toBeUndefined();
+    expect(out?.selected_text).toBeUndefined();
+    expect(out?.validation_message).toBeUndefined();
+    expect(out?.value_present).toBe(true);
+    expect(out?.value_length).toBe(7);
+    expect(out?.readonly).toBe(true);
+    expect(JSON.stringify(out)).not.toContain("hunter2");
+  });
+
+  it("returns undefined for nullish input", () => {
+    expect(sanitizeValueMeta(null)).toBeUndefined();
+    expect(sanitizeValueMeta(undefined)).toBeUndefined();
   });
 });
 

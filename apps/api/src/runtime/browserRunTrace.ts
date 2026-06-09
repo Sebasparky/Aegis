@@ -42,6 +42,10 @@ export type BrowserTraceEventType =
   | "browser_scroll_to_ref"
   | "browser_click"
   | "browser_type"
+  // Exact-replacement field set (browser_set_value / browser_fill / browser_clear).
+  // Distinct from browser_type (append). Carries only tool + element_name +
+  // context + result_code/error_code — never the requested or actual value.
+  | "browser_set_value"
   // Rejected/orphan call: a runtime tool was invoked with a browser_runtime_id
   // that did not resolve to a live session (SESSION_NOT_FOUND). Recorded in the
   // route handler's !session branch — keyed by the supplied (stale) id — so a
@@ -393,6 +397,7 @@ const ANTIGEN_ACTION_EVENT_TYPES = new Set<BrowserTraceEventType>([
   "antigen_snapshot",
   "browser_click",
   "browser_type",
+  "browser_set_value",
 ]);
 
 /**

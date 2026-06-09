@@ -43,7 +43,19 @@ export function charCountBucket(len) {
  * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, submitMethod?: string, pointerPathPointCount?: number, pointerStartSource?: string, pointerStatePersisted?: boolean, ref?: string, version: string }} opts
  * @returns {string}
  */
-export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, ref, version }) {
+export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, ref, changed, verified, actualValue, elementKind, version }) {
+  if (toolName === "browser_fill" || toolName === "browser_set_value" || toolName === "browser_clear") {
+    // Exact-replacement result. Surfaces changed/verified and the read-back
+    // actual value (non-sensitive — the backend refuses sensitive fields). The
+    // agent should confirm verified=true and that actual matches its intent.
+    let s = `Antigen ${toolName} complete; path=set_value_success`;
+    if (changed !== undefined) s += `; changed=${changed}`;
+    if (verified !== undefined) s += `; verified=${verified}`;
+    if (elementKind !== undefined) s += `; element_kind=${elementKind}`;
+    if (typeof actualValue === "string") s += `; actual="${snapClean(actualValue, 200)}"`;
+    s += `; source=antigen-browser-adapter@${version}`;
+    return s;
+  }
   if (toolName === "browser_scroll_to_ref") {
     // Scroll-only recovery: the agent MUST take a new antigen_snapshot and click a
     // fresh in-viewport ref. No coordinates, box, or pointer metadata — none exist
@@ -215,14 +227,34 @@ export function buildAntigenSnapshotText(data, version) {
         const combined = snapClean(`${ctx.section ?? ""} ${ctx.label ?? ""}`, 120);
         if (combined) line += ` [context="${combined}"]`;
       }
+      // Allowlist-only current-value hint so the agent can SKIP already-correct
+      // fields. Sensitive fields show only present/length — never the value.
+      const v = el?.value;
+      if (v && typeof v === "object") {
+        const vparts = [];
+        if (v.sensitive === true) {
+          vparts.push(`present=${v.present === true}`);
+          if (typeof v.length === "number") vparts.push(`len=${v.length}`);
+          vparts.push("sensitive");
+        } else {
+          if (typeof v.text === "string") vparts.push(`current="${snapClean(v.text, 80)}"`);
+          else if (typeof v.selected_text === "string") vparts.push(`selected="${snapClean(v.selected_text, 80)}"`);
+          else if (typeof v.present === "boolean") vparts.push(`present=${v.present}`);
+          if (v.checked === true) vparts.push("checked");
+          if (v.required === true) vparts.push("required");
+          if (v.invalid === true) vparts.push("invalid");
+        }
+        if (vparts.length > 0) line += ` [value: ${vparts.join(", ")}]`;
+      }
       lines.push(line);
     }
   }
 
   lines.push("");
   lines.push(
-    "Use these refs with browser_click / browser_type / browser_scroll_to_ref" +
-    " (see each action's action_hint).",
+    "Use these refs with browser_click / browser_scroll_to_ref, browser_type" +
+    " (append/search only), and browser_fill / browser_set_value (exact form" +
+    " values). Skip fields whose [value: ...] already matches your intent.",
   );
 
   return lines.join("\n");

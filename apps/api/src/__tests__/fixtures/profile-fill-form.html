@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>profile fill fixture</title>
+  </head>
+  <body>
+    <!--
+      React-like controlled checkout form. The "model" (window.__model) is updated ONLY through
+      dispatched input/change events, and aria-invalid is recomputed on blur — mirroring a
+      controlled component whose validation keys off touched/blur. A protected profile fill must
+      drive the proper event sequence (native setter + focus/input/change/blur) for this to clear.
+      The phone validator requires exactly 10 national digits, so the raw country-code-inclusive
+      canonical (15551234567 → 11 digits) would be INVALID; the formatter must strip it.
+    -->
+    <form id="checkout">
+      <label for="phone">Phone number</label>
+      <input
+        id="phone"
+        name="phone"
+        type="tel"
+        autocomplete="tel"
+        maxlength="14"
+        placeholder="(555) 123-4567"
+        aria-invalid="true"
+        value=""
+      />
+
+      <label for="state">State</label>
+      <select id="state" name="state" autocomplete="address-level1" aria-invalid="true">
+        <option value="">Select a state</option>
+        <option value="OH">Ohio</option>
+        <option value="MI">Michigan</option>
+        <option value="CA">California</option>
+      </select>
+    </form>
+
+    <script>
+      window.__model = { phone: null, state: null };
+      (function () {
+        function digits(s) {
+          return (s || "").replace(/\D+/g, "");
+        }
+
+        var phone = document.getElementById("phone");
+        function validatePhone() {
+          var ok = digits(phone.value).length === 10;
+          phone.setAttribute("aria-invalid", ok ? "false" : "true");
+          return ok;
+        }
+        phone.addEventListener("input", function () {
+          window.__model.phone = phone.value;
+        });
+        phone.addEventListener("change", function () {
+          window.__model.phone = phone.value;
+        });
+        phone.addEventListener("blur", validatePhone);
+
+        var state = document.getElementById("state");
+        function validateState() {
+          var ok = state.selectedIndex > 0 && String(state.value).length > 0;
+          state.setAttribute("aria-invalid", ok ? "false" : "true");
+          return ok;
+        }
+        state.addEventListener("input", function () {
+          window.__model.state = state.value;
+        });
+        state.addEventListener("change", function () {
+          window.__model.state = state.value;
+          validateState();
+        });
+        state.addEventListener("blur", validateState);
+      })();
+    </script>
+  </body>
+</html>

@@ -62,8 +62,13 @@ export function findBestSelectOption(
   if (exact) return exact.value;
 
   const upper = rawValue.toUpperCase();
+  // Strip an ISO 3166-2 country prefix (e.g. "US-MI" → "MI") so US-MI / MI / Michigan
+  // all resolve to the same option.
+  const dashIdx = rawValue.indexOf("-");
+  const strippedUpper = dashIdx > 0 ? rawValue.slice(dashIdx + 1).toUpperCase() : upper;
   const alt =
     US_STATE_MAP[upper] ??
+    US_STATE_MAP[strippedUpper] ??
     US_STATE_REV_MAP[lower] ??
     COUNTRY_MAP[upper] ??
     COUNTRY_REV_MAP[lower];
@@ -77,6 +82,76 @@ export function findBestSelectOption(
   }
 
   return null;
+}
+
+/**
+ * Structural metadata about the resolved target field, used to format a canonical profile
+ * value into a representation the field will accept. Metadata only — never carries a value.
+ */
+export interface TargetFieldMeta {
+  type?: string; // input type, lowercased ("tel", "text", ...)
+  autocomplete?: string; // "tel" | "tel-national" | "tel-local" | ...
+  placeholder?: string; // may carry a mask, e.g. "(555) 123-4567" or "+1 ___ ___ ____"
+  maxlength?: number | null;
+  pattern?: string | null;
+}
+
+// A US national number is 10 digits, optionally prefixed by a "1" country code (11 digits).
+function toUsNationalDigits(digits: string): string | null {
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  return null;
+}
+
+// International format is only chosen on an explicit signal — a literal "+" in the mask/pattern,
+// or a number that is not a recognizable US national number. The common US-checkout case prefers
+// bare national digits, which masks (e.g. IKEA's "+1-___-___-____") format correctly themselves.
+function wantsInternationalPhone(meta: TargetFieldMeta): boolean {
+  const hay = `${meta.placeholder ?? ""} ${meta.pattern ?? ""}`;
+  return hay.includes("+");
+}
+
+/**
+ * Format a canonical profile value for a specific target field. Generic by kind; only `phone`
+ * has formatting logic in v1 (all other kinds pass through unchanged).
+ *
+ * Phone: the canonical seed is country-code-inclusive (e.g. "15551234567"). Injecting that raw
+ * into a national `tel` mask shifts the digits (the "+1-155-512-3456" corruption). This strips the
+ * US country code and emits either bare national digits (default, most checkout-compatible) or a
+ * mask-shaped string when the field advertises a formatted mask. International form is used only on
+ * an explicit "+" signal. The formatted value is consumed by CDP and never returned to the agent.
+ */
+export function formatProfileValueForTarget(
+  kind: ProfileFieldKind,
+  canonicalValue: string,
+  meta: TargetFieldMeta,
+): string {
+  if (kind !== "phone") return canonicalValue;
+  const raw = canonicalValue ?? "";
+  const digits = raw.replace(/\D+/g, "");
+  if (!digits) return canonicalValue;
+
+  const national = toUsNationalDigits(digits);
+  const intl = wantsInternationalPhone(meta);
+
+  if (intl) {
+    return national ? `+1${national}` : `+${digits}`;
+  }
+  if (!national) {
+    // Not a recognizable US national number and no international signal — return the digits as-is.
+    return digits;
+  }
+
+  // US national. Shape it from the field's mask when one is advertised; otherwise bare digits.
+  const a = national.slice(0, 3);
+  const b = national.slice(3, 6);
+  const c = national.slice(6, 10);
+  const mask = `${meta.placeholder ?? ""} ${meta.pattern ?? ""}`;
+  if (/\(/.test(mask) && /\)/.test(mask)) return `(${a}) ${b}-${c}`;
+  if (/-/.test(mask)) return `${a}-${b}-${c}`;
+  if (/\./.test(mask)) return `${a}.${b}.${c}`;
+  // Default: bare national digits. Masks that auto-prepend "+1" format these correctly themselves.
+  return national;
 }
 
 // Reuse same dangerous-selector rules as paymentCardFill.ts — profile fill targets input fields only.
@@ -164,6 +239,8 @@ export interface ProfileFieldCandidate {
   label_text: string; // lowercased accessible label text
   aria_label: string; // lowercased
   section_text: string; // lowercased nearest legend/section text
+  maxlength: number | null; // maxlength attribute (used for value formatting; never a value)
+  pattern: string; // pattern attribute, clipped (used for value formatting; never a value)
 }
 
 export interface ProfileFieldHints {
@@ -464,7 +541,9 @@ const ENUMERATE_CANDIDATES_JS = `(function() {
       placeholder: clip(el.getAttribute('placeholder'), 120),
       label_text: clip(labelText, 120),
       aria_label: clip(el.getAttribute('aria-label'), 120),
-      section_text: clip(sectionText, 80)
+      section_text: clip(sectionText, 80),
+      maxlength: (function() { var m = el.getAttribute('maxlength'); var v = m ? parseInt(m, 10) : NaN; return isNaN(v) ? null : v; })(),
+      pattern: (el.getAttribute('pattern') || '').slice(0, 120)
     });
   }
   return out;
@@ -561,6 +640,10 @@ export async function executeProfileFieldFillViaCDP(
       // Stable selector for the current field, set once after the resolve phase and reused by every
       // downstream eval so id regeneration between evals cannot break the fill.
       let currentSelectorExpr = "null";
+      // Field-aware formatted value for the current field, computed once in the resolve phase from
+      // the matched candidate's metadata (e.g. phone country-code stripping / mask shaping). This is
+      // what gets injected; the raw canonical is still used only for the masked agent summary.
+      let currentFillValue = "";
 
       // Track CDP command IDs for unambiguous response routing.
       let attachMsgId: number | null = null;
@@ -678,12 +761,17 @@ export async function executeProfileFieldFillViaCDP(
           const field = fields[fieldIdx];
           const selectorExpr = currentSelectorExpr;
           if (msg.error) {
-            // Input.insertText not supported — fall back to setter fill (value embedded in JS).
-            const resolvedValue = resolvedValues.get(field.key) ?? "";
+            // Input.insertText not supported — fall back to native-setter fill (value embedded in JS).
+            // Drive the full controlled-component sequence (focus→input→change→blur) so React/Vue
+            // validators refresh. Use the field-aware formatted value, not the raw canonical.
+            const resolvedValue = currentFillValue;
             const setterFallbackExpr = `(function() {
               var el = ${selectorExpr};
               if (!el) return { ok: false, reason: 'element not found' };
-              var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+              try { el.focus(); } catch (e) {}
+              el.dispatchEvent(new Event('focus', { bubbles: true }));
+              var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
               setter.call(el, ${JSON.stringify(resolvedValue)});
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -725,6 +813,16 @@ export async function executeProfileFieldFillViaCDP(
               recordNotFound(resolution.reason ?? "NO_CONFIDENT_MATCH");
               return;
             }
+            // Format the canonical value for THIS field using the matched candidate's metadata
+            // (e.g. phone country-code stripping / mask shaping). Raw canonical stays for masking.
+            const matched = descriptors.find((d) => d.fill_id === resolution.fill_id);
+            currentFillValue = formatProfileValueForTarget(field.key, resolvedValues.get(field.key) ?? "", {
+              type: matched?.type,
+              autocomplete: matched?.autocomplete,
+              placeholder: matched?.placeholder,
+              maxlength: matched?.maxlength ?? null,
+              pattern: matched?.pattern ?? null,
+            });
             currentSelectorExpr = fillIdSelectorExpr(resolution.fill_id);
             // Include tagName so the next handler can branch on SELECT vs INPUT.
             const iframeCheck = `(function() {
@@ -750,11 +848,13 @@ export async function executeProfileFieldFillViaCDP(
               return;
             }
             const selectorExpr = currentSelectorExpr;
-            const resolvedValue = resolvedValues.get(field.key) ?? "";
+            const resolvedValue = currentFillValue;
 
             if (val.tagName === "SELECT") {
-              // SELECT element — use existing setter fill (no realistic typing needed for dropdowns).
-              // No DOM value masking — leave field value intact so checkout pages can read and submit it.
+              // SELECT element — select the actual option (value + selectedIndex), then drive the
+              // full controlled-component event sequence (focus→input→change→blur) so React/Vue
+              // validators that key off "touched"/blur clear. Read back to verify the option truly
+              // committed; never fake success. No DOM value masking — checkout pages must read it.
               const selectFillExpr = `(function() {
                 var el = ${selectorExpr};
                 if (!el) return { ok: false, reason: 'element not found' };
@@ -765,27 +865,37 @@ export async function executeProfileFieldFillViaCDP(
                 var countryRevMap = ${JSON.stringify(COUNTRY_REV_MAP)};
                 var lower = rawVal.toLowerCase().trim();
                 var upper = rawVal.toUpperCase();
-                var opts = Array.from(el.options).map(function(o) { return { value: o.value, text: o.text }; });
-                var match = opts.find(function(o) {
-                  return o.value.toLowerCase() === lower || o.text.toLowerCase().trim() === lower;
-                });
-                if (!match) {
-                  var alt = stateMap[upper] || stateRevMap[lower] || countryMap[upper] || countryRevMap[lower];
-                  if (alt) {
-                    var altLow = alt.toLowerCase().trim();
-                    match = opts.find(function(o) {
-                      return o.value.toLowerCase() === altLow || o.text.toLowerCase().trim() === altLow;
-                    });
+                var dashIdx = rawVal.indexOf('-');
+                var strippedUpper = dashIdx > 0 ? rawVal.slice(dashIdx + 1).toUpperCase() : upper;
+                var opts = Array.from(el.options);
+                function findIdx(needle) {
+                  for (var k = 0; k < opts.length; k++) {
+                    var o = opts[k];
+                    if (String(o.value).toLowerCase() === needle || String(o.text).toLowerCase().trim() === needle) return k;
                   }
+                  return -1;
                 }
-                if (!match) return { ok: false, reason: 'select_option_not_found' };
+                var idx = findIdx(lower);
+                if (idx === -1) {
+                  var alt = stateMap[upper] || stateMap[strippedUpper] || stateRevMap[lower] || countryMap[upper] || countryRevMap[lower];
+                  if (alt) idx = findIdx(alt.toLowerCase().trim());
+                }
+                if (idx === -1) return { ok: false, reason: 'select_option_not_found' };
+                var match = opts[idx];
+                try { el.focus(); } catch (e) {}
+                el.dispatchEvent(new Event('focus', { bubbles: true }));
+                el.selectedIndex = idx;
                 var sel = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
                 if (sel && sel.set) { sel.set.call(el, match.value); } else { el.value = match.value; }
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 el.dispatchEvent(new Event('blur', { bubbles: true }));
                 el.setAttribute('data-antigen-filled', 'true');
-                return { ok: true };
+                // Read back: the option must actually be committed (non-placeholder).
+                var committed = (el.value === match.value) && (el.selectedIndex === idx) && el.selectedIndex >= 0 && String(match.value).length > 0;
+                var ariaInvalid = el.getAttribute('aria-invalid') === 'true';
+                if (!committed) return { ok: false, reason: 'select_commit_unverified' };
+                return { ok: true, verified: true, aria_invalid: ariaInvalid };
               })()`;
               phase = "select_fill";
               send("Runtime.evaluate", { expression: selectFillExpr, returnByValue: true }, sessionId);
@@ -924,7 +1034,9 @@ export async function executeProfileFieldFillViaCDP(
               return;
             }
             // Focus succeeded — type via Input.insertText (value in CDP params, not JS expression).
-            const resolvedValue = resolvedValues.get(field.key) ?? "";
+            // Use the field-aware formatted value (e.g. national phone digits) so masked checkout
+            // inputs format correctly instead of shifting the country code.
+            const resolvedValue = currentFillValue;
             phase = "input_insert";
             insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
             return;

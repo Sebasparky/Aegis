@@ -197,6 +197,8 @@ export interface ExternalAntigenSnapshotElement {
    */
   value?: {
     present?: boolean;
+    /** Value is only a mask/placeholder template, not a real value. When true, `present` is false. */
+    placeholder_only?: boolean;
     length?: number;
     text?: string;
     selected_value?: string | null;
@@ -476,6 +478,7 @@ export function toExternalAntigenSnapshotElement(
     const value: NonNullable<ExternalAntigenSnapshotElement["value"]> = { sensitive };
     if (typeof vm.value_present === "boolean") value.present = vm.value_present;
     if (typeof vm.value_length === "number") value.length = vm.value_length;
+    if (vm.value_placeholder_only === true) value.placeholder_only = true;
     if (typeof vm.checked === "boolean") value.checked = vm.checked;
     if (vm.required === true) value.required = true;
     if (vm.readonly === true) value.readonly = true;

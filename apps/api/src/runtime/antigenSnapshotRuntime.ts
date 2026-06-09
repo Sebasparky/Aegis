@@ -121,6 +121,12 @@ export interface AntigenRawValueMeta {
   value_present?: boolean;
   /** Current value length. Safe for sensitive fields — carries no content. */
   value_length?: number;
+  /**
+   * True when the field's value is only a mask/placeholder template (e.g.
+   * "+1-___-___-____") or formatting, not a real user-provided value. When set,
+   * value_present is false. Carries no content — safe for sensitive fields.
+   */
+  value_placeholder_only?: boolean;
   /** <select> currently-selected option value (non-sensitive only). */
   selected_value?: string | null;
   /** <select> currently-selected option visible text (non-sensitive only, clipped). */
@@ -330,6 +336,7 @@ export function sanitizeValueMeta(
   };
   if (typeof raw.value_present === "boolean") out.value_present = raw.value_present;
   if (typeof raw.value_length === "number" && raw.value_length >= 0) out.value_length = raw.value_length;
+  if (raw.value_placeholder_only === true) out.value_placeholder_only = true;
   if (typeof raw.checked === "boolean") out.checked = raw.checked;
   if (raw.required === true) out.required = true;
   if (raw.readonly === true) out.readonly = true;
@@ -603,6 +610,24 @@ export function buildAntigenExtractionExpr(opts: {
       if(/card|payment|billing|checkout/.test(combined)) return 'payment';
       return null;
     }
+    // ─── Mask / placeholder detection (skip-aware exact fill) ──────────────
+    // An input-mask library writes its template into .value (e.g. a phone field
+    // shows "+1-___-___-____"). That is NOT a user-provided value, so it must
+    // not count as "filled". Returns true when the value is empty, an unfilled
+    // or partially-filled mask, or formatting-only. Only the derived boolean
+    // escapes the page, so this is safe to run on sensitive fields too.
+    function isPlaceholderOnlyValue(s){
+      if(s==null) return true;
+      if(s.replace(/\\s/g,'').length===0) return true; // empty / whitespace-only
+      // Unfilled mask slots: a run of underscores, or an underscore next to a
+      // mask separator. Guard: never apply to emails/usernames (they may carry a
+      // single embedded underscore between alphanumerics, e.g. a_b@example.com).
+      if(s.indexOf('@')===-1 && (/_{2,}/.test(s) || /[_][\\s\\-)\\/.]|[\\s\\-(\\/.][_]/.test(s))) return true;
+      // Formatting / placeholder-glyph only (no real alphanumeric content left).
+      var stripped=s.replace(/[\\s\\-()+.\\/_#•]/g,'');
+      if(!/[0-9a-z]/i.test(stripped)) return true;
+      return false;
+    }
     function valueMetaOf(el,tag,type,editable){
       var isInput=tag==='input', isTextarea=tag==='textarea', isSelect=tag==='select';
       if(!(isInput||isTextarea||isSelect||editable)) return null;
@@ -640,8 +665,12 @@ export function buildAntigenExtractionExpr(opts: {
       // text input / textarea / contenteditable
       var cur='';
       try{ cur=editable?(el.innerText!=null?String(el.innerText):(el.textContent||'')):(el.value!=null?String(el.value):''); }catch(e){ cur=''; }
-      meta.value_present=cur.length>0;
+      var placeholderOnly=false; try{ placeholderOnly=isPlaceholderOnlyValue(cur); }catch(e){ placeholderOnly=false; }
+      // A field is "present" only when it holds a real, complete value — a mask
+      // template / unfilled placeholder does not count. value_length stays raw.
+      meta.value_present=cur.length>0&&!placeholderOnly;
       meta.value_length=cur.length;
+      if(cur.length>0&&placeholderOnly) meta.value_placeholder_only=true;
       if(!sensitive){
         var cv=txt(cur); if(cv) meta.value=clip(cv,VALUE_MAX);
         try{ var vm=el.validationMessage; if(vm){ var vmt=txt(vm); if(vmt) meta.validation_message=clip(vmt,VALIDATION_MAX); } }catch(e){}

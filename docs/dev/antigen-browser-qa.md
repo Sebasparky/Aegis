@@ -340,6 +340,26 @@ proven.** Do not claim payment entry or place-order protection has been tested.
 fresh ids every 2.5s while keeping labels/placeholders/autocomplete stable — use it to demonstrate
 the executor resolves fields that a fixed-id selector or generic `browser_type` would miss.
 
+**Seeded profile data (no mid-run prompt):** `seedProfileMemory()` in
+`apps/api/src/store/persistence.ts` auto-seeds **fake, regression-safe** profile values for
+`user_001` on **every** API start — including the load-from-existing-store path (it is idempotent by
+`user_id`+`field_kind`, so it never overwrites a value you supplied via the missing-value prompt).
+Seeded fields: `first_name=Alex`, `last_name=Demo`, `email=alex@aegisdemo.local`,
+`phone=15551234567`, `shipping_address_line1=123 Main St`, `city=Ann Arbor`, `region=MI`,
+`postal_code=48104`, `country=US`. These are fake test values only — never real PII. Raw values are
+KMS-encrypted and flow **only** through the protected CDP profile-fill path
+(`request_profile_field_fill` → `execute_profile_field_fill`); the agent receives masked summaries
+and `raw_profile_value_revealed_to_agent: false`. Because of this, the IKEA checkout smoke should get
+`status: "pending"` (a real `fill_request_id`) — **not** `pending_user` — for these fields and must
+not prompt you mid-run.
+
+**Masked / placeholder values are not "filled":** the snapshot reports `value.present: false`
+(and `value.placeholder_only: true`) for input-mask templates such as `+1-___-___-____`, partially
+filled masks (`+1-555-___-____`), and formatting-only values. A field counts as filled only when it
+holds a real, complete value. `value.length` is still the raw length, and emails/usernames with an
+embedded underscore (`a_b@example.com`) are **not** misclassified. This only changes what the
+snapshot reports — `browser_set_value`/`browser_fill` exact-replacement + idempotency are unchanged.
+
 ---
 
 ## Next QA milestone

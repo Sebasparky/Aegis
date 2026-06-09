@@ -52,7 +52,7 @@ import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } fro
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
-import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
+import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
 import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
@@ -69,7 +69,9 @@ import {
   classifyLogicalRecoveryEligibility,
   recoverAntigenRefBox,
   sanitizeStaleReason,
+  mapTtlRecoveryFailureReason,
   type AntigenRecoveryState,
+  type AntigenTtlRecoveryState,
 } from "../runtime/antigenLogicalRecovery.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
@@ -3712,16 +3714,36 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
       }
+      // TTL-expiry recovery (gated by the SAME ANTIGEN_LOGICAL_REF_RECOVERY flag).
+      // Elapsed time never authorizes the action. Flag off OR element already
+      // GC'd ⇒ keep the strict hard-fail (byte-for-byte current behavior). Flag
+      // on AND the element survives ⇒ mark ttlExpired and force the ref through
+      // the SAME safety stack below (action gate, live-URL guard, Phase 4B,
+      // logical recovery); only a fully-validated dispatch refreshes the lease.
+      let ttlExpired = false;
       if (resolution.status === "expired") {
-        recordBrowserTraceEvent(session.browser_session_id, {
-          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
-          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
-          pointer_dispatch: false, error_code: "ANTIGEN_REF_EXPIRED",
-        });
-        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+        if (!isLogicalRefRecoveryEnabled() || !resolution.element) {
+          recordBrowserTraceEvent(session.browser_session_id, {
+            event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+            tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+            pointer_dispatch: false, error_code: "ANTIGEN_REF_EXPIRED",
+          });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+        }
+        ttlExpired = true;
       }
 
       const el = resolution.element;
+      const snapshotUrl = resolution.snapshot_url ?? null;
+      const snapshotId = resolution.snapshot_id;
+      if (!el) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_NOT_FOUND",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+      }
       if (!el.enabled || !el.clickable || el.box.width <= 0 || el.box.height <= 0) {
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_click", browser_runtime_id: session.browser_session_id,
@@ -3766,6 +3788,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }),
         session.risk_state,
       );
+      // Expired ref + sensitive/final target: never dispatch from stale metadata,
+      // and do NOT route an expired ref to a handoff (its classification can no
+      // longer be trusted). Fail closed and require a fresh snapshot so the action
+      // is re-classified. For clicks the gate only ever returns `allowed_*` or
+      // `blocked_by_antigen_platform`, so anything non-allowed here is sensitive.
+      if (ttlExpired && gate.disposition !== "allowed_without_user_prompt") {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_click", browser_runtime_id: session.browser_session_id,
+          tool: "browser_click", click_path: "ag_ref", ref: refRaw,
+          element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
+          pointer_dispatch: false, error_code: "ANTIGEN_REF_EXPIRED",
+          action_intent: gate.action_intent, ttl_recovery_state: "sensitive_requires_fresh_ref",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "This Antigen ref expired and the target is a sensitive or final action. Take a fresh antigen_snapshot so the action can be re-classified before acting.", ttl_recovery_state: "sensitive_requires_fresh_ref" } });
+      }
       if (gate.disposition === "blocked_by_antigen_platform") {
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_tool_disposition",
@@ -3796,7 +3833,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         userId: MOCK_USER_ID,
         debugOverlay: resolveOverlayEnabled(session),
         // Live-URL guard: fail closed if the page navigated since the snapshot.
-        expectedUrl: resolution.snapshot_url,
+        expectedUrl: snapshotUrl,
         expected,
       });
 
@@ -3822,7 +3859,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           const recovery = await recoverAntigenRefBox({
             cdpUrl: session.cdp_url,
             expected,
-            expectedUrl: resolution.snapshot_url,
+            expectedUrl: snapshotUrl,
             riskClass: eligibility.risk_class,
           });
           if (recovery.status === "recovered") {
@@ -3834,7 +3871,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               sessionId: session.browser_session_id,
               userId: MOCK_USER_ID,
               debugOverlay: resolveOverlayEnabled(session),
-              expectedUrl: resolution.snapshot_url,
+              expectedUrl: snapshotUrl,
               expected,
             });
             if (retry.success) {
@@ -3871,6 +3908,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           failCode === "ANTIGEN_REF_STALE" || failCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
             ? sanitizeStaleReason(refResult.stale_reason)
             : undefined;
+        // An expired ref that failed re-validation: surface why the meaning changed
+        // (page_changed / semantic_mismatch / generic). Time alone never recovers.
+        const ttlFail: AntigenTtlRecoveryState | undefined = ttlExpired
+          ? mapTtlRecoveryFailureReason(refResult.error)
+          : undefined;
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_click", browser_runtime_id: session.browser_session_id,
           tool: "browser_click", click_path: "ag_ref", ref: refRaw,
@@ -3878,18 +3920,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           pointer_dispatch: false, error_code: failCode,
           ...(failCode === "ANTIGEN_REF_STALE" ? { recovery_state: recoveryState } : {}),
           ...(staleSignal ? { stale_reason: staleSignal.stale_reason } : {}),
+          ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
         });
+        const ttlFailField = ttlFail ? { ttl_recovery_state: ttlFail } : {};
         if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot.", ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...(staleSignal ?? {}) } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...(staleSignal ?? {}), ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...(staleSignal ?? {}), recovery_state: recoveryState } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...(staleSignal ?? {}), recovery_state: recoveryState, ...ttlFailField } });
         }
         const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
-        return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed." } });
+        return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed.", ...ttlFailField } });
       }
 
       // Refresh session.current_url so the next Antigen snapshot is not stale after a
@@ -3898,6 +3942,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         setTaskBrowserSessionCurrentUrl(session.browser_session_id, refResult.current_url);
       }
 
+      // Lease refresh: only after a fully-validated dispatch, and only when the
+      // recovery flag is on. Keeps an actively-used ref alive so a live flow rarely
+      // hits the TTL; idle refs still GC at the bound. `ttl_recovery_state` is
+      // surfaced only when this success came from a TTL-expired ref.
+      const leaseRefreshed = isLogicalRefRecoveryEnabled() && snapshotId
+        ? refreshAntigenSnapshotLease(snapshotId, MOCK_USER_ID)
+        : false;
+      const ttlRecovered = ttlExpired && leaseRefreshed;
+
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_click", browser_runtime_id: session.browser_session_id,
         tool: "browser_click", click_path: "ag_ref", ref: refRaw,
@@ -3905,6 +3958,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         pointer_dispatch: true, result_code: "realistic_success",
         url_after: sanitizeTraceUrl(refResult.current_url),
         ...(recoveryState === "recovered" ? { recovery_state: recoveryState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
+        ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
       });
 
       return reply.send({
@@ -3923,6 +3977,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                 ...(recoveredFromStaleReason ? { recovered_from_stale_reason: recoveredFromStaleReason.stale_reason } : {}),
               }
             : {}),
+          ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
         },
       });
     }
@@ -4076,16 +4131,33 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
     }
+    // TTL-expiry recovery (same ANTIGEN_LOGICAL_REF_RECOVERY flag). Scroll is a
+    // non-mutating, low-risk action; an expired-but-present ref is re-validated by
+    // the live-URL guard only (no Phase 4B for scroll). Flag off / element GC'd ⇒
+    // strict hard-fail. A validated scroll refreshes the lease.
+    let ttlExpired = false;
     if (resolution.status === "expired") {
-      recordBrowserTraceEvent(session.browser_session_id, {
-        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
-        tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_EXPIRED",
-      });
-      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      if (!isLogicalRefRecoveryEnabled() || !resolution.element) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+          tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_EXPIRED",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      }
+      ttlExpired = true;
     }
 
     // A scrollable ref needs a positive-dimension box and document-space geometry.
     const el = resolution.element;
+    const snapshotUrl = resolution.snapshot_url ?? null;
+    const snapshotId = resolution.snapshot_id;
+    if (!el) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
+        tool: "browser_scroll_to_ref", ref: refRaw, error_code: "ANTIGEN_REF_NOT_FOUND",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+    }
     if (el.box.width <= 0 || el.box.height <= 0 || !Number.isFinite(el.box.doc_y)) {
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
@@ -4102,26 +4174,38 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       userId: MOCK_USER_ID,
       // Live-URL guard: fail closed if the page navigated since the snapshot, so a
       // scroll never proceeds on a page that click/type would reject.
-      expectedUrl: resolution.snapshot_url,
+      expectedUrl: snapshotUrl,
     });
 
     if (!scrollResult.success) {
       const scrollFailCode = scrollResult.error === "ANTIGEN_REF_PAGE_CHANGED" ? "ANTIGEN_REF_PAGE_CHANGED" : "ANTIGEN_SCROLL_FAILED";
+      const ttlFail: AntigenTtlRecoveryState | undefined = ttlExpired
+        ? mapTtlRecoveryFailureReason(scrollResult.error)
+        : undefined;
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
         tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
         context: el.context, error_code: scrollFailCode,
+        ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
       });
+      const ttlFailField = ttlFail ? { ttl_recovery_state: ttlFail } : {};
       if (scrollResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
-        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot.", ...ttlFailField } });
       }
-      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_SCROLL_FAILED", message: "Antigen could not scroll the ref into view. Take a fresh antigen_snapshot and retry." } });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_SCROLL_FAILED", message: "Antigen could not scroll the ref into view. Take a fresh antigen_snapshot and retry.", ...ttlFailField } });
     }
+
+    // Lease refresh: only after a validated scroll, and only when the flag is on.
+    const leaseRefreshed = isLogicalRefRecoveryEnabled() && snapshotId
+      ? refreshAntigenSnapshotLease(snapshotId, MOCK_USER_ID)
+      : false;
+    const ttlRecovered = ttlExpired && leaseRefreshed;
 
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "browser_scroll_to_ref", browser_runtime_id: session.browser_session_id,
       tool: "browser_scroll_to_ref", ref: refRaw, element_name: el.name,
       context: el.context, result_code: "scroll_to_ref_success",
+      ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
     });
 
     // Success is intentionally minimal: the agent must take a NEW antigen_snapshot
@@ -4131,6 +4215,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       data: {
         mode: "scroll_to_ref",
         hint: "take_new_snapshot",
+        ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
       },
     });
   });
@@ -4211,16 +4296,35 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
       }
+      // TTL-expiry recovery (same ANTIGEN_LOGICAL_REF_RECOVERY flag). Flag off /
+      // element GC'd ⇒ strict hard-fail. Flag on + element present ⇒ mark
+      // ttlExpired and force the ref through the live-URL guard + Phase 4B below;
+      // sensitive fields are refused outright (fresh ref required), and only a
+      // validated keystroke dispatch refreshes the lease.
+      let ttlExpired = false;
       if (resolution.status === "expired") {
-        recordBrowserTraceEvent(session.browser_session_id, {
-          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
-          tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
-          error_code: "ANTIGEN_REF_EXPIRED",
-        });
-        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+        if (!isLogicalRefRecoveryEnabled() || !resolution.element) {
+          recordBrowserTraceEvent(session.browser_session_id, {
+            event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+            tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
+            error_code: "ANTIGEN_REF_EXPIRED",
+          });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+        }
+        ttlExpired = true;
       }
 
       const el = resolution.element;
+      const snapshotUrl = resolution.snapshot_url ?? null;
+      const snapshotId = resolution.snapshot_id;
+      if (!el) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_NOT_FOUND",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+      }
       if (!el.enabled || !el.typeable || el.box.width <= 0 || el.box.height <= 0) {
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_type", browser_runtime_id: session.browser_session_id,
@@ -4229,6 +4333,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           error_code: "ANTIGEN_REF_NOT_TYPEABLE",
         });
         return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_TYPEABLE", message: `Antigen ref '${refRaw}' is not a typeable field. Take a fresh antigen_snapshot and use a typeable ref.` } });
+      }
+
+      // Expired ref into a sensitive field: fail closed with the explicit
+      // fresh-ref signal. (Non-expired sensitive fields are refused below by the
+      // generic sensitive boundary; an expired sensitive ref must never recover.)
+      if (ttlExpired && el.value_meta?.sensitive === true) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+          tool: "browser_type", submit: submitFlag, element_name: el.name, context: el.context,
+          href_path: el.href_path ?? undefined, pointer_dispatch: false,
+          error_code: "ANTIGEN_REF_EXPIRED", ttl_recovery_state: "sensitive_requires_fresh_ref",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "This Antigen ref expired and targets a sensitive field. Sensitive values go through Aegis injection — take a fresh antigen_snapshot.", ttl_recovery_state: "sensitive_requires_fresh_ref" } });
       }
 
       // SENSITIVE BOUNDARY: never append keystrokes into a credential/payment/identity/
@@ -4255,7 +4372,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         submit: submitFlag,
         debugOverlay: resolveOverlayEnabled(session),
         // Live-URL guard: fail closed if the page navigated since the snapshot.
-        expectedUrl: resolution.snapshot_url,
+        expectedUrl: snapshotUrl,
         // Phase 4B: snapshot metadata for live-element revalidation before typing.
         expected: {
           tag: el.tag,
@@ -4276,23 +4393,34 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           : refResult.error === "ANTIGEN_REF_STALE" ? "ANTIGEN_REF_STALE"
           : refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED"
           : "REALISTIC_TYPE_FAILED";
+        const ttlFail: AntigenTtlRecoveryState | undefined = ttlExpired
+          ? mapTtlRecoveryFailureReason(refResult.error)
+          : undefined;
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_type", browser_runtime_id: session.browser_session_id,
           tool: "browser_type", submit: submitFlag, char_count_bucket: refResult.char_count_bucket,
           element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
           pointer_dispatch: false, error_code: failCode,
+          ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
         });
+        const ttlFailField = ttlFail ? { ttl_recovery_state: ttlFail } : {};
         if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot.", ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_OUT_OF_VIEWPORT") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry." } });
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...ttlFailField } });
         }
-        return reply.status(422).send({ ok: false, error: { code: failCode, message: refResult.error ?? "Realistic typing failed." }, data: { char_count_bucket: refResult.char_count_bucket, duration_ms: refResult.duration_ms } });
+        return reply.status(422).send({ ok: false, error: { code: failCode, message: refResult.error ?? "Realistic typing failed.", ...ttlFailField }, data: { char_count_bucket: refResult.char_count_bucket, duration_ms: refResult.duration_ms } });
       }
+
+      // Lease refresh: only after a validated keystroke dispatch, flag-gated.
+      const leaseRefreshed = isLogicalRefRecoveryEnabled() && snapshotId
+        ? refreshAntigenSnapshotLease(snapshotId, MOCK_USER_ID)
+        : false;
+      const ttlRecovered = ttlExpired && leaseRefreshed;
 
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_type", browser_runtime_id: session.browser_session_id,
@@ -4301,6 +4429,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
         pointer_dispatch: refResult.pointer_path_point_count !== undefined,
         result_code: "realistic_type_success",
+        ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
       });
 
       return reply.send({
@@ -4314,6 +4443,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(refResult.pointer_path_point_count !== undefined ? { pointer_path_point_count: refResult.pointer_path_point_count } : {}),
           ...(refResult.pointer_start_source !== undefined ? { pointer_start_source: refResult.pointer_start_source } : {}),
           ...(refResult.pointer_state_persisted !== undefined ? { pointer_state_persisted: refResult.pointer_state_persisted } : {}),
+          ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
         },
       });
     }
@@ -4441,15 +4571,33 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
     }
+    // TTL-expiry recovery (same ANTIGEN_LOGICAL_REF_RECOVERY flag). Flag off /
+    // element GC'd ⇒ strict hard-fail. Flag on + element present ⇒ mark ttlExpired
+    // and force the ref through the live-URL guard + Phase 4B exact read-back
+    // below; sensitive fields are refused (fresh ref required), and only a
+    // validated set refreshes the lease.
+    let ttlExpired = false;
     if (resolution.status === "expired") {
-      recordBrowserTraceEvent(session.browser_session_id, {
-        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
-        tool: "browser_set_value", error_code: "ANTIGEN_REF_EXPIRED",
-      });
-      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      if (!isLogicalRefRecoveryEnabled() || !resolution.element) {
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+          tool: "browser_set_value", error_code: "ANTIGEN_REF_EXPIRED",
+        });
+        return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "The Antigen snapshot has expired. Take a fresh antigen_snapshot." } });
+      }
+      ttlExpired = true;
     }
 
     const el = resolution.element;
+    const snapshotUrl = resolution.snapshot_url ?? null;
+    const snapshotId = resolution.snapshot_id;
+    if (!el) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", error_code: "ANTIGEN_REF_NOT_FOUND",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_NOT_FOUND", message: `Antigen ref '${refRaw}' was not found in the latest snapshot. Take a fresh antigen_snapshot.` } });
+    }
     const fillableKinds = new Set(["input", "textarea", "select", "editable"]);
     if (!fillableKinds.has(el.kind) || !el.enabled || el.box.width <= 0 || el.box.height <= 0) {
       recordBrowserTraceEvent(session.browser_session_id, {
@@ -4458,6 +4606,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         error_code: "NOT_FILLABLE",
       });
       return reply.status(422).send({ ok: false, error: { code: "NOT_FILLABLE", message: `Antigen ref '${refRaw}' is not an exact-fillable field (input/textarea/select). Take a fresh antigen_snapshot and use a fillable ref.` } });
+    }
+
+    // Expired ref into a sensitive field: fail closed with the explicit fresh-ref
+    // signal (an expired sensitive ref must never recover, even before the generic
+    // injection-required refusal below).
+    if (ttlExpired && el.value_meta?.sensitive === true) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+        tool: "browser_set_value", element_name: el.name, context: el.context,
+        error_code: "ANTIGEN_REF_EXPIRED", ttl_recovery_state: "sensitive_requires_fresh_ref",
+      });
+      return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_EXPIRED", message: "This Antigen ref expired and targets a sensitive field. Sensitive values go through Aegis injection — take a fresh antigen_snapshot.", ttl_recovery_state: "sensitive_requires_fresh_ref" } });
     }
 
     // SENSITIVE BOUNDARY: never exact-fill a credential/payment/identity/financial
@@ -4481,7 +4641,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       selectByLabel,
       sessionId: session.browser_session_id,
       userId: MOCK_USER_ID,
-      expectedUrl: resolution.snapshot_url,
+      expectedUrl: snapshotUrl,
       expected: {
         tag: el.tag,
         kind: el.kind,
@@ -4501,10 +4661,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         : setResult.error === "ELEMENT_DETACHED" ? "ELEMENT_DETACHED"
         : setResult.error === "VALUE_MISMATCH" ? "VALUE_MISMATCH"
         : "SET_VALUE_FAILED";
+      const ttlFail: AntigenTtlRecoveryState | undefined = ttlExpired
+        ? mapTtlRecoveryFailureReason(setResult.error)
+        : undefined;
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
         tool: "browser_set_value", element_name: el.name, context: el.context,
         error_code: failCode,
+        ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
       });
       const messages: Record<string, string> = {
         ANTIGEN_REF_PAGE_CHANGED: "The page changed since this snapshot. Take a fresh antigen_snapshot.",
@@ -4516,7 +4680,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       };
       return reply.status(422).send({
         ok: false,
-        error: { code: failCode, message: messages[failCode] ?? "Exact field set failed." },
+        error: { code: failCode, message: messages[failCode] ?? "Exact field set failed.", ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}) },
         data: {
           ...(setResult.changed !== undefined ? { changed: setResult.changed } : {}),
           ...(setResult.verified !== undefined ? { verified: setResult.verified } : {}),
@@ -4528,10 +4692,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
     }
 
+    // Lease refresh: only after a validated exact set, flag-gated.
+    const leaseRefreshed = isLogicalRefRecoveryEnabled() && snapshotId
+      ? refreshAntigenSnapshotLease(snapshotId, MOCK_USER_ID)
+      : false;
+    const ttlRecovered = ttlExpired && leaseRefreshed;
+
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
       tool: "browser_set_value", element_name: el.name, context: el.context,
       result_code: "set_value_success",
+      ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
     });
 
     return reply.send({
@@ -4543,6 +4714,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         actual_value: setResult.actual_value ?? body.value,
         ...(setResult.element_kind !== undefined ? { element_kind: setResult.element_kind } : {}),
         duration_ms: setResult.duration_ms,
+        ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
       },
     });
   });

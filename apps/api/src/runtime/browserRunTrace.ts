@@ -22,8 +22,10 @@ import type { ActionIntent } from "@aegis/types";
 import {
   ANTIGEN_RECOVERY_STATES,
   ANTIGEN_SANITIZED_STALE_REASONS,
+  ANTIGEN_TTL_RECOVERY_STATES,
   type AntigenRecoveryState,
   type AntigenSanitizedStaleReason,
+  type AntigenTtlRecoveryState,
 } from "./antigenLogicalRecovery.js";
 
 const MAX_EVENTS_PER_SESSION = 200;
@@ -192,6 +194,11 @@ export interface BrowserTraceEvent {
   // coordinates, boxes, values, or internal matching details).
   recovery_state?: AntigenRecoveryState;
   stale_reason?: AntigenSanitizedStaleReason;
+  // TTL-expiry recovery disposition (enum-gated). Present on ag_* ref events when
+  // the ref was TTL-expired: records whether the expired ref was re-validated and
+  // dispatched, failed re-validation (page_changed / semantic_mismatch / generic),
+  // or was refused as sensitive. Enum only — no URLs, coordinates, names, values.
+  ttl_recovery_state?: AntigenTtlRecoveryState;
   // Capability-state gate classification (enum-gated). Present on browser_click
   // and browser_tool_disposition events when the action gate ran. Enum only —
   // never carries page text, labels, hrefs, or values.
@@ -356,6 +363,10 @@ export function recordBrowserTraceEvent(
     }
     if (event.stale_reason !== undefined && ANTIGEN_SANITIZED_STALE_REASONS.has(event.stale_reason)) {
       safe.stale_reason = event.stale_reason;
+    }
+    // Enum-gate ttl_recovery_state — never clip arbitrary strings into this.
+    if (event.ttl_recovery_state !== undefined && ANTIGEN_TTL_RECOVERY_STATES.has(event.ttl_recovery_state)) {
+      safe.ttl_recovery_state = event.ttl_recovery_state;
     }
     // Enum-gate action_intent — never clip arbitrary strings into this.
     if (event.action_intent !== undefined && ACTION_INTENTS.has(event.action_intent)) {

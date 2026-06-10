@@ -385,14 +385,23 @@ function scoreCandidate(
   const spec = KIND_SPECS[kind];
   const labelish = c.label_text || c.aria_label;
 
+  // A secondary address line ("Street address 2 (optional)", apt/unit/suite) must NEVER be
+  // scored as address line 1. The agent-hint tiers below match by substring, and the line-1
+  // label ("Street address") is a prefix of the line-2 label ("Street address 2 (optional)"),
+  // so without this guard a "Street address" label hint matches BOTH fields at the hint tier and
+  // the resolver fails closed on the tie. Computed once and applied across every non-autocomplete
+  // tier; a field carrying an authoritative line-1 autocomplete is still handled by that tier.
+  const line2 = hasLine2Indicator(c);
+  const isLine1Secondary = kind === "shipping_address_line1" && line2;
+
   // Agent-provided label / placeholder hints take precedence over generic kind keywords.
-  if (hints.label) {
+  if (hints.label && !isLine1Secondary) {
     const hl = hints.label.toLowerCase();
     if ((c.label_text && c.label_text.includes(hl)) || (c.aria_label && c.aria_label.includes(hl))) {
       return { score: 80, strategy: "hint_label" };
     }
   }
-  if (hints.placeholder) {
+  if (hints.placeholder && !isLine1Secondary) {
     const hp = hints.placeholder.toLowerCase();
     if (c.placeholder && c.placeholder.includes(hp)) {
       return { score: 75, strategy: "hint_placeholder" };
@@ -407,8 +416,7 @@ function scoreCandidate(
   // Address line 1 vs line 2 disambiguation — label/placeholder/name-id tiers only.
   // Placed after the autocomplete tier so a correct autocomplete attribute stays authoritative
   // (and verifyKindConsistency still rejects line1↔address-line2 cross-fills).
-  const line2 = hasLine2Indicator(c);
-  if (kind === "shipping_address_line1" && line2) {
+  if (isLine1Secondary) {
     // Secondary-line field — never treat it as line 1. Breaks the shared "Street address" tie.
     return { score: 0, strategy: "none" };
   }
@@ -488,7 +496,18 @@ export function pickProfileFieldCandidate(
   if (maxScore === 0) {
     return { fill_id: null, strategy: "none", reason: "NO_CONFIDENT_MATCH" };
   }
-  const top = scored.filter((s) => s.score === maxScore);
+  let top = scored.filter((s) => s.score === maxScore);
+  if (top.length > 1) {
+    // Tie-break by kind-consistency: drop tied candidates whose own signals declare a different
+    // field kind. A generic keyword like "address" (in the line-1 keyword set) also matches an
+    // "Email address" label, tying the real street field with the email input; the email field is
+    // type=email / autocomplete=email and is dropped here, leaving the address field as the unique
+    // winner. If this does not narrow to exactly one candidate, we still fail closed below.
+    const consistent = top.filter((s) => verifyKindConsistency(kind, s.c).ok);
+    if (consistent.length === 1) {
+      top = consistent;
+    }
+  }
   if (top.length !== 1) {
     return { fill_id: null, strategy: top[0].strategy, reason: "NO_CONFIDENT_MATCH" };
   }

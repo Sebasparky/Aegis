@@ -75,6 +75,43 @@ describe("pickProfileFieldCandidate — semantic resolution", () => {
     expect(res.fill_id).toBe("agfill_1");
   });
 
+  it("resolves address line1 with an agent label hint 'Street address' even though it is a prefix of the line-2 label (live IKEA regression)", () => {
+    // Regression: the live IKEA checkout passed { key: shipping_address_line1, label: 'Street address' }.
+    // 'Street address' is a substring of 'Street address 2 (optional)', so the hint tier matched BOTH
+    // fields at score 80 and the resolver failed closed (NO_CONFIDENT_MATCH). The secondary-line guard
+    // now excludes the line-2 field from line-1 scoring across the hint tiers too.
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "regular-billing-addressline1", name: "addressline1", type: "email", autocomplete: "email", label_text: "email address" }),
+      cand({ fill_id: "agfill_1", id: "regular-billing-addressline1", name: "addressline1", label_text: "street address" }),
+      cand({ fill_id: "agfill_2", id: "regular-billing-addressline2", name: "addressline2", label_text: "street address 2 (optional)" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line1", candidates, { label: "Street address" });
+    expect(res.fill_id).toBe("agfill_1");
+    expect(res.strategy).toBe("hint_label");
+  });
+
+  it("resolves address line1 over an 'Email address' field when both tie on the generic 'address' keyword (no hint)", () => {
+    // The line-1 keyword set includes the bare token 'address', which also matches an
+    // 'Email address' label. With no autocomplete on the street field, both score 70 at the label
+    // tier. The kind-consistency tie-break drops the email input (type=email) and keeps the street.
+    const candidates = [
+      cand({ fill_id: "agfill_email", type: "email", autocomplete: "email", label_text: "email address" }),
+      cand({ fill_id: "agfill_street", name: "addressline1", label_text: "street address" }),
+    ];
+    const res = pickProfileFieldCandidate("shipping_address_line1", candidates, {});
+    expect(res.fill_id).toBe("agfill_street");
+  });
+
+  it("resolves billing addressLine1 by name/id keyword when ids are namespaced and no autocomplete is present", () => {
+    // Mirrors IKEA ids like 'REGULAR-billing-addressLine1' / 'REGULAR-billing-addressLine2'.
+    const candidates = [
+      cand({ fill_id: "agfill_0", id: "regular-billing-addressline1", name: "regular-billing-addressline1" }),
+      cand({ fill_id: "agfill_1", id: "regular-billing-addressline2", name: "regular-billing-addressline2" }),
+    ];
+    expect(pickProfileFieldCandidate("shipping_address_line1", candidates, {}).fill_id).toBe("agfill_0");
+    expect(pickProfileFieldCandidate("shipping_address_line2", candidates, {}).fill_id).toBe("agfill_1");
+  });
+
   it("fails closed (NO_CONFIDENT_MATCH) for line1 when the only address-like field is 'Street address 2 (optional)'", () => {
     const candidates = [
       cand({ fill_id: "agfill_0", id: "field_c3d4", name: "address2", label_text: "street address 2 (optional)" }),

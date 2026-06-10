@@ -201,6 +201,8 @@ function tMatchTok(d: TNode, tok: string): boolean {
   if (t === '[role="heading"]') return d.getAttribute("role") === "heading";
   if (t === '[aria-modal="true"]') return d.getAttribute("aria-modal") === "true";
   if (t === "dialog[open]") return d.tagName === "DIALOG" && d.getAttribute("open") !== null;
+  if (t === "[inert]") return d.getAttribute("inert") !== null;
+  if (t === '[aria-hidden="true"]') return d.getAttribute("aria-hidden") === "true";
   return d.tagName === t.toUpperCase();
 }
 function tMatchAll(node: TNode, sel: string): TNode[] {
@@ -289,7 +291,15 @@ function extractTree(
   };
   const all = root ? [root, ...tDescendants(root)] : [];
   g["document"] = {
-    querySelectorAll: () => candidates,
+    // The candidate selector returns the provided candidates; structural queries
+    // (e.g. the inert/aria-hidden background probe) resolve against the tree.
+    querySelectorAll: (sel?: string) => {
+      if (typeof sel === "string" && /inert|aria-hidden/.test(sel)) {
+        const toks = sel.split(",");
+        return all.filter((d) => toks.some((tk) => tMatchTok(d, tk)));
+      }
+      return candidates;
+    },
     querySelector: (sel: string) => {
       const toks = sel.split(",");
       return all.find((d) => toks.some((tk) => tMatchTok(d, tk))) ?? null;
@@ -1146,6 +1156,42 @@ describe("extraction — active overlay / top-layer", () => {
     const root = tnode({ tag: "body", children: [tnode({ tag: "main", children: [btn] })] });
     const [c] = extractTree([btn], root);
     expect(c.overlay).toBeUndefined();
+  });
+
+  // A positioned div.modal with NO ARIA role/modal and a high-z-index/large
+  // marketing region behind it must NOT be misread as a blocking modal. This is
+  // the IKEA-homepage false-positive guard: detection is structural-only (ARIA /
+  // native dialog / popover / toast / drawer / fixed-coverage) — never inferred
+  // from container class names or large aria-hidden regions.
+  it("does NOT infer a modal from a div.modal + aria-hidden marketing region (no false positive)", () => {
+    const heroLink = tnode({ tag: "a", attrs: { href: "/offers", class: "hero-overlay" }, position: "absolute", text: "Shop offers" });
+    const bg = tnode({
+      tag: "div",
+      attrs: { "aria-hidden": "true" },
+      box: { left: 0, top: 0, width: 1280, height: 800 }, // large region, but no real modal open
+      children: [tnode({ tag: "p", text: "decorative" })],
+    });
+    const root = tnode({ tag: "body", children: [bg, heroLink] });
+    const [c] = extractTree([heroLink], root);
+    expect(c.overlay).toBeUndefined();
+  });
+
+  // Chat/help widgets float over the page but must NOT block. Even a fixed,
+  // high-z, full-coverage chat panel reports as a NONBLOCKING popover.
+  it("a chat/help widget is a nonblocking popover even at fixed high-z full coverage", () => {
+    const chatBtn = tnode({ tag: "button", text: "Send" });
+    const widget = tnode({
+      tag: "div",
+      attrs: { class: "chat-widget", "aria-label": "Live help" },
+      position: "fixed",
+      zIndex: "9999",
+      box: { left: 0, top: 0, width: 1280, height: 800 },
+      children: [chatBtn],
+    });
+    const root = tnode({ tag: "body", children: [widget] });
+    const [c] = extractTree([chatBtn], root);
+    expect(c.overlay?.overlay_type).toBe("popover");
+    expect(c.overlay?.blocking).toBe(false);
   });
 });
 

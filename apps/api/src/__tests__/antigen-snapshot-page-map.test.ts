@@ -365,3 +365,110 @@ describe("buildAntigenPageMap — structural overlays", () => {
     expect(serialized).not.toMatch(/"(box|x|y|width|height|doc_x|doc_y)"/);
   });
 });
+
+describe("buildAntigenPageMap — overlay taxonomy (structural type before login)", () => {
+  it("an add-to-bag toast with a 'Log in' link is a toast, NOT login_prompt; background not demoted", () => {
+    const view = rec({
+      ref: "ag_1", kind: "link", role: "link", name: "View bag", normalized_name: "view bag", href_path: "/cart",
+      overlay: { overlay_type: "toast", blocking: false, modal_title: "Added to bag" },
+    });
+    const login = rec({
+      ref: "ag_2", kind: "link", role: "link", name: "Log in", normalized_name: "log in", href_path: "/login",
+      overlay: { overlay_type: "toast", blocking: false, modal_title: "Added to bag" },
+    });
+    const bgAdd = rec({ ref: "ag_3", name: "Add to bag", normalized_name: "add to bag" });
+    const map = buildAntigenPageMap({ records: [view, login, bgAdd], viewportOnly: true, url: "https://x.com/" });
+
+    expect(map.warnings_or_modals.some((w) => w.kind === "toast")).toBe(true);
+    expect(map.warnings_or_modals.some((w) => w.kind === "login_prompt")).toBe(false);
+    const addAction = [...map.primary_actions, ...map.secondary_actions].find((a) => a.ref === "ag_3");
+    expect(addAction?.priority).toBe("high");
+    expect(addAction?.reason).not.toBe("behind_active_modal");
+  });
+
+  it("a cart flyout with an account link is cart_drawer/flyout, NOT login_prompt", () => {
+    const checkout = rec({
+      ref: "ag_1", name: "Go to checkout", normalized_name: "go to checkout",
+      overlay: { overlay_type: "drawer", blocking: false, modal_title: "Your shopping bag" },
+    });
+    const login = rec({
+      ref: "ag_2", kind: "link", role: "link", name: "Log in to checkout faster", normalized_name: "log in to checkout faster",
+      overlay: { overlay_type: "drawer", blocking: false, modal_title: "Your shopping bag" },
+    });
+    const map = buildAntigenPageMap({ records: [checkout, login], viewportOnly: true, url: "https://x.com/" });
+    const w = map.warnings_or_modals.find((m) => m.overlay_type === "drawer");
+    expect(["cart_drawer", "flyout"]).toContain(w?.kind);
+    expect(w?.kind).not.toBe("login_prompt");
+  });
+
+  it("a checkout method dialog (guest + login) is login_checkout with active_overlay + demoted background", () => {
+    const guest = rec({
+      ref: "ag_1", name: "Continue as guest", normalized_name: "continue as guest",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Choose how you would like to check out" },
+    });
+    const login = rec({
+      ref: "ag_2", name: "Log in", normalized_name: "log in",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Choose how you would like to check out" },
+    });
+    const bgCart = rec({ ref: "ag_3", kind: "link", role: "link", name: "View bag", normalized_name: "view bag", href_path: "/cart" });
+    const map = buildAntigenPageMap({ records: [guest, login, bgCart], viewportOnly: true, url: "https://x.com/checkout" });
+
+    expect(map.warnings_or_modals.some((w) => w.kind === "login_checkout")).toBe(true);
+    expect(map.warnings_or_modals.some((w) => w.kind === "login_prompt")).toBe(false);
+    expect(map.active_overlay?.present).toBe(true);
+    expect(map.active_overlay?.blocking).toBe(true);
+    expect(map.active_overlay?.modal_title).toBe("Choose how you would like to check out");
+    expect(map.active_overlay?.primary_action_refs).toContain("ag_1");
+
+    const bg = [...map.primary_actions, ...map.secondary_actions, ...map.navigation].find((a) => a.ref === "ag_3");
+    expect(bg?.priority).toBe("low");
+    expect(bg?.reason).toBe("behind_active_modal");
+  });
+
+  it("a chat widget is chat_widget/nonblocking and never wins active_overlay over a blocking modal", () => {
+    const chat = rec({
+      ref: "ag_1", name: "Send", normalized_name: "send",
+      overlay: { overlay_type: "popover", blocking: false, modal_title: "Live chat" },
+    });
+    const confirm = rec({
+      ref: "ag_2", name: "Confirm order", normalized_name: "confirm order",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Confirm your order" },
+    });
+    const map = buildAntigenPageMap({ records: [chat, confirm], viewportOnly: true, url: "https://x.com/" });
+
+    const chatW = map.warnings_or_modals.find((w) => w.overlay_type === "popover");
+    expect(chatW?.kind).toBe("chat_widget");
+    expect(chatW?.blocking).toBe(false);
+    // The blocking modal — not the chat widget — is the dominant active overlay.
+    expect(map.active_overlay?.overlay_type).toBe("dialog");
+    expect(map.active_overlay?.blocking).toBe(true);
+    expect(map.active_overlay?.modal_title).toBe("Confirm your order");
+  });
+
+  it("a lone chat widget does NOT demote the rest of the page", () => {
+    const chat = rec({
+      ref: "ag_1", name: "Send", normalized_name: "send",
+      overlay: { overlay_type: "popover", blocking: false, modal_title: "Help chat" },
+    });
+    const add = rec({ ref: "ag_2", name: "Add to bag", normalized_name: "add to bag" });
+    const map = buildAntigenPageMap({ records: [chat, add], viewportOnly: true, url: "https://x.com/" });
+    const addAction = [...map.primary_actions, ...map.secondary_actions].find((a) => a.ref === "ag_2");
+    expect(addAction?.priority).toBe("high");
+    expect(addAction?.reason).not.toBe("behind_active_modal");
+  });
+
+  it("a cookie consent rendered as role=dialog stays cookie_banner — never the blocking active_overlay", () => {
+    const accept = rec({
+      ref: "ag_1", name: "Accept all", normalized_name: "accept all",
+      context: { section: "Cookie consent" },
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "We use cookies" },
+    });
+    const map = buildAntigenPageMap({ records: [accept], viewportOnly: true, url: "https://x.com/" });
+    expect(map.warnings_or_modals.some((w) => w.kind === "cookie_banner")).toBe(true);
+    // Cookie banners never count as the dominant active overlay and never demote.
+    expect(map.active_overlay).toBeUndefined();
+    const action = [...map.primary_actions, ...map.secondary_actions].find((a) => a.ref === "ag_1");
+    expect(action?.reason).not.toBe("modal_primary_action");
+    expect(action?.reason).not.toBe("behind_active_modal");
+  });
+});

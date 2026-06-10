@@ -637,6 +637,9 @@ export function buildAntigenExtractionExpr(opts: {
     var OVERLAY_WALK_DEPTH=12;
     var OVERLAY_DRAWER_RE=/(drawer|flyout|off-?canvas|side-?panel|slide-?over|snackbar)/i;
     var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
+    // Chat/help/support widget container signal — these float over the page but
+    // must NEVER be treated as blocking modals (they don't trap the user).
+    var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
     var CTX_WALK_DEPTH=8;
     // Page scroll offset, captured once for this snapshot. Box x/y stay
     // viewport-relative (used by the realistic pointer click); doc_x/doc_y add
@@ -992,6 +995,13 @@ export function buildAntigenExtractionExpr(opts: {
       var tg=(node.tagName||'').toLowerCase();
       var role=attr(node,'role'); role=role?String(role).toLowerCase():'';
       var ariaModal=attr(node,'aria-modal')==='true';
+      // Chat/help/support widgets float over the page but never trap the user.
+      // Detected FIRST so a large open chat panel (even one using role=dialog or
+      // a >=0.5 coverage backdrop) is reported as a NONBLOCKING popover and can
+      // never win active_overlay over a real blocking modal. Signal = container
+      // class/id/aria-label only — never element text or values.
+      var chatSig=(attr(node,'class')||'')+' '+(attr(node,'id')||'')+' '+(attr(node,'aria-label')||'');
+      if(OVERLAY_CHAT_RE.test(chatSig)) return {type:'popover',blocking:false};
       if(tg==='dialog'){
         var open=false; try{ open=(node.open===true)||(attr(node,'open')!=null); }catch(e){ open=attr(node,'open')!=null; }
         if(open) return {type:'dialog',blocking:ariaModal||matchesSafe(node,':modal')};
@@ -1006,8 +1016,14 @@ export function buildAntigenExtractionExpr(opts: {
       var live=attr(node,'aria-live'); if(live){ live=String(live).toLowerCase(); if(live==='polite'||live==='assertive') return {type:'toast',blocking:false}; }
       var cls=(attr(node,'class')||'')+' '+(attr(node,'id')||'');
       if(OVERLAY_DRAWER_RE.test(cls)) return {type:'drawer',blocking:fixedCoverage(node)>=0.5};
-      var cov=fixedCoverage(node);
-      if(cov>=0.15) return {type:'overlay',blocking:cov>=0.5};
+      // NO generic fixed-coverage overlay branch: a positioned high-z container
+      // with no ARIA role / native dialog / popover / toast / drawer signal is
+      // NOT treated as an overlay. Sticky filter toolbars, promo heroes, and
+      // header bars are positioned + high-z but are page chrome, not modals —
+      // marking them overlays produced live false positives. Real overlays expose
+      // an explicit role (e.g. role=dialog), so structural signals are the sole
+      // authority. fixedCoverage remains the BLOCKING test for real dialogs and
+      // drawers above.
       return null;
     }
     function hasInertAncestor(el){
@@ -1047,8 +1063,15 @@ export function buildAntigenExtractionExpr(opts: {
       var inInert=false; try{ inInert=hasInertAncestor(el); }catch(e){ inInert=false; }
       if(!type){
         // No positive overlay membership — emit a background marker ONLY when the
-        // element is inert, or aria-hidden background while a modal is open. The
-        // page map uses this to demote/exclude; the external view drops it.
+        // element is inert, or aria-hidden background while a REAL modal
+        // (aria-modal / native <dialog open>) is open. Both are precise ARIA
+        // modality primitives. We deliberately do NOT infer modals from container
+        // class names or large aria-hidden regions: real marketing pages (e.g.
+        // hero carousels with an "...overlay" class behind an aria-hidden region)
+        // would be misread as blocking modals. Structural detection above
+        // (role=dialog/alertdialog, native <dialog>, popover, toast, drawer,
+        // fixed-coverage) is the authority. The page map uses this marker to
+        // demote/exclude; the external view drops it.
         var bgHidden=false; try{ bgHidden=hasAriaHiddenAncestor(el)&&hasModalMemo(); }catch(e){ bgHidden=false; }
         if(!inInert&&!bgHidden) return null;
         var bg={ overlay_type:'overlay', blocking:false, background:true };

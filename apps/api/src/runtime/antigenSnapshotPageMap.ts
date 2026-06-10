@@ -87,7 +87,16 @@ export interface ProductCard {
 }
 
 export interface WarningOrModal {
-  kind: "cookie_banner" | "modal" | "cart_drawer" | "login_prompt" | "toast" | "unknown_overlay";
+  kind:
+    | "cookie_banner"
+    | "modal"
+    | "cart_drawer"
+    | "flyout"
+    | "chat_widget"
+    | "login_prompt"
+    | "login_checkout"
+    | "toast"
+    | "unknown_overlay";
   /** Structural overlay kind when this warning came from overlay detection. */
   overlay_type?: AntigenOverlayType;
   /** Accessible title of the overlay container (value-free). */
@@ -243,6 +252,16 @@ function isOverlayMember(r: AntigenSnapshotElementRecord): boolean {
   return !!r.overlay && r.overlay.background !== true;
 }
 
+/**
+ * Cookie-consent control refs. Cookie banners are surfaced as their own
+ * `cookie_banner` warning and must never count as the dominant `active_overlay`,
+ * drive `blockingActive` demotion, or steal modal action prioritization — even
+ * when a site renders consent as a `role=dialog`.
+ */
+function cookieRefSet(records: AntigenSnapshotElementRecord[]): Set<string> {
+  return new Set(records.filter((r) => COOKIE_RE.test(ctxText(r))).map((r) => r.ref));
+}
+
 /** A background-behind-modal record (inert / aria-hidden behind a modal). */
 function isBackgroundRecord(r: AntigenSnapshotElementRecord): boolean {
   return !!r.overlay && (r.overlay.background === true || r.overlay.bg_hidden === true);
@@ -265,6 +284,11 @@ const LOGIN_PROMPT_RE = /\b(sign in|log in|login|create account)\b/i;
 const CART_DRAWER_RE = /\b(cart|bag|basket)\b/i;
 const MODAL_SECTION_RE = /\b(modal|dialog|overlay|popup|popover)\b/i;
 const DISMISS_NAME = /\b(close|dismiss|no thanks|not now|maybe later|×|x)\b/;
+// Chat/help/support widget — a nonblocking popover, never a login prompt or modal.
+const CHAT_WIDGET_RE = /\b(chat|messenger|live\s*help|virtual\s*assistant|support\s*(widget|chat)|help\s*(widget|chat))\b/i;
+// Guest / checkout affordances that, alongside a login option, mark a checkout
+// method dialog (rather than a pure login prompt).
+const GUEST_CHECKOUT_RE = /\b(guest|continue as guest|check\s?out|checkout|place order)\b/i;
 
 // ─── Per-record qualitative status ───────────────────────────────────────────
 
@@ -431,15 +455,46 @@ function ctxText(r: AntigenSnapshotElementRecord): string {
   return `${r.context?.section ?? ""} ${r.context?.label ?? ""} ${r.name}`;
 }
 
-/** Map a structural overlay group to the agent-facing warning kind. */
+/** Section/label/name + the overlay's accessible title — used for classification. */
+function overlayGroupText(group: AntigenSnapshotElementRecord[]): string {
+  const title = group.map((r) => r.overlay?.modal_title).find(Boolean) ?? "";
+  return `${title} ${group.map(ctxText).join(" ")}`;
+}
+
+/**
+ * Map a structural overlay group to the agent-facing warning kind. Precedence is
+ * STRUCTURAL-TYPE-FIRST so a single "Log in" affordance can no longer collapse a
+ * toast, cart flyout, or checkout dialog into `login_prompt`:
+ *   toast → chat_widget → drawer(flyout/cart) → login_checkout (login+guest) →
+ *   modal/dialog (login_prompt only when login-DOMINANT) → cart/login fallbacks.
+ */
 function warningKindFor(
   overlayType: AntigenOverlayType,
   group: AntigenSnapshotElementRecord[],
 ): WarningOrModal["kind"] {
+  const text = overlayGroupText(group);
+  const hasLogin = LOGIN_PROMPT_RE.test(text);
+  const hasCart = CART_DRAWER_RE.test(text);
+  const hasGuestCheckout = GUEST_CHECKOUT_RE.test(text);
+
+  // Transient confirmation/announcement — never a login prompt.
   if (overlayType === "toast") return "toast";
-  if (group.some((r) => LOGIN_PROMPT_RE.test(ctxText(r)))) return "login_prompt";
-  if (group.some((r) => CART_DRAWER_RE.test(`${r.context?.section ?? ""} ${r.name}`))) return "cart_drawer";
-  if (overlayType === "dialog" || overlayType === "alertdialog") return "modal";
+  // Chat/help/support widget — nonblocking popover, never a modal/login prompt.
+  if (overlayType === "popover" && CHAT_WIDGET_RE.test(text)) return "chat_widget";
+  // Slide-in panels: cart/bag drawers vs. generic flyouts.
+  if (overlayType === "drawer") return hasCart ? "cart_drawer" : "flyout";
+  // A dialog offering BOTH a login option and a guest/checkout path is a checkout
+  // method chooser, not a pure login prompt.
+  if (hasLogin && hasGuestCheckout) return "login_checkout";
+  if (overlayType === "dialog" || overlayType === "alertdialog") {
+    // `login_prompt` only when login is the dominant purpose (no cart/checkout/guest).
+    if (hasLogin && !hasCart && !hasGuestCheckout) return "login_prompt";
+    return "modal";
+  }
+  // Generic/popover overlays.
+  if (CHAT_WIDGET_RE.test(text)) return "chat_widget";
+  if (hasCart) return "cart_drawer";
+  if (hasLogin && !hasCart && !hasGuestCheckout) return "login_prompt";
   return "unknown_overlay";
 }
 
@@ -552,8 +607,11 @@ function buildWarnings(records: AntigenSnapshotElementRecord[]): WarningOrModal[
  * blocking over nonblocking, then dialog/alertdialog, then the group with the
  * most members. Returns only safe refs + the value-free accessible title.
  */
-function buildActiveOverlay(records: AntigenSnapshotElementRecord[]): ActiveOverlay | undefined {
-  const members = records.filter(isOverlayMember);
+function buildActiveOverlay(
+  records: AntigenSnapshotElementRecord[],
+  cookieRefs: Set<string>,
+): ActiveOverlay | undefined {
+  const members = records.filter((r) => isOverlayMember(r) && !cookieRefs.has(r.ref));
   if (members.length === 0) return undefined;
 
   let best: { group: AntigenSnapshotElementRecord[]; score: number } | undefined;
@@ -669,13 +727,16 @@ export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap 
     };
   }
 
+  const cookieRefs = cookieRefSet(records);
   const warnings = buildWarnings(records);
-  const active_overlay = buildActiveOverlay(records);
+  const active_overlay = buildActiveOverlay(records, cookieRefs);
 
   // When a blocking overlay is active, background actions are demoted so the
-  // agent acts on the modal first. Nonblocking overlays (toasts/popovers) never
-  // demote the rest of the page.
-  const blockingActive = records.some((r) => isOverlayMember(r) && r.overlay?.blocking === true);
+  // agent acts on the modal first. Nonblocking overlays (toasts/popovers/chat
+  // widgets) never demote the rest of the page; cookie banners never count.
+  const blockingActive = records.some(
+    (r) => isOverlayMember(r) && r.overlay?.blocking === true && !cookieRefs.has(r.ref),
+  );
 
   // Categorize interactive elements into ranked action buckets.
   const primary: RankedAction[] = [];
@@ -685,7 +746,9 @@ export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap 
 
   for (const r of records) {
     const vp = statusByRef.get(r.ref) ?? "unknown";
-    const member = isOverlayMember(r);
+    // Cookie-consent controls classify normally — they are never treated as
+    // modal members and never demoted as background.
+    const member = isOverlayMember(r) && !cookieRefs.has(r.ref);
     const dismiss = (member && r.overlay?.is_dismiss === true) || isOverlayDismiss(r, warnings);
     const hint = hintFor(r, vp);
     action_hints.push({

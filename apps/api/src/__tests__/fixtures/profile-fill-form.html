@@ -14,6 +14,15 @@
       canonical (15551234567 → 11 digits) would be INVALID; the formatter must strip it.
     -->
     <form id="checkout">
+      <label for="first_name">First name</label>
+      <input id="first_name" name="first_name" type="text" autocomplete="given-name" value="" />
+
+      <label for="last_name">Last name</label>
+      <input id="last_name" name="last_name" type="text" autocomplete="family-name" value="" />
+
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="email" aria-invalid="true" value="" />
+
       <label for="phone">Phone number</label>
       <input
         id="phone"
@@ -26,6 +35,20 @@
         value=""
       />
 
+      <!--
+        Two address fields sharing the "Street address" label prefix. Line 1 carries the
+        line-1 autocomplete; line 2 is explicitly "(optional)" / address-line2. A
+        shipping_address_line1 request must land in #address1, never #address2.
+      -->
+      <label for="address1">Street address</label>
+      <input id="address1" name="address1" type="text" autocomplete="address-line1" value="" />
+
+      <label for="address2">Street address 2 (optional)</label>
+      <input id="address2" name="address2" type="text" autocomplete="address-line2" value="" />
+
+      <label for="city">City</label>
+      <input id="city" name="city" type="text" autocomplete="address-level2" value="" />
+
       <label for="state">State</label>
       <select id="state" name="state" autocomplete="address-level1" aria-invalid="true">
         <option value="">Select a state</option>
@@ -33,14 +56,53 @@
         <option value="MI">Michigan</option>
         <option value="CA">California</option>
       </select>
+
+      <label for="zip">ZIP code</label>
+      <input id="zip" name="zip" type="text" autocomplete="postal-code" value="" />
     </form>
 
     <script>
-      window.__model = { phone: null, state: null };
+      window.__model = {
+        first_name: null,
+        last_name: null,
+        email: null,
+        phone: null,
+        address1: null,
+        address2: null,
+        city: null,
+        state: null,
+        zip: null,
+      };
       (function () {
         function digits(s) {
           return (s || "").replace(/\D+/g, "");
         }
+
+        // Plain text fields — controlled model updates only via dispatched input/change events.
+        ["first_name", "last_name", "address1", "address2", "city", "zip"].forEach(function (key) {
+          var el = document.getElementById(key);
+          if (!el) return;
+          el.addEventListener("input", function () {
+            window.__model[key] = el.value;
+          });
+          el.addEventListener("change", function () {
+            window.__model[key] = el.value;
+          });
+        });
+
+        var email = document.getElementById("email");
+        function validateEmail() {
+          var ok = email.value.indexOf("@") > 0 && email.value.indexOf(".") > email.value.indexOf("@");
+          email.setAttribute("aria-invalid", ok ? "false" : "true");
+          return ok;
+        }
+        email.addEventListener("input", function () {
+          window.__model.email = email.value;
+        });
+        email.addEventListener("change", function () {
+          window.__model.email = email.value;
+        });
+        email.addEventListener("blur", validateEmail);
 
         var phone = document.getElementById("phone");
         function validatePhone() {

@@ -12,6 +12,7 @@ import {
   setTaskBrowserSessionPointerState,
 } from "./taskBrowserSessions.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
+import { getInputRealismMode, typeCharsViaCDP } from "./inputRealismTyper.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -655,7 +656,7 @@ export async function executeProfileFieldFillViaCDP(
       let fieldIdx = 0;
       let msgId = 1;
       let sessionId: string | null = null;
-      let phase: "attach" | "resolve" | "iframe_check" | "input_box_lookup" | "input_pointer" | "select_fill" | "input_focus" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
+      let phase: "attach" | "resolve" | "iframe_check" | "input_box_lookup" | "input_pointer" | "select_fill" | "input_focus" | "input_typing" | "input_typing_verify" | "input_insert" | "input_blur" | "input_setter_fallback" = "attach";
       // Stable selector for the current field, set once after the resolve phase and reused by every
       // downstream eval so id regeneration between evals cannot break the fill.
       let currentSelectorExpr = "null";
@@ -667,6 +668,7 @@ export async function executeProfileFieldFillViaCDP(
       // Track CDP command IDs for unambiguous response routing.
       let attachMsgId: number | null = null;
       let insertMsgId: number | null = null;
+      let typingVerifyMsgId: number | null = null;
 
       const timer = setTimeout(() => {
         ws.terminate();
@@ -1052,12 +1054,81 @@ export async function executeProfileFieldFillViaCDP(
               recordFailed(`CDP evaluate (focus): ${val?.reason ?? "element not found"}`);
               return;
             }
-            // Focus succeeded — type via Input.insertText (value in CDP params, not JS expression).
-            // Use the field-aware formatted value (e.g. national phone digits) so masked checkout
-            // inputs format correctly instead of shifting the country code.
+            // Focus succeeded. The field-aware formatted value (e.g. national phone digits) is what
+            // gets typed so masked checkout inputs format correctly instead of shifting the country
+            // code. The raw canonical is still used only for the masked agent summary.
             const resolvedValue = currentFillValue;
-            phase = "input_insert";
-            insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+            const selectorExpr = currentSelectorExpr;
+
+            // ANTIGEN_INPUT_REALISM=fast/disabled/false → preserve the legacy bulk Input.insertText.
+            if (getInputRealismMode() === "direct") {
+              phase = "input_insert";
+              insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+              return;
+            }
+
+            // Realistic path — type the value the way a human would, character-by-character via CDP
+            // key events (the same shared engine the protected-card primitive uses). The value flows
+            // only through CDP key params, never a JS expression. Acceptance is verified separately
+            // by a post-typing Runtime.evaluate (el.value.length > 0) — the value is never read back.
+            // phase "input_typing" guards stray key-event acks/errors from failing the field, mirroring
+            // the input_pointer guard. Fallback ladder: key events → Input.insertText → native setter.
+            phase = "input_typing";
+            const sendForTyping = (method: string, params: Record<string, unknown>) => {
+              send(method, params, sessionId!);
+            };
+            const typingVerifyExpr = `(function() {
+              var el = ${selectorExpr};
+              if (!el) return { ok: false, reason: 'element_not_found' };
+              return { ok: el.value.length > 0, reason: el.value.length > 0 ? 'value_present' : 'empty_after_typing' };
+            })()`;
+            typeCharsViaCDP(sendForTyping, sleep, {
+              value: resolvedValue,
+              fieldKind: "username", // profile fields are non-secret → faster jitter profile
+              injectionRequestId: fillRequest.fill_request_id,
+              domain: fillRequest.domain,
+            })
+              .then((typingResult) => {
+                if (typingResult.success) {
+                  phase = "input_typing_verify";
+                  typingVerifyMsgId = send(
+                    "Runtime.evaluate",
+                    { expression: typingVerifyExpr, returnByValue: true },
+                    sessionId!,
+                  );
+                } else {
+                  // Synchronous send failure mid-typing — fall back to bulk insert.
+                  phase = "input_insert";
+                  insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+                }
+              })
+              .catch(() => {
+                phase = "input_insert";
+                insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+              });
+            return;
+          }
+
+          if (phase === "input_typing_verify") {
+            const resolvedValue = currentFillValue;
+            const selectorExpr = currentSelectorExpr;
+            if (val?.ok) {
+              // Typing accepted — dispatch change/blur and mark filled.
+              const blurExpr = `(function() {
+                var el = ${selectorExpr};
+                if (!el) return { ok: false, reason: 'element not found' };
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                el.setAttribute('data-antigen-filled', 'true');
+                return { ok: true };
+              })()`;
+              phase = "input_blur";
+              send("Runtime.evaluate", { expression: blurExpr, returnByValue: true }, sessionId);
+            } else {
+              // Field empty after key events — fall back to bulk Input.insertText.
+              phase = "input_insert";
+              insertMsgId = send("Input.insertText", { text: resolvedValue }, sessionId!);
+            }
             return;
           }
 
@@ -1083,9 +1154,9 @@ export async function executeProfileFieldFillViaCDP(
         }
 
         if (msg.error) {
-          // Ignore CDP errors during async pointer dispatch — these are from fire-and-forget
-          // Input.dispatchMouseEvent calls and must not fail the field fill.
-          if (phase === "input_pointer") return;
+          // Ignore CDP errors during async pointer/key dispatch — these are from fire-and-forget
+          // Input.dispatchMouseEvent / Input.dispatchKeyEvent calls and must not fail the field fill.
+          if (phase === "input_pointer" || phase === "input_typing") return;
           const field = fields[fieldIdx];
           if (field) {
             recordFailed(`CDP error: ${JSON.stringify(msg.error)}`);

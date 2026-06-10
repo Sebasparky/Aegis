@@ -237,4 +237,84 @@ describe.skipIf(!EXE)("Protected profile fill — real browser controlled form",
     expect(secondValue).toBe(firstValue); // not doubled / appended
     expect(secondValue.replace(/\D+/g, "")).toBe("5551234567");
   });
+
+  it("types first/last name into their fields and updates the controlled model", async () => {
+    const req = makeFillRequest([
+      { key: "first_name", label: "First name" },
+      { key: "last_name", label: "Last name" },
+    ]);
+    const resolved = new Map<ProfileFieldKind, string>([
+      ["first_name", "Ada"],
+      ["last_name", "Lovelace"],
+    ]);
+
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    expect(entries.find((e) => e.key === "first_name")?.status).toBe("filled");
+    expect(entries.find((e) => e.key === "last_name")?.status).toBe("filled");
+
+    expect(await evalOnPage(cdpUrl, `document.getElementById('first_name').value`)).toBe("Ada");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('last_name').value`)).toBe("Lovelace");
+    // Controlled model updated only via dispatched input/change — proves realistic key events landed.
+    expect(await evalOnPage(cdpUrl, `window.__model.first_name`)).toBe("Ada");
+    expect(await evalOnPage(cdpUrl, `window.__model.last_name`)).toBe("Lovelace");
+
+    const json = JSON.stringify(entries);
+    expect(json).not.toContain("Ada");
+    expect(json).not.toContain("Lovelace");
+  });
+
+  it("fills email, updates the model, and clears aria-invalid on blur", async () => {
+    const req = makeFillRequest([{ key: "email", label: "Email" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["email", "ada@example.com"]]);
+
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    expect(entries.find((e) => e.key === "email")?.status).toBe("filled");
+
+    expect(await evalOnPage(cdpUrl, `document.getElementById('email').value`)).toBe("ada@example.com");
+    expect(await evalOnPage(cdpUrl, `window.__model.email`)).toBe("ada@example.com");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('email').getAttribute('aria-invalid')`)).toBe("false");
+
+    expect(JSON.stringify(entries)).not.toContain("ada@example.com");
+  });
+
+  it("routes shipping_address_line1 to the line-1 field, never the optional line-2 field", async () => {
+    const req = makeFillRequest([{ key: "shipping_address_line1", label: "Street address" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["shipping_address_line1", "10 Downing St"]]);
+
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    expect(entries.find((e) => e.key === "shipping_address_line1")?.status).toBe("filled");
+
+    expect(await evalOnPage(cdpUrl, `document.getElementById('address1').value`)).toBe("10 Downing St");
+    // The optional line-2 field must remain untouched.
+    expect(await evalOnPage(cdpUrl, `document.getElementById('address2').value`)).toBe("");
+  });
+
+  it("fills city and zip text fields", async () => {
+    const req = makeFillRequest([
+      { key: "city", label: "City" },
+      { key: "postal_code", label: "ZIP code" },
+    ]);
+    const resolved = new Map<ProfileFieldKind, string>([
+      ["city", "London"],
+      ["postal_code", "48104"],
+    ]);
+
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    expect(entries.find((e) => e.key === "city")?.status).toBe("filled");
+    expect(entries.find((e) => e.key === "postal_code")?.status).toBe("filled");
+
+    expect(await evalOnPage(cdpUrl, `document.getElementById('city').value`)).toBe("London");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('zip').value`)).toBe("48104");
+  });
+
+  it("repeated TEXT fill REPLACES rather than appends (idempotent value)", async () => {
+    const req = makeFillRequest([{ key: "first_name", label: "First name" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["first_name", "Ada"]]);
+
+    await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+    const value = (await evalOnPage(cdpUrl, `document.getElementById('first_name').value`)) as string;
+
+    expect(value).toBe("Ada"); // not "AdaAda"
+  });
 });

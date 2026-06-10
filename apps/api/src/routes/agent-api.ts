@@ -77,6 +77,10 @@ import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
 import { captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
+import {
+  registerProtectedIframeRedaction,
+  getProtectedIframeRedactionFields,
+} from "../runtime/protectedIframeRedaction.js";
 import { executeProfileFieldFillViaCDP, validateProfileFillSelector } from "../runtime/profileFieldFill.js";
 import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
 import { performSubmitAndWait, SUBMIT_BLOCKLIST } from "../runtime/credentialStepHandoff.js";
@@ -5092,9 +5096,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       );
     }
 
+    // Protected card fields filled inside cross-origin OPPWA PCI iframes are not
+    // discoverable from the top document, so the screenshot path must be told which
+    // ones to mark + redact (field-kind enums only). If any cannot be located at
+    // capture time, captureRedactedScreenshot fails closed.
+    const expectedIframeFields = getProtectedIframeRedactionFields(session.browser_session_id);
     const shot = await captureRedactedScreenshot({
       browserWsUrl: resolved.browserWsUrl,
       pageTargetId: resolved.target.id,
+      expectedIframeFields,
     });
 
     if (!shot.ok) {
@@ -5119,6 +5129,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       tool: "browser_take_screenshot",
       result_code: "screenshot_redacted",
       redacted_field_count: shot.redacted_field_count,
+      redacted_iframe_field_count: expectedIframeFields.length,
     });
 
     return reply.send({
@@ -5596,6 +5607,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         fillRequest.status = "filled";
         fillRequest.filled_at = completedAt;
         fillRequest.error = undefined;
+
+        // Record cross-origin OPPWA iframe fills so the screenshot path redacts the
+        // iframe container region and fails closed if it later cannot locate it.
+        // Registry holds only the field-kind enum — no raw value, URL, or coordinate.
+        if (
+          fillResult.iframeProvider === "oppwa" &&
+          fillRequest.browser_session_id &&
+          fillResult.iframeFieldKind
+        ) {
+          registerProtectedIframeRedaction(fillRequest.browser_session_id, fillResult.iframeFieldKind, "oppwa");
+        }
 
         // Update authorization fields_filled
         if (!auth.fields_filled.includes(fillRequest.field)) {

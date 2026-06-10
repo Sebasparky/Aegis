@@ -339,3 +339,136 @@ describe.skipIf(!EXE)("Redacted Screenshot — real browser vision channel", () 
     expect(shot.error_code).toBe("SCREENSHOT_REDACTION_FAILED");
   });
 });
+
+// ─── Part 3: real Chromium — cross-origin OPPWA iframe redaction ──────────────
+//
+// Reproduces the live IKEA gap: card_number and CVV are rendered inside cross-origin
+// OPPWA PCI iframes whose internal masking marker is invisible to the top document.
+// The screenshot path must mark the top-document <iframe> containers (driven by the
+// caller's expectedIframeFields) and redact their bounding boxes — and FAIL CLOSED
+// if an expected field's iframe cannot be located. The two top-document fields
+// (expiry, cardholder) are pre-tagged in the fixture, so a full capture redacts all
+// four regions.
+
+const IFRAME_FIXTURE = fileURLToPath(new URL("./fixtures/vision-redact-iframe.html", import.meta.url));
+
+describe.skipIf(!EXE)("Redacted Screenshot — cross-origin OPPWA iframe redaction", () => {
+  let proc: ChildProcess;
+  let userDataDir: string;
+  let cdpUrl: string;
+  let wsUrl: string;
+  let targetId: string;
+  let captureWorks = false;
+
+  beforeAll(async () => {
+    const port = await freePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    userDataDir = mkdtempSync(join(tmpdir(), "vision-redact-iframe-it-"));
+    proc = spawn(
+      EXE!,
+      [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--force-device-scale-factor=1",
+        `file://${IFRAME_FIXTURE}`,
+      ],
+      { stdio: "ignore" },
+    );
+    await waitForCdp(cdpUrl);
+    await new Promise((res) => setTimeout(res, 400));
+    wsUrl = await browserWsUrl(cdpUrl);
+    targetId = await pageTargetId(cdpUrl);
+
+    const probe = await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedIframeFields: [],
+    });
+    captureWorks = probe.ok;
+    if (!captureWorks) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[screenshot-redaction] headless Page.captureScreenshot unavailable — iframe " +
+          "capture-pixel assertions skipped (marking + fail-closed still run).",
+      );
+    }
+  }, 30_000);
+
+  afterAll(() => {
+    try {
+      proc?.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("marks both top-document OPPWA iframe containers (parent-owned attribute only)", async () => {
+    // Marking runs before capture, so this holds even where capture is unavailable.
+    await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedIframeFields: ["card_number", "cvv"],
+    });
+    const panMasked = await evalOnPage(cdpUrl, `document.querySelector('#pan-frame').getAttribute('data-antigen-masked')`);
+    const cvvMasked = await evalOnPage(cdpUrl, `document.querySelector('#cvv-frame').getAttribute('data-antigen-masked')`);
+    const panField = await evalOnPage(cdpUrl, `document.querySelector('#pan-frame').getAttribute('data-antigen-iframe-field')`);
+    const cvvField = await evalOnPage(cdpUrl, `document.querySelector('#cvv-frame').getAttribute('data-antigen-iframe-field')`);
+    expect(panMasked).toBe("true");
+    expect(cvvMasked).toBe("true");
+    expect(panField).toBe("card_number");
+    expect(cvvField).toBe("cvv");
+  });
+
+  it("redacts all four regions: both iframes + expiry + cardholder (count = 4)", async () => {
+    if (!captureWorks) return; // environment cannot screenshot — marking + fail-closed cover the rest
+    const shot = await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedIframeFields: ["card_number", "cvv"],
+    });
+    expect(shot.ok).toBe(true);
+    if (!shot.ok) return;
+    expect(shot.redacted_field_count).toBe(4);
+    expect(shot.mimeType).toBe("image/png");
+    // No raw values of any kind in the result object.
+    expect(JSON.stringify(shot)).not.toContain("4242");
+    expect(JSON.stringify(shot)).not.toContain("oppwa.com");
+
+    // The center of each cross-origin iframe region must be black in the image.
+    const png = PNG.sync.read(Buffer.from(shot.base64, "base64"));
+    for (const sel of ["#pan-frame", "#cvv-frame"]) {
+      const rect = (await evalOnPage(
+        cdpUrl,
+        `(function(){var r=document.querySelector('${sel}').getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height,vw:window.innerWidth};})()`,
+      )) as { x: number; y: number; w: number; h: number; vw: number };
+      const scale = png.width / rect.vw;
+      const cx = Math.round((rect.x + rect.w / 2) * scale);
+      const cy = Math.round((rect.y + rect.h / 2) * scale);
+      const idx = (png.width * cy + cx) << 2;
+      expect([png.data[idx], png.data[idx + 1], png.data[idx + 2]]).toEqual([0, 0, 0]);
+    }
+  }, 20_000);
+
+  // Must run last — removes the CVV iframe to assert fail-closed behaviour.
+  it("fails closed (no image) when an expected protected iframe cannot be located", async () => {
+    await evalOnPage(cdpUrl, `(function(){var e=document.querySelector('#cvv-frame');if(e)e.remove();return true;})()`);
+    const shot = await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedIframeFields: ["card_number", "cvv"],
+    });
+    expect(shot.ok).toBe(false);
+    if (shot.ok) return;
+    expect(shot.error_code).toBe("SCREENSHOT_REDACTION_FAILED");
+  }, 20_000);
+});

@@ -207,6 +207,9 @@ export interface BrowserTraceEvent {
   // count only — never boxes, coordinates, values, or base64. Present on
   // browser_tool_disposition events for browser_take_screenshot.
   redacted_field_count?: number;
+  // Of the redacted fields, how many were cross-origin protected iframe regions
+  // (OPPWA card_number/cvv). Aggregate count only — never URLs, values, or boxes.
+  redacted_iframe_field_count?: number;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -375,6 +378,9 @@ export function recordBrowserTraceEvent(
     // Aggregate count only — bounded, non-negative integer; never boxes/values.
     if (Number.isFinite(event.redacted_field_count)) {
       safe.redacted_field_count = Math.max(0, Math.floor(event.redacted_field_count as number));
+    }
+    if (Number.isFinite(event.redacted_iframe_field_count)) {
+      safe.redacted_iframe_field_count = Math.max(0, Math.floor(event.redacted_iframe_field_count as number));
     }
 
     let entry = traces.get(browserRuntimeId);

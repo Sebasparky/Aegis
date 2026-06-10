@@ -32,6 +32,16 @@ export interface CaptureRedactedScreenshotParams {
   browserWsUrl: string;
   /** CDP target id of the page to capture. Caller selects this. */
   pageTargetId: string;
+  /**
+   * Protected card fields that Antigen filled inside a cross-origin OPPWA PCI
+   * iframe in this session (from the protected-iframe redaction registry). For
+   * each one, the matching top-document <iframe> element is marked
+   * `data-antigen-masked="true"` so its bounding box is redacted. If any expected
+   * field's iframe cannot be located/sized, capture FAILS CLOSED — no image. The
+   * top document only reads the parent-owned `src` attribute and bounding box;
+   * iframe internals are never inspected.
+   */
+  expectedIframeFields?: Array<"card_number" | "cvv" | "expiry">;
 }
 
 export type CaptureRedactedScreenshotResult =
@@ -69,6 +79,52 @@ const OVERLAY_EXPR = `(function(){
     return { ok: true, boxes: boxes, vw: window.innerWidth, vh: window.innerHeight };
   } catch (e) { return { ok: false, reason: String(e) }; }
 })()`;
+
+// Mark the top-document <iframe> elements that host the protected card fields the
+// caller knows were filled inside cross-origin OPPWA PCI iframes. Reads only the
+// parent-owned `src` attribute + bounding box — never iframe internals. Tags each
+// located iframe `data-antigen-masked="true"` so the OVERLAY_EXPR enumerator
+// collects and redacts its rectangle. Returns the kinds it could actually mark
+// (sized, non-zero box) so the caller can FAIL CLOSED on any miss. Match logic
+// mirrors `pickOppwaIframeIndexForField` in paymentIframeFill.ts.
+function buildIframeMarkExpr(fields: Array<"card_number" | "cvv" | "expiry">): string {
+  return `(function(fields){
+  try {
+    var iframes = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+    var oppwa = [];
+    for (var i = 0; i < iframes.length; i++) {
+      try {
+        var u = new URL(iframes[i].src);
+        if (u.hostname.endsWith('oppwa.com') && u.pathname === '/v1/pciIframe.html') {
+          oppwa.push(iframes[i]);
+        }
+      } catch (e) {}
+    }
+    function byName(name) {
+      for (var j = 0; j < oppwa.length; j++) {
+        try { if (new URL(oppwa[j].src).searchParams.get('name') === name) return oppwa[j]; } catch (e) {}
+      }
+      return null;
+    }
+    var marked = [];
+    for (var k = 0; k < fields.length; k++) {
+      var fk = fields[k];
+      var el = null;
+      if (fk === 'card_number') { el = byName('card.number') || oppwa[0] || null; }
+      else if (fk === 'cvv') { el = byName('card.cvv') || (oppwa.length > 1 ? oppwa[1] : null); }
+      else if (fk === 'expiry') { el = byName('card.expiry') || byName('card.expiryMonth') || (oppwa.length > 2 ? oppwa[2] : null); }
+      if (!el) continue;
+      var r = el.getBoundingClientRect();
+      if (!r || r.width <= 0 || r.height <= 0) continue;
+      el.setAttribute('data-antigen-masked', 'true');
+      el.setAttribute('data-antigen-filled', 'true');
+      el.setAttribute('data-antigen-iframe-field', fk);
+      marked.push(fk);
+    }
+    return { ok: true, marked: marked };
+  } catch (e) { return { ok: false, reason: String(e) }; }
+})(${JSON.stringify(fields)})`;
+}
 
 const REMOVE_OVERLAY_EXPR = `(function(){
   try {
@@ -113,7 +169,7 @@ export function redactPngBoxes(
 export async function captureRedactedScreenshot(
   params: CaptureRedactedScreenshotParams,
 ): Promise<CaptureRedactedScreenshotResult> {
-  const { browserWsUrl, pageTargetId } = params;
+  const { browserWsUrl, pageTargetId, expectedIframeFields = [] } = params;
 
   return await new Promise<CaptureRedactedScreenshotResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);
@@ -151,6 +207,26 @@ export async function captureRedactedScreenshot(
       const attach = await send("Target.attachToTarget", { targetId: pageTargetId, flatten: true });
       sessionId = (attach?.sessionId as string) ?? null;
       if (!sessionId) return finish(FAIL);
+
+      // 0. Mark the cross-origin OPPWA iframe containers for any protected card
+      //    field the caller knows was filled. FAIL CLOSED if any expected field's
+      //    iframe rectangle cannot be located/sized — never return an image that
+      //    leaves a filled PAN/CVV iframe visible.
+      if (expectedIframeFields.length > 0) {
+        const markRes = await send(
+          "Runtime.evaluate",
+          { expression: buildIframeMarkExpr(expectedIframeFields), returnByValue: true },
+          sessionId,
+        );
+        const markVal = (markRes?.result as Record<string, unknown> | undefined)?.value as
+          | { ok?: boolean; marked?: string[] }
+          | undefined;
+        if (!markVal?.ok) return finish(FAIL);
+        const marked = Array.isArray(markVal.marked) ? markVal.marked : [];
+        for (const field of expectedIframeFields) {
+          if (!marked.includes(field)) return finish(FAIL);
+        }
+      }
 
       // 1. Lay overlay boxes and collect the registered-field rects.
       const overlayRes = await send("Runtime.evaluate", { expression: OVERLAY_EXPR, returnByValue: true }, sessionId);

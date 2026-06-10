@@ -10,6 +10,7 @@ import {
 import { createServer } from "net";
 import type { TaskBrowserSession, TaskBrowserSessionStatus, ActionIntent, RiskState } from "@aegis/types";
 import { newId, MOCK_USER_ID } from "../store/index.js";
+import { clearProtectedIframeRedactions } from "./protectedIframeRedaction.js";
 
 // ─── Chrome binary detection ──────────────────────────────────────────────────
 
@@ -812,6 +813,8 @@ export async function closeTaskBrowserSession(id: string, userId: string): Promi
     return session;
   } finally {
     closingTaskBrowserSessions.delete(id);
+    // Drop any protected-iframe redaction registry entry for this session (hygiene).
+    clearProtectedIframeRedactions(id);
   }
 }
 

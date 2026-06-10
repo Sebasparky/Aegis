@@ -87,6 +87,36 @@ export function resolveFieldValue(
  *   Falls through to parent-page fill when no OPPWA iframes are detected (not_applicable).
  * - For non-card fields, a field inside an <iframe> fails closed with IFRAME_NOT_SUPPORTED.
  */
+/**
+ * Priority-ordered CSS selectors for locating a payment-card field on the parent page when the
+ * agent supplies no element_hint. Tried in order (first match wins) — NOT joined into a single
+ * `querySelector` list, because a comma list returns the first match in DOM order, which on an
+ * OPPWA checkout returns the cardholder input for an expiry request. Each list ends with a safe
+ * generic input as a last resort. Card number / CVV normally fill inside their OPPWA PCI iframes;
+ * these parent selectors only apply on non-iframe checkouts. Exported for unit testing.
+ */
+export function fieldFallbackSelectors(field: PaymentCardField): string[] {
+  const generic = 'input[type="text"],input[type="tel"],input:not([type])';
+  switch (field) {
+    case "card_number":
+      return ['.wpwl-control-cardNumber', 'input[autocomplete="cc-number"]', 'input[name*="cardnumber" i]', 'input[name*="card-number" i]', generic];
+    case "cvv":
+      return ['.wpwl-control-cvv', 'input[autocomplete="cc-csc"]', 'input[name*="cvv" i]', 'input[name*="cvc" i]', 'input[name*="securitycode" i]', generic];
+    case "expiry_combined":
+      return ['.wpwl-control-expiry', 'input[autocomplete="cc-exp"]', 'input[name="card.expiry" i]', 'input[name*="expiry" i]:not([type="hidden"])', 'input[placeholder*="MM/YY" i]', 'input[placeholder*="MM / YY" i]', generic];
+    case "expiry_month":
+      return ['.wpwl-control-expiryMonth', 'input[autocomplete="cc-exp-month"]', 'input[name="card.expiryMonth" i]', 'input[name*="expmonth" i]', 'input[name*="expiry-month" i]', generic];
+    case "expiry_year":
+      return ['.wpwl-control-expiryYear', 'input[autocomplete="cc-exp-year"]', 'input[name="card.expiryYear" i]', 'input[name*="expyear" i]', 'input[name*="expiry-year" i]', generic];
+    case "cardholder_name":
+      return ['.wpwl-control-cardHolder', 'input[autocomplete="cc-name"]', 'input[name="card.holder" i]', 'input[name*="holder" i]', 'input[name*="cardname" i]', generic];
+    case "billing_zip":
+      return ['.wpwl-control-billingZip', 'input[autocomplete="postal-code"]', 'input[name*="zip" i]', 'input[name*="postal" i]', generic];
+    default:
+      return [generic];
+  }
+}
+
 export async function executePaymentCardFillViaCDP(
   fillRequest: PaymentCardFillRequest,
   resolvedValue: string,
@@ -96,6 +126,7 @@ export async function executePaymentCardFillViaCDP(
   success: boolean;
   error?: string;
   iframeProvider?: "oppwa";
+  iframeFieldKind?: "card_number" | "cvv" | "expiry";
   iframeOrigin?: string;
   iframePath?: string;
 }> {
@@ -121,19 +152,28 @@ export async function executePaymentCardFillViaCDP(
       return { success: false, error: "No browser WebSocket debugger URL returned by CDP." };
     }
 
-    // OPPWA iframe routing — card_number and cvv fields may live inside cross-origin
-    // PCI iframes that are unreachable from the parent page's document context.
-    // Attempt the OPPWA iframe path first; fall through only when not_applicable.
-    if (fillRequest.field === "card_number" || fillRequest.field === "cvv") {
+    // OPPWA iframe routing — card_number, cvv, and the combined expiry (MM/YY) field
+    // may live inside cross-origin PCI iframes that are unreachable from the parent
+    // page's document context. Map the request field to the iframe field-kind and
+    // attempt the OPPWA iframe path first; fall through only when not_applicable.
+    // (expiry_month / expiry_year stay on the parent-page path — those target split
+    // <select> controls on non-OPPWA checkouts, not the combined OPPWA expiry widget.)
+    const iframeFieldKind: "card_number" | "cvv" | "expiry" | null =
+      fillRequest.field === "card_number" ? "card_number" :
+      fillRequest.field === "cvv" ? "cvv" :
+      fillRequest.field === "expiry_combined" ? "expiry" :
+      null;
+    if (iframeFieldKind) {
       const iframeResult = await fillOppwaIframeField({
         browserWsUrl,
-        field_kind: fillRequest.field,
+        field_kind: iframeFieldKind,
         resolvedValue,
       });
       if (iframeResult.status === "filled") {
         return {
           success: true,
           iframeProvider: "oppwa",
+          iframeFieldKind,
           iframeOrigin: iframeResult.iframe_origin,
           iframePath: iframeResult.iframe_path,
         };
@@ -177,8 +217,23 @@ export async function executePaymentCardFillViaCDP(
     } else if (input_type) {
       selectorExpr = `document.querySelector('input[type=${JSON.stringify(input_type)}]')`;
     } else {
-      // Generic fallback by field — prefers text/tel inputs, avoids submit controls
-      selectorExpr = `document.querySelector('input[type="text"],input[type="tel"],input:not([type])')`;
+      // Field-aware fallback when the agent gives no hint. The previous generic
+      // "first text/tel input" mis-targeted on OPPWA-style checkouts (e.g. IKEA): the
+      // expiry MM/YY control and the cardholder field are plain inputs rendered by the
+      // payment widget, and the FIRST text input on the page is the cardholder — so an
+      // unhinted expiry fill landed on the wrong field. We try a priority-ordered list
+      // of selectors (widget class → autocomplete → name/placeholder → generic) and take
+      // the first that matches, in selector priority order rather than DOM order (a plain
+      // `querySelector('A, B')` returns the first match in DOCUMENT order, which would
+      // re-introduce the cardholder mis-target — so we loop instead).
+      selectorExpr = `(function() {
+        var sels = ${JSON.stringify(fieldFallbackSelectors(fillRequest.field))};
+        for (var i = 0; i < sels.length; i++) {
+          var el = document.querySelector(sels[i]);
+          if (el) return el;
+        }
+        return null;
+      })()`;
     }
 
     // The whole protected payment-card bundle is agent-opaque: every field that comes

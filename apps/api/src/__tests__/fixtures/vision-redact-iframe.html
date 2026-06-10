@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Vision Redact Checkout — OPPWA iframe</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; background: #ffffff; color: #111; padding: 24px; }
+    h1 { font-size: 20px; }
+    label { display: block; margin: 14px 0 4px; }
+    input { display: block; font-size: 20px; padding: 8px; width: 320px; border: 1px solid #999; color: #0a3; }
+    /* OPPWA PCI iframes render the card number and CVV cross-origin. Give them an
+       explicit layout box so their bounding rect is available even though the
+       cross-origin src will not load in the test sandbox (only the src attribute
+       and the layout box are read — never iframe internals). */
+    iframe.oppwa { display: block; border: 1px solid #999; background: #eef; margin: 14px 0; }
+    #pan-frame { width: 320px; height: 36px; }
+    #cvv-frame { width: 120px; height: 36px; }
+  </style>
+</head>
+<body>
+  <h1>Checkout</h1>
+
+  <!-- Top-document protected fields, pre-tagged as if already filled by the
+       protected primitive (data-antigen-masked="true"). -->
+  <label for="expiry">Expiry</label>
+  <input id="expiry" name="expiry" type="text" value="12/29" data-antigen-masked="true" />
+
+  <label for="cardname">Name on card</label>
+  <input id="cardname" name="ccname" type="text" value="Jane Cardholder" data-antigen-masked="true" />
+
+  <!-- Cross-origin OPPWA PCI iframes — card number then CVV (DOM order). -->
+  <label>Card number</label>
+  <iframe id="pan-frame" class="oppwa" src="https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.number"></iframe>
+
+  <label>Security code</label>
+  <iframe id="cvv-frame" class="oppwa" src="https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.cvv"></iframe>
+
+  <button id="pay" type="button">Pay</button>
+</body>
+</html>

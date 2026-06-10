@@ -137,8 +137,15 @@ export function classifyPaymentIframe(input: {
     input.classes?.includes("wpwl-control-cvv")
   ) {
     base.field_kind = "cvv";
+  } else if (
+    input.name === "card.expiry" ||
+    input.name === "card.expiryMonth" ||
+    input.name === "card.expiryYear" ||
+    input.classes?.includes("wpwl-control-expiry")
+  ) {
+    base.field_kind = "expiry";
   }
-  // field_kind stays "unknown" for unrecognized OPPWA iframes (e.g. expiry widget)
+  // field_kind stays "unknown" for unrecognized OPPWA iframes
 
   return base;
 }
@@ -154,14 +161,15 @@ interface CdpTargetInfo {
 
 function pickOppwaTarget(
   targets: CdpTargetInfo[],
-  field_kind: "card_number" | "cvv",
+  field_kind: "card_number" | "cvv" | "expiry",
 ): CdpTargetInfo | undefined {
-  // 1. Primary: URL query param name=card.number / name=card.cvv
+  // 1. Primary: URL query param name=card.number / name=card.cvv / name=card.expiry
   for (const t of targets) {
     try {
       const n = new URL(t.url).searchParams.get("name");
       if (field_kind === "card_number" && n === "card.number") return t;
       if (field_kind === "cvv"         && n === "card.cvv")    return t;
+      if (field_kind === "expiry"      && (n === "card.expiry" || n === "card.expiryMonth")) return t;
     } catch { /* skip */ }
   }
 
@@ -170,13 +178,70 @@ function pickOppwaTarget(
     const ti = (t.title ?? "").toLowerCase();
     if (field_kind === "card_number" && ti.includes("card number")) return t;
     if (field_kind === "cvv" && (ti.includes("cvv") || ti.includes("security code"))) return t;
+    if (field_kind === "expiry" && (ti.includes("expiry") || ti.includes("expiration") || ti.includes("valid thru") || ti.includes("mm/yy"))) return t;
   }
 
-  // 3. Tertiary: positional — first OPPWA iframe = card_number, second = cvv
+  // 3. Tertiary: positional — first OPPWA iframe = card_number, second = cvv, third = expiry
   if (field_kind === "card_number") return targets[0];
   if (field_kind === "cvv")         return targets[1];
+  if (field_kind === "expiry")      return targets[2];
 
   return undefined;
+}
+
+/**
+ * Pick the index of the top-document <iframe> element that hosts the given
+ * protected card field, by inspecting only the parent-owned `src` attribute.
+ *
+ * This is the top-document mirror of `pickOppwaTarget` (which matches CDP iframe
+ * *targets*). It is used by the screenshot redaction path to locate the iframe
+ * container whose bounding box must be blacked out — it never inspects iframe
+ * internals.
+ *
+ * Match priority (identical to pickOppwaTarget):
+ *   1. Primary: `?name=card.number` / `?name=card.cvv` among iframes whose host
+ *      ends with `oppwa.com` on path `/v1/pciIframe.html`.
+ *   2. Positional fallback: first OPPWA iframe = card_number, second = cvv.
+ * Returns -1 when no candidate matches (drives screenshot fail-closed).
+ */
+export function pickOppwaIframeIndexForField(
+  iframes: { src: string }[],
+  field: "card_number" | "cvv" | "expiry",
+): number {
+  // Indices of iframes that are OPPWA PCI iframes, in DOM order.
+  const oppwaIdx: number[] = [];
+  for (let i = 0; i < iframes.length; i++) {
+    try {
+      const u = new URL(iframes[i].src);
+      if (u.hostname.endsWith("oppwa.com") && u.pathname === "/v1/pciIframe.html") {
+        oppwaIdx.push(i);
+      }
+    } catch {
+      /* skip non-URL src */
+    }
+  }
+  if (oppwaIdx.length === 0) return -1;
+
+  // 1. Primary: name query param. Expiry accepts the combined (card.expiry) or the
+  //    month-first split (card.expiryMonth) iframe.
+  const wantNames =
+    field === "card_number" ? ["card.number"] :
+    field === "cvv" ? ["card.cvv"] :
+    ["card.expiry", "card.expiryMonth"];
+  for (const i of oppwaIdx) {
+    try {
+      const n = new URL(iframes[i].src).searchParams.get("name");
+      if (n && wantNames.includes(n)) return i;
+    } catch {
+      /* skip */
+    }
+  }
+
+  // 2. Positional fallback: first OPPWA iframe = card_number, second = cvv, third = expiry.
+  if (field === "card_number") return oppwaIdx[0];
+  if (field === "cvv") return oppwaIdx.length > 1 ? oppwaIdx[1] : -1;
+  if (field === "expiry") return oppwaIdx.length > 2 ? oppwaIdx[2] : -1;
+  return -1;
 }
 
 // ─── CDP iframe fill ──────────────────────────────────────────────────────────
@@ -194,14 +259,14 @@ function pickOppwaTarget(
  */
 export async function fillOppwaIframeField(args: {
   browserWsUrl: string;
-  field_kind: "card_number" | "cvv";
+  field_kind: "card_number" | "cvv" | "expiry";
   resolvedValue: string;
   timeout?: number;
 }): Promise<PaymentIframeFillResult> {
   const { browserWsUrl, field_kind, resolvedValue, timeout = 10_000 } = args;
 
   // Build fill expression — resolvedValue embedded here, never returned.
-  // Masking is always applied since both card_number and cvv are sensitive.
+  // Masking is always applied since card_number, cvv, and expiry are all sensitive.
   // See module-level TODO for v2 Input.dispatchKeyEvent alternative.
   const fillExpr = `(function() {
   var el = document.querySelector('input[type="tel"]')

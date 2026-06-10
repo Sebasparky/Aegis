@@ -29,6 +29,7 @@ type WsScenario =
   | "no_oppwa_targets"
   | "card_number_found"
   | "cvv_found"
+  | "expiry_found"
   | "attach_fails"
   | "input_not_found"
   | "ws_error";
@@ -114,6 +115,32 @@ vi.mock("ws", () => {
               ],
             },
           });
+        } else if (wsScenario === "expiry_found") {
+          emit({
+            id: msg.id,
+            result: {
+              targetInfos: [
+                {
+                  targetId: "t_oppwa_cn",
+                  type: "iframe",
+                  url: "https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.number",
+                  title: "Card number *",
+                },
+                {
+                  targetId: "t_oppwa_cvv",
+                  type: "iframe",
+                  url: "https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.cvv",
+                  title: "Security Code CVV",
+                },
+                {
+                  targetId: "t_oppwa_exp",
+                  type: "iframe",
+                  url: "https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.expiry",
+                  title: "Expiry date MM/YY",
+                },
+              ],
+            },
+          });
         } else if (wsScenario === "attach_fails" || wsScenario === "input_not_found") {
           // Two OPPWA iframes present; attach outcome depends on next scenario
           emit({
@@ -174,8 +201,71 @@ import {
   sanitizeIframeUrl,
   classifyPaymentIframe,
   fillOppwaIframeField,
+  pickOppwaIframeIndexForField,
   OPPWA_ERRORS,
 } from "../runtime/paymentIframeFill.js";
+
+// ─── Tests: pickOppwaIframeIndexForField (screenshot redaction matcher) ───────
+
+describe("pickOppwaIframeIndexForField", () => {
+  const PAN = "https://eu-prod.oppwa.com/v1/pciIframe.html?entityId=abc&name=card.number";
+  const CVV = "https://eu-prod.oppwa.com/v1/pciIframe.html?entityId=abc&name=card.cvv";
+
+  it("matches by the name query param (primary)", () => {
+    const iframes = [{ src: "https://example.com/other" }, { src: CVV }, { src: PAN }];
+    expect(pickOppwaIframeIndexForField(iframes, "card_number")).toBe(2);
+    expect(pickOppwaIframeIndexForField(iframes, "cvv")).toBe(1);
+  });
+
+  it("matches the expiry iframe by name=card.expiry (primary)", () => {
+    const EXP = "https://eu-prod.oppwa.com/v1/pciIframe.html?entityId=abc&name=card.expiry";
+    const iframes = [{ src: PAN }, { src: CVV }, { src: EXP }];
+    expect(pickOppwaIframeIndexForField(iframes, "expiry")).toBe(2);
+  });
+
+  it("matches the expiry iframe by name=card.expiryMonth (split month-first widget)", () => {
+    const EXPM = "https://eu-prod.oppwa.com/v1/pciIframe.html?name=card.expiryMonth";
+    const iframes = [{ src: PAN }, { src: EXPM }, { src: CVV }];
+    expect(pickOppwaIframeIndexForField(iframes, "expiry")).toBe(1);
+  });
+
+  it("falls back to the third OPPWA iframe for expiry when the name param is absent", () => {
+    const noName = "https://eu-prod.oppwa.com/v1/pciIframe.html?entityId=abc";
+    const iframes = [{ src: noName }, { src: noName }, { src: noName }];
+    expect(pickOppwaIframeIndexForField(iframes, "expiry")).toBe(2);
+  });
+
+  it("returns -1 for expiry when fewer than three OPPWA iframes exist and no name match", () => {
+    const noName = "https://eu-prod.oppwa.com/v1/pciIframe.html";
+    expect(pickOppwaIframeIndexForField([{ src: noName }, { src: noName }], "expiry")).toBe(-1);
+  });
+
+  it("falls back to DOM position when the name param is absent (first=PAN, second=CVV)", () => {
+    const noName = "https://eu-prod.oppwa.com/v1/pciIframe.html?entityId=abc";
+    const iframes = [{ src: noName }, { src: noName }];
+    expect(pickOppwaIframeIndexForField(iframes, "card_number")).toBe(0);
+    expect(pickOppwaIframeIndexForField(iframes, "cvv")).toBe(1);
+  });
+
+  it("returns -1 when no OPPWA iframe is present (drives screenshot fail-closed)", () => {
+    const iframes = [{ src: "https://pay.google.com/gp/p" }, { src: "data:text/html,x" }];
+    expect(pickOppwaIframeIndexForField(iframes, "card_number")).toBe(-1);
+    expect(pickOppwaIframeIndexForField(iframes, "cvv")).toBe(-1);
+  });
+
+  it("returns -1 for cvv when only one OPPWA iframe exists and no name match", () => {
+    const noName = "https://eu-prod.oppwa.com/v1/pciIframe.html";
+    expect(pickOppwaIframeIndexForField([{ src: noName }], "cvv")).toBe(-1);
+    expect(pickOppwaIframeIndexForField([{ src: noName }], "card_number")).toBe(0);
+  });
+
+  it("rejects non-oppwa hosts and wrong paths and unparseable src", () => {
+    const wrongHost = "https://oppwa.com.evil.example/v1/pciIframe.html?name=card.number";
+    const wrongPath = "https://eu-prod.oppwa.com/v2/other.html?name=card.number";
+    const iframes = [{ src: wrongHost }, { src: wrongPath }, { src: "not-a-url" }];
+    expect(pickOppwaIframeIndexForField(iframes, "card_number")).toBe(-1);
+  });
+});
 
 // ─── Tests: sanitizeIframeUrl ─────────────────────────────────────────────────
 
@@ -292,10 +382,28 @@ describe("classifyPaymentIframe", () => {
     expect(d.origin).not.toContain("injected");
   });
 
-  it("returns provider=unknown for an unrecognized OPPWA iframe (expiry widget)", () => {
+  it("identifies OPPWA expiry via name=card.expiry", () => {
     const d = classifyPaymentIframe({
       origin: "https://eu-prod.oppwa.com/v1/pciIframe.html",
       name: "card.expiry",
+    });
+    expect(d.provider).toBe("oppwa");
+    expect(d.field_kind).toBe("expiry");
+  });
+
+  it("identifies OPPWA expiry via class wpwl-control-expiry", () => {
+    const d = classifyPaymentIframe({
+      origin: "https://eu-prod.oppwa.com/v1/pciIframe.html",
+      classes: ["wpwl-control", "wpwl-control-expiry"],
+    });
+    expect(d.provider).toBe("oppwa");
+    expect(d.field_kind).toBe("expiry");
+  });
+
+  it("still returns field_kind=unknown for a genuinely unrecognized OPPWA iframe", () => {
+    const d = classifyPaymentIframe({
+      origin: "https://eu-prod.oppwa.com/v1/pciIframe.html",
+      name: "card.somethingElse",
     });
     expect(d.provider).toBe("oppwa");
     expect(d.field_kind).toBe("unknown");
@@ -479,6 +587,38 @@ describe("fillOppwaIframeField — cvv fill", () => {
       resolvedValue: cvv,
     });
     expect(JSON.stringify(result)).not.toContain(cvv);
+  });
+});
+
+// ─── Tests: fillOppwaIframeField — expiry fill ────────────────────────────────
+
+describe("fillOppwaIframeField — expiry fill", () => {
+  beforeEach(() => { wsScenario = "expiry_found"; });
+
+  it("returns status=filled for the expiry iframe", async () => {
+    const result = await fillOppwaIframeField({
+      browserWsUrl: "ws://localhost:9222/devtools/browser/fake",
+      field_kind: "expiry",
+      resolvedValue: "12/29",
+    });
+    expect(result.status).toBe("filled");
+    if (result.status === "filled") {
+      expect(result.iframe_provider).toBe("oppwa");
+      const noLeak: false = result.raw_value_revealed_to_agent;
+      const notAuthorized: true = result.purchase_not_authorized;
+      expect(noLeak).toBe(false);
+      expect(notAuthorized).toBe(true);
+    }
+  });
+
+  it("expiry result JSON does NOT contain the raw expiry value", async () => {
+    const exp = "07/31";
+    const result = await fillOppwaIframeField({
+      browserWsUrl: "ws://localhost:9222/devtools/browser/fake",
+      field_kind: "expiry",
+      resolvedValue: exp,
+    });
+    expect(JSON.stringify(result)).not.toContain(exp);
   });
 });
 

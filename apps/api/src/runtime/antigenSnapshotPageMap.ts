@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto";
 import type { AntigenSnapshotElementRecord } from "./antigenSnapshotStore.js";
-import type { AntigenPageMeta } from "./antigenSnapshotRuntime.js";
+import type { AntigenPageMeta, AntigenOverlayType } from "./antigenSnapshotRuntime.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -87,10 +87,35 @@ export interface ProductCard {
 }
 
 export interface WarningOrModal {
-  kind: "cookie_banner" | "modal" | "cart_drawer" | "login_prompt" | "unknown_overlay";
+  kind: "cookie_banner" | "modal" | "cart_drawer" | "login_prompt" | "toast" | "unknown_overlay";
+  /** Structural overlay kind when this warning came from overlay detection. */
+  overlay_type?: AntigenOverlayType;
+  /** Accessible title of the overlay container (value-free). */
+  modal_title?: string;
+  /** True when the overlay blocks the page (aria-modal / native modal / backdrop). */
+  blocking?: boolean;
   message?: string;
+  /** Close/dismiss controls. `close_refs` is an alias kept alongside for clarity. */
   dismiss_refs?: string[];
+  close_refs?: string[];
+  /** Primary call-to-action refs inside the overlay (e.g. "Continue", "Sign in"). */
+  primary_action_refs?: string[];
   action_hint?: "browser_click";
+}
+
+/**
+ * Summary of the dominant active overlay on the page. Built only from real
+ * overlay members (background-behind-modal markers excluded). Exposes ONLY safe
+ * refs + the value-free accessible title — no geometry, no internal flags.
+ */
+export interface ActiveOverlay {
+  present: boolean;
+  overlay_type: AntigenOverlayType;
+  blocking: boolean;
+  modal_title?: string;
+  dismiss_refs: string[];
+  primary_action_refs: string[];
+  action_refs: string[];
 }
 
 export interface PageSummary {
@@ -129,6 +154,8 @@ export interface AntigenPageMap {
   forms: FormGroup[];
   product_cards: ProductCard[];
   warnings_or_modals: WarningOrModal[];
+  /** Dominant active overlay summary; omitted when no overlay is present. */
+  active_overlay?: ActiveOverlay;
   action_hints: ActionHintEntry[];
   /** Per-ref qualitative status — merged into external elements by the endpoint. */
   ref_status: Record<string, RefStatus>;
@@ -196,6 +223,35 @@ const PRIMARY_PATTERNS: PrimaryPattern[] = [
   { re: /\bok\b/, priority: "medium", reason: "confirm_action" },
   { re: /\b(close|dismiss|decline|reject)\b/, priority: "low", reason: "dismiss_action" },
 ];
+
+/** A primary/secondary call-to-action name (any non-dismiss PRIMARY_PATTERN). */
+function isPrimaryActionName(normalizedName: string): boolean {
+  if (!normalizedName) return false;
+  for (const p of PRIMARY_PATTERNS) {
+    if (p.priority !== "low" && p.re.test(normalizedName)) return true;
+  }
+  return false;
+}
+
+/** Bump a priority one level toward high (low→medium, medium/high→high). */
+function bumpPriority(p: ActionPriority): ActionPriority {
+  return p === "low" ? "medium" : "high";
+}
+
+/** A record that belongs to a real (non-background) overlay container. */
+function isOverlayMember(r: AntigenSnapshotElementRecord): boolean {
+  return !!r.overlay && r.overlay.background !== true;
+}
+
+/** A background-behind-modal record (inert / aria-hidden behind a modal). */
+function isBackgroundRecord(r: AntigenSnapshotElementRecord): boolean {
+  return !!r.overlay && (r.overlay.background === true || r.overlay.bg_hidden === true);
+}
+
+/** Inert background — truly non-interactive; excluded from action buckets. */
+function isInertRecord(r: AntigenSnapshotElementRecord): boolean {
+  return r.overlay?.in_inert === true;
+}
 
 const SUBMIT_LIKE = /\b(submit|confirm|search|continue|next|sign in|log in|login|save|go|apply)\b/;
 const NAV_SECTION = /\b(nav|navigation|menu|footer|header|breadcrumb|sidebar)\b/;
@@ -371,14 +427,61 @@ function buildProductCards(records: AntigenSnapshotElementRecord[]): ProductCard
 
 // ─── Warnings / modals ───────────────────────────────────────────────────────
 
+function ctxText(r: AntigenSnapshotElementRecord): string {
+  return `${r.context?.section ?? ""} ${r.context?.label ?? ""} ${r.name}`;
+}
+
+/** Map a structural overlay group to the agent-facing warning kind. */
+function warningKindFor(
+  overlayType: AntigenOverlayType,
+  group: AntigenSnapshotElementRecord[],
+): WarningOrModal["kind"] {
+  if (overlayType === "toast") return "toast";
+  if (group.some((r) => LOGIN_PROMPT_RE.test(ctxText(r)))) return "login_prompt";
+  if (group.some((r) => CART_DRAWER_RE.test(`${r.context?.section ?? ""} ${r.name}`))) return "cart_drawer";
+  if (overlayType === "dialog" || overlayType === "alertdialog") return "modal";
+  return "unknown_overlay";
+}
+
+/** Group structural overlay members by overlay_type + accessible title. */
+function groupOverlayMembers(
+  members: AntigenSnapshotElementRecord[],
+): AntigenSnapshotElementRecord[][] {
+  const groups = new Map<string, AntigenSnapshotElementRecord[]>();
+  for (const r of members) {
+    const key = `${r.overlay?.overlay_type ?? ""}|${r.overlay?.modal_title ?? ""}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(r);
+    groups.set(key, arr);
+  }
+  return [...groups.values()];
+}
+
+function overlayDismissRefs(group: AntigenSnapshotElementRecord[]): string[] {
+  return group
+    .filter(
+      (r) =>
+        r.clickable &&
+        (r.overlay?.is_dismiss === true ||
+          (r.normalized_name && DISMISS_NAME.test(r.normalized_name))),
+    )
+    .map((r) => r.ref);
+}
+
+function overlayPrimaryRefs(group: AntigenSnapshotElementRecord[]): string[] {
+  return group
+    .filter(
+      (r) => r.clickable && r.overlay?.is_dismiss !== true && isPrimaryActionName(r.normalized_name),
+    )
+    .map((r) => r.ref);
+}
+
 function buildWarnings(records: AntigenSnapshotElementRecord[]): WarningOrModal[] {
   const warnings: WarningOrModal[] = [];
 
-  const ctxText = (r: AntigenSnapshotElementRecord) =>
-    `${r.context?.section ?? ""} ${r.context?.label ?? ""} ${r.name}`;
-
   // Cookie banner: any control whose context/name mentions cookies/consent.
   const cookieControls = records.filter((r) => COOKIE_RE.test(ctxText(r)));
+  const cookieRefs = new Set(cookieControls.map((r) => r.ref));
   if (cookieControls.length > 0) {
     const dismiss = cookieControls
       .filter((r) => r.clickable && r.normalized_name && COOKIE_DISMISS.test(r.normalized_name))
@@ -387,30 +490,99 @@ function buildWarnings(records: AntigenSnapshotElementRecord[]): WarningOrModal[
     warnings.push({
       kind: "cookie_banner",
       ...(message ? { message } : {}),
-      ...(dismiss.length > 0 ? { dismiss_refs: dismiss, action_hint: "browser_click" as const } : {}),
+      ...(dismiss.length > 0 ? { dismiss_refs: dismiss, close_refs: dismiss, action_hint: "browser_click" as const } : {}),
     });
   }
 
-  // Generic modal/dialog overlay (excluding cookie, already handled).
-  const modalControls = records.filter(
-    (r) => MODAL_SECTION_RE.test(`${r.context?.section ?? ""}`) && !COOKIE_RE.test(ctxText(r)),
-  );
-  if (modalControls.length > 0) {
-    const dismiss = modalControls
-      .filter((r) => r.clickable && r.normalized_name && DISMISS_NAME.test(r.normalized_name))
-      .map((r) => r.ref);
-    const isLogin = modalControls.some((r) => LOGIN_PROMPT_RE.test(ctxText(r)));
-    const isCart = modalControls.some((r) => CART_DRAWER_RE.test(`${r.context?.section ?? ""}`));
-    const kind: WarningOrModal["kind"] = isLogin ? "login_prompt" : isCart ? "cart_drawer" : "modal";
-    const message = clip(modalControls.map((r) => r.context?.section).find(Boolean) ?? "", MESSAGE_MAX);
-    warnings.push({
-      kind,
-      ...(message ? { message } : {}),
-      ...(dismiss.length > 0 ? { dismiss_refs: dismiss, action_hint: "browser_click" as const } : {}),
-    });
+  // Structural overlays — driven by detected overlay membership (role=dialog,
+  // aria-modal, native <dialog open>, popover, toast/live, drawer, top-layer).
+  // Background-behind-modal markers and cookie controls are excluded.
+  const members = records.filter((r) => isOverlayMember(r) && !cookieRefs.has(r.ref));
+  for (const group of groupOverlayMembers(members)) {
+    const overlayType = group[0].overlay!.overlay_type;
+    const blocking = group.some((r) => r.overlay?.blocking === true);
+    const modalTitle = group.map((r) => r.overlay?.modal_title).find(Boolean);
+    const dismiss = overlayDismissRefs(group);
+    const primary = overlayPrimaryRefs(group);
+    const warning: WarningOrModal = {
+      kind: warningKindFor(overlayType, group),
+      overlay_type: overlayType,
+      blocking,
+    };
+    const message = clip(modalTitle ?? "", MESSAGE_MAX);
+    if (modalTitle) warning.modal_title = clip(modalTitle, MESSAGE_MAX);
+    if (message) warning.message = message;
+    if (dismiss.length > 0) {
+      warning.dismiss_refs = dismiss;
+      warning.close_refs = dismiss;
+      warning.action_hint = "browser_click";
+    }
+    if (primary.length > 0) warning.primary_action_refs = primary;
+    warnings.push(warning);
+  }
+
+  // Low-confidence fallback: a section keyword suggests a modal but structural
+  // detection found nothing (e.g. a CSS-only overlay). Keeps prior behavior from
+  // regressing without double-emitting when structural detection already fired.
+  if (members.length === 0) {
+    const modalControls = records.filter(
+      (r) => MODAL_SECTION_RE.test(`${r.context?.section ?? ""}`) && !COOKIE_RE.test(ctxText(r)),
+    );
+    if (modalControls.length > 0) {
+      const dismiss = modalControls
+        .filter((r) => r.clickable && r.normalized_name && DISMISS_NAME.test(r.normalized_name))
+        .map((r) => r.ref);
+      const isLogin = modalControls.some((r) => LOGIN_PROMPT_RE.test(ctxText(r)));
+      const isCart = modalControls.some((r) => CART_DRAWER_RE.test(`${r.context?.section ?? ""}`));
+      const kind: WarningOrModal["kind"] = isLogin ? "login_prompt" : isCart ? "cart_drawer" : "modal";
+      const message = clip(modalControls.map((r) => r.context?.section).find(Boolean) ?? "", MESSAGE_MAX);
+      warnings.push({
+        kind,
+        ...(message ? { message } : {}),
+        ...(dismiss.length > 0 ? { dismiss_refs: dismiss, close_refs: dismiss, action_hint: "browser_click" as const } : {}),
+      });
+    }
   }
 
   return warnings;
+}
+
+/**
+ * Dominant active overlay summary. Among all structural overlay groups, prefers
+ * blocking over nonblocking, then dialog/alertdialog, then the group with the
+ * most members. Returns only safe refs + the value-free accessible title.
+ */
+function buildActiveOverlay(records: AntigenSnapshotElementRecord[]): ActiveOverlay | undefined {
+  const members = records.filter(isOverlayMember);
+  if (members.length === 0) return undefined;
+
+  let best: { group: AntigenSnapshotElementRecord[]; score: number } | undefined;
+  for (const group of groupOverlayMembers(members)) {
+    const blocking = group.some((r) => r.overlay?.blocking === true);
+    const type = group[0].overlay!.overlay_type;
+    const score =
+      (blocking ? 1000 : 0) +
+      (type === "dialog" || type === "alertdialog" ? 100 : 0) +
+      group.length;
+    if (!best || score > best.score) best = { group, score };
+  }
+  if (!best) return undefined;
+
+  const group = best.group;
+  const overlayType = group[0].overlay!.overlay_type;
+  const blocking = group.some((r) => r.overlay?.blocking === true);
+  const modalTitle = group.map((r) => r.overlay?.modal_title).find(Boolean);
+  const out: ActiveOverlay = {
+    present: true,
+    overlay_type: overlayType,
+    blocking,
+    dismiss_refs: overlayDismissRefs(group),
+    primary_action_refs: overlayPrimaryRefs(group),
+    action_refs: group.filter((r) => r.clickable).map((r) => r.ref),
+  };
+  const title = clip(modalTitle ?? "", MESSAGE_MAX);
+  if (title) out.modal_title = title;
+  return out;
 }
 
 function isOverlayDismiss(record: AntigenSnapshotElementRecord, warnings: WarningOrModal[]): boolean {
@@ -498,6 +670,12 @@ export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap 
   }
 
   const warnings = buildWarnings(records);
+  const active_overlay = buildActiveOverlay(records);
+
+  // When a blocking overlay is active, background actions are demoted so the
+  // agent acts on the modal first. Nonblocking overlays (toasts/popovers) never
+  // demote the rest of the page.
+  const blockingActive = records.some((r) => isOverlayMember(r) && r.overlay?.blocking === true);
 
   // Categorize interactive elements into ranked action buckets.
   const primary: RankedAction[] = [];
@@ -507,33 +685,69 @@ export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap 
 
   for (const r of records) {
     const vp = statusByRef.get(r.ref) ?? "unknown";
-    const overlay = isOverlayDismiss(r, warnings);
+    const member = isOverlayMember(r);
+    const dismiss = (member && r.overlay?.is_dismiss === true) || isOverlayDismiss(r, warnings);
     const hint = hintFor(r, vp);
     action_hints.push({
       ref: r.ref,
       action_hint: hint,
-      ...(overlay ? { reason: "dismiss_overlay" } : {}),
+      ...(dismiss ? { reason: "dismiss_overlay" } : {}),
     });
 
     const { category, priority, reason } = classify(r);
     if (category === "form" || category === "none") continue;
 
+    // Inert background controls cannot be acted on — keep them in `elements`
+    // (the endpoint emits those) but never rank them as actions.
+    if (isInertRecord(r)) continue;
+
+    // Overlay-aware re-classification.
+    let cat = category;
+    let prio = priority;
+    let rsn = reason;
+    if (member) {
+      if (r.overlay?.is_dismiss === true) {
+        cat = "secondary";
+        prio = "medium";
+        rsn = "modal_dismiss";
+      } else if (category === "primary") {
+        prio = "high";
+        rsn = "modal_primary_action";
+      } else {
+        cat = "primary";
+        prio = bumpPriority(priority);
+        rsn = "modal_action";
+      }
+    } else if (blockingActive) {
+      // Behind an active blocking modal — demote out of the spotlight.
+      cat = category === "primary" ? "secondary" : category;
+      prio = "low";
+      rsn = "behind_active_modal";
+    } else if (isBackgroundRecord(r)) {
+      prio = "low";
+      rsn = "behind_active_modal";
+    }
+
     const item: RankedAction = {
       ref: r.ref,
       role: r.role,
       name: r.name,
-      priority,
-      reason: overlay ? "dismiss_overlay" : reason,
+      priority: prio,
+      reason: dismiss && rsn !== "modal_dismiss" ? "dismiss_overlay" : rsn,
       action_hint: hint,
       viewport_status: vp,
       scroll_required: ref_status[r.ref].scroll_required,
     };
-    if (category === "primary") primary.push(item);
-    else if (category === "navigation") navigation.push(item);
+    if (cat === "primary") primary.push(item);
+    else if (cat === "navigation") navigation.push(item);
     else secondary.push(item);
   }
 
-  const byPriority = (a: RankedAction, b: RankedAction) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+  // Within equal priority, overlay actions lead so a modal's controls surface
+  // first regardless of DOM order.
+  const modalRank = (a: RankedAction) => (/^modal_/.test(a.reason) ? 0 : 1);
+  const byPriority = (a: RankedAction, b: RankedAction) =>
+    PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || modalRank(a) - modalRank(b);
   primary.sort(byPriority);
   secondary.sort(byPriority);
 
@@ -559,6 +773,7 @@ export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap 
     forms: buildForms(records),
     product_cards: buildProductCards(records),
     warnings_or_modals: warnings,
+    ...(active_overlay ? { active_overlay } : {}),
     action_hints,
     ref_status,
     evidence_partial: {

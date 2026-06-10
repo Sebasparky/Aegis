@@ -229,3 +229,139 @@ describe("buildAntigenPageMap — warnings/modals", () => {
     expect(modal?.dismiss_refs).toContain("ag_1");
   });
 });
+
+// ─── G. Structural overlays + prioritization ─────────────────────────────────
+
+describe("buildAntigenPageMap — structural overlays", () => {
+  it("surfaces active_overlay + a modal warning with title / primary / dismiss refs", () => {
+    const cont = rec({
+      ref: "ag_1",
+      name: "Continue",
+      normalized_name: "continue",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Continue as guest" },
+    });
+    const close = rec({
+      ref: "ag_2",
+      name: "Close",
+      normalized_name: "close",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Continue as guest", is_dismiss: true },
+    });
+    const map = buildAntigenPageMap({ records: [cont, close], viewportOnly: true, url: "https://x.com/checkout" });
+
+    expect(map.active_overlay?.present).toBe(true);
+    expect(map.active_overlay?.overlay_type).toBe("dialog");
+    expect(map.active_overlay?.blocking).toBe(true);
+    expect(map.active_overlay?.modal_title).toBe("Continue as guest");
+    expect(map.active_overlay?.primary_action_refs).toEqual(["ag_1"]);
+    expect(map.active_overlay?.dismiss_refs).toEqual(["ag_2"]);
+    expect(map.active_overlay?.action_refs).toEqual(["ag_1", "ag_2"]);
+
+    const modal = map.warnings_or_modals.find((w) => w.kind === "modal");
+    expect(modal?.overlay_type).toBe("dialog");
+    expect(modal?.blocking).toBe(true);
+    expect(modal?.modal_title).toBe("Continue as guest");
+    expect(modal?.primary_action_refs).toEqual(["ag_1"]);
+    expect(modal?.dismiss_refs).toEqual(["ag_2"]);
+  });
+
+  it("prioritizes the modal's CTA and demotes background actions behind a blocking modal", () => {
+    const cont = rec({
+      ref: "ag_1",
+      name: "Continue",
+      normalized_name: "continue",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Continue as guest" },
+    });
+    const bgAdd = rec({ ref: "ag_2", name: "Add to bag", normalized_name: "add to bag" });
+    const map = buildAntigenPageMap({ records: [cont, bgAdd], viewportOnly: true, url: "https://x.com/" });
+
+    expect(map.primary_actions[0].ref).toBe("ag_1");
+    expect(map.primary_actions[0].reason).toBe("modal_primary_action");
+    expect(map.primary_actions.map((a) => a.ref)).not.toContain("ag_2");
+
+    const bg = [...map.primary_actions, ...map.secondary_actions, ...map.navigation].find((a) => a.ref === "ag_2");
+    expect(bg?.priority).toBe("low");
+    expect(bg?.reason).toBe("behind_active_modal");
+  });
+
+  it("excludes inert background controls from action buckets but keeps active_overlay", () => {
+    const signin = rec({
+      ref: "ag_1",
+      name: "Sign in",
+      normalized_name: "sign in",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Sign in" },
+    });
+    const inertBtn = rec({
+      ref: "ag_2",
+      name: "Browse",
+      normalized_name: "browse",
+      overlay: { overlay_type: "overlay", blocking: false, background: true, in_inert: true },
+    });
+    const map = buildAntigenPageMap({ records: [signin, inertBtn], viewportOnly: true, url: "https://x.com/" });
+
+    const allActionRefs = [...map.primary_actions, ...map.secondary_actions, ...map.navigation].map((a) => a.ref);
+    expect(allActionRefs).not.toContain("ag_2");
+    expect(map.active_overlay?.primary_action_refs).toEqual(["ag_1"]);
+  });
+
+  it("a nonblocking toast does NOT demote the rest of the page", () => {
+    const view = rec({
+      ref: "ag_1",
+      kind: "link",
+      role: "link",
+      name: "View bag",
+      normalized_name: "view bag",
+      href_path: "/cart",
+      overlay: { overlay_type: "toast", blocking: false, modal_title: "Added to bag" },
+    });
+    const add = rec({ ref: "ag_2", name: "Add to bag", normalized_name: "add to bag" });
+    const map = buildAntigenPageMap({ records: [view, add], viewportOnly: true, url: "https://x.com/" });
+
+    const toast = map.warnings_or_modals.find((w) => w.kind === "toast");
+    expect(toast?.blocking).toBe(false);
+    expect(map.active_overlay?.overlay_type).toBe("toast");
+    expect(map.active_overlay?.blocking).toBe(false);
+
+    const addAction = [...map.primary_actions, ...map.secondary_actions].find((a) => a.ref === "ag_2");
+    expect(addAction?.priority).toBe("high");
+    expect(addAction?.reason).not.toBe("behind_active_modal");
+  });
+
+  it("surfaces a same-URL checkout dialog even when section text lacks modal keywords", () => {
+    const choose = rec({
+      ref: "ag_1",
+      name: "Choose delivery",
+      normalized_name: "choose delivery",
+      context: { section: "Delivery options" },
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Choose delivery" },
+    });
+    const map = buildAntigenPageMap({ records: [choose], viewportOnly: true, url: "https://x.com/checkout" });
+    const modal = map.warnings_or_modals.find((w) => w.kind === "modal");
+    expect(modal?.modal_title).toBe("Choose delivery");
+    expect(map.active_overlay?.modal_title).toBe("Choose delivery");
+  });
+
+  it("omits active_overlay when no overlay is present", () => {
+    const add = rec({ ref: "ag_1", name: "Add to bag", normalized_name: "add to bag" });
+    const map = buildAntigenPageMap({ records: [add], viewportOnly: true, url: "https://x.com/" });
+    expect(map.active_overlay).toBeUndefined();
+  });
+
+  it("active_overlay exposes only safe fields — no internal flags or geometry", () => {
+    const cont = rec({
+      ref: "ag_1",
+      name: "Continue",
+      normalized_name: "continue",
+      overlay: { overlay_type: "dialog", blocking: true, modal_title: "Continue as guest", in_inert: true },
+    });
+    const map = buildAntigenPageMap({ records: [cont], viewportOnly: true, url: "https://x.com/" });
+    const keys = Object.keys(map.active_overlay ?? {}).sort();
+    expect(keys).toEqual(
+      ["action_refs", "blocking", "dismiss_refs", "modal_title", "overlay_type", "present", "primary_action_refs"].sort(),
+    );
+    const serialized = JSON.stringify(map.active_overlay);
+    expect(serialized).not.toContain("in_inert");
+    expect(serialized).not.toContain("bg_hidden");
+    expect(serialized).not.toContain("background");
+    expect(serialized).not.toMatch(/"(box|x|y|width|height|doc_x|doc_y)"/);
+  });
+});

@@ -4957,9 +4957,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     timing.mark("record_store_and_pagemap");
 
-    // External elements + per-element qualitative status (additive, safe).
+    // External elements + per-element qualitative status (additive, safe). When
+    // a ref is the active overlay's primary CTA, flag it so the agent can act on
+    // the modal first. `is_primary` comes from the page map's primary set — never
+    // recomputed from raw names here.
+    const overlayPrimaryRefs = new Set(pageMap.active_overlay?.primary_action_refs ?? []);
     const externalElements = elements.map((el) => {
       const ext = toExternalAntigenSnapshotElement(el);
+      if (ext.overlay && overlayPrimaryRefs.has(el.ref)) {
+        ext.overlay = { ...ext.overlay, is_primary: true };
+      }
       const st = pageMap.ref_status[el.ref];
       return st
         ? {
@@ -4996,6 +5003,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         typeable_count: pageMap.evidence_partial.typeable_count,
         primary_action_count: pageMap.primary_actions.length,
         warning_count: pageMap.warnings_or_modals.length,
+        // Booleans only — never overlay titles, refs, or text.
+        overlay_present: pageMap.active_overlay !== undefined,
+        overlay_blocking: pageMap.active_overlay?.blocking === true,
       },
       result_code: "antigen_snapshot_success",
     });
@@ -5032,6 +5042,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         forms: pageMap.forms,
         product_cards: pageMap.product_cards,
         warnings_or_modals: pageMap.warnings_or_modals,
+        ...(pageMap.active_overlay ? { active_overlay: pageMap.active_overlay } : {}),
         action_hints: pageMap.action_hints,
         elements: externalElements,
       },

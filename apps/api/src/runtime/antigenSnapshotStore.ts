@@ -27,6 +27,8 @@ import type {
   AntigenSnapshotCandidate,
   AntigenSnapshotContext,
   AntigenRawValueMeta,
+  AntigenOverlayInfo,
+  AntigenOverlayType,
 } from "./antigenSnapshotRuntime.js";
 import { newId } from "../store/index.js";
 
@@ -169,6 +171,13 @@ export interface AntigenSnapshotElementRecord {
    */
   value_meta?: AntigenRawValueMeta;
 
+  /**
+   * Active-overlay membership (modal/dialog/popover/toast/drawer/top-layer). The
+   * internal record keeps `in_inert`/`bg_hidden`/`background` for page-map
+   * demotion; the external view strips them.
+   */
+  overlay?: AntigenOverlayInfo;
+
   created_at: string;
   expires_at: string;
 }
@@ -209,6 +218,19 @@ export interface ExternalAntigenSnapshotElement {
     invalid?: boolean;
     validation_message?: string;
     sensitive: boolean;
+  };
+  /**
+   * Active-overlay membership, agent-facing. Present only for real overlay
+   * members (background-behind-modal markers are dropped). Internal ranking
+   * signals (`in_inert`/`bg_hidden`/`background`) are NEVER surfaced; `is_primary`
+   * is filled by the endpoint from the page map's primary-action set.
+   */
+  overlay?: {
+    overlay_type: AntigenOverlayType;
+    blocking: boolean;
+    modal_title?: string;
+    is_dismiss?: boolean;
+    is_primary?: boolean;
   };
 }
 
@@ -292,6 +314,7 @@ export function createAntigenSnapshotRecord(params: CreateAntigenSnapshotParams)
 
     context: c.context,
     value_meta: c.value_meta,
+    overlay: c.overlay,
 
     created_at: createdAt,
     expires_at: expiresAt,
@@ -543,6 +566,20 @@ export function toExternalAntigenSnapshotElement(
       if (typeof vm.validation_message === "string") value.validation_message = vm.validation_message;
     }
     out.value = value;
+  }
+  // Active-overlay membership. SAFETY: only real memberships are surfaced —
+  // background-behind-modal markers (`background`) are dropped, and the internal
+  // ranking flags `in_inert`/`bg_hidden` never reach the agent. `modal_title` is
+  // accessible-name-derived and value-free by construction.
+  const ov = el.overlay;
+  if (ov && ov.background !== true) {
+    const overlay: NonNullable<ExternalAntigenSnapshotElement["overlay"]> = {
+      overlay_type: ov.overlay_type,
+      blocking: ov.blocking === true,
+    };
+    if (typeof ov.modal_title === "string" && ov.modal_title) overlay.modal_title = ov.modal_title;
+    if (ov.is_dismiss === true) overlay.is_dismiss = true;
+    out.overlay = overlay;
   }
   return out;
 }

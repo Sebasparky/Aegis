@@ -86,6 +86,12 @@ export interface AntigenSnapshotCandidate {
    * never the raw value. See AntigenRawValueMeta.
    */
   value_meta?: AntigenRawValueMeta;
+  /**
+   * Active-overlay membership for this candidate (modal/dialog/popover/toast/
+   * drawer/top-layer overlay). Present only when the element sits inside a
+   * detected overlay container. See AntigenOverlayInfo.
+   */
+  overlay?: AntigenOverlayInfo;
 }
 
 /** Bounded disambiguation context. label≤120, section≤80, nearby_text≤160. */
@@ -93,6 +99,53 @@ export interface AntigenSnapshotContext {
   label?: string;
   section?: string;
   nearby_text?: string;
+}
+
+/**
+ * Structural overlay/top-layer kind a candidate belongs to. Derived from the
+ * page-side IIFE by walking ancestors (role=dialog/alertdialog, aria-modal,
+ * native <dialog open>, [popover] showing, fixed high-z-index large-coverage
+ * containers, and toast/drawer panels) — NOT from section-keyword matching.
+ */
+export type AntigenOverlayType =
+  | "dialog"
+  | "alertdialog"
+  | "popover"
+  | "toast"
+  | "drawer"
+  | "overlay";
+
+/**
+ * Per-candidate active-overlay membership. Attached when the element sits inside
+ * a detected overlay container so the agent can SEE that a ref belongs to an
+ * active modal/popover/toast and act on it first.
+ *
+ * SAFETY: `modal_title` is derived ONLY from the container's accessible name
+ * (aria-label / aria-labelledby / inner heading / title attribute) — it NEVER
+ * reads an input value. `in_inert` / `bg_hidden` are internal ranking signals
+ * (background content behind a blocking modal) and are stripped from the
+ * agent-facing view. This mirrors the redaction discipline of
+ * AntigenSnapshotContext.
+ */
+export interface AntigenOverlayInfo {
+  overlay_type: AntigenOverlayType;
+  /** True for aria-modal / native :modal / large fixed high-z backdrop. */
+  blocking: boolean;
+  /** Accessible title of the overlay container (clipped, value-free). */
+  modal_title?: string;
+  /** This element is the overlay's close/dismiss control. */
+  is_dismiss?: boolean;
+  /** Internal: element is inside an [inert] ancestor (non-interactive background). */
+  in_inert?: boolean;
+  /** Internal: element is inside an aria-hidden background while a modal is open. */
+  bg_hidden?: boolean;
+  /**
+   * Internal: this is a background-behind-modal marker (set via in_inert /
+   * bg_hidden only), NOT a positive overlay membership. The page map uses it to
+   * demote/exclude the element; the external view omits the overlay block
+   * entirely so the agent is never told a background element "is" an overlay.
+   */
+  background?: boolean;
 }
 
 /**
@@ -206,6 +259,8 @@ export interface RawAntigenCandidate {
   context?: AntigenSnapshotContext;
   /** Raw, page-derived redacted value metadata for field-like elements. */
   value_meta?: AntigenRawValueMeta | null;
+  /** Raw, page-derived active-overlay membership (bounded in the IIFE). */
+  overlay?: AntigenOverlayInfo | null;
 }
 
 const DEFAULT_MAX_CANDIDATES = 200;
@@ -218,6 +273,17 @@ const CONTEXT_NEARBY_MAX = 160;
 // ─── Value-meta bounds (shared by IIFE + TS sanitizer) ───────────────────────
 const VALUE_TEXT_MAX = 200;
 const VALIDATION_MESSAGE_MAX = 120;
+
+// ─── Overlay bounds / enum (shared by IIFE + TS sanitizer) ───────────────────
+const OVERLAY_TITLE_MAX = 120;
+const OVERLAY_TYPES: ReadonlySet<string> = new Set<AntigenOverlayType>([
+  "dialog",
+  "alertdialog",
+  "popover",
+  "toast",
+  "drawer",
+  "overlay",
+]);
 
 /**
  * The candidate selector list from docs/antigen-snapshot/extraction-strategy.md.
@@ -351,6 +417,37 @@ export function sanitizeValueMeta(
     const validationMessage = clipText(raw.validation_message, VALIDATION_MESSAGE_MAX);
     if (validationMessage !== undefined) out.validation_message = validationMessage;
   }
+  return out;
+}
+
+/**
+ * Re-validates and clamps raw page-derived overlay membership (defense-in-depth
+ * layer 2, mirroring `sanitizeContext`). Drops unknown `overlay_type` values,
+ * coerces `blocking`/flags to literal booleans, and clips `modal_title` —
+ * dropping a title that merely echoes the element's own name. `modal_title`
+ * NEVER carries a field value (the IIFE sources it from accessible
+ * name/heading/title only). Returns `undefined` when nothing valid remains.
+ */
+export function sanitizeOverlay(
+  raw: AntigenOverlayInfo | null | undefined,
+  name: string,
+): AntigenOverlayInfo | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const type = raw.overlay_type;
+  if (typeof type !== "string" || !OVERLAY_TYPES.has(type)) return undefined;
+  const out: AntigenOverlayInfo = {
+    overlay_type: type,
+    blocking: raw.blocking === true,
+  };
+  const echo = normalizeName(name);
+  if (typeof raw.modal_title === "string") {
+    const title = raw.modal_title.replace(/\s+/g, " ").trim().slice(0, OVERLAY_TITLE_MAX);
+    if (title && !(echo && normalizeName(title) === echo)) out.modal_title = title;
+  }
+  if (raw.is_dismiss === true) out.is_dismiss = true;
+  if (raw.in_inert === true) out.in_inert = true;
+  if (raw.bg_hidden === true) out.bg_hidden = true;
+  if (raw.background === true) out.background = true;
   return out;
 }
 
@@ -491,6 +588,9 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
   // Redacted current-value metadata for field-like candidates (skip-aware fill).
   const valueMeta = sanitizeValueMeta(raw.value_meta);
   if (valueMeta) candidate.value_meta = valueMeta;
+  // Active-overlay membership (modal/popover/toast/drawer/top-layer).
+  const overlay = sanitizeOverlay(raw.overlay, raw.name);
+  if (overlay) candidate.overlay = overlay;
   return candidate;
 }
 
@@ -522,6 +622,7 @@ export function buildAntigenExtractionExpr(opts: {
   const nearbyMax = JSON.stringify(CONTEXT_NEARBY_MAX);
   const valueMax = JSON.stringify(VALUE_TEXT_MAX);
   const validationMax = JSON.stringify(VALIDATION_MESSAGE_MAX);
+  const overlayTitleMax = JSON.stringify(OVERLAY_TITLE_MAX);
 
   return `(function(){
     var SELECTOR=${selector};
@@ -532,6 +633,10 @@ export function buildAntigenExtractionExpr(opts: {
     var CTX_NEARBY_MAX=${nearbyMax};
     var VALUE_MAX=${valueMax};
     var VALIDATION_MAX=${validationMax};
+    var OVERLAY_TITLE_MAX=${overlayTitleMax};
+    var OVERLAY_WALK_DEPTH=12;
+    var OVERLAY_DRAWER_RE=/(drawer|flyout|off-?canvas|side-?panel|slide-?over|snackbar)/i;
+    var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
     var CTX_WALK_DEPTH=8;
     // Page scroll offset, captured once for this snapshot. Box x/y stay
     // viewport-relative (used by the realistic pointer click); doc_x/doc_y add
@@ -838,6 +943,126 @@ export function buildAntigenExtractionExpr(opts: {
       if(raw) ctx.nearby_text=raw;
       return (ctx.label||ctx.section||ctx.nearby_text)?ctx:null;
     }
+    // ─── Active-overlay / top-layer detection (structural, not keyword) ────
+    function cssOf(el){ try{ return window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ return null; } }
+    function matchesSafe(el,sel){ try{ return !!(el.matches&&el.matches(sel)); }catch(e){ return false; } }
+    // Memoized page-level check: is any modal-ish container currently open?
+    var _hasModal;
+    function hasModalMemo(){
+      if(_hasModal===undefined){
+        var f=false; try{ f=!!document.querySelector('[aria-modal="true"],dialog[open]'); }catch(e){ f=false; }
+        _hasModal=f;
+      }
+      return _hasModal;
+    }
+    // Viewport-coverage fraction for a fixed/sticky high-z container; -1 if the
+    // node is not a positioned, meaningfully-stacked overlay candidate. This is
+    // the guard against marking sticky headers / low-z banners as overlays.
+    function fixedCoverage(node){
+      var cs=cssOf(node); if(!cs) return -1;
+      var pos=(cs.position||''); if(pos!=='fixed'&&pos!=='sticky') return -1;
+      var z=parseInt(cs.zIndex,10); if(isNaN(z)) z=0;
+      if(z<10) return -1;
+      var r; try{ r=node.getBoundingClientRect(); }catch(e){ return -1; }
+      if(!r) return -1;
+      var vw=window.innerWidth||0, vh=window.innerHeight||0;
+      if(vw<=0||vh<=0) return -1;
+      var w=Math.min(r.width,vw), h=Math.min(r.height,vh);
+      if(w<=0||h<=0) return -1;
+      return (w*h)/(vw*vh);
+    }
+    // Accessible title of an overlay container — VALUE-FREE (aria-label /
+    // aria-labelledby / inner heading / title attr only; never reads .value).
+    function overlayTitle(node){
+      var al=txt(attr(node,'aria-label')); if(al) return clip(al,OVERLAY_TITLE_MAX);
+      var lb=attr(node,'aria-labelledby');
+      if(lb){
+        var ids=lb.split(/\\s+/), parts=[];
+        for(var i=0;i<ids.length;i++){ try{ var ref=document.getElementById(ids[i]); if(ref) parts.push(ref.textContent||''); }catch(e){} }
+        var t=txt(parts.join(' ')); if(t) return clip(t,OVERLAY_TITLE_MAX);
+      }
+      try{ if(node.querySelector){ var h=node.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'); if(h){ var ht=txt(h.innerText!=null?h.innerText:h.textContent); if(ht) return clip(ht,OVERLAY_TITLE_MAX); } } }catch(e){}
+      var ti=txt(attr(node,'title')); if(ti) return clip(ti,OVERLAY_TITLE_MAX);
+      return '';
+    }
+    // Classify a single ancestor as an overlay container. Precedence:
+    // native modal dialog → ARIA dialog/alertdialog → popover → toast/live →
+    // drawer/flyout keyword → generic fixed high-z large-coverage overlay.
+    function overlayKindOf(node){
+      var tg=(node.tagName||'').toLowerCase();
+      var role=attr(node,'role'); role=role?String(role).toLowerCase():'';
+      var ariaModal=attr(node,'aria-modal')==='true';
+      if(tg==='dialog'){
+        var open=false; try{ open=(node.open===true)||(attr(node,'open')!=null); }catch(e){ open=attr(node,'open')!=null; }
+        if(open) return {type:'dialog',blocking:ariaModal||matchesSafe(node,':modal')};
+      }
+      if(role==='dialog'||role==='alertdialog'){
+        return {type:role==='alertdialog'?'alertdialog':'dialog',blocking:ariaModal||fixedCoverage(node)>=0.5};
+      }
+      // A [popover] ancestor with a visible candidate inside is, by construction,
+      // showing (closed popovers render display:none and are filtered upstream).
+      if(attr(node,'popover')!=null) return {type:'popover',blocking:ariaModal};
+      if(role==='alert'||role==='status') return {type:'toast',blocking:false};
+      var live=attr(node,'aria-live'); if(live){ live=String(live).toLowerCase(); if(live==='polite'||live==='assertive') return {type:'toast',blocking:false}; }
+      var cls=(attr(node,'class')||'')+' '+(attr(node,'id')||'');
+      if(OVERLAY_DRAWER_RE.test(cls)) return {type:'drawer',blocking:fixedCoverage(node)>=0.5};
+      var cov=fixedCoverage(node);
+      if(cov>=0.15) return {type:'overlay',blocking:cov>=0.5};
+      return null;
+    }
+    function hasInertAncestor(el){
+      var node=el, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        var inert=false; try{ inert=(node.inert===true)||(attr(node,'inert')!=null); }catch(e){ inert=attr(node,'inert')!=null; }
+        if(inert) return true;
+        node=node.parentElement; depth++;
+      }
+      return false;
+    }
+    // Element's OWN aria-hidden is already filtered by rectOf; start at parent.
+    function hasAriaHiddenAncestor(el){
+      var node=el.parentElement, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        if(attr(node,'aria-hidden')==='true') return true;
+        node=node.parentElement; depth++;
+      }
+      return false;
+    }
+    function isDismissEl(el,name){
+      var al=txt(attr(el,'aria-label')); if(al&&OVERLAY_DISMISS_RE.test(al)) return true;
+      if(attr(el,'data-dismiss')!=null||attr(el,'data-close')!=null) return true;
+      var nm=name?String(name).trim():'';
+      if(/^(close|dismiss|×|x|✕|✖|⨯)$/i.test(nm)) return true;
+      if(nm&&OVERLAY_DISMISS_RE.test(nm)) return true;
+      return false;
+    }
+    // Bounded ancestor walk: innermost match sets type/title; blocking ORs up.
+    function computeOverlay(el,name){
+      var type=null, container=null, blocking=false, node=el, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        var k=null; try{ k=overlayKindOf(node); }catch(e){ k=null; }
+        if(k){ if(!type){ type=k.type; container=node; } if(k.blocking) blocking=true; }
+        node=node.parentElement; depth++;
+      }
+      var inInert=false; try{ inInert=hasInertAncestor(el); }catch(e){ inInert=false; }
+      if(!type){
+        // No positive overlay membership — emit a background marker ONLY when the
+        // element is inert, or aria-hidden background while a modal is open. The
+        // page map uses this to demote/exclude; the external view drops it.
+        var bgHidden=false; try{ bgHidden=hasAriaHiddenAncestor(el)&&hasModalMemo(); }catch(e){ bgHidden=false; }
+        if(!inInert&&!bgHidden) return null;
+        var bg={ overlay_type:'overlay', blocking:false, background:true };
+        if(inInert) bg.in_inert=true;
+        if(bgHidden) bg.bg_hidden=true;
+        return bg;
+      }
+      var ov={ overlay_type:type, blocking:blocking };
+      var title=''; try{ title=overlayTitle(container); }catch(e){ title=''; }
+      if(title) ov.modal_title=title;
+      try{ if(isDismissEl(el,name)) ov.is_dismiss=true; }catch(e){}
+      if(inInert) ov.in_inert=true;
+      return ov;
+    }
     var out=[];
     var nodes;
     try{ nodes=document.querySelectorAll(SELECTOR); }catch(e){ return []; }
@@ -858,6 +1083,7 @@ export function buildAntigenExtractionExpr(opts: {
       var theName=nameOf(el,tag,type);
       var ctx=null; try{ ctx=extractContext(el,theName); }catch(e){ ctx=null; }
       var vmeta=null; try{ vmeta=valueMetaOf(el,tag,type,contentEditable); }catch(e){ vmeta=null; }
+      var ovl=null; try{ ovl=computeOverlay(el,theName); }catch(e){ ovl=null; }
       out.push({
         tag: tag,
         type: type,
@@ -871,7 +1097,8 @@ export function buildAntigenExtractionExpr(opts: {
         name: theName,
         box: { x:r.left, y:r.top, width:r.width, height:r.height, doc_x:r.left+SX, doc_y:r.top+SY },
         context: ctx,
-        value_meta: vmeta
+        value_meta: vmeta,
+        overlay: ovl
       });
     }
     return out;

@@ -105,6 +105,8 @@ interface MockElOpts {
   display?: string;
   visibility?: string;
   opacity?: string;
+  position?: string;
+  zIndex?: string;
 }
 
 interface MockEl {
@@ -175,8 +177,11 @@ interface TNode {
   getBoundingClientRect: () => { left: number; top: number; width: number; height: number };
   querySelector: (sel: string) => TNode | null;
   querySelectorAll: (sel: string) => TNode[];
+  matches: (sel: string) => boolean;
   readonly innerText: string;
   readonly textContent: string;
+  __style?: { position?: string; zIndex?: string; display?: string; visibility?: string; opacity?: string };
+  __matches?: string[];
 }
 
 function tDescendants(node: TNode): TNode[] {
@@ -194,6 +199,8 @@ function tAggText(node: TNode): string {
 function tMatchTok(d: TNode, tok: string): boolean {
   const t = tok.trim();
   if (t === '[role="heading"]') return d.getAttribute("role") === "heading";
+  if (t === '[aria-modal="true"]') return d.getAttribute("aria-modal") === "true";
+  if (t === "dialog[open]") return d.tagName === "DIALOG" && d.getAttribute("open") !== null;
   return d.tagName === t.toUpperCase();
 }
 function tMatchAll(node: TNode, sel: string): TNode[] {
@@ -208,9 +215,14 @@ function tnode(opts: {
   value?: string;
   box?: { left: number; top: number; width: number; height: number };
   children?: TNode[];
+  // Overlay-detection controls.
+  position?: string;
+  zIndex?: string;
+  matchesSelectors?: string[];
 }): TNode {
   const attrs: Record<string, string> = { ...(opts.attrs ?? {}) };
   if (opts.type !== undefined) attrs["type"] = opts.type;
+  const matchSet = opts.matchesSelectors ?? [];
   const self: TNode = {
     tagName: opts.tag.toUpperCase(),
     __own: opts.text ?? "",
@@ -227,6 +239,8 @@ function tnode(opts: {
     getBoundingClientRect: () => opts.box ?? { left: 10, top: 10, width: 120, height: 32 },
     querySelector: (sel: string) => tMatchAll(self, sel)[0] ?? null,
     querySelectorAll: (sel: string) => tMatchAll(self, sel),
+    matches: (sel: string) => matchSet.includes(sel),
+    __style: { position: opts.position, zIndex: opts.zIndex },
     get innerText() {
       return tAggText(self);
     },
@@ -265,12 +279,21 @@ function extractTree(
   g["window"] = {
     innerWidth: 1280,
     innerHeight: 800,
-    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+    getComputedStyle: (el: TNode) => ({
+      display: el?.__style?.display ?? "block",
+      visibility: el?.__style?.visibility ?? "visible",
+      opacity: el?.__style?.opacity ?? "1",
+      position: el?.__style?.position ?? "static",
+      zIndex: el?.__style?.zIndex ?? "auto",
+    }),
   };
   const all = root ? [root, ...tDescendants(root)] : [];
   g["document"] = {
     querySelectorAll: () => candidates,
-    querySelector: (sel: string) => all.find((d) => tMatchTok(d, sel)) ?? null,
+    querySelector: (sel: string) => {
+      const toks = sel.split(",");
+      return all.find((d) => toks.some((tk) => tMatchTok(d, tk))) ?? null;
+    },
     getElementById: (id: string) => all.find((d) => d.getAttribute("id") === id) ?? null,
   };
   try {
@@ -302,6 +325,8 @@ function evalExtraction(
     display: el.__opts.display ?? "block",
     visibility: el.__opts.visibility ?? "visible",
     opacity: el.__opts.opacity ?? "1",
+    position: el.__opts.position ?? "static",
+    zIndex: el.__opts.zIndex ?? "auto",
   });
 
   const win = {
@@ -945,6 +970,182 @@ describe("extraction — disambiguation context", () => {
     expect(expr).not.toContain("solhetta");
     expect(expr).not.toContain("tertial");
     expect(expr).not.toContain("add to bag");
+  });
+});
+
+// ─── Active-overlay / top-layer detection ────────────────────────────────────
+
+describe("extraction — active overlay / top-layer", () => {
+  it("role=dialog + aria-modal=true: members are blocking, title from heading, X is dismiss", () => {
+    const heading = tnode({ tag: "h2", text: "Continue as guest" });
+    const cont = tnode({ tag: "button", text: "Continue" });
+    const close = tnode({ tag: "button", attrs: { "aria-label": "Close" }, text: "×" });
+    const dialog = tnode({
+      tag: "div",
+      attrs: { role: "dialog", "aria-modal": "true" },
+      children: [heading, cont, close],
+    });
+    const bgBtn = tnode({ tag: "button", text: "Add to bag" });
+    const root = tnode({ tag: "body", children: [bgBtn, dialog] });
+
+    const [bg, c, x] = extractTree([bgBtn, cont, close], root);
+    expect(bg.overlay).toBeUndefined(); // background button is not inside any overlay
+    expect(c.overlay?.overlay_type).toBe("dialog");
+    expect(c.overlay?.blocking).toBe(true);
+    expect(c.overlay?.modal_title).toBe("Continue as guest");
+    expect(c.overlay?.is_dismiss).toBeUndefined();
+    expect(x.overlay?.is_dismiss).toBe(true);
+  });
+
+  it("role=alertdialog with a fixed full-coverage high-z container is blocking via backdrop", () => {
+    const ok = tnode({ tag: "button", text: "OK" });
+    const dialog = tnode({
+      tag: "div",
+      attrs: { role: "alertdialog", "aria-label": "Session expiring" },
+      position: "fixed",
+      zIndex: "9999",
+      box: { left: 0, top: 0, width: 1280, height: 800 },
+      children: [ok],
+    });
+    const root = tnode({ tag: "body", children: [dialog] });
+    const [c] = extractTree([ok], root);
+    expect(c.overlay?.overlay_type).toBe("alertdialog");
+    expect(c.overlay?.blocking).toBe(true);
+    expect(c.overlay?.modal_title).toBe("Session expiring");
+  });
+
+  it("native <dialog open> matching :modal is a blocking dialog", () => {
+    const cont = tnode({ tag: "button", text: "Confirm" });
+    const dialog = tnode({
+      tag: "dialog",
+      attrs: { open: "", "aria-label": "Confirm purchase" },
+      matchesSelectors: [":modal"],
+      children: [cont],
+    });
+    const root = tnode({ tag: "body", children: [dialog] });
+    const [c] = extractTree([cont], root);
+    expect(c.overlay?.overlay_type).toBe("dialog");
+    expect(c.overlay?.blocking).toBe(true);
+  });
+
+  it("role=status toast is a nonblocking overlay", () => {
+    const view = tnode({ tag: "a", attrs: { href: "/cart" }, text: "View bag" });
+    const toast = tnode({
+      tag: "div",
+      attrs: { role: "status", "aria-label": "Added to bag" },
+      children: [view],
+    });
+    const root = tnode({ tag: "body", children: [toast] });
+    const [c] = extractTree([view], root);
+    expect(c.overlay?.overlay_type).toBe("toast");
+    expect(c.overlay?.blocking).toBe(false);
+  });
+
+  it("aria-live=polite region is a nonblocking toast", () => {
+    const btn = tnode({ tag: "button", text: "Undo" });
+    const live = tnode({ tag: "div", attrs: { "aria-live": "polite" }, children: [btn] });
+    const root = tnode({ tag: "body", children: [live] });
+    const [c] = extractTree([btn], root);
+    expect(c.overlay?.overlay_type).toBe("toast");
+    expect(c.overlay?.blocking).toBe(false);
+  });
+
+  it("drawer/flyout by class keyword with partial coverage is nonblocking", () => {
+    const checkout = tnode({ tag: "button", text: "Checkout" });
+    const drawer = tnode({
+      tag: "aside",
+      attrs: { class: "cart-drawer", "aria-label": "Your bag" },
+      position: "fixed",
+      zIndex: "50",
+      box: { left: 900, top: 0, width: 380, height: 800 }, // ~0.3 coverage
+      children: [checkout],
+    });
+    const root = tnode({ tag: "body", children: [drawer] });
+    const [c] = extractTree([checkout], root);
+    expect(c.overlay?.overlay_type).toBe("drawer");
+    expect(c.overlay?.blocking).toBe(false);
+  });
+
+  it("[popover] showing is a nonblocking popover", () => {
+    const item = tnode({ tag: "button", text: "Profile" });
+    const pop = tnode({
+      tag: "div",
+      attrs: { popover: "auto", "aria-label": "Account menu" },
+      matchesSelectors: [":popover-open"],
+      children: [item],
+    });
+    const root = tnode({ tag: "body", children: [pop] });
+    const [c] = extractTree([item], root);
+    expect(c.overlay?.overlay_type).toBe("popover");
+    expect(c.overlay?.blocking).toBe(false);
+  });
+
+  it("inert background control is marked in_inert and NOT dropped from extraction", () => {
+    const bgBtn = tnode({ tag: "button", text: "Browse" });
+    const bg = tnode({ tag: "div", attrs: { inert: "" }, children: [bgBtn] });
+    const dialog = tnode({
+      tag: "div",
+      attrs: { role: "dialog", "aria-modal": "true", "aria-label": "Sign in" },
+      children: [tnode({ tag: "button", text: "Sign in" })],
+    });
+    const root = tnode({ tag: "body", children: [bg, dialog] });
+    const [c] = extractTree([bgBtn], root);
+    expect(c).toBeDefined(); // still extracted
+    expect(c.overlay?.in_inert).toBe(true);
+    expect(c.overlay?.background).toBe(true); // background marker, not a real member
+  });
+
+  it("aria-hidden background while a modal is open is marked bg_hidden", () => {
+    const bgBtn = tnode({ tag: "button", text: "Browse" });
+    const bg = tnode({ tag: "div", attrs: { "aria-hidden": "true" }, children: [bgBtn] });
+    const dialog = tnode({
+      tag: "div",
+      attrs: { "aria-modal": "true", role: "dialog", "aria-label": "Sign in" },
+      children: [tnode({ tag: "button", text: "Sign in" })],
+    });
+    const root = tnode({ tag: "body", children: [bg, dialog] });
+    const [c] = extractTree([bgBtn], root);
+    expect(c.overlay?.bg_hidden).toBe(true);
+    expect(c.overlay?.background).toBe(true);
+  });
+
+  it("modal_title never leaks a field value (sourced from heading, not input)", () => {
+    const heading = tnode({ tag: "h2", text: "Verify it's you" });
+    const pwd = tnode({ tag: "input", type: "password", value: "hunter2-secret", attrs: { name: "password" } });
+    const submit = tnode({ tag: "button", text: "Verify" });
+    const dialog = tnode({
+      tag: "div",
+      attrs: { role: "dialog", "aria-modal": "true" },
+      children: [heading, pwd, submit],
+    });
+    const root = tnode({ tag: "body", children: [dialog] });
+    const cands = extractTree([pwd, submit], root);
+    for (const c of cands) {
+      expect(c.overlay?.modal_title ?? "").not.toContain("hunter2");
+    }
+    const submitC = cands.find((c) => c.name === "Verify");
+    expect(submitC?.overlay?.modal_title).toBe("Verify it's you");
+  });
+
+  it("a sticky low-z header is NOT detected as an overlay (no false positive)", () => {
+    const logo = tnode({ tag: "a", attrs: { href: "/" }, text: "Home" });
+    const header = tnode({
+      tag: "header",
+      position: "sticky",
+      zIndex: "1",
+      box: { left: 0, top: 0, width: 1280, height: 64 }, // wide but shallow
+      children: [logo],
+    });
+    const root = tnode({ tag: "body", children: [header] });
+    const [c] = extractTree([logo], root);
+    expect(c.overlay).toBeUndefined();
+  });
+
+  it("a normal in-flow button has no overlay membership", () => {
+    const btn = tnode({ tag: "button", text: "Add to bag" });
+    const root = tnode({ tag: "body", children: [tnode({ tag: "main", children: [btn] })] });
+    const [c] = extractTree([btn], root);
+    expect(c.overlay).toBeUndefined();
   });
 });
 

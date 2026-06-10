@@ -319,6 +319,76 @@ describe("external view", () => {
   });
 });
 
+describe("external view — active overlay", () => {
+  it("copies overlay membership from candidate to internal record", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        kind: "button", role: "button", href: null, href_path: null, name: "Continue",
+        overlay: { overlay_type: "dialog", blocking: true, modal_title: "Continue as guest" },
+      }),
+    ]);
+    expect(elements[0].overlay).toEqual({
+      overlay_type: "dialog",
+      blocking: true,
+      modal_title: "Continue as guest",
+    });
+  });
+
+  it("surfaces overlay_type/blocking/modal_title/is_dismiss in the external view", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        kind: "button", role: "button", href: null, href_path: null, name: "Close",
+        overlay: { overlay_type: "dialog", blocking: true, modal_title: "Sign in", is_dismiss: true },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.overlay).toEqual({
+      overlay_type: "dialog",
+      blocking: true,
+      modal_title: "Sign in",
+      is_dismiss: true,
+    });
+  });
+
+  it("strips internal in_inert/bg_hidden flags from the external view", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        kind: "button", role: "button", href: null, href_path: null, name: "Sign in",
+        overlay: { overlay_type: "dialog", blocking: true, modal_title: "Sign in", in_inert: true, bg_hidden: true },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    const serialized = JSON.stringify(ext.overlay);
+    expect(serialized).not.toContain("in_inert");
+    expect(serialized).not.toContain("bg_hidden");
+  });
+
+  it("drops the overlay block entirely for background-behind-modal markers", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        kind: "button", role: "button", href: null, href_path: null, name: "Browse",
+        overlay: { overlay_type: "overlay", blocking: false, background: true, in_inert: true },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.overlay).toBeUndefined();
+  });
+
+  it("never leaks a field value through modal_title", () => {
+    const { elements } = createFor([
+      makeCandidate({
+        tag: "input", kind: "input", role: "textbox", typeable: true, clickable: false,
+        href: null, href_path: null, name: "Password",
+        value_meta: { sensitive: true, sensitivity: "credential", value_present: true, value_length: 7 },
+        overlay: { overlay_type: "dialog", blocking: true, modal_title: "Verify it's you" },
+      }),
+    ]);
+    const ext = toExternalAntigenSnapshotElement(elements[0]);
+    expect(ext.overlay?.modal_title).toBe("Verify it's you");
+    expect(JSON.stringify(ext)).not.toContain("hunter2");
+  });
+});
+
 describe("document-space geometry (Phase 5C)", () => {
   it("retains doc_x/doc_y on the internal record when present", () => {
     const { elements } = createFor([

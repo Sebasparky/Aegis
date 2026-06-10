@@ -35,6 +35,13 @@ import {
   type AntigenRevalidationEvalValue,
 } from "./antigenKnownBoxRevalidation.js";
 import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
+import {
+  buildPageStateProbeExpr,
+  classifyClickVerification,
+  type PageStateProbe,
+  type ClickVerification,
+  type ClickVerificationContext,
+} from "./antigenClickVerification.js";
 import { timingEnabled } from "./browserTiming.js";
 import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
@@ -178,6 +185,137 @@ export interface RealisticClickResult {
   // route handler to refresh session.current_url so later Antigen snapshots are
   // not stale after a click-triggered navigation. Never returned to the agent.
   current_url?: string;
+  // Post-click intent verification (ANTIGEN_CLICK_VERIFY only). Present only when
+  // the caller passed `verify.enabled` AND the click physically dispatched.
+  // Carries only sanitized booleans/enums/timing — no raw url/title/text.
+  verification?: ClickVerification;
+}
+
+/** Opt-in post-click verification request, threaded from the route handler. */
+export interface ClickVerifyOption {
+  enabled: boolean;
+  // The clicked target is an editable field — success is FOCUS, not a page
+  // change (cheap focus probe, no url/modal/cart polling).
+  editableTarget: boolean;
+  // At snapshot time the target sat behind a blocking modal (modal-trap guard).
+  targetWasBehindBlockingModal: boolean;
+}
+
+// Adaptive after-click settle schedule (ms between re-probes) for non-editable
+// targets. Cheap-first: an immediate probe runs before this loop; polling only
+// continues while no signal is observed and the after-probe is still readable.
+// Bounded to ~600ms of waits (≈800ms total incl. realistic pointer dispatch).
+const CLICK_VERIFY_SETTLE_SCHEDULE_MS = [150, 200, 250] as const;
+
+/**
+ * Read a compact PageStateProbe from the live page over the already-attached CDP
+ * session. Best-effort: any failure yields a status:"error" probe (which the
+ * classifier maps to CLICK_INTENT_UNVERIFIED — never a retry trigger).
+ */
+async function runPageStateProbe(
+  sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
+  box: ElementBox,
+): Promise<PageStateProbe> {
+  const errorProbe: PageStateProbe = {
+    url: null,
+    title_hash: null,
+    overlay: { present: false, blocking: false, overlay_type: null, title_hash: null },
+    cart_count: null,
+    visible_text_hash: null,
+    focused_editable_at_target: false,
+    status: "error",
+  };
+  try {
+    const expr = buildPageStateProbeExpr({ targetBox: box });
+    const r = await sendAndWait("Runtime.evaluate", { expression: expr, returnByValue: true });
+    const val = (r?.result as Record<string, unknown> | undefined)?.value as PageStateProbe | undefined;
+    if (!val || typeof val !== "object" || (val.status !== "ok" && val.status !== "error")) return errorProbe;
+    // Defensive: ensure overlay sub-object exists.
+    if (!val.overlay || typeof val.overlay !== "object") {
+      return { ...val, overlay: { present: false, blocking: false, overlay_type: null, title_hash: null } };
+    }
+    return val;
+  } catch {
+    return errorProbe;
+  }
+}
+
+/**
+ * Drive post-click verification: classify the immediate after-probe, then (for
+ * non-editable targets only) poll the adaptive schedule until a signal appears
+ * or the budget is exhausted. Editable targets use a single cheap focus probe.
+ * Returns the verification (with timing telemetry) plus the last live URL read
+ * (internal-only, for session.current_url refresh — never surfaced to agents).
+ */
+async function runAfterClickVerification(opts: {
+  sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
+  sleep: (ms: number) => Promise<void>;
+  box: ElementBox;
+  before: PageStateProbe;
+  ctx: ClickVerificationContext;
+  editableTarget: boolean;
+}): Promise<{ verification: ClickVerification; last_url: string | null }> {
+  const { sendAndWait, sleep, box, before, ctx, editableTarget } = opts;
+  const t0 = process.hrtime.bigint();
+  let polls = 0;
+  let after = await runPageStateProbe(sendAndWait, box);
+  polls++;
+  let result = classifyClickVerification(before, after, ctx);
+  if (!editableTarget) {
+    for (
+      let i = 0;
+      i < CLICK_VERIFY_SETTLE_SCHEDULE_MS.length && !result.intent_verified && after.status === "ok";
+      i++
+    ) {
+      await sleep(CLICK_VERIFY_SETTLE_SCHEDULE_MS[i]);
+      after = await runPageStateProbe(sendAndWait, box);
+      polls++;
+      result = classifyClickVerification(before, after, ctx);
+    }
+  }
+  const verifyMs = Math.round(Number(process.hrtime.bigint() - t0) / 1_000_000);
+  return {
+    verification: { ...result, verify_ms: verifyMs, settle_polls: polls },
+    last_url: typeof after.url === "string" && after.url.length > 0 ? after.url : null,
+  };
+}
+
+/**
+ * Shared post-dispatch settle path for both click runtimes. When verification is
+ * off (the default) this is exactly today's behavior: best-effort URL refresh
+ * only. When on, it drives intent verification and uses the after-probe's URL as
+ * the live URL. A failed click is returned unchanged (no probe, no URL read).
+ */
+async function settleAndVerify(opts: {
+  verify: ClickVerifyOption | undefined;
+  clickResult: RealisticClickResult;
+  beforeProbe: PageStateProbe | null;
+  sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
+  sleep: (ms: number) => Promise<void>;
+  box: ElementBox;
+}): Promise<RealisticClickResult> {
+  const { verify, clickResult, beforeProbe, sendAndWait, sleep, box } = opts;
+  if (!clickResult.success) return clickResult;
+  if (verify?.enabled && beforeProbe) {
+    const ctx: ClickVerificationContext = {
+      editableTarget: verify.editableTarget,
+      targetWasBehindBlockingModal: verify.targetWasBehindBlockingModal,
+      pageChangedCompare: isAntigenPageChanged,
+    };
+    const { verification, last_url } = await runAfterClickVerification({
+      sendAndWait,
+      sleep,
+      box,
+      before: beforeProbe,
+      ctx,
+      editableTarget: verify.editableTarget,
+    });
+    return { ...clickResult, ...(last_url ? { current_url: last_url } : {}), verification };
+  }
+  // Refresh the live URL after a click-triggered navigation settles. Best-effort:
+  // a failed read never fails an otherwise-successful click.
+  const currentUrl = await readCurrentUrlAfterClick(sendAndWait, sleep);
+  return currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult;
 }
 
 /**
@@ -418,12 +556,16 @@ export async function realisticClickByDescription(params: {
   // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env. The route handler
   // passes this so headed/visible sessions show the overlay without the env var.
   debugOverlay?: boolean;
+  // Opt-in post-click intent verification (ANTIGEN_CLICK_VERIFY). The description
+  // path has no structural metadata, so it verifies WITHOUT the editable/modal-
+  // trap context (both false) and is never eligible for the safe retry.
+  verify?: ClickVerifyOption;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, elementDescription, sessionId, userId, selectorHint } = params;
+  const { cdpUrl, elementDescription, sessionId, userId, selectorHint, verify } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -591,14 +733,14 @@ export async function realisticClickByDescription(params: {
         tBeforePointer = process.hrtime.bigint();
         void (async () => {
           try {
+            // Capture the BEFORE page state on the same session right before the
+            // pointer dispatch (verification only — no-op when the flag is off).
+            const beforeProbe = verify?.enabled ? await runPageStateProbe(sendAndWait, box) : null;
             const clickResult = await dispatchPointerClickToBox({
               box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
               targetContext: { url: pageTarget.url, reason: targetReason },
             });
-            // Refresh the live URL after a click-triggered navigation settles.
-            // Best-effort: a failed read never fails an otherwise-successful click.
-            const currentUrl = clickResult.success ? await readCurrentUrlAfterClick(sendAndWait, sleep) : null;
-            finish(currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult);
+            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box }));
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }
@@ -643,12 +785,15 @@ export async function realisticClickKnownBox(params: {
   expectedUrl?: string | null;
   // When set, overrides the ANTIGEN_POINTER_DEBUG_OVERLAY env (see route handler).
   debugOverlay?: boolean;
+  // Opt-in post-click intent verification (ANTIGEN_CLICK_VERIFY). Carries the
+  // editable / modal-trap context derived from snapshot element metadata.
+  verify?: ClickVerifyOption;
 }): Promise<RealisticClickResult> {
   if (getInputRealismMode() === "direct") {
     return { success: false, error: "REALISM_DISABLED" };
   }
 
-  const { cdpUrl, box, sessionId, userId, expected, expectedUrl } = params;
+  const { cdpUrl, box, sessionId, userId, expected, expectedUrl, verify } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
@@ -829,14 +974,14 @@ export async function realisticClickKnownBox(params: {
         tBeforePointer = process.hrtime.bigint();
         void (async () => {
           try {
+            // Capture the BEFORE page state on the same session right before the
+            // pointer dispatch (verification only — no-op when the flag is off).
+            const beforeProbe = verify?.enabled ? await runPageStateProbe(sendAndWait, box) : null;
             const clickResult = await dispatchPointerClickToBox({
               box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
               targetContext: { url: pageTarget.url, reason: targetReason },
             });
-            // Refresh the live URL after a click-triggered navigation settles.
-            // Best-effort: a failed read never fails an otherwise-successful click.
-            const currentUrl = clickResult.success ? await readCurrentUrlAfterClick(sendAndWait, sleep) : null;
-            finish(currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult);
+            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box }));
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }

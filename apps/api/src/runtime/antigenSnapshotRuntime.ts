@@ -594,6 +594,165 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
   return candidate;
 }
 
+// ─── Shared active-overlay / top-layer structural snippet ────────────────────
+
+/**
+ * Raw-JS snippet (no TS — Node tsconfig has no DOM lib) that declares the
+ * structural overlay classifier (`overlayKindOf` / `computeOverlay`) and its
+ * helpers. It is the SINGLE source of overlay structural detection, concatenated
+ * by both the full snapshot extraction IIFE (`buildAntigenExtractionExpr`) and
+ * the post-click page-state probe (`buildPageStateProbeExpr` in
+ * antigenClickVerification.ts), so the two surfaces can never drift in how they
+ * classify modals/toasts/drawers/chat-widgets and what counts as blocking.
+ *
+ * Assumes these are already in scope where it is concatenated:
+ *   txt, clip, attr (string helpers), and the constants OVERLAY_TITLE_MAX,
+ *   OVERLAY_WALK_DEPTH, OVERLAY_DRAWER_RE, OVERLAY_DISMISS_RE, OVERLAY_CHAT_RE.
+ */
+export function buildOverlaySnippetJs(): string {
+  return `
+    // ─── Active-overlay / top-layer detection (structural, not keyword) ────
+    function cssOf(el){ try{ return window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ return null; } }
+    function matchesSafe(el,sel){ try{ return !!(el.matches&&el.matches(sel)); }catch(e){ return false; } }
+    // Memoized page-level check: is any modal-ish container currently open?
+    var _hasModal;
+    function hasModalMemo(){
+      if(_hasModal===undefined){
+        var f=false; try{ f=!!document.querySelector('[aria-modal="true"],dialog[open]'); }catch(e){ f=false; }
+        _hasModal=f;
+      }
+      return _hasModal;
+    }
+    // Viewport-coverage fraction for a fixed/sticky high-z container; -1 if the
+    // node is not a positioned, meaningfully-stacked overlay candidate. This is
+    // the guard against marking sticky headers / low-z banners as overlays.
+    function fixedCoverage(node){
+      var cs=cssOf(node); if(!cs) return -1;
+      var pos=(cs.position||''); if(pos!=='fixed'&&pos!=='sticky') return -1;
+      var z=parseInt(cs.zIndex,10); if(isNaN(z)) z=0;
+      if(z<10) return -1;
+      var r; try{ r=node.getBoundingClientRect(); }catch(e){ return -1; }
+      if(!r) return -1;
+      var vw=window.innerWidth||0, vh=window.innerHeight||0;
+      if(vw<=0||vh<=0) return -1;
+      var w=Math.min(r.width,vw), h=Math.min(r.height,vh);
+      if(w<=0||h<=0) return -1;
+      return (w*h)/(vw*vh);
+    }
+    // Accessible title of an overlay container — VALUE-FREE (aria-label /
+    // aria-labelledby / inner heading / title attr only; never reads .value).
+    function overlayTitle(node){
+      var al=txt(attr(node,'aria-label')); if(al) return clip(al,OVERLAY_TITLE_MAX);
+      var lb=attr(node,'aria-labelledby');
+      if(lb){
+        var ids=lb.split(/\\s+/), parts=[];
+        for(var i=0;i<ids.length;i++){ try{ var ref=document.getElementById(ids[i]); if(ref) parts.push(ref.textContent||''); }catch(e){} }
+        var t=txt(parts.join(' ')); if(t) return clip(t,OVERLAY_TITLE_MAX);
+      }
+      try{ if(node.querySelector){ var h=node.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'); if(h){ var ht=txt(h.innerText!=null?h.innerText:h.textContent); if(ht) return clip(ht,OVERLAY_TITLE_MAX); } } }catch(e){}
+      var ti=txt(attr(node,'title')); if(ti) return clip(ti,OVERLAY_TITLE_MAX);
+      return '';
+    }
+    // Classify a single ancestor as an overlay container. Precedence:
+    // native modal dialog → ARIA dialog/alertdialog → popover → toast/live →
+    // drawer/flyout keyword → generic fixed high-z large-coverage overlay.
+    function overlayKindOf(node){
+      var tg=(node.tagName||'').toLowerCase();
+      var role=attr(node,'role'); role=role?String(role).toLowerCase():'';
+      var ariaModal=attr(node,'aria-modal')==='true';
+      // Chat/help/support widgets float over the page but never trap the user.
+      // Detected FIRST so a large open chat panel (even one using role=dialog or
+      // a >=0.5 coverage backdrop) is reported as a NONBLOCKING popover and can
+      // never win active_overlay over a real blocking modal. Signal = container
+      // class/id/aria-label only — never element text or values.
+      var chatSig=(attr(node,'class')||'')+' '+(attr(node,'id')||'')+' '+(attr(node,'aria-label')||'');
+      if(OVERLAY_CHAT_RE.test(chatSig)) return {type:'popover',blocking:false};
+      if(tg==='dialog'){
+        var open=false; try{ open=(node.open===true)||(attr(node,'open')!=null); }catch(e){ open=attr(node,'open')!=null; }
+        if(open) return {type:'dialog',blocking:ariaModal||matchesSafe(node,':modal')};
+      }
+      if(role==='dialog'||role==='alertdialog'){
+        return {type:role==='alertdialog'?'alertdialog':'dialog',blocking:ariaModal||fixedCoverage(node)>=0.5};
+      }
+      // A [popover] ancestor with a visible candidate inside is, by construction,
+      // showing (closed popovers render display:none and are filtered upstream).
+      if(attr(node,'popover')!=null) return {type:'popover',blocking:ariaModal};
+      if(role==='alert'||role==='status') return {type:'toast',blocking:false};
+      var live=attr(node,'aria-live'); if(live){ live=String(live).toLowerCase(); if(live==='polite'||live==='assertive') return {type:'toast',blocking:false}; }
+      var cls=(attr(node,'class')||'')+' '+(attr(node,'id')||'');
+      if(OVERLAY_DRAWER_RE.test(cls)) return {type:'drawer',blocking:fixedCoverage(node)>=0.5};
+      // NO generic fixed-coverage overlay branch: a positioned high-z container
+      // with no ARIA role / native dialog / popover / toast / drawer signal is
+      // NOT treated as an overlay. Sticky filter toolbars, promo heroes, and
+      // header bars are positioned + high-z but are page chrome, not modals —
+      // marking them overlays produced live false positives. Real overlays expose
+      // an explicit role (e.g. role=dialog), so structural signals are the sole
+      // authority. fixedCoverage remains the BLOCKING test for real dialogs and
+      // drawers above.
+      return null;
+    }
+    function hasInertAncestor(el){
+      var node=el, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        var inert=false; try{ inert=(node.inert===true)||(attr(node,'inert')!=null); }catch(e){ inert=attr(node,'inert')!=null; }
+        if(inert) return true;
+        node=node.parentElement; depth++;
+      }
+      return false;
+    }
+    // Element's OWN aria-hidden is already filtered by rectOf; start at parent.
+    function hasAriaHiddenAncestor(el){
+      var node=el.parentElement, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        if(attr(node,'aria-hidden')==='true') return true;
+        node=node.parentElement; depth++;
+      }
+      return false;
+    }
+    function isDismissEl(el,name){
+      var al=txt(attr(el,'aria-label')); if(al&&OVERLAY_DISMISS_RE.test(al)) return true;
+      if(attr(el,'data-dismiss')!=null||attr(el,'data-close')!=null) return true;
+      var nm=name?String(name).trim():'';
+      if(/^(close|dismiss|×|x|✕|✖|⨯)$/i.test(nm)) return true;
+      if(nm&&OVERLAY_DISMISS_RE.test(nm)) return true;
+      return false;
+    }
+    // Bounded ancestor walk: innermost match sets type/title; blocking ORs up.
+    function computeOverlay(el,name){
+      var type=null, container=null, blocking=false, node=el, depth=0;
+      while(node&&depth<OVERLAY_WALK_DEPTH){
+        var k=null; try{ k=overlayKindOf(node); }catch(e){ k=null; }
+        if(k){ if(!type){ type=k.type; container=node; } if(k.blocking) blocking=true; }
+        node=node.parentElement; depth++;
+      }
+      var inInert=false; try{ inInert=hasInertAncestor(el); }catch(e){ inInert=false; }
+      if(!type){
+        // No positive overlay membership — emit a background marker ONLY when the
+        // element is inert, or aria-hidden background while a REAL modal
+        // (aria-modal / native <dialog open>) is open. Both are precise ARIA
+        // modality primitives. We deliberately do NOT infer modals from container
+        // class names or large aria-hidden regions: real marketing pages (e.g.
+        // hero carousels with an "...overlay" class behind an aria-hidden region)
+        // would be misread as blocking modals. Structural detection above
+        // (role=dialog/alertdialog, native <dialog>, popover, toast, drawer,
+        // fixed-coverage) is the authority. The page map uses this marker to
+        // demote/exclude; the external view drops it.
+        var bgHidden=false; try{ bgHidden=hasAriaHiddenAncestor(el)&&hasModalMemo(); }catch(e){ bgHidden=false; }
+        if(!inInert&&!bgHidden) return null;
+        var bg={ overlay_type:'overlay', blocking:false, background:true };
+        if(inInert) bg.in_inert=true;
+        if(bgHidden) bg.bg_hidden=true;
+        return bg;
+      }
+      var ov={ overlay_type:type, blocking:blocking };
+      var title=''; try{ title=overlayTitle(container); }catch(e){ title=''; }
+      if(title) ov.modal_title=title;
+      try{ if(isDismissEl(el,name)) ov.is_dismiss=true; }catch(e){}
+      if(inInert) ov.in_inert=true;
+      return ov;
+    }`;
+}
+
 // ─── Page-side extraction IIFE builder ───────────────────────────────────────
 
 /**
@@ -946,146 +1105,7 @@ export function buildAntigenExtractionExpr(opts: {
       if(raw) ctx.nearby_text=raw;
       return (ctx.label||ctx.section||ctx.nearby_text)?ctx:null;
     }
-    // ─── Active-overlay / top-layer detection (structural, not keyword) ────
-    function cssOf(el){ try{ return window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ return null; } }
-    function matchesSafe(el,sel){ try{ return !!(el.matches&&el.matches(sel)); }catch(e){ return false; } }
-    // Memoized page-level check: is any modal-ish container currently open?
-    var _hasModal;
-    function hasModalMemo(){
-      if(_hasModal===undefined){
-        var f=false; try{ f=!!document.querySelector('[aria-modal="true"],dialog[open]'); }catch(e){ f=false; }
-        _hasModal=f;
-      }
-      return _hasModal;
-    }
-    // Viewport-coverage fraction for a fixed/sticky high-z container; -1 if the
-    // node is not a positioned, meaningfully-stacked overlay candidate. This is
-    // the guard against marking sticky headers / low-z banners as overlays.
-    function fixedCoverage(node){
-      var cs=cssOf(node); if(!cs) return -1;
-      var pos=(cs.position||''); if(pos!=='fixed'&&pos!=='sticky') return -1;
-      var z=parseInt(cs.zIndex,10); if(isNaN(z)) z=0;
-      if(z<10) return -1;
-      var r; try{ r=node.getBoundingClientRect(); }catch(e){ return -1; }
-      if(!r) return -1;
-      var vw=window.innerWidth||0, vh=window.innerHeight||0;
-      if(vw<=0||vh<=0) return -1;
-      var w=Math.min(r.width,vw), h=Math.min(r.height,vh);
-      if(w<=0||h<=0) return -1;
-      return (w*h)/(vw*vh);
-    }
-    // Accessible title of an overlay container — VALUE-FREE (aria-label /
-    // aria-labelledby / inner heading / title attr only; never reads .value).
-    function overlayTitle(node){
-      var al=txt(attr(node,'aria-label')); if(al) return clip(al,OVERLAY_TITLE_MAX);
-      var lb=attr(node,'aria-labelledby');
-      if(lb){
-        var ids=lb.split(/\\s+/), parts=[];
-        for(var i=0;i<ids.length;i++){ try{ var ref=document.getElementById(ids[i]); if(ref) parts.push(ref.textContent||''); }catch(e){} }
-        var t=txt(parts.join(' ')); if(t) return clip(t,OVERLAY_TITLE_MAX);
-      }
-      try{ if(node.querySelector){ var h=node.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'); if(h){ var ht=txt(h.innerText!=null?h.innerText:h.textContent); if(ht) return clip(ht,OVERLAY_TITLE_MAX); } } }catch(e){}
-      var ti=txt(attr(node,'title')); if(ti) return clip(ti,OVERLAY_TITLE_MAX);
-      return '';
-    }
-    // Classify a single ancestor as an overlay container. Precedence:
-    // native modal dialog → ARIA dialog/alertdialog → popover → toast/live →
-    // drawer/flyout keyword → generic fixed high-z large-coverage overlay.
-    function overlayKindOf(node){
-      var tg=(node.tagName||'').toLowerCase();
-      var role=attr(node,'role'); role=role?String(role).toLowerCase():'';
-      var ariaModal=attr(node,'aria-modal')==='true';
-      // Chat/help/support widgets float over the page but never trap the user.
-      // Detected FIRST so a large open chat panel (even one using role=dialog or
-      // a >=0.5 coverage backdrop) is reported as a NONBLOCKING popover and can
-      // never win active_overlay over a real blocking modal. Signal = container
-      // class/id/aria-label only — never element text or values.
-      var chatSig=(attr(node,'class')||'')+' '+(attr(node,'id')||'')+' '+(attr(node,'aria-label')||'');
-      if(OVERLAY_CHAT_RE.test(chatSig)) return {type:'popover',blocking:false};
-      if(tg==='dialog'){
-        var open=false; try{ open=(node.open===true)||(attr(node,'open')!=null); }catch(e){ open=attr(node,'open')!=null; }
-        if(open) return {type:'dialog',blocking:ariaModal||matchesSafe(node,':modal')};
-      }
-      if(role==='dialog'||role==='alertdialog'){
-        return {type:role==='alertdialog'?'alertdialog':'dialog',blocking:ariaModal||fixedCoverage(node)>=0.5};
-      }
-      // A [popover] ancestor with a visible candidate inside is, by construction,
-      // showing (closed popovers render display:none and are filtered upstream).
-      if(attr(node,'popover')!=null) return {type:'popover',blocking:ariaModal};
-      if(role==='alert'||role==='status') return {type:'toast',blocking:false};
-      var live=attr(node,'aria-live'); if(live){ live=String(live).toLowerCase(); if(live==='polite'||live==='assertive') return {type:'toast',blocking:false}; }
-      var cls=(attr(node,'class')||'')+' '+(attr(node,'id')||'');
-      if(OVERLAY_DRAWER_RE.test(cls)) return {type:'drawer',blocking:fixedCoverage(node)>=0.5};
-      // NO generic fixed-coverage overlay branch: a positioned high-z container
-      // with no ARIA role / native dialog / popover / toast / drawer signal is
-      // NOT treated as an overlay. Sticky filter toolbars, promo heroes, and
-      // header bars are positioned + high-z but are page chrome, not modals —
-      // marking them overlays produced live false positives. Real overlays expose
-      // an explicit role (e.g. role=dialog), so structural signals are the sole
-      // authority. fixedCoverage remains the BLOCKING test for real dialogs and
-      // drawers above.
-      return null;
-    }
-    function hasInertAncestor(el){
-      var node=el, depth=0;
-      while(node&&depth<OVERLAY_WALK_DEPTH){
-        var inert=false; try{ inert=(node.inert===true)||(attr(node,'inert')!=null); }catch(e){ inert=attr(node,'inert')!=null; }
-        if(inert) return true;
-        node=node.parentElement; depth++;
-      }
-      return false;
-    }
-    // Element's OWN aria-hidden is already filtered by rectOf; start at parent.
-    function hasAriaHiddenAncestor(el){
-      var node=el.parentElement, depth=0;
-      while(node&&depth<OVERLAY_WALK_DEPTH){
-        if(attr(node,'aria-hidden')==='true') return true;
-        node=node.parentElement; depth++;
-      }
-      return false;
-    }
-    function isDismissEl(el,name){
-      var al=txt(attr(el,'aria-label')); if(al&&OVERLAY_DISMISS_RE.test(al)) return true;
-      if(attr(el,'data-dismiss')!=null||attr(el,'data-close')!=null) return true;
-      var nm=name?String(name).trim():'';
-      if(/^(close|dismiss|×|x|✕|✖|⨯)$/i.test(nm)) return true;
-      if(nm&&OVERLAY_DISMISS_RE.test(nm)) return true;
-      return false;
-    }
-    // Bounded ancestor walk: innermost match sets type/title; blocking ORs up.
-    function computeOverlay(el,name){
-      var type=null, container=null, blocking=false, node=el, depth=0;
-      while(node&&depth<OVERLAY_WALK_DEPTH){
-        var k=null; try{ k=overlayKindOf(node); }catch(e){ k=null; }
-        if(k){ if(!type){ type=k.type; container=node; } if(k.blocking) blocking=true; }
-        node=node.parentElement; depth++;
-      }
-      var inInert=false; try{ inInert=hasInertAncestor(el); }catch(e){ inInert=false; }
-      if(!type){
-        // No positive overlay membership — emit a background marker ONLY when the
-        // element is inert, or aria-hidden background while a REAL modal
-        // (aria-modal / native <dialog open>) is open. Both are precise ARIA
-        // modality primitives. We deliberately do NOT infer modals from container
-        // class names or large aria-hidden regions: real marketing pages (e.g.
-        // hero carousels with an "...overlay" class behind an aria-hidden region)
-        // would be misread as blocking modals. Structural detection above
-        // (role=dialog/alertdialog, native <dialog>, popover, toast, drawer,
-        // fixed-coverage) is the authority. The page map uses this marker to
-        // demote/exclude; the external view drops it.
-        var bgHidden=false; try{ bgHidden=hasAriaHiddenAncestor(el)&&hasModalMemo(); }catch(e){ bgHidden=false; }
-        if(!inInert&&!bgHidden) return null;
-        var bg={ overlay_type:'overlay', blocking:false, background:true };
-        if(inInert) bg.in_inert=true;
-        if(bgHidden) bg.bg_hidden=true;
-        return bg;
-      }
-      var ov={ overlay_type:type, blocking:blocking };
-      var title=''; try{ title=overlayTitle(container); }catch(e){ title=''; }
-      if(title) ov.modal_title=title;
-      try{ if(isDismissEl(el,name)) ov.is_dismiss=true; }catch(e){}
-      if(inInert) ov.in_inert=true;
-      return ov;
-    }
+    ${buildOverlaySnippetJs()}
     var out=[];
     var nodes;
     try{ nodes=document.querySelectorAll(SELECTOR); }catch(e){ return []; }

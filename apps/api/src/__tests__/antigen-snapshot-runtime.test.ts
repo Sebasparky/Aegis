@@ -396,6 +396,16 @@ describe("buildAntigenExtractionExpr — validity", () => {
     expect(() => new Function(`return ${buildAntigenExtractionExpr({ maxCandidates: 50, viewportOnly: false })}`)).not.toThrow();
   });
 
+  it("embeds the shared overlay snippet (anti-drift with the post-click probe)", () => {
+    // The structural overlay classifier is the SINGLE source shared with
+    // buildPageStateProbeExpr; the extraction must still contain it verbatim.
+    const expr = buildAntigenExtractionExpr({ maxCandidates: 200, viewportOnly: true });
+    expect(expr).toContain("function overlayKindOf");
+    expect(expr).toContain("function computeOverlay");
+    // Chat-widget suppression must survive the extraction (no false-positive modals).
+    expect(expr).toContain("OVERLAY_CHAT_RE");
+  });
+
   it("uses the documented generic selector list (not site-specific)", () => {
     expect(ANTIGEN_CANDIDATE_SELECTOR).toContain("a[href]");
     expect(ANTIGEN_CANDIDATE_SELECTOR).toContain('[contenteditable="true"]');

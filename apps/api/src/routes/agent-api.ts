@@ -49,7 +49,8 @@ import { getTaskBrowserSessionForReuse, getTaskBrowserSession, createTaskBrowser
 import { classifyActionIntent } from "../detection/actionIntent.js";
 import { evaluateActionGate } from "../detection/actionGate.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
-import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP } from "../runtime/realisticBrowserActions.js";
+import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP, type ClickVerifyOption } from "../runtime/realisticBrowserActions.js";
+import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
 import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -3656,6 +3657,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     return s.mode === "visible";
   };
 
+  // Clearly low-risk click intents that may receive the single safe verify-retry.
+  // Final / sensitive intents are blocked pre-dispatch by the action gate and
+  // never reach verification, but this allowlist is an explicit second guard so a
+  // retry can never fire for final_commit / payment / publish / account-security.
+  const LOW_RISK_CLICK_INTENTS = new Set<string>(["navigation", "cart_mutation", "checkout_transition"]);
+
   server.post("/api/agent/v1/runtime/browser-click", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
@@ -3830,6 +3837,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // Allowed: record the observed intent for advisory risk-state, then dispatch.
       advanceRiskState(session.browser_session_id, gate.action_intent);
 
+      // Post-click intent verification (ANTIGEN_CLICK_VERIFY, default-off). When
+      // off, verifyOption is undefined and the runtime path is byte-identical to
+      // today. editableTarget → success is FOCUS (cheap focus probe, no polling);
+      // targetWasBehindBlockingModal comes from the snapshot's structural
+      // background marker and drives the modal-trap guard.
+      const verifyEditableTarget =
+        el.typeable === true || el.kind === "input" || el.kind === "textarea" || el.kind === "select" || el.kind === "editable";
+      const verifyBehindBlockingModal = el.overlay?.background === true;
+      const verifyOption: ClickVerifyOption | undefined = isClickVerifyEnabled()
+        ? { enabled: true, editableTarget: verifyEditableTarget, targetWasBehindBlockingModal: verifyBehindBlockingModal }
+        : undefined;
+
       let refResult = await realisticClickKnownBox({
         cdpUrl: session.cdp_url,
         box: el.box,
@@ -3839,6 +3858,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         // Live-URL guard: fail closed if the page navigated since the snapshot.
         expectedUrl: snapshotUrl,
         expected,
+        verify: verifyOption,
       });
 
       // Same-page logical-ref recovery (env-gated, default-off). A recoverable
@@ -3877,6 +3897,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               debugOverlay: resolveOverlayEnabled(session),
               expectedUrl: snapshotUrl,
               expected,
+              verify: verifyOption,
             });
             if (retry.success) {
               refResult = retry;
@@ -3940,6 +3961,59 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed.", ...ttlFailField } });
       }
 
+      // ── Single safe verify-retry (ANTIGEN_CLICK_VERIFY + ANTIGEN_LOGICAL_REF_RECOVERY) ──
+      // The click physically dispatched but verifiably produced NO effect. Retry
+      // exactly once, only for a clearly low-risk intent, only against a unique
+      // semantically-identical target re-found on the same page. Extremely
+      // conservative — NEVER on:
+      //   • CLICK_INTENT_UNVERIFIED (an unreadable probe is not evidence of a miss),
+      //   • editable targets (success is focus; re-clicking can't help),
+      //   • modal-trap / background-behind-modal clicks,
+      //   • sensitive/final actions (already blocked pre-dispatch; asserted here),
+      //   • a click that already consumed the stale-recovery retry (shared flag).
+      // A verified click (e.g. cart_changed) never retries, so a successful
+      // add-to-cart can't be duplicated. recoverAntigenRefBox is the SAME unique-
+      // match machinery the stale path uses; only status:"recovered" proceeds.
+      let retriedOnce = recoveryState === "recovered";
+      if (
+        !retriedOnce &&
+        isClickVerifyEnabled() &&
+        isLogicalRefRecoveryEnabled() &&
+        refResult.verification?.outcome === "CLICK_DISPATCHED_NO_EFFECT" &&
+        !verifyEditableTarget &&
+        !verifyBehindBlockingModal &&
+        LOW_RISK_CLICK_INTENTS.has(gate.action_intent)
+      ) {
+        const eligibility = classifyLogicalRecoveryEligibility(expected, "click");
+        if (eligibility.eligible) {
+          const recovery = await recoverAntigenRefBox({
+            cdpUrl: session.cdp_url,
+            expected,
+            expectedUrl: snapshotUrl,
+            riskClass: eligibility.risk_class,
+          });
+          if (recovery.status === "recovered") {
+            retriedOnce = true;
+            const retry = await realisticClickKnownBox({
+              cdpUrl: session.cdp_url,
+              box: recovery.box,
+              sessionId: session.browser_session_id,
+              userId: MOCK_USER_ID,
+              debugOverlay: resolveOverlayEnabled(session),
+              expectedUrl: snapshotUrl,
+              expected,
+              verify: verifyOption,
+            });
+            // Adopt the retry only if it physically dispatched. A retry that fails
+            // to dispatch leaves the original (dispatched) result intact — the
+            // first click still physically happened, so we never downgrade to an
+            // HTTP error here.
+            if (retry.success) refResult = retry;
+          }
+        }
+      }
+      const verification = refResult.verification;
+
       // Refresh session.current_url so the next Antigen snapshot is not stale after a
       // click-triggered navigation. Internal session state only — never in the response.
       if (typeof refResult.current_url === "string" && refResult.current_url.length > 0) {
@@ -3963,6 +4037,22 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         url_after: sanitizeTraceUrl(refResult.current_url),
         ...(recoveryState === "recovered" ? { recovery_state: recoveryState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
         ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
+        ...(verification ? {
+          click_dispatched: verification.click_dispatched,
+          intent_verified: verification.intent_verified,
+          verification_signal: verification.verification_signal,
+          url_changed: verification.url_changed,
+          overlay_before_present: verification.overlay_before_present,
+          overlay_before_blocking: verification.overlay_before_blocking,
+          overlay_after_present: verification.overlay_after_present,
+          overlay_after_blocking: verification.overlay_after_blocking,
+          ...(verification.overlay_before_type ? { overlay_before_type: verification.overlay_before_type } : {}),
+          ...(verification.overlay_after_type ? { overlay_after_type: verification.overlay_after_type } : {}),
+          ...(typeof verification.verify_ms === "number" ? { verify_ms: verification.verify_ms } : {}),
+          ...(typeof verification.settle_polls === "number" ? { settle_polls: verification.settle_polls } : {}),
+          retried_once: retriedOnce,
+          stale_recovered: recoveryState === "recovered",
+        } : {}),
       });
 
       return reply.send({
@@ -3982,6 +4072,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               }
             : {}),
           ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
+          // Post-click intent verification (only present when ANTIGEN_CLICK_VERIFY
+          // is on). A dispatched-but-unverified click stays ok:true with
+          // intent_verified:false + an outcome + recommended_next_step — never an
+          // HTTP error. The agent treats intent_verified:false as a reason to
+          // re-snapshot before retrying.
+          ...(verification
+            ? {
+                click_dispatched: verification.click_dispatched,
+                intent_verified: verification.intent_verified,
+                verification_signal: verification.verification_signal,
+                outcome: verification.outcome,
+                recommended_next_step: verification.recommended_next_step,
+                ...(retriedOnce ? { retried_once: true } : {}),
+              }
+            : {}),
         },
       });
     }
@@ -4036,6 +4141,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       userId: MOCK_USER_ID,
       selectorHint,
       debugOverlay: resolveOverlayEnabled(session),
+      // Verification-only (no retry on this path — no structural metadata to
+      // re-find a unique target). editable / modal-trap context unknown here.
+      verify: isClickVerifyEnabled()
+        ? { enabled: true, editableTarget: false, targetWasBehindBlockingModal: false }
+        : undefined,
     });
 
     if (!result.success) {
@@ -4058,11 +4168,26 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       setTaskBrowserSessionCurrentUrl(session.browser_session_id, result.current_url);
     }
 
+    const descVerification = result.verification;
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "browser_click", browser_runtime_id: session.browser_session_id,
       tool: "browser_click", click_path: "description",
       pointer_dispatch: true, result_code: "realistic_success",
       url_after: sanitizeTraceUrl(result.current_url),
+      ...(descVerification ? {
+        click_dispatched: descVerification.click_dispatched,
+        intent_verified: descVerification.intent_verified,
+        verification_signal: descVerification.verification_signal,
+        url_changed: descVerification.url_changed,
+        overlay_before_present: descVerification.overlay_before_present,
+        overlay_before_blocking: descVerification.overlay_before_blocking,
+        overlay_after_present: descVerification.overlay_after_present,
+        overlay_after_blocking: descVerification.overlay_after_blocking,
+        ...(descVerification.overlay_before_type ? { overlay_before_type: descVerification.overlay_before_type } : {}),
+        ...(descVerification.overlay_after_type ? { overlay_after_type: descVerification.overlay_after_type } : {}),
+        ...(typeof descVerification.verify_ms === "number" ? { verify_ms: descVerification.verify_ms } : {}),
+        ...(typeof descVerification.settle_polls === "number" ? { settle_polls: descVerification.settle_polls } : {}),
+      } : {}),
     });
 
     return reply.send({
@@ -4072,6 +4197,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(result.pointer_start_source !== undefined ? { pointer_start_source: result.pointer_start_source } : {}),
         ...(result.pointer_path_point_count !== undefined ? { pointer_path_point_count: result.pointer_path_point_count } : {}),
         ...(result.pointer_state_persisted !== undefined ? { pointer_state_persisted: result.pointer_state_persisted } : {}),
+        ...(descVerification
+          ? {
+              click_dispatched: descVerification.click_dispatched,
+              intent_verified: descVerification.intent_verified,
+              verification_signal: descVerification.verification_signal,
+              outcome: descVerification.outcome,
+              recommended_next_step: descVerification.recommended_next_step,
+            }
+          : {}),
       },
     });
   });

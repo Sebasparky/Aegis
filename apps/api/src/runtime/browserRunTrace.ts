@@ -27,6 +27,12 @@ import {
   type AntigenSanitizedStaleReason,
   type AntigenTtlRecoveryState,
 } from "./antigenLogicalRecovery.js";
+import {
+  VERIFICATION_SIGNALS,
+  OVERLAY_TYPE_VALUES,
+  type VerificationSignal,
+} from "./antigenClickVerification.js";
+import type { AntigenOverlayType } from "./antigenSnapshotRuntime.js";
 
 const MAX_EVENTS_PER_SESSION = 200;
 const MAX_SESSIONS = 50;
@@ -213,6 +219,26 @@ export interface BrowserTraceEvent {
   // Of the redacted fields, how many were cross-origin protected iframe regions
   // (OPPWA card_number/cvv). Aggregate count only — never URLs, values, or boxes.
   redacted_iframe_field_count?: number;
+  // ── Post-click intent verification (ANTIGEN_CLICK_VERIFY) ────────────────────
+  // Sanitized verification telemetry on browser_click events. Booleans / enums /
+  // timing only — never raw url, document/modal titles, body text, refs, or
+  // coordinates. Overlay state is expressed as presence/blocking booleans plus
+  // the fixed overlay-type vocabulary (enum-gated); modal titles are never traced.
+  click_dispatched?: boolean;
+  intent_verified?: boolean;
+  verification_signal?: VerificationSignal;
+  retried_once?: boolean;
+  stale_recovered?: boolean;
+  url_changed?: boolean;
+  overlay_before_present?: boolean;
+  overlay_before_blocking?: boolean;
+  overlay_after_present?: boolean;
+  overlay_after_blocking?: boolean;
+  overlay_before_type?: AntigenOverlayType;
+  overlay_after_type?: AntigenOverlayType;
+  // Verification overhead telemetry: total wall time and number of after-probes.
+  verify_ms?: number;
+  settle_polls?: number;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -387,6 +413,28 @@ export function recordBrowserTraceEvent(
     if (Number.isFinite(event.redacted_iframe_field_count)) {
       safe.redacted_iframe_field_count = Math.max(0, Math.floor(event.redacted_iframe_field_count as number));
     }
+    // ── Post-click verification fields — booleans / enum-gated / bounded ints.
+    if (typeof event.click_dispatched === "boolean") safe.click_dispatched = event.click_dispatched;
+    if (typeof event.intent_verified === "boolean") safe.intent_verified = event.intent_verified;
+    if (event.verification_signal !== undefined && VERIFICATION_SIGNALS.has(event.verification_signal)) {
+      safe.verification_signal = event.verification_signal;
+    }
+    if (typeof event.retried_once === "boolean") safe.retried_once = event.retried_once;
+    if (typeof event.stale_recovered === "boolean") safe.stale_recovered = event.stale_recovered;
+    if (typeof event.url_changed === "boolean") safe.url_changed = event.url_changed;
+    if (typeof event.overlay_before_present === "boolean") safe.overlay_before_present = event.overlay_before_present;
+    if (typeof event.overlay_before_blocking === "boolean") safe.overlay_before_blocking = event.overlay_before_blocking;
+    if (typeof event.overlay_after_present === "boolean") safe.overlay_after_present = event.overlay_after_present;
+    if (typeof event.overlay_after_blocking === "boolean") safe.overlay_after_blocking = event.overlay_after_blocking;
+    // Enum-gate overlay types against the fixed vocabulary — never clip strings.
+    if (event.overlay_before_type !== undefined && OVERLAY_TYPE_VALUES.has(event.overlay_before_type)) {
+      safe.overlay_before_type = event.overlay_before_type;
+    }
+    if (event.overlay_after_type !== undefined && OVERLAY_TYPE_VALUES.has(event.overlay_after_type)) {
+      safe.overlay_after_type = event.overlay_after_type;
+    }
+    if (Number.isFinite(event.verify_ms)) safe.verify_ms = Math.max(0, Math.floor(event.verify_ms as number));
+    if (Number.isFinite(event.settle_polls)) safe.settle_polls = Math.max(0, Math.floor(event.settle_polls as number));
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {

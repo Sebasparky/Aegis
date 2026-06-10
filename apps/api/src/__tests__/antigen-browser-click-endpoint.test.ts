@@ -34,6 +34,17 @@ vi.mock("../runtime/realisticBrowserActions.js", async () => {
   };
 });
 
+// Mock ONLY recoverAntigenRefBox (CDP-backed) so the verify-retry path can be
+// driven deterministically. classifyLogicalRecoveryEligibility /
+// isLogicalRefRecoveryEnabled stay real (the latter is driven by env).
+const recoverBoxMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/antigenLogicalRecovery.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/antigenLogicalRecovery.js")>(
+    "../runtime/antigenLogicalRecovery.js",
+  );
+  return { ...actual, recoverAntigenRefBox: recoverBoxMock };
+});
+
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
@@ -159,6 +170,11 @@ beforeEach(() => {
     pointer_state_persisted: true,
     current_url: CATEGORY_URL,
   });
+  // Benign default for the CDP-backed recovery (overridden per-test). Without a
+  // resolved value the stale-recovery + verify-retry paths would crash on
+  // `recovery.status`. "not_found" exercises the fail-closed branch.
+  recoverBoxMock.mockReset();
+  recoverBoxMock.mockResolvedValue({ status: "not_found" });
 });
 
 describe("POST /api/agent/v1/runtime/browser-click — Antigen ag_* path", () => {
@@ -744,5 +760,215 @@ describe("POST /api/agent/v1/runtime/browser-click — TTL-expiry recovery", () 
     expect(body.error.ttl_recovery_state).toBe("sensitive_requires_fresh_ref");
     // Never dispatched and never routed to a handoff from stale metadata.
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/agent/v1/runtime/browser-click — post-click verification (ANTIGEN_CLICK_VERIFY)", () => {
+  // A low-risk navigation link (classifies as `navigation`, gate allows).
+  const navLink = () =>
+    candidate({
+      tag: "a", kind: "link", role: "link", name: "Desks & desk chairs",
+      normalized_name: "desks & desk chairs", href_path: "/us/en/cat/workspace-desks-chairs-fu004/",
+      box: { x: 100, y: 200, width: 80, height: 40 },
+    });
+  // A low-risk cart-mutation button — eligible for logical-recovery re-find.
+  const addToCart = () =>
+    candidate({
+      tag: "button", kind: "button", role: "button", name: "Add to cart",
+      normalized_name: "add to cart", box: { x: 100, y: 200, width: 80, height: 40 },
+    });
+
+  function verification(overrides: Record<string, unknown> = {}) {
+    return {
+      click_dispatched: true,
+      intent_verified: true,
+      verification_signal: "url_changed",
+      outcome: "CLICK_VERIFIED",
+      recommended_next_step: "none",
+      overlay_before_present: false,
+      overlay_before_blocking: false,
+      overlay_after_present: false,
+      overlay_after_blocking: false,
+      overlay_before_type: null,
+      overlay_after_type: null,
+      url_changed: true,
+      verify_ms: 12,
+      settle_polls: 1,
+      ...overrides,
+    };
+  }
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_CLICK_VERIFY;
+    delete process.env.ANTIGEN_LOGICAL_REF_RECOVERY;
+  });
+
+  it("flag OFF: response is byte-compatible with today and no verify option is passed", async () => {
+    seedSession();
+    seedSnapshot([navLink()]);
+    // Default beforeEach mock returns success WITHOUT a verification object.
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    // No verification keys leak into the response when the flag is off.
+    expect(data).not.toHaveProperty("click_dispatched");
+    expect(data).not.toHaveProperty("intent_verified");
+    expect(data).not.toHaveProperty("verification_signal");
+    expect(data).not.toHaveProperty("outcome");
+    expect(data).not.toHaveProperty("recommended_next_step");
+    // The runtime was invoked WITHOUT a verify option (no probing path).
+    const callArg = clickKnownBoxMock.mock.calls[0][0];
+    expect(callArg.verify).toBeUndefined();
+  });
+
+  it("flag ON, verified: surfaces intent_verified + signal + outcome and passes verify option", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    seedSession();
+    seedSnapshot([navLink()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_start_source: "session", pointer_state_persisted: true,
+      current_url: CATEGORY_URL, verification: verification(),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Desks & desk chairs" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.click_dispatched).toBe(true);
+    expect(data.intent_verified).toBe(true);
+    expect(data.verification_signal).toBe("url_changed");
+    expect(data.outcome).toBe("CLICK_VERIFIED");
+    expect(data.recommended_next_step).toBe("none");
+    expect(data).not.toHaveProperty("retried_once");
+    // verify option threaded into the runtime.
+    expect(clickKnownBoxMock.mock.calls[0][0].verify).toEqual(
+      expect.objectContaining({ enabled: true, editableTarget: false, targetWasBehindBlockingModal: false }),
+    );
+    // A verified click never retries.
+    expect(recoverBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON + recovery ON: a no-effect low-risk click retries once on a unique re-found target", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([addToCart()]);
+    // First dispatch: no effect. Retry dispatch: verified (cart changed).
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({ intent_verified: false, verification_signal: "no_effect", outcome: "CLICK_DISPATCHED_NO_EFFECT", recommended_next_step: "try_alternate_ref", url_changed: false }),
+    });
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({ verification_signal: "cart_changed", url_changed: false }),
+    });
+    recoverBoxMock.mockResolvedValueOnce({ status: "recovered", box: { x: 100, y: 200, width: 80, height: 40 } });
+
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Add to cart" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(2);
+    expect(recoverBoxMock).toHaveBeenCalledTimes(1);
+    expect(data.retried_once).toBe(true);
+    expect(data.intent_verified).toBe(true);
+    expect(data.verification_signal).toBe("cart_changed");
+    expect(data.outcome).toBe("CLICK_VERIFIED");
+  });
+
+  it("flag ON: CLICK_INTENT_UNVERIFIED never triggers a retry", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([addToCart()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({ intent_verified: false, verification_signal: "no_effect", outcome: "CLICK_INTENT_UNVERIFIED", recommended_next_step: "refresh_snapshot", url_changed: false }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Add to cart" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+    expect(recoverBoxMock).not.toHaveBeenCalled();
+    expect(data.outcome).toBe("CLICK_INTENT_UNVERIFIED");
+    expect(data.recommended_next_step).toBe("refresh_snapshot");
+    expect(data).not.toHaveProperty("retried_once");
+  });
+
+  it("flag ON: a click behind a blocking modal (background marker) never retries", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    // Background-behind-modal marker on the snapshot element drives the trap guard.
+    seedSnapshot([
+      candidate({
+        tag: "a", kind: "link", role: "link", name: "Browse catalog", normalized_name: "browse catalog",
+        href_path: "/us/en/cat/", box: { x: 100, y: 200, width: 80, height: 40 },
+        overlay: { overlay_type: "overlay", blocking: false, background: true },
+      }),
+    ]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({ intent_verified: false, verification_signal: "no_effect", outcome: "CLICK_DISPATCHED_NO_EFFECT", recommended_next_step: "refresh_snapshot", url_changed: false }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Browse catalog" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+    expect(recoverBoxMock).not.toHaveBeenCalled();
+    expect(data.intent_verified).toBe(false);
+    // verify option carried the modal-trap context from the snapshot metadata.
+    expect(clickKnownBoxMock.mock.calls[0][0].verify.targetWasBehindBlockingModal).toBe(true);
+  });
+
+  it("flag ON: a FINAL-COMMIT target is blocked pre-dispatch — verification/retry never run", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    seedSnapshot([candidate({ name: "Place order", normalized_name: "place order" })]);
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Place order" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.mode).toBe("blocked_by_antigen_platform");
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expect(recoverBoxMock).not.toHaveBeenCalled();
+  });
+
+  it("flag ON, description path: surfaces verification fields and never retries", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
+    seedSession();
+    clickByDescriptionMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: CATEGORY_URL,
+      verification: verification({ verification_signal: "modal_opened", url_changed: false, overlay_after_present: true, overlay_after_blocking: true, overlay_after_type: "dialog" }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, element_description: "Continue" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.intent_verified).toBe(true);
+    expect(data.verification_signal).toBe("modal_opened");
+    expect(data.outcome).toBe("CLICK_VERIFIED");
+    expect(data).not.toHaveProperty("retried_once");
+    expect(recoverBoxMock).not.toHaveBeenCalled();
+    expect(clickByDescriptionMock.mock.calls[0][0].verify).toEqual(
+      expect.objectContaining({ enabled: true }),
+    );
   });
 });

@@ -239,6 +239,9 @@ export interface BrowserTraceEvent {
   // Verification overhead telemetry: total wall time and number of after-probes.
   verify_ms?: number;
   settle_polls?: number;
+  // Total wall time for the whole tool call (endpoint-measured). Duration only —
+  // sanitized to a non-negative integer like verify_ms; never carries identifiers.
+  total_ms?: number;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -435,6 +438,7 @@ export function recordBrowserTraceEvent(
     }
     if (Number.isFinite(event.verify_ms)) safe.verify_ms = Math.max(0, Math.floor(event.verify_ms as number));
     if (Number.isFinite(event.settle_polls)) safe.settle_polls = Math.max(0, Math.floor(event.settle_polls as number));
+    if (Number.isFinite(event.total_ms)) safe.total_ms = Math.max(0, Math.floor(event.total_ms as number));
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {

@@ -1,6 +1,8 @@
 import WebSocket from "ws";
 import { PNG } from "pngjs";
 
+import { BrowserTimingScope } from "./browserTiming.js";
+
 /**
  * Redacted Screenshot capture — vision-channel protection for protected fills.
  *
@@ -171,6 +173,10 @@ export async function captureRedactedScreenshot(
 ): Promise<CaptureRedactedScreenshotResult> {
   const { browserWsUrl, pageTargetId, expectedIframeFields = [] } = params;
 
+  // Dev-only latency markers (gated). Sanitized: stage labels + durations +
+  // counts only — never image bytes, boxes, URLs, or field values.
+  const timing = new BrowserTimingScope("antigen_screenshot_redacted");
+
   return await new Promise<CaptureRedactedScreenshotResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);
     let msgId = 1;
@@ -191,6 +197,12 @@ export async function captureRedactedScreenshot(
       } catch {
         /* ignore */
       }
+      timing.end({
+        ok: result.ok,
+        redacted_field_count: result.ok ? result.redacted_field_count : undefined,
+        iframe_fields: expectedIframeFields.length,
+        png_kb: result.ok && result.base64 ? Math.round((result.base64.length * 3) / 4096) : undefined,
+      });
       resolve(result);
     };
 
@@ -207,6 +219,7 @@ export async function captureRedactedScreenshot(
       const attach = await send("Target.attachToTarget", { targetId: pageTargetId, flatten: true });
       sessionId = (attach?.sessionId as string) ?? null;
       if (!sessionId) return finish(FAIL);
+      timing.mark("connect_attach");
 
       // 0. Mark the cross-origin OPPWA iframe containers for any protected card
       //    field the caller knows was filled. FAIL CLOSED if any expected field's
@@ -227,6 +240,7 @@ export async function captureRedactedScreenshot(
           if (!marked.includes(field)) return finish(FAIL);
         }
       }
+      timing.mark("iframe_mark");
 
       // 1. Lay overlay boxes and collect the registered-field rects.
       const overlayRes = await send("Runtime.evaluate", { expression: OVERLAY_EXPR, returnByValue: true }, sessionId);
@@ -237,6 +251,7 @@ export async function captureRedactedScreenshot(
       const boxes = Array.isArray(overlayVal.boxes) ? overlayVal.boxes : [];
       const vw = typeof overlayVal.vw === "number" ? overlayVal.vw : 0;
       const vh = typeof overlayVal.vh === "number" ? overlayVal.vh : 0;
+      timing.mark("overlay_eval");
 
       // 2. Capture the (already DOM-overlaid) viewport. Enable the Page domain first
       //    — some Chromium builds need it before captureScreenshot resolves.
@@ -253,6 +268,7 @@ export async function captureRedactedScreenshot(
         await removeOverlay();
         return finish(FAIL);
       }
+      timing.mark("capture");
 
       // 3. Pixel-pass fail-safe: black out the field rectangles in the image bytes.
       let redacted: string;
@@ -262,10 +278,12 @@ export async function captureRedactedScreenshot(
         await removeOverlay();
         return finish(FAIL);
       }
+      timing.mark("png_redact");
 
       // 4. Remove the temporary capture-only overlay so the live UI keeps the lighter
       //    text-security mask, not opaque boxes. Best-effort — never blocks the result.
       await removeOverlay();
+      timing.mark("cleanup_eval");
 
       return finish({ ok: true, base64: redacted, mimeType: "image/png", redacted_field_count: boxes.length });
     };

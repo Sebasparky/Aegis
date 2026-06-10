@@ -11,6 +11,7 @@ import {
 } from "./taskBrowserSessions.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import { getInputRealismMode, typeCharsViaCDP } from "./inputRealismTyper.js";
+import { timingEnabled } from "./browserTiming.js";
 
 /**
  * Protected Realistic Fill — shared sensitive-value input primitive.
@@ -331,6 +332,11 @@ export async function executeProtectedRealisticFill(
 
   const realism: ProtectedRealisticFillRealism = { mode: "realistic" };
 
+  // Dev-only latency marker (gated). Sanitized: duration + shape token + realism
+  // strategy/bucket only — NEVER the value, selector, domain, or coordinates.
+  const fillTimingOn = timingEnabled();
+  const tFillEnter = process.hrtime.bigint();
+
   return await new Promise<ProtectedRealisticFillResult>((resolve) => {
     const ws = new WebSocket(browserWsUrl);
     let msgId = 1;
@@ -363,6 +369,16 @@ export async function executeProtectedRealisticFill(
     const finish = (success: boolean, error?: string) => {
       clearTimeout(timer);
       ws.close();
+      if (fillTimingOn) {
+        const totalMs = Math.round((Number(process.hrtime.bigint() - tFillEnter) / 1_000_000) * 100) / 100;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] antigen_protected_fill total=${totalMs}ms` +
+            ` field_shape=${fieldShape ?? "unknown"} strategy=${realism.strategy ?? "none"}` +
+            ` typing_ms=${realism.duration_ms ?? 0} char_count_bucket=${realism.char_count_bucket ?? "n/a"}` +
+            ` fallback_used=${realism.fallback_used === true} success=${success}`,
+        );
+      }
       resolve({ success, error, field_shape: fieldShape, realism });
     };
 

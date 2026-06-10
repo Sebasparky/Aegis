@@ -13,6 +13,7 @@ import {
 } from "./taskBrowserSessions.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import { getInputRealismMode, typeCharsViaCDP } from "./inputRealismTyper.js";
+import { BrowserTimingScope } from "./browserTiming.js";
 
 // US state abbreviation → full name (uppercase keys)
 const US_STATE_MAP: Record<string, string> = {
@@ -650,6 +651,10 @@ export async function executeProfileFieldFillViaCDP(
       }));
     }
 
+    // Dev-only latency markers (gated). Sanitized: stage labels + durations +
+    // field-kind tokens only — never values, selectors, labels, or coordinates.
+    const timing = new BrowserTimingScope("antigen_profile_fill");
+
     return await new Promise<ProfileFieldFillEntry[]>((resolve) => {
       const entries: ProfileFieldFillEntry[] = [];
       const fields = fillRequest.requested_fields;
@@ -709,6 +714,7 @@ export async function executeProfileFieldFillViaCDP(
           masked_summary: maskProfileValue(field.key, rawValue),
           raw_profile_value_revealed_to_agent: false,
         });
+        timing.mark(`field_${field.key}`);
         fieldIdx++;
         advanceField();
       };
@@ -722,6 +728,7 @@ export async function executeProfileFieldFillViaCDP(
           raw_profile_value_revealed_to_agent: false,
           error,
         });
+        timing.mark(`field_${field.key}`);
         fieldIdx++;
         advanceField();
       };
@@ -736,6 +743,7 @@ export async function executeProfileFieldFillViaCDP(
           raw_profile_value_revealed_to_agent: false,
           error: `Field resolution failed for kind '${field.key}': ${reason}.`,
         });
+        timing.mark(`field_${field.key}`);
         fieldIdx++;
         advanceField();
       };
@@ -744,6 +752,10 @@ export async function executeProfileFieldFillViaCDP(
         if (fieldIdx >= fields.length) {
           clearTimeout(timer);
           ws.close();
+          timing.end({
+            field_count: fields.length,
+            filled_count: entries.filter((e) => e.field_filled).length,
+          });
           resolve(entries);
           return;
         }
@@ -772,6 +784,7 @@ export async function executeProfileFieldFillViaCDP(
         // Attach response — identified by tracked message ID.
         if (id === attachMsgId && result?.sessionId && !sessionId) {
           sessionId = result.sessionId as string;
+          timing.mark("connect_attach");
           advanceField();
           return;
         }

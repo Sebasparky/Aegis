@@ -47,6 +47,11 @@ function isPortInUse(port: number): Promise<boolean> {
 
 async function waitForCdpReady(port: number, timeoutMs = 6000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  // Backoff: poll quickly at first (Chrome's CDP endpoint usually comes up well
+  // under a second, so a flat 250ms interval wastes ~125ms on average), then
+  // settle to 250ms. Total budget unchanged.
+  const backoffMs = [50, 100, 150, 200];
+  let attempt = 0;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://localhost:${port}/json/version`);
@@ -54,7 +59,9 @@ async function waitForCdpReady(port: number, timeoutMs = 6000): Promise<void> {
     } catch {
       // Chrome not ready yet
     }
-    await new Promise((r) => setTimeout(r, 250));
+    const delay = backoffMs[attempt] ?? 250;
+    attempt += 1;
+    await new Promise((r) => setTimeout(r, delay));
   }
   throw Object.assign(new Error(`CDP not ready on port ${port} after ${timeoutMs}ms`), {
     code: "CDP_NOT_READY",

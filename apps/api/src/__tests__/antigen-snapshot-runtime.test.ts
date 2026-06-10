@@ -18,9 +18,16 @@ const mockState = vi.hoisted(() => ({
   allSentMessages: [] as string[],
   // The array the page-side IIFE "returns" via Runtime.evaluate.
   nextEvalResponse: null as unknown,
+  // Per-eval response queue (bundle tests): consumed in order before falling
+  // back to nextEvalResponse for every remaining eval.
+  evalResponses: [] as unknown[],
+  // Number of WebSocket connections opened — proves single-connection bundling.
+  connectionCount: 0,
   reset() {
     this.allSentMessages = [];
     this.nextEvalResponse = null;
+    this.evalResponses = [];
+    this.connectionCount = 0;
   },
 }));
 
@@ -29,6 +36,7 @@ vi.mock("ws", () => {
   class MockWs {
     private handlers = new Map<string, Array<(...a: unknown[]) => void>>();
     constructor(_url: string) {
+      state.connectionCount += 1;
       setImmediate(() => this._fire("open"));
     }
     on(event: string, fn: (...a: unknown[]) => void) {
@@ -50,7 +58,7 @@ vi.mock("ws", () => {
         );
       }
       if (msg.method === "Runtime.evaluate") {
-        const val = state.nextEvalResponse;
+        const val = state.evalResponses.length > 0 ? state.evalResponses.shift() : state.nextEvalResponse;
         setImmediate(() =>
           this._fire("message", Buffer.from(JSON.stringify({ id: msg.id, result: { result: { value: val } } }))),
         );
@@ -70,6 +78,7 @@ import {
   buildAntigenPageMetaExpr,
   extractAntigenSnapshotCandidatesViaCDP,
   extractAntigenPageMetaViaCDP,
+  extractAntigenSnapshotBundleViaCDP,
   normalizeName,
   hrefPath,
   inferKind,
@@ -1524,5 +1533,107 @@ describe("extractAntigenPageMetaViaCDP — transport (best-effort)", () => {
   it("returns undefined (never throws) when the CDP endpoint is unreachable", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
     await expect(extractAntigenPageMetaViaCDP({ cdpUrl: "http://localhost:9999" })).resolves.toBeUndefined();
+  });
+});
+
+// ─── Bundled candidate + page-meta extraction (single connection) ─────────────
+
+describe("extractAntigenSnapshotBundleViaCDP — single-connection bundle", () => {
+  const DEFAULT_VERSION = { webSocketDebuggerUrl: "ws://localhost:9222/browser" };
+  const DEFAULT_TARGETS = [{ id: "target1", url: "https://example.com", type: "page" }];
+  const RAW_LINK: RawAntigenCandidate = {
+    tag: "a", type: null, role: null, content_editable: false,
+    id: "home-link", href: "https://example.com/home?ref=1",
+    disabled: false, aria_disabled: false, read_only: false,
+    name: "Home", box: { x: 10, y: 20, width: 50, height: 18 },
+  };
+  const RAW_META = {
+    viewport_w: 1280, viewport_h: 800, scroll_x: 0, scroll_y: 40, doc_h: 3000,
+    heading: "Cart", text_excerpt: "subtotal checkout",
+  };
+
+  function stubFetch(version: unknown, list: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const data = String(url).endsWith("/json/version") ? version : list;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(data) });
+      }),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns candidates AND page meta over exactly ONE connection and ONE attach", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.evalResponses = [[RAW_LINK], RAW_META];
+
+    const p = extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    const bundle = await p;
+
+    expect(bundle.candidates).toHaveLength(1);
+    expect(bundle.candidates[0]).toMatchObject({ index: 0, kind: "link", name: "Home", href_path: "/home" });
+    expect(bundle.pageMeta?.heading).toBe("Cart");
+    expect(bundle.pageMeta?.viewport_h).toBe(800);
+
+    // Transport proof: one WS connection, one attach, two evals (candidates + meta).
+    expect(mockState.connectionCount).toBe(1);
+    const sent = mockState.allSentMessages.map((m) => JSON.parse(m) as { method: string });
+    expect(sent.filter((m) => m.method === "Target.attachToTarget")).toHaveLength(1);
+    expect(sent.filter((m) => m.method === "Runtime.evaluate")).toHaveLength(2);
+  });
+
+  it("meta eval returning a non-object → candidates returned, pageMeta undefined (never throws)", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.evalResponses = [[RAW_LINK], null];
+
+    const p = extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    const bundle = await p;
+    expect(bundle.candidates).toHaveLength(1);
+    expect(bundle.pageMeta).toBeUndefined();
+  });
+
+  it("empty page (non-array candidate result) → empty candidates, meta still attempted", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.evalResponses = [null, RAW_META];
+
+    const p = extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    const bundle = await p;
+    expect(bundle.candidates).toEqual([]);
+    expect(bundle.pageMeta?.heading).toBe("Cart");
+  });
+
+  it("throws CDP_FETCH_FAILED when the CDP endpoint is unreachable (candidate-path code unchanged)", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+    await expect(extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9999" })).rejects.toMatchObject({
+      code: "CDP_FETCH_FAILED",
+    });
+  });
+
+  it("throws NO_PAGE_TARGET when no page target exists (candidate-path code unchanged)", async () => {
+    stubFetch(DEFAULT_VERSION, [{ id: "x", url: "https://example.com", type: "service_worker" }]);
+    await expect(extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9222" })).rejects.toMatchObject({
+      code: "NO_PAGE_TARGET",
+    });
+  });
+
+  it("no forbidden internals leak from the bundle", async () => {
+    vi.useFakeTimers();
+    stubFetch(DEFAULT_VERSION, DEFAULT_TARGETS);
+    mockState.evalResponses = [[RAW_LINK], RAW_META];
+    const p = extractAntigenSnapshotBundleViaCDP({ cdpUrl: "http://localhost:9222" });
+    await vi.runAllTimersAsync();
+    const serialized = JSON.stringify(await p);
+    for (const banned of ["cdp_url", "user_data_dir", "secret_ref", "password", "ws://"]) {
+      expect(serialized).not.toContain(banned);
+    }
   });
 });

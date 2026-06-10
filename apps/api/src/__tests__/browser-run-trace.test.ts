@@ -40,7 +40,10 @@ vi.mock("../runtime/realisticBrowserActions.js", async () => {
   };
 });
 
-// Mock snapshot extraction so browser-snapshot works without a real page.
+// Mock snapshot extraction so browser-snapshot works without a real page. The
+// endpoint calls the single-connection bundle; this mock delegates to the two
+// per-phase mocks with the real bundle's error contract (candidate failures
+// throw, page-meta failures resolve undefined).
 const extractMock = vi.hoisted(() => vi.fn());
 const pageMetaMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
@@ -51,6 +54,16 @@ vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
     ...actual,
     extractAntigenSnapshotCandidatesViaCDP: extractMock,
     extractAntigenPageMetaViaCDP: pageMetaMock,
+    extractAntigenSnapshotBundleViaCDP: vi.fn(async (params: Record<string, unknown>) => {
+      const candidates = await extractMock(params);
+      let pageMeta: unknown;
+      try {
+        pageMeta = await pageMetaMock(params);
+      } catch {
+        pageMeta = undefined;
+      }
+      return { candidates, ...(pageMeta !== undefined ? { pageMeta } : {}) };
+    }),
   };
 });
 
@@ -402,6 +415,34 @@ describe("browser run trace — leak guard & gating", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.events).toHaveLength(0);
+  });
+
+  it("sanitizes total_ms like verify_ms: non-negative integer, absent when not provided", () => {
+    recordBrowserTraceEvent(SESSION_ID, {
+      event_type: "browser_click", browser_runtime_id: SESSION_ID,
+      tool: "browser_click", result_code: "realistic_success",
+      total_ms: 123.9,
+    });
+    recordBrowserTraceEvent(SESSION_ID, {
+      event_type: "browser_click", browser_runtime_id: SESSION_ID,
+      tool: "browser_click", result_code: "realistic_success",
+      total_ms: -50,
+    });
+    recordBrowserTraceEvent(SESSION_ID, {
+      event_type: "browser_click", browser_runtime_id: SESSION_ID,
+      tool: "browser_click", result_code: "realistic_success",
+      total_ms: Number.NaN,
+    });
+    recordBrowserTraceEvent(SESSION_ID, {
+      event_type: "browser_click", browser_runtime_id: SESSION_ID,
+      tool: "browser_click", result_code: "realistic_success",
+    });
+    const events = getBrowserRunTrace(SESSION_ID)!.events;
+    const last4 = events.slice(-4);
+    expect(last4[0].total_ms).toBe(123); // floored
+    expect(last4[1].total_ms).toBe(0); // clamped to non-negative
+    expect(last4[2].total_ms).toBeUndefined(); // NaN dropped
+    expect(last4[3].total_ms).toBeUndefined(); // absent stays absent
   });
 });
 

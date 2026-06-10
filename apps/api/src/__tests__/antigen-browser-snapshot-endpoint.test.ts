@@ -18,17 +18,32 @@ vi.mock("../store/persistence.js", () => ({
   resetStoreForDemo: vi.fn(),
 }));
 
-// Mock the CDP extraction transports — the store stays real.
+// Mock the CDP extraction transports — the store stays real. The endpoint calls
+// the single-connection bundle; the mock delegates to the two per-phase mocks
+// with the REAL bundle's error contract (candidate failures throw, page-meta
+// failures resolve to undefined) so tests keep driving each phase independently.
 const extractMock = vi.hoisted(() => vi.fn());
 const pageMetaMock = vi.hoisted(() => vi.fn());
+const bundleMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
   );
+  bundleMock.mockImplementation(async (params: Record<string, unknown>) => {
+    const candidates = await extractMock(params);
+    let pageMeta: unknown;
+    try {
+      pageMeta = await pageMetaMock(params);
+    } catch {
+      pageMeta = undefined;
+    }
+    return { candidates, ...(pageMeta !== undefined ? { pageMeta } : {}) };
+  });
   return {
     ...actual,
     extractAntigenSnapshotCandidatesViaCDP: extractMock,
     extractAntigenPageMetaViaCDP: pageMetaMock,
+    extractAntigenSnapshotBundleViaCDP: bundleMock,
   };
 });
 

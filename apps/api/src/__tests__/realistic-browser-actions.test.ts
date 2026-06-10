@@ -164,11 +164,13 @@ import {
   setFieldValueKnownBox,
   buildAntigenSetValueExpr,
   computeScrollTargetY,
+  readCurrentUrlAfterClick,
   GENERAL_TYPING_PROFILE,
   ACTIVE_ELEMENT_CHECK_EXPR,
   SEARCH_BUTTON_FIND_EXPR,
 } from "../runtime/realisticBrowserActions.js";
 import { ensurePointerDebugOverlayWithStatus } from "../runtime/nativePointerRuntime.js";
+import { clearBrowserWsUrlCacheForTests } from "../runtime/cdpTargetSelection.js";
 
 // ─── fetch mock helpers ───────────────────────────────────────────────────────
 
@@ -188,6 +190,9 @@ beforeEach(() => {
   mockState.reset();
   taskMockState.reset();
   vi.unstubAllEnvs();
+  // The browser WS endpoint cache is module-level — clear it so each test's
+  // stubbed /json/version response is authoritative (order independence).
+  clearBrowserWsUrlCacheForTests();
 });
 
 afterEach(() => {
@@ -1954,5 +1959,122 @@ describe("browser_click overlay observability — integration", () => {
     expect(offTypes).toContain("mouseReleased");
     expect(offTypes.filter((t) => t === "mousePressed")).toHaveLength(1);
     expect(offTypes.filter((t) => t === "mouseReleased")).toHaveLength(1);
+  });
+});
+
+// ─── readCurrentUrlAfterClick — early-exit post-click URL settle ──────────────
+//
+// Pure unit tests via injected sendAndWait/sleep. The contract under test:
+//  - with preClickUrl: poll at t≈0/60/120, exit early on a URL change or on two
+//    consecutive stable reads at the pre-click URL; inconclusive reads fall
+//    through to the legacy 250ms ceiling (worst case unchanged)
+//  - without preClickUrl: legacy single sleep(250) + one read, byte-identical
+//  - any eval failure returns null (click success is never affected)
+
+describe("readCurrentUrlAfterClick — early-exit settle", () => {
+  const urlResult = (url: string | null) => ({ result: { value: url } });
+
+  function makeHarness(reads: Array<string | null>) {
+    let i = 0;
+    const sleeps: number[] = [];
+    const sendAndWait = vi.fn(async () => urlResult(reads[Math.min(i++, reads.length - 1)]));
+    const sleep = vi.fn(async (ms: number) => {
+      sleeps.push(ms);
+    });
+    return { sendAndWait, sleep, sleeps };
+  }
+
+  it("(a) no navigation: exits after two stable reads — sleeps 60+60 only, never the 250 ceiling", async () => {
+    const PRE = "https://example.com/page";
+    const { sendAndWait, sleep, sleeps } = makeHarness([PRE, PRE, PRE]);
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep, PRE);
+    expect(url).toBe(PRE);
+    expect(sleeps).toEqual([60, 60]);
+    expect(sendAndWait).toHaveBeenCalledTimes(3);
+  });
+
+  it("(b) navigation already committed at first read: returns the new URL with zero sleeps", async () => {
+    const PRE = "https://example.com/page";
+    const NEXT = "https://example.com/next";
+    const { sendAndWait, sleep, sleeps } = makeHarness([NEXT]);
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep, PRE);
+    expect(url).toBe(NEXT);
+    expect(sleeps).toEqual([]);
+    expect(sendAndWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("(b2) navigation committing mid-window: returns the new URL at the read that sees it", async () => {
+    const PRE = "https://example.com/page";
+    const NEXT = "https://example.com/next";
+    const { sendAndWait, sleep, sleeps } = makeHarness([PRE, NEXT]);
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep, PRE);
+    expect(url).toBe(NEXT);
+    expect(sleeps).toEqual([60]);
+  });
+
+  it("(c) inconclusive reads (empty page URL): pays the full legacy ceiling — final read at t≈250", async () => {
+    const PRE = "https://example.com/page";
+    const NEXT = "https://example.com/late";
+    // First three reads unavailable, the final ceiling read sees the late navigation.
+    const { sendAndWait, sleep, sleeps } = makeHarness([null, null, null, NEXT]);
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep, PRE);
+    expect(url).toBe(NEXT);
+    expect(sleeps).toEqual([60, 60, 130]); // 60+60+130 = 250ms ceiling, unchanged worst case
+    expect(sendAndWait).toHaveBeenCalledTimes(4);
+  });
+
+  it("(d) without preClickUrl: legacy behavior — exactly one sleep(250) and one read", async () => {
+    const URL = "https://example.com/page";
+    const { sendAndWait, sleep, sleeps } = makeHarness([URL]);
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep);
+    expect(url).toBe(URL);
+    expect(sleeps).toEqual([250]);
+    expect(sendAndWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("(e) eval throw returns null — caller still reports click success", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const sendAndWait = vi.fn(async () => {
+      throw new Error("CDP gone");
+    });
+    const url = await readCurrentUrlAfterClick(sendAndWait, sleep, "https://example.com/page");
+    expect(url).toBeNull();
+    const urlLegacy = await readCurrentUrlAfterClick(sendAndWait, sleep);
+    expect(urlLegacy).toBeNull();
+  });
+});
+
+// ─── Live-URL guard freshness under the WS-endpoint cache ─────────────────────
+//
+// The /json/version → wsUrl mapping is cached (process-level, no page state).
+// The live-URL guard's input (/json/list target URL) must STILL be fetched
+// fresh on every action: a warm WS-endpoint cache must never let a stale page
+// URL pass the ANTIGEN_REF_PAGE_CHANGED fail-closed check.
+
+describe("realisticClickKnownBox — live-URL guard stays fresh with warm WS cache", () => {
+  it("fails closed with ANTIGEN_REF_PAGE_CHANGED on every call and re-fetches /json/list each time", async () => {
+    const fetchMock = makeFetchMock(DEFAULT_VERSION, [
+      { id: "target1", url: "https://example.com/moved-away", type: "page" },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const box = { x: 10, y: 10, width: 100, height: 30 };
+    const expectedUrl = "https://example.com/snapshot-page";
+
+    // First call: cold WS cache (version fetched). Guard fails closed.
+    const r1 = await realisticClickKnownBox({ cdpUrl: "http://localhost:9222", box, expectedUrl });
+    expect(r1.success).toBe(false);
+    expect(r1.error).toBe("ANTIGEN_REF_PAGE_CHANGED");
+
+    // Second call: WARM WS cache (version NOT re-fetched) — the guard must
+    // still read the LIVE /json/list and fail closed identically.
+    const r2 = await realisticClickKnownBox({ cdpUrl: "http://localhost:9222", box, expectedUrl });
+    expect(r2.success).toBe(false);
+    expect(r2.error).toBe("ANTIGEN_REF_PAGE_CHANGED");
+
+    const listCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/list"));
+    const versionCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"));
+    expect(listCalls).toHaveLength(2); // live page state: fetched fresh both times
+    expect(versionCalls).toHaveLength(1); // process WS endpoint: cached on the second call
   });
 });

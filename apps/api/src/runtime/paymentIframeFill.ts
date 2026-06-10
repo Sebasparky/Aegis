@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 
+import { timingEnabled } from "./browserTiming.js";
+
 // ─── OPPWA / Worldline iframe fill v1 ─────────────────────────────────────────
 //
 // Fills card_number and CVV fields hosted inside OPPWA cross-origin PCI iframes
@@ -265,6 +267,17 @@ export async function fillOppwaIframeField(args: {
 }): Promise<PaymentIframeFillResult> {
   const { browserWsUrl, field_kind, resolvedValue, timeout = 10_000 } = args;
 
+  // Dev-only latency marker (gated). Sanitized: duration + field-kind token +
+  // status only — never the value or iframe URLs.
+  const iframeTimingOn = timingEnabled();
+  const tIframeEnter = process.hrtime.bigint();
+  const logIframeTiming = (status: string) => {
+    if (!iframeTimingOn) return;
+    const totalMs = Math.round((Number(process.hrtime.bigint() - tIframeEnter) / 1_000_000) * 100) / 100;
+    // eslint-disable-next-line no-console
+    console.log(`[AntigenTiming] antigen_payment_iframe_fill total=${totalMs}ms field_kind=${field_kind} status=${status}`);
+  };
+
   // Build fill expression — resolvedValue embedded here, never returned.
   // Masking is always applied since card_number, cvv, and expiry are all sensitive.
   // See module-level TODO for v2 Input.dispatchKeyEvent alternative.
@@ -286,7 +299,7 @@ export async function fillOppwaIframeField(args: {
   return { ok: true };
 })()`;
 
-  return new Promise<PaymentIframeFillResult>((resolve) => {
+  const fillResult = await new Promise<PaymentIframeFillResult>((resolve) => {
     let ws: WebSocket;
     try {
       ws = new WebSocket(browserWsUrl);
@@ -463,4 +476,6 @@ export async function fillOppwaIframeField(args: {
       });
     });
   });
+  logIframeTiming(fillResult.status);
+  return fillResult;
 }

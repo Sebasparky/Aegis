@@ -51,7 +51,7 @@ import { evaluateActionGate } from "../detection/actionGate.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP, type ClickVerifyOption } from "../runtime/realisticBrowserActions.js";
 import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
-import { extractAntigenSnapshotCandidatesViaCDP, extractAntigenPageMetaViaCDP } from "../runtime/antigenSnapshotRuntime.js";
+import { extractAntigenSnapshotBundleViaCDP, type AntigenPageMeta } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
@@ -60,7 +60,7 @@ import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTarg
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
 import { recordBrowserTraceEvent, sanitizeTraceUrl } from "../runtime/browserRunTrace.js";
-import { BrowserTimingScope } from "../runtime/browserTiming.js";
+import { BrowserTimingScope, timingEnabled } from "../runtime/browserTiming.js";
 // Same-page logical-ref recovery (env-gated, default-off). When enabled, a
 // recoverable ANTIGEN_REF_STALE on a clearly low-risk click target is retried
 // against a unique logically-equivalent element re-found on the same page; the
@@ -3666,6 +3666,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   server.post("/api/agent/v1/runtime/browser-click", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
+    const tToolStart = Date.now();
 
     const body = (req.body ?? {}) as { browser_runtime_id?: unknown; element_description?: unknown; selector_hint?: unknown; ref?: unknown };
 
@@ -4040,6 +4041,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
         pointer_dispatch: true, result_code: "realistic_success",
         url_after: sanitizeTraceUrl(refResult.current_url),
+        total_ms: Date.now() - tToolStart,
         ...(recoveryState === "recovered" ? { recovery_state: recoveryState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
         ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
         ...(verification ? {
@@ -4184,6 +4186,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       tool: "browser_click", click_path: "description",
       pointer_dispatch: true, result_code: "realistic_success",
       url_after: sanitizeTraceUrl(result.current_url),
+      total_ms: Date.now() - tToolStart,
       ...(descVerification ? {
         click_dispatched: descVerification.click_dispatched,
         intent_verified: descVerification.intent_verified,
@@ -4371,6 +4374,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   server.post("/api/agent/v1/runtime/browser-type", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
+    const tToolStart = Date.now();
 
     const body = (req.body ?? {}) as {
       browser_runtime_id?: unknown;
@@ -4577,6 +4581,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
         pointer_dispatch: refResult.pointer_path_point_count !== undefined,
         result_code: "realistic_type_success",
+        total_ms: Date.now() - tToolStart,
         ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
       });
 
@@ -4639,6 +4644,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       submit: typeof result.submitted === "boolean" ? result.submitted : submitFlag,
       pointer_dispatch: result.pointer_path_point_count !== undefined,
       result_code: "realistic_type_success",
+      total_ms: Date.now() - tToolStart,
     });
 
     return reply.send({
@@ -4669,6 +4675,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   server.post("/api/agent/v1/runtime/browser-set-value", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
+    const tToolStart = Date.now();
 
     const body = (req.body ?? {}) as {
       browser_runtime_id?: unknown;
@@ -4850,6 +4857,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
       tool: "browser_set_value", element_name: el.name, context: el.context,
       result_code: "set_value_success",
+      total_ms: Date.now() - tToolStart,
       ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
     });
 
@@ -4959,6 +4967,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   server.post("/api/agent/v1/runtime/browser-snapshot", async (req, reply) => {
     const delegation = await requireAgentToken(req, reply);
     if (!delegation) return;
+    const tToolStart = Date.now();
 
     const body = (req.body ?? {}) as {
       browser_runtime_id?: unknown;
@@ -5033,15 +5042,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       ? { browserWsUrl: resolved.browserWsUrl, pageTarget: { id: resolved.target.id, url: resolved.target.url } }
       : undefined;
 
+    // Single-connection bundle: candidate extraction AND the best-effort page
+    // metadata run on one WebSocket + CDP session (extractAntigenSnapshotBundleViaCDP)
+    // instead of two connect+attach cycles. Error semantics are unchanged:
+    // candidate failures throw (→ SNAPSHOT_EXTRACTION_FAILED below); page-meta
+    // problems never fail a snapshot (pageMeta is simply undefined). The raw
+    // viewport/scroll numbers are consumed server-side to derive qualitative
+    // fields only; they are never emitted to the agent.
     let candidates: AntigenSnapshotCandidate[];
+    let pageMeta: AntigenPageMeta | undefined;
     try {
-      candidates = await extractAntigenSnapshotCandidatesViaCDP({
+      const bundle = await extractAntigenSnapshotBundleViaCDP({
         cdpUrl: session.cdp_url,
         maxCandidates,
         viewportOnly,
         resolvedTarget,
       });
-      timing.mark("candidate_extract");
+      candidates = bundle.candidates;
+      pageMeta = bundle.pageMeta;
+      timing.mark("candidate_and_meta_extract");
     } catch {
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "antigen_snapshot", browser_runtime_id: session.browser_session_id,
@@ -5052,13 +5071,6 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // Never leak CDP URLs, filesystem paths, or stack detail.
       return sendError(reply, 502, "SNAPSHOT_EXTRACTION_FAILED", "Failed to capture an Antigen snapshot of the page.");
     }
-
-    // Best-effort page metadata for the Snapshot v2 page map. NEVER fails the
-    // snapshot — candidate extraction above is the authoritative path. The raw
-    // viewport/scroll numbers are consumed server-side to derive qualitative
-    // fields only; they are never emitted to the agent.
-    const pageMeta = await extractAntigenPageMetaViaCDP({ cdpUrl: session.cdp_url, resolvedTarget });
-    timing.mark("page_metadata");
 
     // The LIVE page URL is taken from the SAME single resolved target the DOM
     // extraction bound to — the same pickBestPageTarget source the click/type/
@@ -5152,13 +5164,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         overlay_blocking: pageMap.active_overlay?.blocking === true,
       },
       result_code: "antigen_snapshot_success",
+      total_ms: Date.now() - tToolStart,
     });
 
     timing.mark("serialize");
-    // Sanitized: stage labels + durations + scalar counts only. No URLs/refs/geometry.
-    timing.end({ element_count: snapshot.element_count, viewport_only: viewportOnly, rebound });
 
-    return reply.send({
+    const responsePayload = {
       ok: true,
       data: {
         snapshot_id: snapshot.snapshot_id,
@@ -5190,7 +5201,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         action_hints: pageMap.action_hints,
         elements: externalElements,
       },
+    };
+
+    // Sanitized: stage labels + durations + scalar counts only. No URLs/refs/geometry.
+    // payload_bytes is computed only when the timing flag is on (stringify is not free).
+    timing.end({
+      element_count: snapshot.element_count,
+      viewport_only: viewportOnly,
+      rebound,
+      payload_elements: externalElements.length,
+      ...(timingEnabled() ? { payload_bytes: JSON.stringify(responsePayload).length } : {}),
     });
+
+    return reply.send(responsePayload);
   });
 
   // ─── Redacted Screenshot — vision-channel protection ──────────────────────────

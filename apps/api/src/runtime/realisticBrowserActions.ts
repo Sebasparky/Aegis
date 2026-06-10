@@ -26,7 +26,7 @@ import {
   resolvePointerTimingMode,
   type ElementBox,
 } from "./nativePointerRuntime.js";
-import { pickBestPageTarget } from "./cdpTargetSelection.js";
+import { pickBestPageTarget, getBrowserWsUrl, invalidateBrowserWsUrl } from "./cdpTargetSelection.js";
 import {
   buildAntigenRevalidationExpr,
   evaluateKnownBoxRevalidation,
@@ -300,8 +300,11 @@ async function settleAndVerify(opts: {
   sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
   sleep: (ms: number) => Promise<void>;
   box: ElementBox;
+  // Live target URL captured at action time (pickBestPageTarget). Enables the
+  // early-exit URL settle; advisory only — never a safety-check input here.
+  preClickUrl?: string | null;
 }): Promise<RealisticClickResult> {
-  const { verify, clickResult, beforeProbe, sendAndWait, sleep, box } = opts;
+  const { verify, clickResult, beforeProbe, sendAndWait, sleep, box, preClickUrl } = opts;
   if (!clickResult.success) return clickResult;
   if (verify?.enabled && beforeProbe) {
     const ctx: ClickVerificationContext = {
@@ -322,27 +325,60 @@ async function settleAndVerify(opts: {
   }
   // Refresh the live URL after a click-triggered navigation settles. Best-effort:
   // a failed read never fails an otherwise-successful click.
-  const currentUrl = await readCurrentUrlAfterClick(sendAndWait, sleep);
+  const currentUrl = await readCurrentUrlAfterClick(sendAndWait, sleep, preClickUrl);
   return currentUrl ? { ...clickResult, current_url: currentUrl } : clickResult;
 }
 
 /**
  * Reads the live page URL (document.location.href) after a click settles.
  *
- * Best-effort and non-fatal: waits a short settle window (so a click-triggered
- * navigation has a chance to commit), evaluates document.location.href, and
- * returns the string or null. Any failure returns null — the caller must still
+ * Best-effort and non-fatal: any failure returns null — the caller must still
  * report click success. Only reads the URL; no DOM mutation, no element lookup.
+ *
+ * Early-exit settle (when `preClickUrl` is supplied): instead of one fixed
+ * 250ms sleep, the URL is polled at t≈0 / 60 / 120ms and the poll exits as soon
+ * as a navigation is observed OR two consecutive reads are stable at the
+ * pre-click URL (no navigation happened — the common case for in-page clicks,
+ * saving ~125ms per click). Inconclusive reads fall through to the legacy
+ * 250ms ceiling, so the worst case is unchanged. SAFETY: the returned URL is
+ * advisory session metadata only — the live-URL guard and Phase 4B re-read
+ * live state on every subsequent action and never consume this value.
+ *
+ * Without `preClickUrl` (legacy callers), behavior is byte-identical to before:
+ * one 250ms sleep then a single read.
+ *
+ * Exported for unit testing (injected sendAndWait/sleep) — internal otherwise.
  */
-async function readCurrentUrlAfterClick(
+export async function readCurrentUrlAfterClick(
   sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
   sleep: (ms: number) => Promise<void>,
+  preClickUrl?: string | null,
 ): Promise<string | null> {
-  try {
-    await sleep(250); // brief settle so click-triggered navigation can commit
+  const readUrl = async (): Promise<string | null> => {
     const r = await sendAndWait("Runtime.evaluate", { expression: "document.location.href", returnByValue: true });
     const val = (r?.result as Record<string, unknown> | undefined)?.value;
     return typeof val === "string" && val.length > 0 ? val : null;
+  };
+  try {
+    if (typeof preClickUrl === "string" && preClickUrl.length > 0) {
+      const r0 = await readUrl();
+      if (r0 && r0 !== preClickUrl) return r0; // navigation already committed
+      await sleep(60);
+      const r1 = await readUrl();
+      if (r1 && r1 !== preClickUrl) return r1;
+      await sleep(60);
+      const r2 = await readUrl();
+      if (r2 && r2 !== preClickUrl) return r2;
+      // Two consecutive reads (t≈60, t≈120) stable at the pre-click URL: no
+      // navigation happened — exit early with the stable URL.
+      if (r1 && r2 && r1 === r2) return r2;
+      // Inconclusive (reads unavailable) — pay the legacy ceiling: final read
+      // lands at t≈250ms exactly like the pre-optimization path.
+      await sleep(130);
+      return await readUrl();
+    }
+    await sleep(250); // legacy: brief settle so click-triggered navigation can commit
+    return await readUrl();
   } catch {
     return null;
   }
@@ -582,13 +618,17 @@ export async function realisticClickByDescription(params: {
   const timeOn = timingEnabled();
   const tEnter = process.hrtime.bigint();
   let tAfterSelect = tEnter;
+  let tAfterAttach = tEnter;
   let tBeforePointer = tEnter;
+  let tAfterPointer = tEnter;
 
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -641,12 +681,16 @@ export async function realisticClickByDescription(params: {
         const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
         // Sanitized: stage labels + durations + booleans only. No URLs/coords/text.
         // eslint-disable-next-line no-console
+        const v = result.verification;
         console.log(
           `[AntigenTiming] realistic_click_by_description total=${ms(tEnter, tEnd)}ms` +
             ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
-            ` connect_find_attach=${ms(tAfterSelect, tBeforePointer)}ms` +
-            ` pointer_and_urlread=${ms(tBeforePointer, tEnd)}ms` +
-            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}`,
+            ` connect_attach=${ms(tAfterSelect, tAfterAttach)}ms` +
+            ` find_eval=${ms(tAfterAttach, tBeforePointer)}ms` +
+            ` pointer_dispatch=${ms(tBeforePointer, tAfterPointer)}ms` +
+            ` settle_verify=${ms(tAfterPointer, tEnd)}ms` +
+            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}` +
+            (v ? ` verified=${v.intent_verified} settle_polls=${v.settle_polls ?? 0}` : ""),
         );
       }
       resolve(result);
@@ -682,6 +726,7 @@ export async function realisticClickByDescription(params: {
           return;
         }
         cdpSessionId = result.sessionId as string;
+        tAfterAttach = process.hrtime.bigint();
         boxId = sendMsg("Runtime.evaluate", { expression: findExpr, returnByValue: true }, cdpSessionId);
         return;
       }
@@ -748,7 +793,8 @@ export async function realisticClickByDescription(params: {
               box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
               targetContext: { url: pageTarget.url, reason: targetReason },
             });
-            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box }));
+            tAfterPointer = process.hrtime.bigint();
+            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box, preClickUrl: pageTarget.url }));
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }
@@ -757,6 +803,7 @@ export async function realisticClickByDescription(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `WS_ERROR: ${err.message}` });
     });
   });
@@ -810,13 +857,17 @@ export async function realisticClickKnownBox(params: {
   const timeOn = timingEnabled();
   const tEnter = process.hrtime.bigint();
   let tAfterSelect = tEnter;
+  let tAfterAttach = tEnter;
   let tBeforePointer = tEnter;
+  let tAfterPointer = tEnter;
 
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -879,12 +930,16 @@ export async function realisticClickKnownBox(params: {
         const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
         // Sanitized: stage labels + durations + booleans only. No URLs/coords/refs.
         // eslint-disable-next-line no-console
+        const v = result.verification;
         console.log(
           `[AntigenTiming] realistic_click_known_box total=${ms(tEnter, tEnd)}ms` +
             ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
-            ` connect_attach_phase4b=${ms(tAfterSelect, tBeforePointer)}ms` +
-            ` pointer_and_urlread=${ms(tBeforePointer, tEnd)}ms` +
-            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}`,
+            ` connect_attach=${ms(tAfterSelect, tAfterAttach)}ms` +
+            ` phase4b_eval=${ms(tAfterAttach, tBeforePointer)}ms` +
+            ` pointer_dispatch=${ms(tBeforePointer, tAfterPointer)}ms` +
+            ` settle_verify=${ms(tAfterPointer, tEnd)}ms` +
+            ` overlay=${debugOverlay} timing_profile=${resolvePointerTimingMode()} success=${result.success}` +
+            (v ? ` verified=${v.intent_verified} settle_polls=${v.settle_polls ?? 0}` : ""),
         );
       }
       resolve(result);
@@ -920,6 +975,7 @@ export async function realisticClickKnownBox(params: {
           return;
         }
         cdpSessionId = result.sessionId as string;
+        tAfterAttach = process.hrtime.bigint();
         viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
         return;
       }
@@ -989,7 +1045,8 @@ export async function realisticClickKnownBox(params: {
               box, vw, vh, sessionId, userId, sendCdp, sendCdpAndWait: sendAndWait, sleep, debugOverlay,
               targetContext: { url: pageTarget.url, reason: targetReason },
             });
-            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box }));
+            tAfterPointer = process.hrtime.bigint();
+            finish(await settleAndVerify({ verify, clickResult, beforeProbe, sendAndWait, sleep, box, preClickUrl: pageTarget.url }));
           } catch (err) {
             finish({ success: false, error: `CDP_CLICK_FAILED: ${(err as Error).message}` });
           }
@@ -998,6 +1055,7 @@ export async function realisticClickKnownBox(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `WS_ERROR: ${err.message}` });
     });
   });
@@ -1048,11 +1106,23 @@ export async function realisticTypeKnownBox(params: {
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
+  // Dev-only latency markers (gated). Sanitized: stage labels + durations +
+  // char_count_bucket only — never the text, its length, or coordinates.
+  const timeOn = timingEnabled();
+  const tEnter = process.hrtime.bigint();
+  let tAfterSelect = tEnter;
+  let tAfterAttach = tEnter;
+  let tBeforeFocus = tEnter;
+  let tAfterFocus = tEnter;
+  let tAfterTyping = tEnter;
+
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -1068,6 +1138,7 @@ export async function realisticTypeKnownBox(params: {
   if (!pageTarget) {
     return { success: false, error: "No page targets found via CDP.", char_count_bucket: charCountBucket, duration_ms: 0 };
   }
+  tAfterSelect = process.hrtime.bigint();
 
   // Live-URL guard: the snapshot's boxes are only valid on the page they were
   // captured on. pageTarget.url is the authoritative live URL from the active CDP
@@ -1116,6 +1187,22 @@ export async function realisticTypeKnownBox(params: {
       finishCalled = true;
       clearTimeout(timer);
       ws.close();
+      if (timeOn) {
+        const tEnd = process.hrtime.bigint();
+        const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
+        // Sanitized: stage labels + durations + booleans/buckets only. No text/coords.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] antigen_type_known_box total=${ms(tEnter, tEnd)}ms` +
+            ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
+            ` connect_attach=${ms(tAfterSelect, tAfterAttach)}ms` +
+            ` phase4b_eval=${ms(tAfterAttach, tBeforeFocus)}ms` +
+            ` focus_click=${ms(tBeforeFocus, tAfterFocus)}ms` +
+            ` typing_dispatch=${ms(tAfterFocus, tAfterTyping)}ms` +
+            ` enter_submit=${ms(tAfterTyping, tEnd)}ms` +
+            ` char_count_bucket=${result.char_count_bucket} submitted=${result.submitted === true} success=${result.success}`,
+        );
+      }
       resolve(result);
     };
 
@@ -1149,6 +1236,7 @@ export async function realisticTypeKnownBox(params: {
           return;
         }
         cdpSessionId = result.sessionId as string;
+        tAfterAttach = process.hrtime.bigint();
         viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
         return;
       }
@@ -1224,6 +1312,7 @@ export async function realisticTypeKnownBox(params: {
                 oneTimeHandlers.set(reqId, res);
               });
 
+            tBeforeFocus = process.hrtime.bigint();
             // Focus the field by realistic pointer click on the stored box.
             let focusPathCount: number | undefined;
             await clickBoxWithPointer(state, box, sendCdp, sleep, {
@@ -1233,6 +1322,7 @@ export async function realisticTypeKnownBox(params: {
               purpose: "input_focus",
               onFocusComplete: (info) => { focusPathCount = info.path_point_count; },
             });
+            tAfterFocus = process.hrtime.bigint();
             let typeStatePersisted = false;
             if (sessionId) {
               browsingPointerState.set(sessionId, { x: state.current_x, y: state.current_y });
@@ -1255,6 +1345,7 @@ export async function realisticTypeKnownBox(params: {
             }
 
             const typing = await dispatchTextCharsViaCDP(sendCdp, sleep, text);
+            tAfterTyping = process.hrtime.bigint();
             let submitted = false;
             let submitMethod: "enter" | "button_fallback" | undefined;
             if (submit) {
@@ -1315,6 +1406,7 @@ export async function realisticTypeKnownBox(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `WS_ERROR: ${err.message}`, char_count_bucket: charCountBucket, duration_ms: 0 });
     });
   });
@@ -1450,11 +1542,21 @@ export async function setFieldValueKnownBox(params: {
   const { cdpUrl, box, value, selectByLabel, expected, expectedUrl } = params;
   const cdpDiagnostics = process.env.ANTIGEN_CDP_DIAGNOSTICS === "true";
 
+  // Dev-only latency markers (gated). Sanitized: stage labels + durations +
+  // booleans/kind tokens only — NEVER the value, the read-back, or coordinates.
+  const timeOn = timingEnabled();
+  const tEnter = process.hrtime.bigint();
+  let tAfterSelect = tEnter;
+  let tAfterAttach = tEnter;
+  let tAfterPhase4b = tEnter;
+
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -1470,6 +1572,7 @@ export async function setFieldValueKnownBox(params: {
   if (!pageTarget) {
     return { success: false, error: "No page targets found via CDP.", duration_ms: 0 };
   }
+  tAfterSelect = process.hrtime.bigint();
 
   // Live-URL guard: stored boxes are only valid on the page they were captured on.
   if (isAntigenPageChanged(expectedUrl, pageTarget.url)) {
@@ -1511,6 +1614,21 @@ export async function setFieldValueKnownBox(params: {
       finishCalled = true;
       clearTimeout(timer);
       ws.close();
+      if (timeOn) {
+        const tEnd = process.hrtime.bigint();
+        const ms = (a: bigint, b: bigint) => Math.round((Number(b - a) / 1_000_000) * 100) / 100;
+        // Sanitized: stage labels + durations + booleans/kind tokens only. Never values.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] antigen_set_value total=${ms(tEnter, tEnd)}ms` +
+            ` cdp_target_select=${ms(tEnter, tAfterSelect)}ms` +
+            ` connect_attach=${ms(tAfterSelect, tAfterAttach)}ms` +
+            ` phase4b_eval=${ms(tAfterAttach, tAfterPhase4b)}ms` +
+            ` set_value_eval=${ms(tAfterPhase4b, tEnd)}ms` +
+            ` element_kind=${result.element_kind ?? "unknown"} changed=${result.changed === true}` +
+            ` verified=${result.verified === true} success=${result.success}`,
+        );
+      }
       resolve(result);
     };
 
@@ -1535,11 +1653,13 @@ export async function setFieldValueKnownBox(params: {
           return;
         }
         cdpSessionId = result.sessionId as string;
+        tAfterAttach = process.hrtime.bigint();
         viewportId = sendMsg("Runtime.evaluate", { expression: viewportExpr, returnByValue: true }, cdpSessionId);
         return;
       }
 
       if (id === viewportId) {
+        tAfterPhase4b = process.hrtime.bigint();
         const evalResult = result?.result as Record<string, unknown> | undefined;
         const val = evalResult?.value as ({ vw?: number; vh?: number } & Partial<AntigenRevalidationEvalValue>) | undefined;
 
@@ -1622,6 +1742,7 @@ export async function setFieldValueKnownBox(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `WS_ERROR: ${err.message}`, duration_ms: 0 });
     });
   });
@@ -1682,7 +1803,9 @@ export async function scrollKnownBoxIntoView(params: {
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -1791,6 +1914,7 @@ export async function scrollKnownBoxIntoView(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `ANTIGEN_SCROLL_FAILED: WS_ERROR: ${err.message}` });
     });
   });
@@ -1822,7 +1946,9 @@ export async function injectNavigationMediationBannerViaCDP(
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch {
@@ -1915,11 +2041,18 @@ export async function realisticTypeTextViaCDP(params: {
   const debugOverlay = params.debugOverlay ?? (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true");
   const slowMoMs = parseInt(process.env.ANTIGEN_BROWSER_SLOW_MO_MS ?? "0", 10) || 0;
 
+  // Dev-only latency marker (gated). Total-only on this secondary path —
+  // sanitized: duration + char_count_bucket + booleans, never the text.
+  const timeOn = timingEnabled();
+  const tEnter = process.hrtime.bigint();
+
   let versionData: { webSocketDebuggerUrl?: string };
   let targets: Array<{ id: string; url: string; type: string }>;
   try {
     [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+      // Short-TTL process-level cache; /json/list below stays a fresh fetch
+      // every call (it feeds the live-URL guard).
+      getBrowserWsUrl(cdpUrl).then((wsUrl) => ({ webSocketDebuggerUrl: wsUrl })),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>),
     ]);
   } catch (err) {
@@ -1991,6 +2124,14 @@ export async function realisticTypeTextViaCDP(params: {
       clearTimeout(timer);
       if (diagFallbackTimerId !== null) clearTimeout(diagFallbackTimerId);
       ws.close();
+      if (timeOn) {
+        const totalMs = Math.round((Number(process.hrtime.bigint() - tEnter) / 1_000_000) * 100) / 100;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AntigenTiming] antigen_type_by_description total=${totalMs}ms` +
+            ` char_count_bucket=${result.char_count_bucket} submitted=${result.submitted === true} success=${result.success}`,
+        );
+      }
       resolve(result);
     };
 
@@ -2360,6 +2501,7 @@ export async function realisticTypeTextViaCDP(params: {
     });
 
     ws.on("error", (err: Error) => {
+      invalidateBrowserWsUrl(cdpUrl); // stale cached WS endpoint heals on the next call
       finish({ success: false, error: `WS_ERROR: ${err.message}`, char_count_bucket: charCountBucket, duration_ms: 0 });
     });
   });

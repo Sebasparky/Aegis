@@ -11,7 +11,14 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { pickBestPageTarget, readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
+import {
+  pickBestPageTarget,
+  readLiveCdpPageUrl,
+  resolveSnapshotCdpTarget,
+  getBrowserWsUrl,
+  invalidateBrowserWsUrl,
+  clearBrowserWsUrlCacheForTests,
+} from "../runtime/cdpTargetSelection.js";
 
 const blank = { id: "t1", url: "about:blank", type: "page" };
 const newtab = { id: "t2", url: "chrome://newtab/", type: "page" };
@@ -182,6 +189,7 @@ describe("resolveSnapshotCdpTarget (one-shot snapshot target resolution)", () =>
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    clearBrowserWsUrlCacheForTests();
   });
 
   // Branch on the requested URL: /json/version → ws endpoint; /json/list → targets.
@@ -236,5 +244,98 @@ describe("resolveSnapshotCdpTarget (one-shot snapshot target resolution)", () =>
   it("returns null when the CDP list payload is not an array", async () => {
     stubFetch({ unexpected: true });
     await expect(resolveSnapshotCdpTarget(CDP)).resolves.toBeNull();
+  });
+});
+
+// ─── getBrowserWsUrl — short-TTL /json/version cache ─────────────────────────
+//
+// Only the process-level WS endpoint is cached. The contract under test:
+//  - within the TTL, /json/version is NOT re-fetched
+//  - /json/list is NEVER cached by this helper (resolveSnapshotCdpTarget and all
+//    action paths fetch it fresh — the live-URL guard's input stays live)
+//  - invalidation and TTL expiry force a fresh fetch
+//  - transport failures propagate; missing wsUrl is never cached
+
+describe("getBrowserWsUrl (short-TTL browser WS endpoint cache)", () => {
+  const CDP = "http://localhost:9333";
+  const WS = "ws://localhost:9333/devtools/browser/xyz";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    clearBrowserWsUrlCacheForTests();
+  });
+
+  function stubVersionFetch(wsUrl: string | undefined): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/json/version")) {
+        return { json: async () => ({ webSocketDebuggerUrl: wsUrl }) } as unknown as Response;
+      }
+      return { json: async () => [] } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("serves a cached WS URL within the TTL without re-fetching /json/version", async () => {
+    const fetchMock = stubVersionFetch(WS);
+    await expect(getBrowserWsUrl(CDP)).resolves.toBe(WS);
+    await expect(getBrowserWsUrl(CDP)).resolves.toBe(WS);
+    await expect(getBrowserWsUrl(CDP)).resolves.toBe(WS);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"))).toHaveLength(1);
+  });
+
+  it("resolveSnapshotCdpTarget with a warm cache STILL fetches /json/list fresh every call", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/json/version")) {
+        return { json: async () => ({ webSocketDebuggerUrl: WS }) } as unknown as Response;
+      }
+      return {
+        json: async () => [{ id: "t1", url: "https://example.com/live", type: "page" }],
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resolveSnapshotCdpTarget(CDP);
+    await resolveSnapshotCdpTarget(CDP);
+    await resolveSnapshotCdpTarget(CDP);
+
+    const listCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/list"));
+    const versionCalls = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"));
+    expect(listCalls).toHaveLength(3); // live page state: never cached
+    expect(versionCalls).toHaveLength(1); // process-level WS endpoint: cached
+  });
+
+  it("invalidateBrowserWsUrl forces a fresh /json/version fetch", async () => {
+    const fetchMock = stubVersionFetch(WS);
+    await getBrowserWsUrl(CDP);
+    invalidateBrowserWsUrl(CDP);
+    await getBrowserWsUrl(CDP);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"))).toHaveLength(2);
+  });
+
+  it("TTL expiry forces a fresh /json/version fetch", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubVersionFetch(WS);
+    await getBrowserWsUrl(CDP);
+    vi.advanceTimersByTime(11_000); // past the 10s TTL
+    await getBrowserWsUrl(CDP);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"))).toHaveLength(2);
+  });
+
+  it("transport failures propagate (caller error contract unchanged) and are not cached", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    await expect(getBrowserWsUrl(CDP)).rejects.toThrow("ECONNREFUSED");
+    const fetchMock = stubVersionFetch(WS);
+    await expect(getBrowserWsUrl(CDP)).resolves.toBe(WS);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("a missing wsUrl resolves undefined and is never cached", async () => {
+    const fetchMock = stubVersionFetch(undefined);
+    await expect(getBrowserWsUrl(CDP)).resolves.toBeUndefined();
+    await expect(getBrowserWsUrl(CDP)).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/json/version"))).toHaveLength(2);
   });
 });

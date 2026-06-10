@@ -37,6 +37,8 @@
 
 import WebSocket from "ws";
 
+import { BrowserTimingScope } from "./browserTiming.js";
+
 // ─── Public types ────────────────────────────────────────────────────────────
 
 export type AntigenCandidateKind =
@@ -1165,6 +1167,8 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
   const { cdpUrl, resolvedTarget } = params;
   const maxCandidates = params.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const viewportOnly = params.viewportOnly ?? true;
+  // Stage timing (dev-only, gated): stage labels + durations + scalar counts only.
+  const timing = new BrowserTimingScope("antigen_snapshot_extract");
 
   // Fast path: the snapshot handler already resolved a single live target (via
   // pickBestPageTarget) and threads it in so DOM extraction binds to the SAME
@@ -1206,6 +1210,7 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
     }
     browserWsUrl = ws;
     pageTarget = picked;
+    timing.mark("target_fallback_fetch");
   }
 
   const expr = buildAntigenExtractionExpr({ maxCandidates, viewportOnly });
@@ -1277,11 +1282,13 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
           return;
         }
         cdpSessionId = result.sessionId as string;
+        timing.mark("connect_attach");
         evalId = sendMsg("Runtime.evaluate", { expression: expr, returnByValue: true }, cdpSessionId);
         return;
       }
 
       if (id === evalId) {
+        timing.mark("eval_iife");
         const evalResult = result?.result as Record<string, unknown> | undefined;
         const value = evalResult?.value;
         if (!Array.isArray(value)) {
@@ -1294,7 +1301,10 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
     });
   });
 
-  return raw.slice(0, maxCandidates).map((rec, i) => mapRawToCandidate(rec, i));
+  const mapped = raw.slice(0, maxCandidates).map((rec, i) => mapRawToCandidate(rec, i));
+  timing.mark("sanitize_map");
+  timing.end({ candidate_count: mapped.length, pre_resolved: !!resolvedTarget, viewport_only: viewportOnly });
+  return mapped;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
@@ -1371,6 +1381,7 @@ export async function extractAntigenPageMetaViaCDP(
   params: { cdpUrl: string; resolvedTarget?: PreResolvedSnapshotTarget },
 ): Promise<AntigenPageMeta | undefined> {
   const { cdpUrl, resolvedTarget } = params;
+  const timing = new BrowserTimingScope("antigen_snapshot_pagemeta");
   try {
     // Bind to the snapshot handler's single resolved target when provided so the
     // page-meta read describes the SAME page as the candidate extraction; else
@@ -1449,10 +1460,217 @@ export async function extractAntigenPageMetaViaCDP(
       });
     });
 
-    return sanitizePageMeta(raw);
+    const meta = sanitizePageMeta(raw);
+    timing.end({ pre_resolved: !!resolvedTarget, ok: meta !== undefined });
+    return meta;
   } catch {
+    timing.end({ pre_resolved: !!resolvedTarget, ok: false });
     return undefined;
   }
+}
+
+// ─── Bundled candidate + page-meta extraction (single connection) ────────────
+
+/** Result of the bundled snapshot extraction: candidates + best-effort page meta. */
+export interface AntigenSnapshotBundle {
+  candidates: AntigenSnapshotCandidate[];
+  pageMeta?: AntigenPageMeta;
+}
+
+/** Sub-timeout for the best-effort page-meta eval after candidates returned. */
+const BUNDLE_PAGE_META_TIMEOUT_MS = 2_000;
+
+/**
+ * Single-connection snapshot extraction: candidate DOM extraction AND the
+ * best-effort page-meta read on the SAME WebSocket + CDP session, removing the
+ * second connect+attach round trip extractAntigenPageMetaViaCDP would pay.
+ *
+ * Contract (identical to the two separate calls — only transport is shared):
+ * - Candidate-path failures throw with the SAME codes as
+ *   extractAntigenSnapshotCandidatesViaCDP (CDP_FETCH_FAILED / NO_PAGE_TARGET /
+ *   CDP_ATTACH_FAILED / CDP_EVALUATE_FAILED), so the endpoint's
+ *   SNAPSHOT_EXTRACTION_FAILED behavior is unchanged.
+ * - Page-meta is best-effort and NEVER fails the bundle: any meta eval error or
+ *   its own 2s sub-timeout resolves with `pageMeta: undefined` (matching
+ *   extractAntigenPageMetaViaCDP's never-throw contract). The candidate 8s
+ *   deadline is NOT re-armed for the meta eval.
+ * - Both evals run on one attach to the one resolved target, so candidates and
+ *   page meta are guaranteed to describe the same page.
+ *
+ * The standalone extractAntigenSnapshotCandidatesViaCDP /
+ * extractAntigenPageMetaViaCDP remain exported and unchanged for other callers
+ * and tests.
+ */
+export async function extractAntigenSnapshotBundleViaCDP(
+  params: ExtractAntigenSnapshotCandidatesParams,
+): Promise<AntigenSnapshotBundle> {
+  const { cdpUrl, resolvedTarget } = params;
+  const maxCandidates = params.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
+  const viewportOnly = params.viewportOnly ?? true;
+  // Stage timing (dev-only, gated): stage labels + durations + scalar counts only.
+  const timing = new BrowserTimingScope("antigen_snapshot_bundle");
+
+  // Same target resolution as the candidate path: pre-resolved target preferred,
+  // self-contained fetch + pickAntigenPageTarget as the legacy fallback.
+  let browserWsUrl: string;
+  let pageTarget: { id: string; url: string };
+  if (resolvedTarget) {
+    browserWsUrl = resolvedTarget.browserWsUrl;
+    pageTarget = resolvedTarget.pageTarget;
+  } else {
+    let versionData: { webSocketDebuggerUrl?: string };
+    let targets: Array<{ id: string; url: string; type: string }>;
+    try {
+      [versionData, targets] = await Promise.all([
+        fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+        fetch(`${cdpUrl}/json/list`).then(
+          (r) => r.json() as Promise<Array<{ id: string; url: string; type: string }>>,
+        ),
+      ]);
+    } catch (err) {
+      throw Object.assign(new Error(`CDP fetch failed: ${(err as Error).message}`), {
+        code: "CDP_FETCH_FAILED",
+      });
+    }
+    const ws = versionData.webSocketDebuggerUrl;
+    if (!ws) {
+      throw Object.assign(new Error("No browser WebSocket debugger URL from CDP."), {
+        code: "CDP_FETCH_FAILED",
+      });
+    }
+    const picked = pickAntigenPageTarget(targets);
+    if (!picked) {
+      throw Object.assign(new Error("No page targets found via CDP."), {
+        code: "NO_PAGE_TARGET",
+      });
+    }
+    browserWsUrl = ws;
+    pageTarget = picked;
+    timing.mark("target_fallback_fetch");
+  }
+
+  const candidateExpr = buildAntigenExtractionExpr({ maxCandidates, viewportOnly });
+  const pageMetaExpr = buildAntigenPageMetaExpr();
+
+  const { raw, rawMeta } = await new Promise<{ raw: RawAntigenCandidate[]; rawMeta: unknown }>(
+    (resolve, reject) => {
+      const ws = new WebSocket(browserWsUrl);
+      let msgId = 1;
+      let cdpSessionId: string | null = null;
+      let attachId: number;
+      let candidateEvalId: number;
+      let metaEvalId: number | undefined;
+      let candidateRecords: RawAntigenCandidate[] = [];
+      let settled = false;
+      let metaTimer: ReturnType<typeof setTimeout> | undefined;
+
+      // Candidate-phase hard deadline — identical to the standalone candidate
+      // extraction. Cleared once candidates arrive; never re-armed for page meta.
+      const candidateTimer = setTimeout(() => {
+        fail(Object.assign(new Error("Antigen snapshot extraction timed out after 8 seconds."), {
+          code: "CDP_EVALUATE_FAILED",
+        }));
+      }, 8_000);
+
+      const sendMsg = (method: string, p: Record<string, unknown> = {}, sid?: string): number => {
+        const id = msgId++;
+        const msg: Record<string, unknown> = { id, method, params: p };
+        if (sid) msg.sessionId = sid;
+        ws.send(JSON.stringify(msg));
+        return id;
+      };
+
+      const succeed = (value: { raw: RawAntigenCandidate[]; rawMeta: unknown }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(candidateTimer);
+        if (metaTimer) clearTimeout(metaTimer);
+        ws.close();
+        resolve(value);
+      };
+
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(candidateTimer);
+        if (metaTimer) clearTimeout(metaTimer);
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+        reject(err);
+      };
+
+      ws.on("open", () => {
+        attachId = sendMsg("Target.attachToTarget", { targetId: pageTarget.id, flatten: true });
+      });
+
+      ws.on("error", (err: Error) => {
+        // Candidates not yet delivered → candidate-path failure (same code as the
+        // standalone path). After candidates, a socket error only costs the meta.
+        if (metaEvalId !== undefined) succeed({ raw: candidateRecords, rawMeta: undefined });
+        else fail(Object.assign(new Error(`CDP socket error: ${err.message}`), { code: "CDP_FETCH_FAILED" }));
+      });
+
+      ws.on("message", (data: Buffer | string) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id as number | undefined;
+        if (id === undefined) return; // CDP event notification, no id
+        const result = msg.result as Record<string, unknown> | undefined;
+
+        if (id === attachId) {
+          if (!result?.sessionId) {
+            fail(Object.assign(new Error("CDP attach failed: no sessionId."), { code: "CDP_ATTACH_FAILED" }));
+            return;
+          }
+          cdpSessionId = result.sessionId as string;
+          timing.mark("connect_attach");
+          candidateEvalId = sendMsg("Runtime.evaluate", { expression: candidateExpr, returnByValue: true }, cdpSessionId);
+          return;
+        }
+
+        if (id === candidateEvalId) {
+          timing.mark("eval_iife");
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          const value = evalResult?.value;
+          candidateRecords = Array.isArray(value) ? (value as RawAntigenCandidate[]) : [];
+          // Candidates are safe — stop the candidate deadline and start the
+          // best-effort meta eval on the SAME session with its own sub-timeout.
+          clearTimeout(candidateTimer);
+          metaTimer = setTimeout(() => succeed({ raw: candidateRecords, rawMeta: undefined }), BUNDLE_PAGE_META_TIMEOUT_MS);
+          try {
+            metaEvalId = sendMsg("Runtime.evaluate", { expression: pageMetaExpr, returnByValue: true }, cdpSessionId!);
+          } catch {
+            succeed({ raw: candidateRecords, rawMeta: undefined });
+          }
+          return;
+        }
+
+        if (metaEvalId !== undefined && id === metaEvalId) {
+          timing.mark("eval_pagemeta");
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          succeed({ raw: candidateRecords, rawMeta: evalResult?.value });
+        }
+      });
+    },
+  );
+
+  const candidates = raw.slice(0, maxCandidates).map((rec, i) => mapRawToCandidate(rec, i));
+  const pageMeta = sanitizePageMeta(rawMeta);
+  timing.mark("sanitize_map");
+  timing.end({
+    candidate_count: candidates.length,
+    page_meta_ok: pageMeta !== undefined,
+    pre_resolved: !!resolvedTarget,
+    viewport_only: viewportOnly,
+  });
+  return { candidates, ...(pageMeta !== undefined ? { pageMeta } : {}) };
 }
 
 /**

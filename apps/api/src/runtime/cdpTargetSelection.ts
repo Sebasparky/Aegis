@@ -37,6 +37,51 @@ export interface TargetSelectionResult {
   candidates: Array<{ targetId: string; url: string }>;
 }
 
+// ─── Browser WS endpoint cache (/json/version) ───────────────────────────────
+//
+// The browser-level WebSocket debugger URL is a property of the Chromium
+// PROCESS, not of any page: it carries zero page/navigation state and is stable
+// for the process lifetime. Caching it (short TTL) removes one HTTP round trip
+// per action. SAFETY: only the version→wsUrl mapping is cached — /json/list
+// (the live-URL guard's input) is ALWAYS fetched fresh by every caller; no
+// safety check ever consumes a cached value. If a session is killed and a new
+// browser respawns on the same port within the TTL, the stale wsUrl makes the
+// WebSocket connect fail → callers invalidate and return their existing error
+// (fail-closed, self-healing on the next call).
+
+const BROWSER_WS_URL_TTL_MS = 10_000;
+const browserWsUrlCache = new Map<string, { wsUrl: string; expires_ms: number }>();
+
+/**
+ * Resolve the browser WebSocket debugger URL for a CDP base URL, serving a
+ * cached value within the TTL. Transport failures propagate (same as the
+ * direct fetch callers used before); a response without a wsUrl resolves to
+ * undefined and is never cached.
+ */
+export async function getBrowserWsUrl(cdpUrl: string): Promise<string | undefined> {
+  const cached = browserWsUrlCache.get(cdpUrl);
+  if (cached && Date.now() < cached.expires_ms) return cached.wsUrl;
+  const versionData = await fetch(`${cdpUrl}/json/version`).then(
+    (r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>,
+  );
+  const wsUrl = versionData?.webSocketDebuggerUrl;
+  if (typeof wsUrl === "string" && wsUrl.length > 0) {
+    browserWsUrlCache.set(cdpUrl, { wsUrl, expires_ms: Date.now() + BROWSER_WS_URL_TTL_MS });
+    return wsUrl;
+  }
+  return undefined;
+}
+
+/** Drop a cached browser WS URL (call after any WebSocket connect failure). */
+export function invalidateBrowserWsUrl(cdpUrl: string): void {
+  browserWsUrlCache.delete(cdpUrl);
+}
+
+/** Test-only: clear the whole cache so tests are order-independent. */
+export function clearBrowserWsUrlCacheForTests(): void {
+  browserWsUrlCache.clear();
+}
+
 /** URL schemes that are never useful injection targets. */
 const UNUSABLE_PREFIXES = ["about:", "chrome://", "devtools://", "chrome-extension://"];
 
@@ -188,17 +233,18 @@ export interface ResolvedCdpPageTarget {
  * throws, never logs secrets.
  */
 export async function resolveSnapshotCdpTarget(cdpUrl: string): Promise<ResolvedCdpPageTarget | null> {
-  let versionData: { webSocketDebuggerUrl?: string };
+  let browserWsUrl: string | undefined;
   let targets: CdpPageTarget[];
   try {
-    [versionData, targets] = await Promise.all([
-      fetch(`${cdpUrl}/json/version`).then((r) => r.json() as Promise<{ webSocketDebuggerUrl?: string }>),
+    // /json/version goes through the short-TTL process-level cache; /json/list
+    // (live page/URL state) is ALWAYS fetched fresh.
+    [browserWsUrl, targets] = await Promise.all([
+      getBrowserWsUrl(cdpUrl),
       fetch(`${cdpUrl}/json/list`).then((r) => r.json() as Promise<CdpPageTarget[]>),
     ]);
   } catch {
     return null;
   }
-  const browserWsUrl = versionData?.webSocketDebuggerUrl;
   if (!browserWsUrl || !Array.isArray(targets)) return null;
   // Empty opts == the exact selection the click/type/scroll guards use.
   const { target } = pickBestPageTarget(targets, {});

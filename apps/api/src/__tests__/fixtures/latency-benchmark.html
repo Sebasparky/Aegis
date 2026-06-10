@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Antigen Latency Benchmark Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .row { margin: 12px 0; }
+    label { display: inline-block; width: 140px; }
+  </style>
+</head>
+<body>
+  <h1>Benchmark form</h1>
+  <form id="bench-form">
+    <div class="row">
+      <label for="bench-text">Full name</label>
+      <input id="bench-text" name="fullName" type="text" autocomplete="name" value="" />
+    </div>
+    <div class="row">
+      <label for="bench-city">City</label>
+      <input id="bench-city" name="city" type="text" autocomplete="address-level2" value="" />
+    </div>
+    <div class="row">
+      <label for="bench-select">Region</label>
+      <select id="bench-select" name="region">
+        <option value="">Choose…</option>
+        <option value="MI">Michigan</option>
+        <option value="OH">Ohio</option>
+      </select>
+    </div>
+    <div class="row">
+      <button id="bench-button" type="button">Toggle counter</button>
+      <span id="bench-count">0</span>
+    </div>
+    <div class="row">
+      <a id="bench-link" href="#section-two">Jump to section two</a>
+    </div>
+  </form>
+  <p id="section-two">Section two content for the in-page link target.</p>
+  <script>
+    var n = 0;
+    document.getElementById("bench-button").addEventListener("click", function () {
+      n += 1;
+      document.getElementById("bench-count").textContent = String(n);
+    });
+  </script>
+</body>
+</html>

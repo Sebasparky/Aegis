@@ -175,6 +175,9 @@ export interface BrowserTraceEvent {
     // Snapshot v2 page-map counts (safe aggregates only — no text/refs/coords).
     primary_action_count?: number;
     warning_count?: number;
+    // Active-overlay booleans only — never titles, refs, or text.
+    overlay_present?: boolean;
+    overlay_blocking?: boolean;
   };
   char_count_bucket?: string;
   submit?: boolean;
@@ -339,6 +342,8 @@ export function recordBrowserTraceEvent(
       if (Number.isFinite(event.snapshot.typeable_count)) snap.typeable_count = event.snapshot.typeable_count;
       if (Number.isFinite(event.snapshot.primary_action_count)) snap.primary_action_count = event.snapshot.primary_action_count;
       if (Number.isFinite(event.snapshot.warning_count)) snap.warning_count = event.snapshot.warning_count;
+      if (typeof event.snapshot.overlay_present === "boolean") snap.overlay_present = event.snapshot.overlay_present;
+      if (typeof event.snapshot.overlay_blocking === "boolean") snap.overlay_blocking = event.snapshot.overlay_blocking;
       safe.snapshot = snap;
     }
     const bucket = clip(event.char_count_bucket);

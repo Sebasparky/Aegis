@@ -110,7 +110,13 @@ const CHECKOUT_TRANSITION = [
 ];
 
 const CART_MUTATION = [
-  /\badd\s+to\s+(cart|bag|basket)\b/,
+  // "Add to cart/bag/basket" — tolerant of a bounded object phrase between "add"
+  // and "to", so listing-grid buttons like "Add 'EKENÄSET Armchair' to cart"
+  // still classify as a cart mutation. The "to <cart|bag|basket>" tail stays
+  // contiguous, so "add payment method", "add card", "add to subscription",
+  // etc. never match. Gap capped (~60 chars) to avoid overmatching unrelated
+  // clauses; sensitive/final intents are matched by higher-priority rules first.
+  /\badd\b[^.?!]{0,60}?\bto\s+(cart|bag|basket)\b/,
   /\b(remove|delete)\s+(from\s+)?(cart|bag|basket|item)\b/,
   /\bupdate\s+(cart|bag|quantity|qty)\b/,
   /\bsave\s+for\s+later\b/,

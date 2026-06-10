@@ -11,6 +11,9 @@ import { describe, it, expect } from "vitest";
 import {
   classifyClickVerification,
   buildPageStateProbeExpr,
+  selectSettleSchedule,
+  CLICK_VERIFY_SETTLE_SCHEDULE_MS,
+  CART_MUTATION_SETTLE_SCHEDULE_MS,
   type PageStateProbe,
   type ClickVerificationContext,
 } from "../runtime/antigenClickVerification.js";
@@ -35,6 +38,7 @@ function ctx(overrides: Partial<ClickVerificationContext> = {}): ClickVerificati
     editableTarget: false,
     targetWasBehindBlockingModal: false,
     pageChangedCompare: isAntigenPageChanged,
+    cartMutationIntent: false,
     ...overrides,
   };
 }
@@ -209,6 +213,101 @@ describe("classifyClickVerification — non-verified outcomes", () => {
     );
     expect(r.verification_signal).toBe("url_changed");
     expect(r.intent_verified).toBe(true);
+  });
+});
+
+describe("classifyClickVerification — cart-mutation intent (Step-2 add-to-bag fix)", () => {
+  it("cart_mutation first add null→1 verifies as cart_changed", () => {
+    const r = classifyClickVerification(
+      probe({ cart_count: null }),
+      probe({ cart_count: 1 }),
+      ctx({ cartMutationIntent: true }),
+    );
+    expect(r.verification_signal).toBe("cart_changed");
+    expect(r.intent_verified).toBe(true);
+    expect(r.outcome).toBe("CLICK_VERIFIED");
+  });
+
+  it("generic click null→1 does NOT verify (cart-mutation gate)", () => {
+    const r = classifyClickVerification(
+      probe({ cart_count: null }),
+      probe({ cart_count: 1 }),
+      ctx({ cartMutationIntent: false }),
+    );
+    expect(r.intent_verified).toBe(false);
+    expect(r.verification_signal).toBe("no_effect");
+  });
+
+  it("0→1 still verifies for a generic click (both-present path, intent-agnostic)", () => {
+    const r = classifyClickVerification(
+      probe({ cart_count: 0 }),
+      probe({ cart_count: 1 }),
+      ctx(),
+    );
+    expect(r.verification_signal).toBe("cart_changed");
+    expect(r.intent_verified).toBe(true);
+  });
+
+  it("cart_mutation null→0 does NOT verify (no positive quantity)", () => {
+    const r = classifyClickVerification(
+      probe({ cart_count: null }),
+      probe({ cart_count: 0 }),
+      ctx({ cartMutationIntent: true }),
+    );
+    expect(r.intent_verified).toBe(false);
+    expect(r.verification_signal).toBe("no_effect");
+  });
+
+  it("persistent toast + new region (count 1→2, same dominant) verifies overlay_changed ONLY for cart_mutation", () => {
+    const persistent = { present: true, blocking: false, overlay_type: "toast" as const, title_hash: "t1" };
+    const before = probe({ cart_count: null, overlay: { ...persistent, count: 1 } });
+    const after = probe({ cart_count: null, overlay: { ...persistent, count: 2 } });
+
+    const cart = classifyClickVerification(before, after, ctx({ cartMutationIntent: true }));
+    expect(cart.verification_signal).toBe("overlay_changed");
+    expect(cart.intent_verified).toBe(true);
+
+    const generic = classifyClickVerification(before, after, ctx({ cartMutationIntent: false }));
+    expect(generic.intent_verified).toBe(false);
+    expect(generic.verification_signal).toBe("no_effect");
+  });
+
+  it("does not leak overlay count / cart_count onto the ClickVerification result", () => {
+    const r = classifyClickVerification(
+      probe({ cart_count: null, overlay: { present: true, blocking: false, overlay_type: "toast", title_hash: "t1", count: 1 } }),
+      probe({ cart_count: 1, overlay: { present: true, blocking: false, overlay_type: "toast", title_hash: "t1", count: 2 } }),
+      ctx({ cartMutationIntent: true }),
+    );
+    const keys = Object.keys(r);
+    expect(keys).not.toContain("count");
+    expect(keys).not.toContain("cart_count");
+    expect(keys).not.toContain("title_hash");
+    expect(keys).not.toContain("visible_text_hash");
+  });
+});
+
+describe("selectSettleSchedule — cart_mutation polls longer (async confirmation)", () => {
+  it("cart_mutation, non-editable, not modal-trap → extended schedule (~1.2s, ≤1.3s)", () => {
+    const s = selectSettleSchedule(ctx({ cartMutationIntent: true }), false);
+    expect(s).toBe(CART_MUTATION_SETTLE_SCHEDULE_MS);
+    expect(s.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(1300);
+    expect(s.reduce((a, b) => a + b, 0)).toBeGreaterThan(CLICK_VERIFY_SETTLE_SCHEDULE_MS.reduce((a, b) => a + b, 0));
+  });
+
+  it("navigation / generic click → default cheap schedule", () => {
+    expect(selectSettleSchedule(ctx({ cartMutationIntent: false }), false)).toBe(CLICK_VERIFY_SETTLE_SCHEDULE_MS);
+  });
+
+  it("editable/focus target never gets the extended schedule (cheap single-probe path)", () => {
+    // Even if cartMutationIntent were set, an editable target uses the default
+    // (and the runtime skips the poll loop entirely for editable targets).
+    expect(selectSettleSchedule(ctx({ cartMutationIntent: true }), true)).toBe(CLICK_VERIFY_SETTLE_SCHEDULE_MS);
+  });
+
+  it("cart_mutation behind a blocking modal (modal-trap) uses the default schedule, not extended", () => {
+    expect(
+      selectSettleSchedule(ctx({ cartMutationIntent: true, targetWasBehindBlockingModal: true }), false),
+    ).toBe(CLICK_VERIFY_SETTLE_SCHEDULE_MS);
   });
 });
 

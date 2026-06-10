@@ -3846,7 +3846,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         el.typeable === true || el.kind === "input" || el.kind === "textarea" || el.kind === "select" || el.kind === "editable";
       const verifyBehindBlockingModal = el.overlay?.background === true;
       const verifyOption: ClickVerifyOption | undefined = isClickVerifyEnabled()
-        ? { enabled: true, editableTarget: verifyEditableTarget, targetWasBehindBlockingModal: verifyBehindBlockingModal }
+        ? {
+            enabled: true,
+            editableTarget: verifyEditableTarget,
+            targetWasBehindBlockingModal: verifyBehindBlockingModal,
+            cartMutationIntent: gate.action_intent === "cart_mutation",
+          }
         : undefined;
 
       let refResult = await realisticClickKnownBox({
@@ -4144,7 +4149,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // Verification-only (no retry on this path — no structural metadata to
       // re-find a unique target). editable / modal-trap context unknown here.
       verify: isClickVerifyEnabled()
-        ? { enabled: true, editableTarget: false, targetWasBehindBlockingModal: false }
+        ? {
+            enabled: true,
+            editableTarget: false,
+            targetWasBehindBlockingModal: false,
+            cartMutationIntent: descGate.action_intent === "cart_mutation",
+          }
         : undefined,
     });
 

@@ -38,6 +38,7 @@ import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
 import {
   buildPageStateProbeExpr,
   classifyClickVerification,
+  selectSettleSchedule,
   type PageStateProbe,
   type ClickVerification,
   type ClickVerificationContext,
@@ -199,13 +200,15 @@ export interface ClickVerifyOption {
   editableTarget: boolean;
   // At snapshot time the target sat behind a blocking modal (modal-trap guard).
   targetWasBehindBlockingModal: boolean;
+  // The click is a cart-mutation (add-to-bag) intent — enables the cart-specific
+  // first-add and new-notification signals in the classifier. False for every
+  // other intent, so generic clicks keep today's behavior.
+  cartMutationIntent: boolean;
 }
 
-// Adaptive after-click settle schedule (ms between re-probes) for non-editable
-// targets. Cheap-first: an immediate probe runs before this loop; polling only
-// continues while no signal is observed and the after-probe is still readable.
-// Bounded to ~600ms of waits (≈800ms total incl. realistic pointer dispatch).
-const CLICK_VERIFY_SETTLE_SCHEDULE_MS = [150, 200, 250] as const;
+// Adaptive after-click settle schedules live in antigenClickVerification.ts
+// (selectSettleSchedule): the default cheap schedule for most clicks, and a
+// longer one for cart_mutation clicks whose confirmation is network-gated.
 
 /**
  * Read a compact PageStateProbe from the live page over the already-attached CDP
@@ -219,7 +222,7 @@ async function runPageStateProbe(
   const errorProbe: PageStateProbe = {
     url: null,
     title_hash: null,
-    overlay: { present: false, blocking: false, overlay_type: null, title_hash: null },
+    overlay: { present: false, blocking: false, overlay_type: null, title_hash: null, count: 0 },
     cart_count: null,
     visible_text_hash: null,
     focused_editable_at_target: false,
@@ -262,12 +265,16 @@ async function runAfterClickVerification(opts: {
   polls++;
   let result = classifyClickVerification(before, after, ctx);
   if (!editableTarget) {
+    // cart_mutation clicks poll longer (async network-gated confirmation); all
+    // other clicks use the cheap default. Early-exits on the first verified
+    // signal regardless, so a fast click never pays the extra budget.
+    const schedule = selectSettleSchedule(ctx, editableTarget);
     for (
       let i = 0;
-      i < CLICK_VERIFY_SETTLE_SCHEDULE_MS.length && !result.intent_verified && after.status === "ok";
+      i < schedule.length && !result.intent_verified && after.status === "ok";
       i++
     ) {
-      await sleep(CLICK_VERIFY_SETTLE_SCHEDULE_MS[i]);
+      await sleep(schedule[i]);
       after = await runPageStateProbe(sendAndWait, box);
       polls++;
       result = classifyClickVerification(before, after, ctx);
@@ -301,6 +308,7 @@ async function settleAndVerify(opts: {
       editableTarget: verify.editableTarget,
       targetWasBehindBlockingModal: verify.targetWasBehindBlockingModal,
       pageChangedCompare: isAntigenPageChanged,
+      cartMutationIntent: verify.cartMutationIntent,
     };
     const { verification, last_url } = await runAfterClickVerification({
       sendAndWait,

@@ -55,6 +55,37 @@ describe("classifyActionIntent — clicks", () => {
     }
   });
 
+  it("classifies listing-grid add buttons with an embedded product name as cart_mutation", () => {
+    for (const label of [
+      "Add 'EKENÄSET Armchair' to cart",
+      "Add 'STRANDMON Wing chair' to cart",
+      "Add UPPLAND Armchair, Hakebo gray-green to bag",
+      "Add this item to basket",
+    ]) {
+      const c = click(label);
+      expect(c.action_intent, label).toBe("cart_mutation");
+      expect(c.reversibility, label).toBe("reversible");
+    }
+  });
+
+  it("does NOT misclassify non-cart 'add'/'to' phrases as cart_mutation", () => {
+    // No contiguous "to cart|bag|basket" tail → must never become cart_mutation.
+    for (const label of [
+      "Add payment method",
+      "Add card",
+      "Add a new card",
+      "Add address",
+      "Add account",
+      "Add to subscription",
+      "Add your email to receive cart reminders", // "to receive cart", not "to cart"
+    ]) {
+      expect(click(label).action_intent, label).not.toBe("cart_mutation");
+    }
+    // Final/payment-shaped actions keep their higher-priority classification.
+    expect(click("Place order").action_intent).not.toBe("cart_mutation");
+    expect(classifyActionIntent({ action: "click", text: "Add payment method", kind: "button", context: { section: "Payment & billing" } }).action_intent).not.toBe("cart_mutation");
+  });
+
   it("classifies publish/send under identity as publish_send", () => {
     for (const label of ["Publish", "Post", "Tweet", "Send", "Send message"]) {
       const c = click(label);

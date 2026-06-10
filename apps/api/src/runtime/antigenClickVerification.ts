@@ -40,6 +40,12 @@ export interface OverlayProbeSummary {
   overlay_type: AntigenOverlayType | null;
   // Hash of the dominant overlay's accessible title — never the raw title.
   title_hash: string | null;
+  // Count of distinct visible, classified overlay regions on the page. Optional
+  // (older probes/literals omit it → treated as 0). Used ONLY for cart-mutation
+  // intent to detect a freshly-appearing add-to-bag notification even when a
+  // persistent aria-live region still dominates the summary. Internal-only —
+  // never surfaced in any agent response or trace.
+  count?: number;
 }
 
 /**
@@ -109,6 +115,11 @@ export interface ClickVerificationContext {
   // Injected so url comparison reuses the exact page-change semantics the click
   // path already uses (hash/trailing-slash/query-multiset aware).
   pageChangedCompare: (a: string | null | undefined, b: string | null | undefined) => boolean;
+  // The click was classified as a cart-mutation (add-to-bag) intent. ONLY then do
+  // the two cart-specific signals below apply: first-add cart count (null→positive)
+  // and a new notification region (overlay count increase). Generic clicks keep
+  // today's behavior — null→positive and count-increase never verify them.
+  cartMutationIntent: boolean;
 }
 
 // Enum sets for trace enum-gating (mirrors ANTIGEN_RECOVERY_STATES discipline).
@@ -137,6 +148,38 @@ export const OVERLAY_TYPE_VALUES: ReadonlySet<AntigenOverlayType> = new Set<Anti
   "drawer",
   "overlay",
 ]);
+
+// ─── Adaptive settle schedules ───────────────────────────────────────────────
+
+// Default after-click settle schedule (ms between re-probes) for non-editable
+// targets. Cheap-first: an immediate probe runs before this loop; polling only
+// continues while no signal is observed and the after-probe is still readable.
+// ~600ms of waits (≈800ms total incl. realistic pointer dispatch).
+export const CLICK_VERIFY_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250];
+
+// Cart-mutation (add-to-bag) clicks often confirm ASYNCHRONOUSLY — the toast /
+// cart badge lands only after a network round trip, later than the default
+// budget. For cart_mutation clicks only, poll a bit longer (~1.2s of waits,
+// ≈1.3s total) so the confirmation is observed. Still early-exits on the first
+// verified signal, so a fast add adds zero extra latency.
+export const CART_MUTATION_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250, 300, 300];
+
+/**
+ * Pick the adaptive after-click settle schedule. Only cart_mutation clicks get
+ * the extended schedule, and only when they are not editable/focus targets and
+ * not behind a blocking modal (modal-trap). Navigation, checkout_transition,
+ * editable/focus, modal-trap, and sensitive/final clicks all use the cheap
+ * default. UNVERIFIED (probe error) stops polling via the caller's status guard.
+ */
+export function selectSettleSchedule(
+  ctx: ClickVerificationContext,
+  editableTarget: boolean,
+): readonly number[] {
+  if (ctx.cartMutationIntent && !editableTarget && !ctx.targetWasBehindBlockingModal) {
+    return CART_MUTATION_SETTLE_SCHEDULE_MS;
+  }
+  return CLICK_VERIFY_SETTLE_SCHEDULE_MS;
+}
 
 // ─── Page-state probe IIFE builder ───────────────────────────────────────────
 
@@ -180,11 +223,11 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
       // present/blocking/type/title_hash. Prefers blocking > dialog/alertdialog
       // > any, mirroring the snapshot page-map's active-overlay selection.
       function overlaySummary(){
-        var present=false, blocking=false, best=null;
+        var present=false, blocking=false, best=null, cnt=0;
         function rank(k){ var r=0; if(k.blocking) r+=1000; if(k.type==='dialog'||k.type==='alertdialog') r+=100; return r; }
         var nodes;
         try{ nodes=document.querySelectorAll('dialog,[role="dialog"],[role="alertdialog"],[popover],[aria-modal],[role="alert"],[role="status"],[aria-live],[class*="drawer"],[class*="flyout"],[class*="offcanvas"],[class*="snackbar"],[id*="drawer"]'); }
-        catch(e){ return { present:false, blocking:false, overlay_type:null, title_hash:null }; }
+        catch(e){ return { present:false, blocking:false, overlay_type:null, title_hash:null, count:0 }; }
         nodes=Array.prototype.slice.call(nodes);
         var lim=Math.min(nodes.length,60);
         for(var i=0;i<lim;i++){
@@ -193,11 +236,12 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
           var k=null; try{ k=overlayKindOf(node); }catch(e){ k=null; }
           if(!k) continue;
           present=true;
+          cnt++;
           if(k.blocking) blocking=true;
           if(!best||rank(k)>rank(best.k)){ best={ k:k, node:node }; }
         }
         var ttl=''; try{ ttl=best?overlayTitle(best.node):''; }catch(e){ ttl=''; }
-        return { present:present, blocking:blocking, overlay_type:best?best.k.type:null, title_hash:ttl?fnv(ttl):null };
+        return { present:present, blocking:blocking, overlay_type:best?best.k.type:null, title_hash:ttl?fnv(ttl):null, count:cnt };
       }
       // Best-effort cart-quantity heuristic. Returns an integer or null — never
       // throws, never blocks verification when a site has no readable counter.
@@ -343,6 +387,33 @@ export function classifyClickVerification(
     before.cart_count !== after.cart_count
   ) {
     return verified("cart_changed");
+  }
+  // First add-to-cart, cart-mutation intent only: the counter was absent/zero-
+  // rendered (null) before and shows a positive quantity after. Sites that hide
+  // the badge until the first item (e.g. "Shopping bag" → "Shopping bag, 1 items")
+  // would otherwise be missed by the null-safe both-present check above. Gated on
+  // cartMutationIntent so a generic click that merely surfaces a cart badge never
+  // verifies this way.
+  if (
+    ctx.cartMutationIntent &&
+    before.cart_count == null &&
+    after.cart_count != null &&
+    after.cart_count > 0
+  ) {
+    return verified("cart_changed");
+  }
+  // New add-to-bag notification, cart-mutation intent only: a fresh overlay region
+  // appeared (region count rose) even though a persistent aria-live region
+  // (delivery/location) still dominates the summary, leaving overlay_type/title
+  // unchanged. Count-increase is purely structural — no text-hash dependence.
+  if (
+    ctx.cartMutationIntent &&
+    (after.overlay.count ?? 0) > (before.overlay.count ?? 0) &&
+    after.overlay.present
+  ) {
+    return verified(
+      after.overlay.blocking && !before.overlay.blocking ? "modal_opened" : "overlay_changed",
+    );
   }
   if (before.title_hash !== after.title_hash) return verified("title_changed");
   // Non-editable target, but focus moved into a field (e.g. a wrapper that

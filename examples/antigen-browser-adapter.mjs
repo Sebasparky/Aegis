@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -1656,17 +1656,43 @@ async function handleLine(line) {
         const resPointerCount          = resBody?.data?.pointer_path_point_count;
         const resPointerStartSource    = resBody?.data?.pointer_start_source;
         const resPointerStatePersisted = resBody?.data?.pointer_state_persisted;
+        // Post-click verification + realization telemetry (ANTIGEN_CLICK_VERIFY /
+        // ANTIGEN_SURFACE_RESOLVE; fields absent when off). Allowlisted scalars +
+        // the sanitized post_click_state object only — never the raw payload.
+        const resIntentVerified        = resBody?.data?.intent_verified;
+        const resVerificationSignal    = resBody?.data?.verification_signal;
+        const resOutcome               = resBody?.data?.outcome;
+        const resRecommendedNextStep   = resBody?.data?.recommended_next_step;
+        const resRetriedOnce           = resBody?.data?.retried_once;
+        const resRecoveryState         = resBody?.data?.recovery_state;
+        const resSurfaceResolution     = resBody?.data?.surface_resolution_state;
+        const resVerifyMs              = resBody?.data?.verify_ms;
+        const resSettlePolls           = resBody?.data?.settle_polls;
+        const resPostClickState        = resBody?.data?.post_click_state;
         process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] realistic_click_success\n`);
         await noteToolDisposition({ tool: "browser_click", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+        const clickText = buildSyntheticSuccessText("browser_click", {
+          hint: selectorHint ? "selector" : "description",
+          pointerPathPointCount: resPointerCount,
+          pointerStartSource: resPointerStartSource,
+          pointerStatePersisted: resPointerStatePersisted,
+          intentVerified: typeof resIntentVerified === "boolean" ? resIntentVerified : undefined,
+          verificationSignal: typeof resVerificationSignal === "string" ? resVerificationSignal : undefined,
+          outcome: typeof resOutcome === "string" ? resOutcome : undefined,
+          recommendedNextStep: typeof resRecommendedNextStep === "string" ? resRecommendedNextStep : undefined,
+          retriedOnce: resRetriedOnce === true ? true : undefined,
+          recoveryState: typeof resRecoveryState === "string" ? resRecoveryState : undefined,
+          surfaceResolutionState: typeof resSurfaceResolution === "string" ? resSurfaceResolution : undefined,
+          verifyMs: typeof resVerifyMs === "number" ? resVerifyMs : undefined,
+          settlePolls: typeof resSettlePolls === "number" ? resSettlePolls : undefined,
+          version: ADAPTER_VERSION,
+        });
+        const postClickBlock = buildPostClickStateText(resPostClickState, {
+          intentVerified: typeof resIntentVerified === "boolean" ? resIntentVerified : undefined,
+        });
         writeSyntheticResponse(
           requestId,
-          buildSyntheticSuccessText("browser_click", {
-            hint: selectorHint ? "selector" : "description",
-            pointerPathPointCount: resPointerCount,
-            pointerStartSource: resPointerStartSource,
-            pointerStatePersisted: resPointerStatePersisted,
-            version: ADAPTER_VERSION,
-          }),
+          postClickBlock ? `${clickText}\n\n${postClickBlock}` : clickText,
         );
         return;
       }

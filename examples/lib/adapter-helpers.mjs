@@ -40,10 +40,10 @@ export function charCountBucket(len) {
  * Never includes raw typed text, passwords, or any field value.
  *
  * @param {"browser_type"|"browser_fill"|"browser_click"|"browser_scroll_to_ref"} toolName
- * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, submitMethod?: string, pointerPathPointCount?: number, pointerStartSource?: string, pointerStatePersisted?: boolean, ref?: string, version: string }} opts
+ * @param {{ bucket?: string, hint?: string, focused?: boolean, submitted?: boolean, submitMethod?: string, pointerPathPointCount?: number, pointerStartSource?: string, pointerStatePersisted?: boolean, ref?: string, intentVerified?: boolean, verificationSignal?: string, outcome?: string, recommendedNextStep?: string, retriedOnce?: boolean, recoveryState?: string, surfaceResolutionState?: string, verifyMs?: number, settlePolls?: number, version: string }} opts
  * @returns {string}
  */
-export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, ref, changed, verified, actualValue, elementKind, version }) {
+export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, submitted, submitMethod, pointerPathPointCount, pointerStartSource, pointerStatePersisted, ref, changed, verified, actualValue, elementKind, intentVerified, verificationSignal, outcome, recommendedNextStep, retriedOnce, recoveryState, surfaceResolutionState, verifyMs, settlePolls, version }) {
   if (toolName === "browser_fill" || toolName === "browser_set_value" || toolName === "browser_clear") {
     // Exact-replacement result. Surfaces changed/verified and the read-back
     // actual value (non-sensitive — the backend refuses sensitive fields). The
@@ -71,6 +71,17 @@ export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, sub
     if (pointerPathPointCount !== undefined) s += `; pointer_path_point_count=${pointerPathPointCount}`;
     if (pointerStartSource !== undefined) s += `; pointer_start_source=${pointerStartSource}`;
     if (pointerStatePersisted !== undefined) s += `; pointer_state_persisted=${pointerStatePersisted}`;
+    // Post-click intent verification (present only when the backend ran it).
+    // Scalars only — enums/booleans/bounded ints; never page text or geometry.
+    if (intentVerified !== undefined) s += `; intent_verified=${intentVerified === true}`;
+    if (verificationSignal !== undefined) s += `; verification_signal=${snapClean(String(verificationSignal), 40)}`;
+    if (outcome !== undefined) s += `; outcome=${snapClean(String(outcome), 40)}`;
+    if (recommendedNextStep !== undefined) s += `; recommended_next_step=${snapClean(String(recommendedNextStep), 40)}`;
+    if (retriedOnce === true) s += `; retried_once=true`;
+    if (recoveryState !== undefined) s += `; recovery_state=${snapClean(String(recoveryState), 40)}`;
+    if (surfaceResolutionState !== undefined) s += `; surface_resolution_state=${snapClean(String(surfaceResolutionState), 40)}`;
+    if (typeof verifyMs === "number" && Number.isFinite(verifyMs)) s += `; verify_ms=${Math.max(0, Math.floor(verifyMs))}`;
+    if (typeof settlePolls === "number" && Number.isFinite(settlePolls)) s += `; settle_polls=${Math.max(0, Math.floor(settlePolls))}`;
     s += `; source=antigen-browser-adapter@${version}`;
     return s;
   }
@@ -94,6 +105,106 @@ function snapClean(value, max = 120) {
   if (typeof value !== "string") return "";
   const s = value.replace(/\s+/g, " ").replace(/"/g, "'").trim();
   return s.length > max ? s.slice(0, max) : s;
+}
+
+/**
+ * Builds the agent-facing post-click realization block from the backend's
+ * sanitized `post_click_state` (browser_click response; ANTIGEN_CLICK_VERIFY).
+ *
+ * Allowlist-only, same discipline as buildAntigenSnapshotText: reads ONLY the
+ * documented safe fields (change enum, query-free url paths, clipped titles,
+ * ready_state, names-only surface actions). Never stringifies the raw payload,
+ * so refs/boxes/hrefs/query strings the backend might ever include can never
+ * leak. Returns "" when the state is absent/unusable.
+ *
+ * The block tells the agent what ALREADY happened so it does not wait, blind-
+ * retry, or take exploratory snapshots: a page/route change, a modal, a closed
+ * modal, still-loading, or genuinely nothing. Surface actions are NAMES ONLY —
+ * refs always come from one fresh antigen_snapshot.
+ *
+ * @param {object|undefined} state post_click_state from the click response.
+ * @param {{ intentVerified?: boolean }} [opts]
+ * @returns {string} multi-line block ("" when not applicable)
+ */
+export function buildPostClickStateText(state, opts = {}) {
+  if (!state || typeof state !== "object") return "";
+  const change = snapClean(String(state.change ?? ""), 24);
+  if (!change) return "";
+
+  const lines = [];
+  const headline = {
+    navigation: "the page changed; you are on the new page now.",
+    still_loading: "navigation detected but the document is still loading.",
+    modal_opened: "a blocking dialog is now active.",
+    modal_closed: "the overlay/dialog closed.",
+    surface_changed: "a new overlay/panel is showing.",
+    content_updated: "same URL, but the page content/title updated.",
+    none: "nothing observable changed (click dispatched).",
+    unknown: "the post-click page state could not be read.",
+  }[change] ?? "post-click state recorded.";
+  lines.push(`Post-click state: ${change} — ${headline}`);
+
+  // URL path transition (backend-sanitized: pathname only, never query/fragment).
+  const oldPath = snapClean(state.old_url_path, 160);
+  const newPath = snapClean(state.new_url_path, 160);
+  const ready = snapClean(state.document_ready_state, 16);
+  if (state.url_changed === true && (oldPath || newPath)) {
+    const host = snapClean(state.new_url_host, 120);
+    lines.push(
+      `URL path: ${oldPath || "(unknown)"} → ${host ? host : ""}${newPath || "(unknown)"}` +
+      (ready ? ` (ready_state=${ready})` : ""),
+    );
+  } else if (change === "still_loading" && ready) {
+    lines.push(`ready_state=${ready}`);
+  }
+  const oldTitle = snapClean(state.old_title, 120);
+  const newTitle = snapClean(state.new_title, 120);
+  if (state.title_changed === true && (oldTitle || newTitle)) {
+    lines.push(`Title: "${oldTitle}" → "${newTitle}"`);
+  }
+
+  // Active surface after the click (modal/drawer/panel) — names only.
+  const surface = state.surface && typeof state.surface === "object" ? state.surface : null;
+  if (surface) {
+    const type = snapClean(surface.overlay_type, 24) || "overlay";
+    const title = snapClean(surface.title, 120);
+    lines.push(
+      `Post-click surface: ${type}${surface.overlay_blocking === true ? " (blocking)" : ""}${title ? ` — "${title}"` : ""}`,
+    );
+    const actions = Array.isArray(surface.surface_actions) ? surface.surface_actions : [];
+    if (actions.length > 0) {
+      lines.push("Surface actions (names only — refs require one antigen_snapshot):");
+      for (const a of actions) {
+        const name = snapClean(a?.name, 80);
+        if (!name) continue;
+        let line = `- ${snapClean(a?.classification, 16) || "secondary"} "${name}"`;
+        if (a?.requires_handoff === true) line += " [requires_handoff]";
+        lines.push(line);
+      }
+    }
+  }
+
+  // One decisive next step. An absorbed click (unverified + blocking surface
+  // still up) gets the explicit warning instead of a generic refresh hint.
+  const nextStep = snapClean(state.recommended_next_step, 40);
+  if (opts.intentVerified === false && surface && surface.overlay_blocking === true && change !== "modal_opened") {
+    lines.push(
+      "Next: a blocking surface is still active — your click was likely absorbed by it; act on this surface (or its dismiss action) via a fresh antigen_snapshot.",
+    );
+  } else if (change === "still_loading") {
+    lines.push("Next: wait briefly for the page to finish loading, then take one antigen_snapshot.");
+  } else if (change === "none") {
+    lines.push(
+      `Next: recommended_next_step=${nextStep || "refresh_snapshot"} — re-snapshot before retrying; do not blind-retry this ref.`,
+    );
+  } else if (change === "unknown") {
+    lines.push("Next: take one antigen_snapshot to confirm the current page state.");
+  } else {
+    lines.push(
+      "Next: the click already produced this state — do NOT re-click or wait; take one antigen_snapshot and act on the fresh refs.",
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -140,6 +251,38 @@ export function buildAntigenSnapshotText(data, version) {
     if (scroll.more_above === true) more.push("more above");
     if (scroll.more_below === true) more.push("more below");
     lines.push(`Scroll: ${snapClean(scroll.position, 16)}${more.length ? ` (${more.join(", ")})` : ""}`);
+  }
+
+  // ── Active surfaces (ANTIGEN_ACTIVE_SURFACES; fields absent when off) ──
+  // The semantic surface view: while a panel/dialog/drawer is up, its stable
+  // actions are the reliable click targets — background refs may be blocked or
+  // churning. Allowlist-only rendering; never geometry or internal flags.
+  const surfaces = Array.isArray(d.active_surfaces) ? d.active_surfaces : [];
+  if (surfaces.length > 0) {
+    lines.push("");
+    lines.push("Active surfaces:");
+    for (const s of surfaces) {
+      const sid = snapClean(s?.surface_id, 16) || "surf";
+      const type = snapClean(s?.surface_type, 24) || "overlay";
+      const title = snapClean(s?.title, 120);
+      lines.push(`- ${sid}: ${type}${s?.blocking === true ? " (blocking)" : ""}${title ? ` — "${title}"` : ""}`);
+      const surfaceActions = Array.isArray(s?.actions) ? s.actions : [];
+      for (const a of surfaceActions) {
+        const ref = typeof a?.ref === "string" ? a.ref : "unknown";
+        let line = `  - ${snapClean(a?.classification, 16) || "secondary"} "${snapClean(a?.name, 80)}" [ref=${ref}]`;
+        if (a?.requires_handoff === true) line += " [requires_handoff]";
+        lines.push(line);
+      }
+    }
+  }
+  const recommended = Array.isArray(d.recommended_actions) ? d.recommended_actions : [];
+  if (recommended.length > 0) {
+    lines.push("");
+    lines.push("Recommended actions (prefer these over background refs while a surface is active):");
+    for (const r of recommended) {
+      const recRef = typeof r?.ref === "string" ? r.ref : "unknown";
+      lines.push(`- ${snapClean(r?.classification, 16) || "action"} "${snapClean(r?.name, 80)}" [ref=${recRef}] (browser_click)`);
+    }
   }
 
   // ── Warnings / modals ──
@@ -218,6 +361,9 @@ export function buildAntigenSnapshotText(data, version) {
       let line = `- ${kind} "${name}" [ref=${ref}] [clickable=${clickable}] [typeable=${typeable}]`;
       const status = typeof el?.viewport_status === "string" ? el.viewport_status : "";
       if (status) line += ` [viewport=${status}]`;
+      // Behind an active blocking surface (flag-gated, boolean only): prefer the
+      // surface's recommended actions over this ref.
+      if (el?.likely_blocked_by_overlay === true) line += " [likely_blocked_by_overlay]";
       const hrefPath = el?.hints?.href_path;
       if (hrefPath) line += ` [href_path=${snapClean(hrefPath, 160)}]`;
       // Allowlist-only: read just context.section + context.label (no other

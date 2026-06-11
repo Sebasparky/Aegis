@@ -54,7 +54,7 @@ import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
 import { extractAntigenSnapshotBundleViaCDP, type AntigenPageMeta } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
-import { buildAntigenPageMap } from "../runtime/antigenSnapshotPageMap.js";
+import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
@@ -74,6 +74,17 @@ import {
   type AntigenRecoveryState,
   type AntigenTtlRecoveryState,
 } from "../runtime/antigenLogicalRecovery.js";
+// Surface-scoped live resolution (ANTIGEN_SURFACE_RESOLVE, default-off). A stale
+// ag_* ref that belongs to an active surface (modal/drawer/popover) is re-resolved
+// by SEMANTIC identity inside its live surface — never page-wide — and the
+// unchanged realisticClickKnownBox + Phase 4B remain the authoritative final gate.
+import {
+  isSurfaceResolveEnabled,
+  isSurfaceResolutionEligible,
+  checkSurfaceLiveIntent,
+  resolveSurfaceActionBox,
+  type AntigenSurfaceResolutionState,
+} from "../runtime/antigenSurfaceResolution.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
@@ -3852,6 +3863,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             editableTarget: verifyEditableTarget,
             targetWasBehindBlockingModal: verifyBehindBlockingModal,
             cartMutationIntent: gate.action_intent === "cart_mutation",
+            checkoutTransitionIntent: gate.action_intent === "checkout_transition",
+            collectSurfaceDetail: isActiveSurfacesEnabled(),
           }
         : undefined;
 
@@ -3867,61 +3880,143 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         verify: verifyOption,
       });
 
-      // Same-page logical-ref recovery (env-gated, default-off). A recoverable
-      // ANTIGEN_REF_STALE on a CLEARLY low-risk click target is retried against a
-      // unique logically-equivalent element re-found on the same page. Strict
-      // Phase 4B already ran above and failed; recovery only PROPOSES a fresh box
-      // and re-runs the unchanged realisticClickKnownBox (Phase 4B is still the
-      // authoritative gate). recovery_state records the disposition; the raw stale
-      // reason is surfaced only as a SANITIZED stale_reason / stability_hint.
+      // ── Stale-ref resolution (two flag-gated, default-off paths) ─────────────
+      //
+      // Surface-scoped live resolution (ANTIGEN_SURFACE_RESOLVE) — for a stale ref
+      // that BELONGS to an active surface (modal/drawer/popover member): re-resolve
+      // the action by SEMANTIC identity inside its live surface (overlay type +
+      // accessible title, unique unoccluded match) and re-click the fresh box.
+      // Surface members NEVER fall back to a page-wide match — a gone surface
+      // fails closed (the panel dismissed; that is signal, not an error to bridge).
+      //
+      // Same-page logical-ref recovery (ANTIGEN_LOGICAL_REF_RECOVERY) — unchanged
+      // page-wide path for NON-surface refs: a recoverable stale on a clearly
+      // low-risk target is retried against a unique logically-equivalent element.
+      //
+      // Both paths only PROPOSE a fresh box; the unchanged realisticClickKnownBox
+      // + Phase 4B remain the authoritative final gate. Sensitive / final /
+      // non-low-risk targets never re-resolve on either path.
       let recoveryState: AntigenRecoveryState = "disabled";
+      let surfaceState: AntigenSurfaceResolutionState | undefined;
       let recoveredFromStaleReason: ReturnType<typeof sanitizeStaleReason> | undefined;
       if (!refResult.success && refResult.error === "ANTIGEN_REF_STALE") {
-        const eligibility = isLogicalRefRecoveryEnabled()
-          ? classifyLogicalRecoveryEligibility(expected, "click")
-          : null;
-        if (!eligibility) {
-          recoveryState = "disabled";
-        } else if (!eligibility.eligible) {
-          recoveryState = "skipped_ineligible";
-        } else {
-          const originalStale = sanitizeStaleReason(refResult.stale_reason);
-          const recovery = await recoverAntigenRefBox({
-            cdpUrl: session.cdp_url,
-            expected,
-            expectedUrl: snapshotUrl,
-            riskClass: eligibility.risk_class,
-          });
-          if (recovery.status === "recovered") {
-            // Re-run the trusted click path on the proposed box. Phase 4B runs
-            // again and remains the final safety gate; we attempt recovery once.
-            const retry = await realisticClickKnownBox({
-              cdpUrl: session.cdp_url,
-              box: recovery.box,
-              sessionId: session.browser_session_id,
-              userId: MOCK_USER_ID,
-              debugOverlay: resolveOverlayEnabled(session),
-              expectedUrl: snapshotUrl,
-              expected,
-              verify: verifyOption,
-            });
-            if (retry.success) {
-              refResult = retry;
-              recoveryState = "recovered";
-              recoveredFromStaleReason = originalStale;
-            } else {
-              recoveryState = "failed_revalidation";
-            }
-          } else if (recovery.status === "ambiguous") {
-            recoveryState = "failed_ambiguous";
-          } else if (recovery.status === "not_found") {
-            recoveryState = "failed_not_found";
-          } else if (recovery.status === "out_of_viewport") {
-            recoveryState = "failed_out_of_viewport";
-          } else if (recovery.status === "page_changed") {
-            recoveryState = "failed_page_changed";
+        const surfaceMembership =
+          isSurfaceResolveEnabled() && el.overlay && el.overlay.background !== true
+            ? el.overlay
+            : undefined;
+        if (surfaceMembership) {
+          // Surface path. Eligibility is default-deny: low-risk reversible intent
+          // (already gate-allowed above) AND not on the sensitive-commit denylist
+          // AND not a sensitive field. Ineligible surface members fail closed
+          // WITHOUT page-wide recovery.
+          if (
+            el.value_meta?.sensitive === true ||
+            !isSurfaceResolutionEligible(expected, gate.action_intent)
+          ) {
+            surfaceState = "skipped_ineligible";
           } else {
-            recoveryState = "failed_cdp";
+            const originalStale = sanitizeStaleReason(refResult.stale_reason);
+            const sr = await resolveSurfaceActionBox({
+              cdpUrl: session.cdp_url,
+              expected,
+              expectedUrl: snapshotUrl,
+              surface: {
+                overlay_type: surfaceMembership.overlay_type,
+                modal_title: surfaceMembership.modal_title ?? null,
+              },
+            });
+            if (sr.status === "resolved") {
+              // Defense in depth: the unique live match must still classify as a
+              // low-risk reversible intent. compareLiveToExpected makes drift
+              // near-impossible; this guarantees it can never dispatch.
+              const drift = checkSurfaceLiveIntent(sr.live, {
+                url: session.current_url,
+                risk_state: session.risk_state,
+              });
+              if (!drift.ok) {
+                surfaceState = "failed_intent_drift";
+              } else {
+                // Re-run the trusted click path on the proposed box. Phase 4B
+                // runs again and remains the final safety gate; one attempt only.
+                const retry = await realisticClickKnownBox({
+                  cdpUrl: session.cdp_url,
+                  box: sr.box,
+                  sessionId: session.browser_session_id,
+                  userId: MOCK_USER_ID,
+                  debugOverlay: resolveOverlayEnabled(session),
+                  expectedUrl: snapshotUrl,
+                  expected,
+                  verify: verifyOption,
+                });
+                if (retry.success) {
+                  refResult = retry;
+                  surfaceState = "resolved";
+                  recoveredFromStaleReason = originalStale;
+                } else {
+                  surfaceState = "failed_revalidation";
+                }
+              }
+            } else if (sr.status === "surface_gone") {
+              surfaceState = "failed_surface_gone";
+            } else if (sr.status === "surface_ambiguous") {
+              surfaceState = "failed_surface_ambiguous";
+            } else if (sr.status === "action_ambiguous") {
+              surfaceState = "failed_action_ambiguous";
+            } else if (sr.status === "action_not_found") {
+              surfaceState = "failed_action_not_found";
+            } else if (sr.status === "page_changed") {
+              surfaceState = "failed_page_changed";
+            } else {
+              surfaceState = "failed_cdp";
+            }
+          }
+        } else {
+          const eligibility = isLogicalRefRecoveryEnabled()
+            ? classifyLogicalRecoveryEligibility(expected, "click")
+            : null;
+          if (!eligibility) {
+            recoveryState = "disabled";
+          } else if (!eligibility.eligible) {
+            recoveryState = "skipped_ineligible";
+          } else {
+            const originalStale = sanitizeStaleReason(refResult.stale_reason);
+            const recovery = await recoverAntigenRefBox({
+              cdpUrl: session.cdp_url,
+              expected,
+              expectedUrl: snapshotUrl,
+              riskClass: eligibility.risk_class,
+            });
+            if (recovery.status === "recovered") {
+              // Re-run the trusted click path on the proposed box. Phase 4B runs
+              // again and remains the final safety gate; we attempt recovery once.
+              const retry = await realisticClickKnownBox({
+                cdpUrl: session.cdp_url,
+                box: recovery.box,
+                sessionId: session.browser_session_id,
+                userId: MOCK_USER_ID,
+                debugOverlay: resolveOverlayEnabled(session),
+                expectedUrl: snapshotUrl,
+                expected,
+                verify: verifyOption,
+              });
+              if (retry.success) {
+                refResult = retry;
+                recoveryState = "recovered";
+                recoveredFromStaleReason = originalStale;
+              } else {
+                recoveryState = "failed_revalidation";
+              }
+            } else if (recovery.status === "ambiguous") {
+              recoveryState = "failed_ambiguous";
+            } else if (recovery.status === "not_found") {
+              recoveryState = "failed_not_found";
+            } else if (recovery.status === "out_of_viewport") {
+              recoveryState = "failed_out_of_viewport";
+            } else if (recovery.status === "page_changed") {
+              recoveryState = "failed_page_changed";
+            } else {
+              recoveryState = "failed_cdp";
+            }
           }
         }
       }
@@ -3949,7 +4044,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           tool: "browser_click", click_path: "ag_ref", ref: refRaw,
           element_name: el.name, context: el.context, href_path: el.href_path ?? undefined,
           pointer_dispatch: false, error_code: failCode,
-          ...(failCode === "ANTIGEN_REF_STALE" ? { recovery_state: recoveryState } : {}),
+          // When the surface path handled this stale, surface_resolution_state is
+          // the disposition and recovery_state is omitted (page-wide recovery did
+          // not run for the surface member). Otherwise the legacy field stands.
+          ...(failCode === "ANTIGEN_REF_STALE"
+            ? surfaceState !== undefined
+              ? { surface_resolution_state: surfaceState }
+              : { recovery_state: recoveryState }
+            : {}),
           ...(staleSignal ? { stale_reason: staleSignal.stale_reason } : {}),
           ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
         });
@@ -3961,7 +4063,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...(staleSignal ?? {}), ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
-          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...(staleSignal ?? {}), recovery_state: recoveryState, ...ttlFailField } });
+          // Surface-aware stale message: a gone surface is useful signal (the
+          // panel/dialog closed) — tell the agent that instead of a generic stale.
+          const staleMessage =
+            surfaceState === "failed_surface_gone"
+              ? "The active surface (panel/dialog) this ref belonged to is no longer present — it likely closed. Take a fresh antigen_snapshot and act on the current page state."
+              : "Antigen ref is stale. Take a new antigen_snapshot and retry.";
+          return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: staleMessage, ...(staleSignal ?? {}), ...(surfaceState !== undefined ? { surface_resolution_state: surfaceState } : { recovery_state: recoveryState }), ...ttlFailField } });
         }
         const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
         return reply.status(422).send({ ok: false, error: { code, message: refResult.error ?? "Realistic click failed.", ...ttlFailField } });
@@ -3980,7 +4088,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // A verified click (e.g. cart_changed) never retries, so a successful
       // add-to-cart can't be duplicated. recoverAntigenRefBox is the SAME unique-
       // match machinery the stale path uses; only status:"recovered" proceeds.
-      let retriedOnce = recoveryState === "recovered";
+      let retriedOnce = recoveryState === "recovered" || surfaceState === "resolved";
       if (
         !retriedOnce &&
         isClickVerifyEnabled() &&
@@ -4019,6 +4127,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
       }
       const verification = refResult.verification;
+      // Generalized post-click realization summary (sanitized: query-free paths,
+      // clipped value-free titles, names-only surface actions). undefined when
+      // ANTIGEN_CLICK_VERIFY is off — the response stays byte-identical.
+      const postClickState = buildPostClickState(verification, {
+        includeActions: isActiveSurfacesEnabled(),
+      });
 
       // Refresh session.current_url so the next Antigen snapshot is not stale after a
       // click-triggered navigation. Internal session state only — never in the response.
@@ -4043,6 +4157,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         url_after: sanitizeTraceUrl(refResult.current_url),
         total_ms: Date.now() - tToolStart,
         ...(recoveryState === "recovered" ? { recovery_state: recoveryState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
+        ...(surfaceState === "resolved" ? { surface_resolution_state: surfaceState, ...(recoveredFromStaleReason ? { stale_reason: recoveredFromStaleReason.stale_reason } : {}) } : {}),
         ...(ttlRecovered ? { ttl_recovery_state: "ttl_expired_recovered" as const } : {}),
         ...(verification ? {
           click_dispatched: verification.click_dispatched,
@@ -4058,7 +4173,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(typeof verification.verify_ms === "number" ? { verify_ms: verification.verify_ms } : {}),
           ...(typeof verification.settle_polls === "number" ? { settle_polls: verification.settle_polls } : {}),
           retried_once: retriedOnce,
-          stale_recovered: recoveryState === "recovered",
+          stale_recovered: recoveryState === "recovered" || surfaceState === "resolved",
+          ...(postClickState ? {
+            post_click_change: postClickState.change,
+            post_click_actions_count: postClickState.surface?.surface_actions?.length ?? 0,
+          } : {}),
         } : {}),
       });
 
@@ -4069,12 +4188,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(refResult.pointer_start_source !== undefined ? { pointer_start_source: refResult.pointer_start_source } : {}),
           ...(refResult.pointer_path_point_count !== undefined ? { pointer_path_point_count: refResult.pointer_path_point_count } : {}),
           ...(refResult.pointer_state_persisted !== undefined ? { pointer_state_persisted: refResult.pointer_state_persisted } : {}),
-          // Recovery telemetry: present only when same-page logical recovery saved
-          // this action, so we can measure how often it helps. Enum + sanitized
-          // stale reason only — never boxes/coordinates/hrefs.
+          // Recovery telemetry: present only when same-page logical recovery or
+          // surface-scoped live resolution saved this action, so we can measure
+          // how often each helps. Enum + sanitized stale reason only — never
+          // boxes/coordinates/hrefs/surface titles.
           ...(recoveryState === "recovered"
             ? {
                 recovery_state: recoveryState,
+                ...(recoveredFromStaleReason ? { recovered_from_stale_reason: recoveredFromStaleReason.stale_reason } : {}),
+              }
+            : {}),
+          ...(surfaceState === "resolved"
+            ? {
+                surface_resolution_state: surfaceState,
                 ...(recoveredFromStaleReason ? { recovered_from_stale_reason: recoveredFromStaleReason.stale_reason } : {}),
               }
             : {}),
@@ -4092,6 +4218,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                 outcome: verification.outcome,
                 recommended_next_step: verification.recommended_next_step,
                 ...(retriedOnce ? { retried_once: true } : {}),
+                // Bounded timing telemetry — lets the agent (and QA) see what the
+                // settle cost, instead of guessing from wall-clock.
+                ...(typeof verification.verify_ms === "number" && Number.isFinite(verification.verify_ms)
+                  ? { verify_ms: Math.max(0, Math.min(600_000, Math.floor(verification.verify_ms))) }
+                  : {}),
+                ...(typeof verification.settle_polls === "number" && Number.isFinite(verification.settle_polls)
+                  ? { settle_polls: Math.max(0, Math.min(32, Math.floor(verification.settle_polls))) }
+                  : {}),
+                // Generalized post-click realization summary. Built ONLY via
+                // buildPostClickState (explicit allowlist) — never spread
+                // verification.post_click_internal (raw URLs) into a response.
+                ...(postClickState ? { post_click_state: postClickState } : {}),
               }
             : {}),
         },
@@ -4156,6 +4294,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             editableTarget: false,
             targetWasBehindBlockingModal: false,
             cartMutationIntent: descGate.action_intent === "cart_mutation",
+            checkoutTransitionIntent: descGate.action_intent === "checkout_transition",
+            collectSurfaceDetail: isActiveSurfacesEnabled(),
           }
         : undefined,
     });
@@ -4181,6 +4321,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
 
     const descVerification = result.verification;
+    const descPostClickState = buildPostClickState(descVerification, {
+      includeActions: isActiveSurfacesEnabled(),
+    });
     recordBrowserTraceEvent(session.browser_session_id, {
       event_type: "browser_click", browser_runtime_id: session.browser_session_id,
       tool: "browser_click", click_path: "description",
@@ -4200,6 +4343,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ...(descVerification.overlay_after_type ? { overlay_after_type: descVerification.overlay_after_type } : {}),
         ...(typeof descVerification.verify_ms === "number" ? { verify_ms: descVerification.verify_ms } : {}),
         ...(typeof descVerification.settle_polls === "number" ? { settle_polls: descVerification.settle_polls } : {}),
+        ...(descPostClickState ? {
+          post_click_change: descPostClickState.change,
+          post_click_actions_count: descPostClickState.surface?.surface_actions?.length ?? 0,
+        } : {}),
       } : {}),
     });
 
@@ -4217,6 +4364,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               verification_signal: descVerification.verification_signal,
               outcome: descVerification.outcome,
               recommended_next_step: descVerification.recommended_next_step,
+              ...(typeof descVerification.verify_ms === "number" && Number.isFinite(descVerification.verify_ms)
+                ? { verify_ms: Math.max(0, Math.min(600_000, Math.floor(descVerification.verify_ms))) }
+                : {}),
+              ...(typeof descVerification.settle_polls === "number" && Number.isFinite(descVerification.settle_polls)
+                ? { settle_polls: Math.max(0, Math.min(32, Math.floor(descVerification.settle_polls))) }
+                : {}),
+              ...(descPostClickState ? { post_click_state: descPostClickState } : {}),
             }
           : {}),
       },
@@ -5111,6 +5265,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       url: snapshot.url,
     });
 
+    // Active Surfaces v1 (ANTIGEN_ACTIVE_SURFACES, default-off). Read-only
+    // enrichment derived from the SAME stored records — flag off is
+    // byte-identical (no new response fields, no element annotation).
+    const activeSurfaces = isActiveSurfacesEnabled()
+      ? buildActiveSurfaces(elements, snapshot.url)
+      : undefined;
+    const likelyBlockedRefs = new Set(activeSurfaces?.likely_blocked_refs ?? []);
+
     timing.mark("record_store_and_pagemap");
 
     // External elements + per-element qualitative status (additive, safe). When
@@ -5124,7 +5286,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         ext.overlay = { ...ext.overlay, is_primary: true };
       }
       const st = pageMap.ref_status[el.ref];
-      return st
+      const base = st
         ? {
             ...ext,
             viewport_status: st.viewport_status,
@@ -5132,6 +5294,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             stability_hint: st.stability_hint,
           }
         : ext;
+      // Background-behind-blocking-surface annotation (flag-gated, boolean only):
+      // tells the agent this ref is likely unclickable/churning while a blocking
+      // surface is up, so it prefers the surface's recommended actions instead.
+      return likelyBlockedRefs.has(el.ref)
+        ? { ...base, likely_blocked_by_overlay: true as const }
+        : base;
     });
 
     const evidence = {
@@ -5198,6 +5366,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         product_cards: pageMap.product_cards,
         warnings_or_modals: pageMap.warnings_or_modals,
         ...(pageMap.active_overlay ? { active_overlay: pageMap.active_overlay } : {}),
+        // Active Surfaces v1 (flag-gated): semantic surface view + recommended
+        // safe actions. `likely_blocked_refs` stays internal — elements carry the
+        // boolean annotation instead.
+        ...(activeSurfaces
+          ? {
+              active_surfaces: activeSurfaces.surfaces,
+              recommended_actions: activeSurfaces.recommended_actions,
+            }
+          : {}),
         action_hints: pageMap.action_hints,
         elements: externalElements,
       },

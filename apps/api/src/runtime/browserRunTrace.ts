@@ -32,6 +32,11 @@ import {
   OVERLAY_TYPE_VALUES,
   type VerificationSignal,
 } from "./antigenClickVerification.js";
+import {
+  ANTIGEN_SURFACE_RESOLUTION_STATES,
+  type AntigenSurfaceResolutionState,
+} from "./antigenSurfaceResolution.js";
+import { POST_CLICK_CHANGES, type PostClickChange } from "./antigenSnapshotPageMap.js";
 import type { AntigenOverlayType } from "./antigenSnapshotRuntime.js";
 
 const MAX_EVENTS_PER_SESSION = 200;
@@ -203,6 +208,10 @@ export interface BrowserTraceEvent {
   // coordinates, boxes, values, or internal matching details).
   recovery_state?: AntigenRecoveryState;
   stale_reason?: AntigenSanitizedStaleReason;
+  // Surface-scoped live resolution disposition (enum-gated). Present on
+  // browser_click events for surface-member refs when ANTIGEN_SURFACE_RESOLVE
+  // is on. Enum only — never surface titles, boxes, or values.
+  surface_resolution_state?: AntigenSurfaceResolutionState;
   // TTL-expiry recovery disposition (enum-gated). Present on ag_* ref events when
   // the ref was TTL-expired: records whether the expired ref was re-validated and
   // dispatched, failed re-validation (page_changed / semantic_mismatch / generic),
@@ -239,6 +248,11 @@ export interface BrowserTraceEvent {
   // Verification overhead telemetry: total wall time and number of after-probes.
   verify_ms?: number;
   settle_polls?: number;
+  // Generalized post-click realization summary (enum-gated) plus the number of
+  // surface-action NAMES included in the response's post_click_state. Enum +
+  // bounded int only — titles, names, and paths are NEVER traced.
+  post_click_change?: PostClickChange;
+  post_click_actions_count?: number;
   // Total wall time for the whole tool call (endpoint-measured). Duration only —
   // sanitized to a non-negative integer like verify_ms; never carries identifiers.
   total_ms?: number;
@@ -401,6 +415,13 @@ export function recordBrowserTraceEvent(
     if (event.stale_reason !== undefined && ANTIGEN_SANITIZED_STALE_REASONS.has(event.stale_reason)) {
       safe.stale_reason = event.stale_reason;
     }
+    // Enum-gate surface_resolution_state — never clip arbitrary strings into this.
+    if (
+      event.surface_resolution_state !== undefined &&
+      ANTIGEN_SURFACE_RESOLUTION_STATES.has(event.surface_resolution_state)
+    ) {
+      safe.surface_resolution_state = event.surface_resolution_state;
+    }
     // Enum-gate ttl_recovery_state — never clip arbitrary strings into this.
     if (event.ttl_recovery_state !== undefined && ANTIGEN_TTL_RECOVERY_STATES.has(event.ttl_recovery_state)) {
       safe.ttl_recovery_state = event.ttl_recovery_state;
@@ -439,6 +460,13 @@ export function recordBrowserTraceEvent(
     if (Number.isFinite(event.verify_ms)) safe.verify_ms = Math.max(0, Math.floor(event.verify_ms as number));
     if (Number.isFinite(event.settle_polls)) safe.settle_polls = Math.max(0, Math.floor(event.settle_polls as number));
     if (Number.isFinite(event.total_ms)) safe.total_ms = Math.max(0, Math.floor(event.total_ms as number));
+    // Enum-gate post_click_change — never clip arbitrary strings into this.
+    if (event.post_click_change !== undefined && POST_CLICK_CHANGES.has(event.post_click_change)) {
+      safe.post_click_change = event.post_click_change;
+    }
+    if (Number.isFinite(event.post_click_actions_count)) {
+      safe.post_click_actions_count = Math.max(0, Math.min(32, Math.floor(event.post_click_actions_count as number)));
+    }
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {

@@ -25,8 +25,16 @@
  */
 
 import { createHash } from "node:crypto";
+import type { ActionIntent } from "@aegis/types";
+import { classifyActionIntent } from "../detection/actionIntent.js";
 import type { AntigenSnapshotElementRecord } from "./antigenSnapshotStore.js";
-import type { AntigenPageMeta, AntigenOverlayType } from "./antigenSnapshotRuntime.js";
+import type { AntigenPageMeta, AntigenOverlayType, AntigenCandidateKind } from "./antigenSnapshotRuntime.js";
+import { normalizeName } from "./antigenSnapshotRuntime.js";
+import {
+  OVERLAY_TYPE_VALUES,
+  type ClickVerification,
+  type OverlayProbeAction,
+} from "./antigenClickVerification.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -709,6 +717,493 @@ function hashVisibleText(excerpt: string | undefined): string | undefined {
 }
 
 // ─── Main builder ────────────────────────────────────────────────────────────
+
+// ─── Active Surfaces v1 (ANTIGEN_ACTIVE_SURFACES, default-off) ────────────────
+//
+// Slice 1 of the surface model: promote structural overlay groups (dialogs,
+// drawers, popovers, toasts) to first-class "active surfaces" with stable
+// SEMANTIC identity (type + accessible title) and classified actions, so an
+// agent facing an IKEA-style add-to-bag panel is steered toward the panel's
+// stable primary action ("Go to shopping bag") instead of fighting a churning
+// background/header ref. Read-only snapshot enrichment — click behavior is
+// unchanged in this slice.
+//
+// SAFETY: built ONLY from data the snapshot already carries (overlay membership,
+// accessible names, refs). No geometry, no selectors, no values, no internal
+// flags ever leave this layer. `action_intent` comes from classifyActionIntent
+// on STRUCTURAL metadata only; final/irreversible actions are listed with
+// `requires_handoff: true` and are never recommended.
+
+/** Active Surfaces flag — strictly opt-in; default off is byte-identical. */
+export function isActiveSurfacesEnabled(): boolean {
+  return process.env.ANTIGEN_ACTIVE_SURFACES === "true";
+}
+
+export type SurfaceActionClassification = "primary" | "dismiss" | "secondary";
+
+export interface ActiveSurfaceAction {
+  ref: string;
+  name: string;
+  kind: AntigenCandidateKind;
+  classification: SurfaceActionClassification;
+  /** Structural intent classification (navigation / cart_mutation / …). */
+  action_intent: ActionIntent;
+  /**
+   * True when the intent is final / irreversible / uncertain — the action is
+   * listed for visibility but must go through the existing handoff tools and is
+   * never included in `recommended_actions`.
+   */
+  requires_handoff?: true;
+}
+
+export interface ActiveSurface {
+  /** Per-snapshot id ("surf_1", …) in dominance order. Informational only. */
+  surface_id: string;
+  surface_type: AntigenOverlayType;
+  /** Accessible title of the surface container (value-free, clipped). */
+  title?: string;
+  blocking: boolean;
+  /** The surface exposes at least one dismiss-classified action. */
+  dismissible: boolean;
+  actions: ActiveSurfaceAction[];
+}
+
+export interface RecommendedSurfaceAction {
+  ref: string;
+  name: string;
+  surface_id: string;
+  classification: SurfaceActionClassification;
+  reason: "active_surface_primary_action" | "active_surface_dismiss_action";
+}
+
+export interface ActiveSurfacesResult {
+  surfaces: ActiveSurface[];
+  /**
+   * Actions from the DOMINANT recommendable surface only (never toasts or chat
+   * widgets): primaries first, then dismisses. Advisory — Antigen never
+   * auto-clicks; the agent still chooses.
+   */
+  recommended_actions: RecommendedSurfaceAction[];
+  /** A blocking, non-cookie overlay is active (drives background annotation). */
+  blocking_active: boolean;
+  /**
+   * INTERNAL (endpoint use only — not part of the agent payload): refs of
+   * records that are NOT members of any real overlay while a blocking surface
+   * is active. The endpoint annotates these `likely_blocked_by_overlay`.
+   */
+  likely_blocked_refs: string[];
+}
+
+// Dismiss classification for surface actions. Includes "continue shopping"-style
+// panel closers on top of the structural is_dismiss marker and DISMISS_NAME —
+// classification is advisory labeling only (Antigen never auto-clicks dismiss).
+const SURFACE_DISMISS_EXTRA = /\b(cancel|continue shopping|keep shopping|keep browsing|go back)\b/;
+
+function isSurfaceDismissAction(r: AntigenSnapshotElementRecord): boolean {
+  if (r.overlay?.is_dismiss === true) return true;
+  const n = r.normalized_name;
+  if (!n) return false;
+  return DISMISS_NAME.test(n) || SURFACE_DISMISS_EXTRA.test(n);
+}
+
+/** Intents that are reversible and safe to recommend / (in slice 2) live-resolve. */
+const SURFACE_LOW_RISK_INTENTS: ReadonlySet<string> = new Set([
+  "navigation",
+  "cart_mutation",
+  "checkout_transition",
+]);
+
+/**
+ * Deterministic, conservative primary-action pick among the non-dismiss actions
+ * of one surface:
+ *   1. exactly one non-dismiss action → primary;
+ *   2. else the unique one with an href_path (real navigation target) → primary;
+ *   3. else the unique one with a call-to-action name → primary;
+ *   4. else none — everything stays secondary (never guess between peers).
+ */
+function pickPrimaryRef(nonDismiss: AntigenSnapshotElementRecord[]): string | undefined {
+  if (nonDismiss.length === 1) return nonDismiss[0].ref;
+  const withHref = nonDismiss.filter((r) => !!r.href_path);
+  if (withHref.length === 1) return withHref[0].ref;
+  const cta = nonDismiss.filter((r) => isPrimaryActionName(r.normalized_name));
+  if (cta.length === 1) return cta[0].ref;
+  return undefined;
+}
+
+/**
+ * Builds the active-surfaces view from the snapshot's element records. Pure and
+ * deterministic — no DOM, no CDP. Cookie-consent groups are excluded (they keep
+ * their own `cookie_banner` warning and must not dominate surface guidance),
+ * mirroring `buildActiveOverlay`.
+ */
+export function buildActiveSurfaces(
+  records: AntigenSnapshotElementRecord[],
+  url?: string | null,
+): ActiveSurfacesResult {
+  const cookieRefs = cookieRefSet(records);
+  const members = records.filter((r) => isOverlayMember(r) && !cookieRefs.has(r.ref));
+
+  const blocking_active = members.some((r) => r.overlay?.blocking === true);
+  const likely_blocked_refs = blocking_active
+    ? records
+        .filter((r) => !(isOverlayMember(r) && !cookieRefs.has(r.ref)))
+        .map((r) => r.ref)
+    : [];
+
+  if (members.length === 0) {
+    return { surfaces: [], recommended_actions: [], blocking_active, likely_blocked_refs };
+  }
+
+  // Dominance ordering: blocking first, then dialog/alertdialog, then size —
+  // the SAME scoring buildActiveOverlay uses, applied to every group.
+  const scored = groupOverlayMembers(members).map((group) => {
+    const blocking = group.some((r) => r.overlay?.blocking === true);
+    const type = group[0].overlay!.overlay_type;
+    const score =
+      (blocking ? 1000 : 0) + (type === "dialog" || type === "alertdialog" ? 100 : 0) + group.length;
+    return { group, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const surfaces: ActiveSurface[] = [];
+  const recommended_actions: RecommendedSurfaceAction[] = [];
+  let recommendedFromSurface = false;
+
+  for (let i = 0; i < scored.length; i++) {
+    const group = scored[i].group;
+    const surfaceId = `surf_${i + 1}`;
+    const overlayType = group[0].overlay!.overlay_type;
+    const blocking = group.some((r) => r.overlay?.blocking === true);
+    const title = clip(group.map((r) => r.overlay?.modal_title).find(Boolean) ?? "", MESSAGE_MAX);
+
+    const clickables = group.filter((r) => r.clickable && r.enabled);
+    const dismissRefs = new Set(clickables.filter(isSurfaceDismissAction).map((r) => r.ref));
+    const primaryRef = pickPrimaryRef(clickables.filter((r) => !dismissRefs.has(r.ref)));
+
+    const actions: ActiveSurfaceAction[] = clickables.map((r) => {
+      const cls = classifyActionIntent({
+        action: "click",
+        text: r.name,
+        normalized_text: r.normalized_name,
+        role: r.role,
+        kind: r.kind,
+        tag: r.tag,
+        href_path: r.href_path,
+        context: r.context ? { label: r.context.label, section: r.context.section } : undefined,
+        url: url ?? undefined,
+      });
+      const requiresHandoff =
+        cls.reversibility !== "reversible" || !SURFACE_LOW_RISK_INTENTS.has(cls.action_intent);
+      const action: ActiveSurfaceAction = {
+        ref: r.ref,
+        name: r.name,
+        kind: r.kind,
+        classification: dismissRefs.has(r.ref)
+          ? "dismiss"
+          : r.ref === primaryRef
+            ? "primary"
+            : "secondary",
+        action_intent: cls.action_intent,
+      };
+      if (requiresHandoff) action.requires_handoff = true;
+      return action;
+    });
+
+    const surface: ActiveSurface = {
+      surface_id: surfaceId,
+      surface_type: overlayType,
+      blocking,
+      dismissible: actions.some((a) => a.classification === "dismiss"),
+      actions,
+    };
+    if (title) surface.title = title;
+    surfaces.push(surface);
+
+    // Recommendations come from the single dominant recommendable surface:
+    // never a toast (transient, may auto-dismiss) or a chat/help widget, and
+    // never an action that requires a handoff.
+    const warningKind = warningKindFor(overlayType, group);
+    const recommendable =
+      overlayType !== "toast" && warningKind !== "chat_widget" && warningKind !== "toast";
+    if (!recommendedFromSurface && recommendable) {
+      const rec = (a: ActiveSurfaceAction, reason: RecommendedSurfaceAction["reason"]) =>
+        recommended_actions.push({
+          ref: a.ref,
+          name: a.name,
+          surface_id: surfaceId,
+          classification: a.classification,
+          reason,
+        });
+      for (const a of actions) {
+        if (a.requires_handoff) continue;
+        if (a.classification === "primary") rec(a, "active_surface_primary_action");
+      }
+      for (const a of actions) {
+        if (a.requires_handoff) continue;
+        if (a.classification === "dismiss") rec(a, "active_surface_dismiss_action");
+      }
+      if (recommended_actions.length > 0) recommendedFromSurface = true;
+    }
+  }
+
+  return { surfaces, recommended_actions, blocking_active, likely_blocked_refs };
+}
+
+// ─── Post-Click State v1 (ANTIGEN_CLICK_VERIFY, default-off) ─────────────────
+//
+// Generalized post-click REALIZATION summary: after a verified-path click, the
+// endpoint maps the runtime's internal before/after probe state into one
+// compact, sanitized object so the agent knows — in the click response itself —
+// whether nothing happened, a modal opened/closed, the URL changed, an SPA
+// route loaded, or the page is still loading. Names-only by design: refs come
+// ONLY from antigen_snapshot (the constant `next` marker says so).
+//
+// SAFETY: URLs are reduced to query-/fragment-free host+path via splitUrl
+// (tokens/PII live in query strings — never exposed); titles are clipped
+// value-free display strings consistent with ActiveSurface.title /
+// page_summary.visible_heading; surface actions carry accessible NAMES only
+// (no refs, no geometry, no hrefs); requires_handoff actions are listed for
+// visibility but never implied as recommended.
+
+export interface PostClickStateAction {
+  name: string; // value-free accessible name, ≤80
+  classification: SurfaceActionClassification;
+  /** Final / irreversible / uncertain intent — must go through handoff tools. */
+  requires_handoff?: true;
+}
+
+export interface PostClickSurface {
+  overlay_blocking: boolean;
+  overlay_type: AntigenOverlayType;
+  /** Value-free accessible title of the surface container, ≤120. */
+  title?: string;
+  /** Names-only actions inside the surface (ANTIGEN_ACTIVE_SURFACES only; ≤8). */
+  surface_actions?: PostClickStateAction[];
+}
+
+export type PostClickChange =
+  | "none" // nothing observable changed
+  | "modal_opened"
+  | "modal_closed"
+  | "surface_changed" // overlay type/identity changed (drawer swap, step change)
+  | "navigation" // URL/route changed (full nav or SPA history route)
+  | "content_updated" // same URL: title and/or main content changed
+  | "still_loading" // navigation detected but document not complete
+  | "unknown"; // after-probe unreadable
+
+export const POST_CLICK_CHANGES: ReadonlySet<PostClickChange> = new Set<PostClickChange>([
+  "none",
+  "modal_opened",
+  "modal_closed",
+  "surface_changed",
+  "navigation",
+  "content_updated",
+  "still_loading",
+  "unknown",
+]);
+
+export type PostClickRecommendedNextStep =
+  | "none"
+  | "refresh_snapshot"
+  | "wait_for_load_then_snapshot"
+  | "try_alternate_ref";
+
+export interface PostClickState {
+  /** The one-glance realization signal. */
+  change: PostClickChange;
+  navigation_or_route_detected: boolean;
+  url_changed: boolean;
+  /** Sanitized: pathname ONLY (≤160) — no query, no fragment, no credentials. */
+  old_url_path?: string;
+  new_url_path?: string;
+  /** Host only — included when the host changed across the click. */
+  new_url_host?: string;
+  title_changed: boolean;
+  old_title?: string; // clipped ≤120
+  new_title?: string;
+  document_ready_state?: "loading" | "interactive" | "complete";
+  main_content_changed: boolean;
+  /** Present when an overlay is active after the click (any `change`). */
+  surface?: PostClickSurface;
+  recommended_next_step: PostClickRecommendedNextStep;
+  /** Constant marker: clickable refs come only from antigen_snapshot. */
+  next: "refs_require_fresh_snapshot";
+}
+
+const POST_CLICK_MAX_ACTIONS = 8;
+
+/** Names-only surface-action classification, mirroring buildActiveSurfaces:
+ * page-side dismiss flag (or dismiss-name pattern) → dismiss; the UNIQUE
+ * CTA-named non-dismiss action → primary (never guess between peers); else
+ * secondary. requires_handoff exactly as the active-surfaces rule — and,
+ * STRICTER than buildActiveSurfaces, a handoff-flagged action can never be
+ * "primary" here: in a click response "primary" reads as the suggested next
+ * action, and a final/irreversible action must never be suggested. */
+function buildPostClickSurfaceActions(
+  probeActions: OverlayProbeAction[],
+  url: string | null | undefined,
+): PostClickStateAction[] {
+  const seen = new Set<string>();
+  const cleaned = probeActions
+    .map((a) => ({ ...a, name: clip(a.name, 80) ?? "" }))
+    .filter((a) => {
+      if (!a.name) return false;
+      const key = normalizeName(a.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, POST_CLICK_MAX_ACTIONS);
+
+  const isDismiss = (a: OverlayProbeAction): boolean => {
+    if (a.dismiss) return true;
+    const n = normalizeName(a.name);
+    return !!n && (DISMISS_NAME.test(n) || SURFACE_DISMISS_EXTRA.test(n));
+  };
+  const classified = cleaned.map((a) => {
+    const cls = classifyActionIntent({
+      action: "click",
+      text: a.name,
+      normalized_text: normalizeName(a.name),
+      kind: a.kind,
+      url: url ?? undefined,
+    });
+    const requiresHandoff =
+      cls.reversibility !== "reversible" || !SURFACE_LOW_RISK_INTENTS.has(cls.action_intent);
+    return { ...a, dismissAction: isDismiss(a), requiresHandoff };
+  });
+
+  // Primary candidacy: non-dismiss, non-handoff only.
+  const candidates = classified.filter((a) => !a.dismissAction && !a.requiresHandoff);
+  const cta = candidates.filter((a) => isPrimaryActionName(normalizeName(a.name)));
+  const primaryName =
+    candidates.length === 1
+      ? candidates[0].name
+      : cta.length === 1
+        ? cta[0].name
+        : undefined;
+
+  return classified.map((a) => {
+    const action: PostClickStateAction = {
+      name: a.name,
+      classification: a.dismissAction ? "dismiss" : a.name === primaryName ? "primary" : "secondary",
+    };
+    if (a.requiresHandoff) action.requires_handoff = true;
+    return action;
+  });
+}
+
+/**
+ * Maps a click verification's INTERNAL display state into the sanitized,
+ * agent-facing post_click_state. Pure and deterministic — no DOM, no CDP, no
+ * env reads (the caller gates `includeActions` on isActiveSurfacesEnabled()).
+ * Returns undefined when verification is absent (flag off — response stays
+ * byte-identical).
+ */
+export function buildPostClickState(
+  verification: ClickVerification | undefined,
+  opts: { includeActions: boolean },
+): PostClickState | undefined {
+  if (!verification) return undefined;
+  const internal = verification.post_click_internal;
+
+  // After-probe unreadable: the click may or may not have worked — say so
+  // explicitly instead of leaving the agent to infer from silence.
+  if (!internal) {
+    return {
+      change: "unknown",
+      navigation_or_route_detected: false,
+      url_changed: verification.url_changed,
+      title_changed: false,
+      main_content_changed: false,
+      recommended_next_step: "refresh_snapshot",
+      next: "refs_require_fresh_snapshot",
+    };
+  }
+
+  const urlChanged = verification.url_changed;
+  const before = splitUrl(internal.before_url);
+  const after = splitUrl(internal.after_url);
+  const titleChanged =
+    internal.before_title !== null &&
+    internal.after_title !== null &&
+    internal.before_title !== internal.after_title;
+
+  const overlay = internal.after_overlay;
+  const overlayTypeKnown =
+    !!overlay?.present &&
+    !!overlay.overlay_type &&
+    OVERLAY_TYPE_VALUES.has(overlay.overlay_type);
+
+  let change: PostClickChange;
+  if (urlChanged && internal.ready_state !== "complete") change = "still_loading";
+  else if (urlChanged) change = "navigation";
+  else if (!verification.overlay_before_blocking && verification.overlay_after_blocking) change = "modal_opened";
+  else if (verification.overlay_before_present && !verification.overlay_after_present) change = "modal_closed";
+  else if (
+    // A fresh nonblocking overlay appeared (add-to-bag flyout, toast panel) or
+    // an existing overlay's identity changed (drawer swap, step change).
+    (!verification.overlay_before_present && verification.overlay_after_present) ||
+    (verification.overlay_before_present &&
+      verification.overlay_after_present &&
+      (verification.overlay_before_type !== verification.overlay_after_type ||
+        verification.verification_signal === "overlay_changed" ||
+        verification.verification_signal === "modal_opened"))
+  ) {
+    change = "surface_changed";
+  } else if (titleChanged || internal.main_content_changed) change = "content_updated";
+  else change = "none";
+
+  const recommended: PostClickRecommendedNextStep =
+    change === "still_loading"
+      ? "wait_for_load_then_snapshot"
+      : change === "none"
+        ? verification.recommended_next_step === "try_alternate_ref"
+          ? "try_alternate_ref"
+          : "refresh_snapshot"
+        : "refresh_snapshot";
+
+  const state: PostClickState = {
+    change,
+    navigation_or_route_detected: urlChanged || (titleChanged && internal.main_content_changed),
+    url_changed: urlChanged,
+    title_changed: titleChanged,
+    main_content_changed: internal.main_content_changed,
+    recommended_next_step: recommended,
+    next: "refs_require_fresh_snapshot",
+  };
+  if (urlChanged) {
+    const oldPath = clip(before.path, 160);
+    const newPath = clip(after.path, 160);
+    if (oldPath) state.old_url_path = oldPath;
+    if (newPath) state.new_url_path = newPath;
+    if (after.host && before.host !== after.host) {
+      const newHost = clip(after.host, 120);
+      if (newHost) state.new_url_host = newHost;
+    }
+  }
+  if (titleChanged) {
+    const oldTitle = clip(internal.before_title, MESSAGE_MAX);
+    const newTitle = clip(internal.after_title, MESSAGE_MAX);
+    if (oldTitle) state.old_title = oldTitle;
+    if (newTitle) state.new_title = newTitle;
+  }
+  if (internal.ready_state) state.document_ready_state = internal.ready_state;
+  if (overlay && overlayTypeKnown) {
+    const surface: PostClickSurface = {
+      overlay_blocking: overlay.blocking === true,
+      overlay_type: overlay.overlay_type as AntigenOverlayType,
+    };
+    const title = clip(overlay.title ?? undefined, MESSAGE_MAX);
+    if (title) surface.title = title;
+    if (opts.includeActions && Array.isArray(overlay.actions) && overlay.actions.length > 0) {
+      const actions = buildPostClickSurfaceActions(overlay.actions, internal.after_url);
+      if (actions.length > 0) surface.surface_actions = actions;
+    }
+    state.surface = surface;
+  }
+  return state;
+}
 
 export function buildAntigenPageMap(params: BuildPageMapParams): AntigenPageMap {
   const { records, pageMeta, viewportOnly, url } = params;

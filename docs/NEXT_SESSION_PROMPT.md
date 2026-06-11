@@ -5,6 +5,32 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## Antigen Runtime Flag Diagnostics v1 (2026-06-11)
+
+Smoke runs kept losing time because `ANTIGEN_*` flags were set in the adapter/MCP shell
+while the **API process** (`apps/api`, port 4000) ran without them — click verification,
+surface resolution, and pointer fast mode silently looked inactive. To make the API
+process's effective flags observable:
+
+- **Startup log:** `apps/api` prints one sanitized line on boot, e.g.
+  `[AntigenRuntimeFlags] click_verify=true active_surfaces=true surface_resolve=true logical_recovery=true pointer_timing=fast browser_trace=true timing_debug=true require_antigen_tools=false headless=false cdp_port_configured=true`
+- **Diagnostic endpoint:** `GET /api/runtime/status` (dev/local only — **404 in production**)
+  returns `{ ok, service, environment, pid, uptime_seconds, antigen: {...flags} }`.
+
+```bash
+# Confirm the flags the API process actually has:
+curl -s http://localhost:4000/api/runtime/status | jq .
+# Basic liveness:
+curl -s http://localhost:4000/ | jq .
+```
+
+Allowlist-only by construction (`getAntigenRuntimeStatus()` in
+`apps/api/src/runtime/antigenRuntimeFlags.ts`) — no `process.env` dump; `cdp_port_configured`
+is a boolean, never the CDP URL; no secrets/tokens/cookies/vault/KMS. **Set Antigen flags in
+the same shell that starts `apps/api`** — that was the source of the confusion.
+
+---
+
 ## Email OTP Delivery v1 Completed (2026-05-25)
 
 Resend delivery is implemented and working for email ownership verification.

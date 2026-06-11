@@ -65,6 +65,8 @@ import { browserRunTraceRoutes } from "./routes/browser-run-trace.js";
 import { sensitiveGrantRoutes } from "./routes/sensitive-grants.js";
 import { workspaceRoutes } from "./routes/workspaces.js";
 import { verificationRoutes } from "./routes/verifications.js";
+import { runtimeStatusRoutes } from "./routes/runtime-status.js";
+import { formatAntigenRuntimeFlagsLine } from "./runtime/antigenRuntimeFlags.js";
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
@@ -169,6 +171,7 @@ async function main() {
   await server.register(sensitiveGrantRoutes);
   await server.register(workspaceRoutes);
   await server.register(verificationRoutes);
+  await server.register(runtimeStatusRoutes);
   await server.register(agentApiRoutes);
 
   if (process.env.NODE_ENV !== "production") {
@@ -177,6 +180,7 @@ async function main() {
 
   await server.listen({ port: 4000, host: "0.0.0.0" });
   console.log("Antigen API running on http://localhost:4000");
+  console.log(formatAntigenRuntimeFlagsLine());
 
   let isShuttingDown = false;
   const shutdown = async () => {

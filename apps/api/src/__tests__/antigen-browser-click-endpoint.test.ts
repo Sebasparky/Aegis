@@ -972,3 +972,242 @@ describe("POST /api/agent/v1/runtime/browser-click — post-click verification (
     );
   });
 });
+
+describe("POST /api/agent/v1/runtime/browser-click — post_click_state (generalized realization summary)", () => {
+  // "Continue to checkout" classifies as checkout_transition (reversible, allowed).
+  const checkoutButton = () =>
+    candidate({
+      tag: "button", kind: "button", role: "button", name: "Continue to checkout",
+      normalized_name: "continue to checkout", box: { x: 100, y: 200, width: 80, height: 40 },
+    });
+  const navLink = () =>
+    candidate({
+      tag: "a", kind: "link", role: "link", name: "Shopping bag",
+      normalized_name: "shopping bag", href_path: "/us/en/cart/",
+      box: { x: 100, y: 200, width: 80, height: 40 },
+    });
+
+  function verification(overrides: Record<string, unknown> = {}) {
+    return {
+      click_dispatched: true,
+      intent_verified: true,
+      verification_signal: "url_changed",
+      outcome: "CLICK_VERIFIED",
+      recommended_next_step: "none",
+      overlay_before_present: false,
+      overlay_before_blocking: false,
+      overlay_after_present: false,
+      overlay_after_blocking: false,
+      overlay_before_type: null,
+      overlay_after_type: null,
+      url_changed: true,
+      verify_ms: 480,
+      settle_polls: 3,
+      ...overrides,
+    };
+  }
+
+  const guestModalInternal = () => ({
+    before_url: "https://www.ikea.com/us/en/",
+    after_url: "https://www.ikea.com/us/en/",
+    before_title: "Shopping bag",
+    after_title: "Shopping bag",
+    ready_state: "complete",
+    main_content_changed: true,
+    after_overlay: {
+      present: true,
+      blocking: true,
+      overlay_type: "dialog",
+      title_hash: "ch01",
+      title: "Choose how to check out",
+      actions: [
+        { name: "Continue as guest", kind: "button", dismiss: false },
+        { name: "Log in", kind: "button", dismiss: false },
+        { name: "Close", kind: "button", dismiss: true },
+      ],
+    },
+  });
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_CLICK_VERIFY;
+    delete process.env.ANTIGEN_ACTIVE_SURFACES;
+  });
+
+  it("checkout click that opens the guest modal: post_click_state carries surface + action names (no extra snapshot needed)", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_ACTIVE_SURFACES = "true";
+    seedSession();
+    seedSnapshot([checkoutButton()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({
+        verification_signal: "modal_opened", url_changed: false,
+        overlay_after_present: true, overlay_after_blocking: true, overlay_after_type: "dialog",
+        post_click_internal: guestModalInternal(),
+      }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Continue to checkout" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    // Bounded timing telemetry now agent-visible.
+    expect(data.verify_ms).toBe(480);
+    expect(data.settle_polls).toBe(3);
+    // Realization summary: the modal is already here — no retry, no blind snapshot.
+    expect(data.post_click_state).toBeDefined();
+    expect(data.post_click_state.change).toBe("modal_opened");
+    expect(data.post_click_state.next).toBe("refs_require_fresh_snapshot");
+    expect(data.post_click_state.surface.overlay_type).toBe("dialog");
+    expect(data.post_click_state.surface.overlay_blocking).toBe(true);
+    expect(data.post_click_state.surface.title).toBe("Choose how to check out");
+    const names = data.post_click_state.surface.surface_actions.map((a: { name: string }) => a.name);
+    expect(names).toContain("Continue as guest");
+    expect(names).toContain("Close");
+    // Names only — never refs/boxes/hrefs inside surface actions.
+    for (const a of data.post_click_state.surface.surface_actions) {
+      expect(Object.keys(a).sort()).toEqual(
+        expect.arrayContaining(["classification", "name"]),
+      );
+      expect(a).not.toHaveProperty("ref");
+      expect(a).not.toHaveProperty("box");
+      expect(a).not.toHaveProperty("href");
+    }
+    // The raw internal carrier never leaks.
+    expect(res.body).not.toContain("post_click_internal");
+    expect(res.body).not.toContain("title_hash");
+    // checkout_transition selected the extended settle schedule via the verify option.
+    expect(clickKnownBoxMock.mock.calls[0][0].verify).toEqual(
+      expect.objectContaining({ checkoutTransitionIntent: true, collectSurfaceDetail: true }),
+    );
+  });
+
+  it("navigation click: sanitized paths only — query strings/fragments never leak", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_ACTIVE_SURFACES = "true";
+    seedSession();
+    seedSnapshot([navLink()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true,
+      current_url: "https://www.ikea.com/us/en/checkout?session=tok_secret#step1",
+      verification: verification({
+        post_click_internal: {
+          before_url: "https://www.ikea.com/us/en/cart/",
+          after_url: "https://www.ikea.com/us/en/checkout?session=tok_secret#step1",
+          before_title: "Shopping bag",
+          after_title: "Checkout",
+          ready_state: "complete",
+          main_content_changed: true,
+        },
+      }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Shopping bag" },
+    });
+    expect(res.statusCode).toBe(200);
+    const state = res.json().data.post_click_state;
+    expect(state.change).toBe("navigation");
+    expect(state.old_url_path).toBe("/us/en/cart/");
+    expect(state.new_url_path).toBe("/us/en/checkout");
+    expect(state.old_title).toBe("Shopping bag");
+    expect(state.new_title).toBe("Checkout");
+    expect(state.document_ready_state).toBe("complete");
+    expect(res.body).not.toContain("tok_secret");
+    expect(res.body).not.toContain("session=");
+  });
+
+  it("still-loading navigation reports wait_for_load_then_snapshot", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    seedSession();
+    seedSnapshot([navLink()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/checkout",
+      verification: verification({
+        post_click_internal: {
+          before_url: "https://www.ikea.com/us/en/cart/",
+          after_url: "https://www.ikea.com/us/en/checkout",
+          before_title: "Shopping bag",
+          after_title: null,
+          ready_state: "interactive",
+          main_content_changed: true,
+        },
+      }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Shopping bag" },
+    });
+    const state = res.json().data.post_click_state;
+    expect(state.change).toBe("still_loading");
+    expect(state.recommended_next_step).toBe("wait_for_load_then_snapshot");
+  });
+
+  it("CLICK_VERIFY without ACTIVE_SURFACES: surface present, surface_actions omitted", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    seedSession();
+    seedSnapshot([checkoutButton()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({
+        verification_signal: "modal_opened", url_changed: false,
+        overlay_after_present: true, overlay_after_blocking: true, overlay_after_type: "dialog",
+        post_click_internal: guestModalInternal(),
+      }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Continue to checkout" },
+    });
+    const state = res.json().data.post_click_state;
+    expect(state.surface.title).toBe("Choose how to check out");
+    expect(state.surface).not.toHaveProperty("surface_actions");
+    expect(clickKnownBoxMock.mock.calls[0][0].verify).toEqual(
+      expect.objectContaining({ collectSurfaceDetail: false }),
+    );
+  });
+
+  it("flags OFF: no post_click_state / verify_ms / settle_polls anywhere in the response", async () => {
+    seedSession();
+    seedSnapshot([checkoutButton()]);
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Continue to checkout" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data).not.toHaveProperty("post_click_state");
+    expect(data).not.toHaveProperty("verify_ms");
+    expect(data).not.toHaveProperty("settle_polls");
+    expect(res.body).not.toContain("post_click_internal");
+    expect(clickKnownBoxMock.mock.calls[0][0].verify).toBeUndefined();
+  });
+
+  it("description path: post_click_state surfaces with the same sanitization", async () => {
+    process.env.ANTIGEN_CLICK_VERIFY = "true";
+    process.env.ANTIGEN_ACTIVE_SURFACES = "true";
+    seedSession();
+    clickByDescriptionMock.mockResolvedValueOnce({
+      success: true, pointer_state_persisted: true, current_url: "https://www.ikea.com/us/en/",
+      verification: verification({
+        verification_signal: "modal_opened", url_changed: false,
+        overlay_after_present: true, overlay_after_blocking: true, overlay_after_type: "dialog",
+        post_click_internal: guestModalInternal(),
+      }),
+    });
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, element_description: "Continue to checkout" },
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.post_click_state.change).toBe("modal_opened");
+    expect(data.post_click_state.surface.title).toBe("Choose how to check out");
+    expect(data.verify_ms).toBe(480);
+    expect(res.body).not.toContain("post_click_internal");
+    expect(clickByDescriptionMock.mock.calls[0][0].verify).toEqual(
+      expect.objectContaining({ checkoutTransitionIntent: true, collectSurfaceDetail: true }),
+    );
+  });
+});

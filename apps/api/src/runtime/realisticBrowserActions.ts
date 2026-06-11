@@ -204,6 +204,14 @@ export interface ClickVerifyOption {
   // first-add and new-notification signals in the classifier. False for every
   // other intent, so generic clicks keep today's behavior.
   cartMutationIntent: boolean;
+  // The click is a checkout transition — selects the extended settle schedule
+  // (checkout overlays/routes often land after a network round trip). Changes
+  // no classification rule.
+  checkoutTransitionIntent: boolean;
+  // Collect the dominant overlay's action NAMES in after-probes (display-only,
+  // for the endpoint's post_click_state). Set from isActiveSurfacesEnabled() by
+  // the route handler; the lean before-probe never collects.
+  collectSurfaceDetail: boolean;
 }
 
 // Adaptive after-click settle schedules live in antigenClickVerification.ts
@@ -218,6 +226,7 @@ export interface ClickVerifyOption {
 async function runPageStateProbe(
   sendAndWait: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
   box: ElementBox,
+  collectSurfaceActions = false,
 ): Promise<PageStateProbe> {
   const errorProbe: PageStateProbe = {
     url: null,
@@ -229,7 +238,7 @@ async function runPageStateProbe(
     status: "error",
   };
   try {
-    const expr = buildPageStateProbeExpr({ targetBox: box });
+    const expr = buildPageStateProbeExpr({ targetBox: box, collectSurfaceActions });
     const r = await sendAndWait("Runtime.evaluate", { expression: expr, returnByValue: true });
     const val = (r?.result as Record<string, unknown> | undefined)?.value as PageStateProbe | undefined;
     if (!val || typeof val !== "object" || (val.status !== "ok" && val.status !== "error")) return errorProbe;
@@ -257,17 +266,19 @@ async function runAfterClickVerification(opts: {
   before: PageStateProbe;
   ctx: ClickVerificationContext;
   editableTarget: boolean;
+  collectSurfaceDetail: boolean;
 }): Promise<{ verification: ClickVerification; last_url: string | null }> {
-  const { sendAndWait, sleep, box, before, ctx, editableTarget } = opts;
+  const { sendAndWait, sleep, box, before, ctx, editableTarget, collectSurfaceDetail } = opts;
   const t0 = process.hrtime.bigint();
   let polls = 0;
-  let after = await runPageStateProbe(sendAndWait, box);
+  let after = await runPageStateProbe(sendAndWait, box, collectSurfaceDetail);
   polls++;
   let result = classifyClickVerification(before, after, ctx);
   if (!editableTarget) {
-    // cart_mutation clicks poll longer (async network-gated confirmation); all
-    // other clicks use the cheap default. Early-exits on the first verified
-    // signal regardless, so a fast click never pays the extra budget.
+    // cart_mutation / checkout_transition clicks poll longer (async network-
+    // gated confirmation); all other clicks use the cheap default. Early-exits
+    // on the first verified signal regardless, so a fast click never pays the
+    // extra budget.
     const schedule = selectSettleSchedule(ctx, editableTarget);
     for (
       let i = 0;
@@ -275,14 +286,37 @@ async function runAfterClickVerification(opts: {
       i++
     ) {
       await sleep(schedule[i]);
-      after = await runPageStateProbe(sendAndWait, box);
+      after = await runPageStateProbe(sendAndWait, box, collectSurfaceDetail);
       polls++;
       result = classifyClickVerification(before, after, ctx);
     }
   }
   const verifyMs = Math.round(Number(process.hrtime.bigint() - t0) / 1_000_000);
+  // INTERNAL display-state carrier for the endpoint's sanitized post_click_state.
+  // Filled only when the FINAL after-probe was readable — an error probe carries
+  // no trustworthy display state (the classifier already reports UNVERIFIED).
+  const postClickInternal =
+    after.status === "ok"
+      ? {
+          before_url: before.url,
+          after_url: after.url,
+          before_title: typeof before.title === "string" && before.title.length > 0 ? before.title : null,
+          after_title: typeof after.title === "string" && after.title.length > 0 ? after.title : null,
+          ready_state: after.ready_state ?? null,
+          main_content_changed:
+            before.visible_text_hash !== null &&
+            after.visible_text_hash !== null &&
+            before.visible_text_hash !== after.visible_text_hash,
+          ...(after.overlay.present ? { after_overlay: after.overlay } : {}),
+        }
+      : undefined;
   return {
-    verification: { ...result, verify_ms: verifyMs, settle_polls: polls },
+    verification: {
+      ...result,
+      verify_ms: verifyMs,
+      settle_polls: polls,
+      ...(postClickInternal ? { post_click_internal: postClickInternal } : {}),
+    },
     last_url: typeof after.url === "string" && after.url.length > 0 ? after.url : null,
   };
 }
@@ -312,6 +346,7 @@ async function settleAndVerify(opts: {
       targetWasBehindBlockingModal: verify.targetWasBehindBlockingModal,
       pageChangedCompare: isAntigenPageChanged,
       cartMutationIntent: verify.cartMutationIntent,
+      checkoutTransitionIntent: verify.checkoutTransitionIntent,
     };
     const { verification, last_url } = await runAfterClickVerification({
       sendAndWait,
@@ -320,6 +355,7 @@ async function settleAndVerify(opts: {
       before: beforeProbe,
       ctx,
       editableTarget: verify.editableTarget,
+      collectSurfaceDetail: verify.collectSurfaceDetail,
     });
     return { ...clickResult, ...(last_url ? { current_url: last_url } : {}), verification };
   }

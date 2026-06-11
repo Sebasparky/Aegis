@@ -14,6 +14,7 @@ import {
   selectSettleSchedule,
   CLICK_VERIFY_SETTLE_SCHEDULE_MS,
   CART_MUTATION_SETTLE_SCHEDULE_MS,
+  CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS,
   type PageStateProbe,
   type ClickVerificationContext,
 } from "../runtime/antigenClickVerification.js";
@@ -39,6 +40,7 @@ function ctx(overrides: Partial<ClickVerificationContext> = {}): ClickVerificati
     targetWasBehindBlockingModal: false,
     pageChangedCompare: isAntigenPageChanged,
     cartMutationIntent: false,
+    checkoutTransitionIntent: false,
     ...overrides,
   };
 }
@@ -336,5 +338,107 @@ describe("buildPageStateProbeExpr — shares the overlay snippet (anti-drift)", 
     expect(() =>
       new Function(`return ${buildPageStateProbeExpr({ targetBox: { x: 1, y: 2, width: 3, height: 4 } })}`),
     ).not.toThrow();
+  });
+});
+
+describe("selectSettleSchedule — checkout_transition polls longer (slow checkout overlays)", () => {
+  it("checkout_transition, non-editable, not modal-trap → extended schedule (~1.6s, ≤1.7s)", () => {
+    const s = selectSettleSchedule(ctx({ checkoutTransitionIntent: true }), false);
+    expect(s).toBe(CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS);
+    expect(s.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(1700);
+    expect(s.reduce((a, b) => a + b, 0)).toBeGreaterThan(CLICK_VERIFY_SETTLE_SCHEDULE_MS.reduce((a, b) => a + b, 0));
+  });
+
+  it("editable/focus target never gets the extended schedule", () => {
+    expect(selectSettleSchedule(ctx({ checkoutTransitionIntent: true }), true)).toBe(CLICK_VERIFY_SETTLE_SCHEDULE_MS);
+  });
+
+  it("checkout_transition behind a blocking modal (modal-trap) uses the default schedule", () => {
+    expect(
+      selectSettleSchedule(ctx({ checkoutTransitionIntent: true, targetWasBehindBlockingModal: true }), false),
+    ).toBe(CLICK_VERIFY_SETTLE_SCHEDULE_MS);
+  });
+
+  it("cart_mutation takes precedence when both intents are set", () => {
+    expect(
+      selectSettleSchedule(ctx({ cartMutationIntent: true, checkoutTransitionIntent: true }), false),
+    ).toBe(CART_MUTATION_SETTLE_SCHEDULE_MS);
+  });
+});
+
+describe("buildPageStateProbeExpr — display state + surface-action collection (post_click_state)", () => {
+  it("collection is OFF by default and ON only when requested", () => {
+    expect(buildPageStateProbeExpr({})).toContain("var COLLECT_ACTIONS=false");
+    const on = buildPageStateProbeExpr({ collectSurfaceActions: true });
+    expect(on).toContain("var COLLECT_ACTIONS=true");
+    expect(on).toContain("function overlayActions");
+    expect(on).toContain("function actionName");
+  });
+
+  it("action names read .value ONLY for submit/button/reset inputs (nameOf precedence)", () => {
+    const expr = buildPageStateProbeExpr({ collectSurfaceActions: true });
+    expect(expr).toContain("tag==='input'&&(type==='submit'||type==='button'||type==='reset')");
+    // No generic value read outside that guard: every `.value` mention sits
+    // inside the guarded actionName branch (same as buildSurfaceActionSearchExpr).
+    const valueReads = expr.split("el.value").length - 1;
+    expect(valueReads).toBeLessThanOrEqual(2); // null-check + read, one guarded site
+  });
+
+  it("returns ready_state and clipped display titles alongside the hashes", () => {
+    const expr = buildPageStateProbeExpr({});
+    expect(expr).toContain("document.readyState");
+    expect(expr).toContain("ready_state:");
+    expect(expr).toContain("title: docTitle?clip(docTitle,120):null");
+    expect(expr).toContain("title:ttl?clip(ttl,120):null");
+    // Hash comparison keys remain.
+    expect(expr).toContain("title_hash: docTitle?fnv(docTitle):null");
+  });
+
+  it("remains syntactically valid JS with collection enabled", () => {
+    expect(() =>
+      new Function(`return ${buildPageStateProbeExpr({ collectSurfaceActions: true, targetBox: { x: 1, y: 2, width: 3, height: 4 } })}`),
+    ).not.toThrow();
+  });
+});
+
+describe("classifyClickVerification — display fields never affect classification", () => {
+  it("differing overlay display titles with the SAME title_hash do not verify overlay_changed", () => {
+    const r = classifyClickVerification(
+      probe({ overlay: { present: true, blocking: false, overlay_type: "toast", title_hash: "t1", title: "Saved to bag" } }),
+      probe({ overlay: { present: true, blocking: false, overlay_type: "toast", title_hash: "t1", title: "A totally different display title" } }),
+      ctx(),
+    );
+    expect(r.intent_verified).toBe(false);
+    expect(r.verification_signal).toBe("no_effect");
+  });
+
+  it("differing document display titles with the SAME title_hash do not verify title_changed", () => {
+    const r = classifyClickVerification(
+      probe({ title: "Shopping bag", title_hash: "h1" }),
+      probe({ title: "Checkout", title_hash: "h1" }),
+      ctx(),
+    );
+    expect(r.intent_verified).toBe(false);
+  });
+
+  it("ready_state and probe actions never leak onto the ClickVerification result", () => {
+    const r = classifyClickVerification(
+      probe({ ready_state: "interactive" }),
+      probe({
+        ready_state: "complete",
+        overlay: {
+          present: true, blocking: true, overlay_type: "dialog", title_hash: "m1",
+          title: "Choose how to check out",
+          actions: [{ name: "Continue as guest", kind: "button", dismiss: false }],
+        },
+      }),
+      ctx(),
+    );
+    expect(r.verification_signal).toBe("modal_opened");
+    const keys = Object.keys(r);
+    expect(keys).not.toContain("ready_state");
+    expect(keys).not.toContain("actions");
+    expect(keys).not.toContain("title");
+    expect(keys).not.toContain("post_click_internal"); // runtime fills this, never the classifier
   });
 });

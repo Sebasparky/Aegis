@@ -15,12 +15,22 @@
 //      can never drift between the two surfaces.
 //   3. classifyClickVerification() — the pure before/after → signal decision.
 //
-// LEAK BOUNDARY: all titles and body text are hashed PAGE-SIDE (FNV-1a, raw JS)
-// so only fixed-length hashes and integers ever cross CDP. No raw titles, modal
-// titles, or body text leave the page; nothing here returns coordinates, refs,
-// or secrets. The feature is gated behind ANTIGEN_CLICK_VERIFY (default-off):
-// when off, the runtime never builds a probe and the endpoint response is
-// byte-identical to today.
+// LEAK BOUNDARY: hashes (FNV-1a, computed PAGE-SIDE) remain the ONLY comparison
+// keys — the pure classifier never reads a raw title or body text. As a
+// deliberate, scoped DISPLAY addition (mirroring the snapshot's existing
+// value-free-title policy: ActiveSurface.title / page_summary.visible_heading),
+// the probe also returns the clipped document.title, the dominant overlay's
+// clipped accessible title (same overlayTitle() snippet the snapshot uses), and
+// — only when collectSurfaceActions is requested — the dominant overlay's
+// clickable action NAMES (accessible names only; `.value` read solely for
+// submit/button/reset inputs). These display fields feed the endpoint's
+// sanitized `post_click_state`; they never influence classification. Body text
+// stays hash-only. Full URLs cross CDP for internal comparison but never leave
+// the API agent-facing — the endpoint's post_click_state builder reduces them
+// to query-/fragment-free paths. Nothing here returns coordinates, refs, field
+// values, or secrets. The feature is gated behind ANTIGEN_CLICK_VERIFY
+// (default-off): when off, the runtime never builds a probe and the endpoint
+// response is byte-identical to today.
 
 import type { ElementBox } from "./nativePointerRuntime.js";
 import type { AntigenOverlayType } from "./antigenSnapshotRuntime.js";
@@ -33,13 +43,29 @@ export function isClickVerifyEnabled(): boolean {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/** One clickable member of the dominant overlay — DISPLAY ONLY (names, no
+ * geometry/refs/hrefs). Collected only when the probe is built with
+ * collectSurfaceActions; never read by the classifier. */
+export interface OverlayProbeAction {
+  name: string; // accessible name, clipped page-side (≤80)
+  kind: "button" | "link";
+  dismiss: boolean;
+}
+
 /** Compact page-level overlay summary used for before/after comparison. */
 export interface OverlayProbeSummary {
   present: boolean;
   blocking: boolean;
   overlay_type: AntigenOverlayType | null;
-  // Hash of the dominant overlay's accessible title — never the raw title.
+  // Hash of the dominant overlay's accessible title — the COMPARISON key.
   title_hash: string | null;
+  // Clipped value-free accessible title of the dominant overlay (same
+  // overlayTitle() extraction the snapshot uses for ActiveSurface.title).
+  // DISPLAY ONLY — feeds the endpoint's post_click_state; never compared.
+  title?: string | null;
+  // Dominant-overlay clickable action names (collectSurfaceActions only).
+  // DISPLAY ONLY — capped page-side (≤8 of ≤40 scanned).
+  actions?: OverlayProbeAction[];
   // Count of distinct visible, classified overlay regions on the page. Optional
   // (older probes/literals omit it → treated as 0). Used ONLY for cart-mutation
   // intent to detect a freshly-appearing add-to-bag notification even when a
@@ -57,6 +83,12 @@ export interface OverlayProbeSummary {
 export interface PageStateProbe {
   url: string | null;
   title_hash: string | null;
+  // Clipped (≤120) document.title — DISPLAY ONLY (post_click_state); the
+  // classifier compares title_hash exclusively.
+  title?: string | null;
+  // document.readyState at probe time — DISPLAY ONLY; lets the endpoint report
+  // "still_loading" after a navigation. Never read by the classifier.
+  ready_state?: "loading" | "interactive" | "complete" | null;
   overlay: OverlayProbeSummary;
   cart_count: number | null;
   visible_text_hash: string | null;
@@ -84,6 +116,24 @@ export type ClickOutcome =
 
 export type RecommendedNextStep = "refresh_snapshot" | "try_alternate_ref" | "none";
 
+/**
+ * INTERNAL carrier of before/after display state — filled by the runtime, read
+ * ONLY by the endpoint's buildPostClickState mapper. Holds RAW URLs (the
+ * endpoint reduces them to query-/fragment-free paths) and clipped display
+ * titles. MUST NEVER be spread into an API response, trace event, or log.
+ */
+export interface PostClickInternal {
+  before_url: string | null;
+  after_url: string | null;
+  before_title: string | null;
+  after_title: string | null;
+  ready_state: "loading" | "interactive" | "complete" | null;
+  // visible_text_hash before ≠ after (computed by the runtime from hashes).
+  main_content_changed: boolean;
+  // The dominant overlay summary from the FINAL after-probe, when present.
+  after_overlay?: OverlayProbeSummary;
+}
+
 export interface ClickVerification {
   click_dispatched: boolean;
   intent_verified: boolean;
@@ -102,6 +152,10 @@ export interface ClickVerification {
   // Timing telemetry, filled by the runtime (not the pure classifier).
   verify_ms?: number;
   settle_polls?: number;
+  // INTERNAL (runtime-filled): display state for the endpoint's sanitized
+  // post_click_state. Never spread into responses/traces — the endpoint maps
+  // it through buildPostClickState (explicit-field allowlist) only.
+  post_click_internal?: PostClickInternal;
 }
 
 export interface ClickVerificationContext {
@@ -120,6 +174,11 @@ export interface ClickVerificationContext {
   // and a new notification region (overlay count increase). Generic clicks keep
   // today's behavior — null→positive and count-increase never verify them.
   cartMutationIntent: boolean;
+  // The click was classified as a checkout transition ("Continue to checkout").
+  // Sites often render the checkout-method overlay / route AFTER a network round
+  // trip, later than the default settle budget — this selects the extended
+  // settle schedule only. It changes NO classification rule.
+  checkoutTransitionIntent: boolean;
 }
 
 // Enum sets for trace enum-gating (mirrors ANTIGEN_RECOVERY_STATES discipline).
@@ -164,12 +223,21 @@ export const CLICK_VERIFY_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250
 // verified signal, so a fast add adds zero extra latency.
 export const CART_MUTATION_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250, 300, 300];
 
+// Checkout transitions ("Continue to checkout") frequently open their
+// checkout-method overlay / next route only after a network round trip (IKEA's
+// "Choose how to check out" dialog is the canonical case) — slower than the
+// default budget. Poll longer (~1.6s of waits) for checkout_transition clicks
+// only. Still early-exits on the first verified signal, so a fast checkout
+// transition pays zero extra latency.
+export const CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250, 300, 300, 400];
+
 /**
- * Pick the adaptive after-click settle schedule. Only cart_mutation clicks get
- * the extended schedule, and only when they are not editable/focus targets and
- * not behind a blocking modal (modal-trap). Navigation, checkout_transition,
- * editable/focus, modal-trap, and sensitive/final clicks all use the cheap
- * default. UNVERIFIED (probe error) stops polling via the caller's status guard.
+ * Pick the adaptive after-click settle schedule. Only cart_mutation and
+ * checkout_transition clicks get an extended schedule, and only when they are
+ * not editable/focus targets and not behind a blocking modal (modal-trap).
+ * Navigation, editable/focus, modal-trap, and sensitive/final clicks all use
+ * the cheap default. UNVERIFIED (probe error) stops polling via the caller's
+ * status guard.
  */
 export function selectSettleSchedule(
   ctx: ClickVerificationContext,
@@ -177,6 +245,9 @@ export function selectSettleSchedule(
 ): readonly number[] {
   if (ctx.cartMutationIntent && !editableTarget && !ctx.targetWasBehindBlockingModal) {
     return CART_MUTATION_SETTLE_SCHEDULE_MS;
+  }
+  if (ctx.checkoutTransitionIntent && !editableTarget && !ctx.targetWasBehindBlockingModal) {
+    return CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS;
   }
   return CLICK_VERIFY_SETTLE_SCHEDULE_MS;
 }
@@ -192,9 +263,19 @@ export function selectSettleSchedule(
  *
  * Returns a value shaped like PageStateProbe. Any failure returns status:"error".
  * targetBox is interpolated via JSON.stringify — never raw concatenation.
+ *
+ * collectSurfaceActions (default false): additionally harvest the dominant
+ * overlay's clickable action NAMES (bounded: scan ≤40, return ≤8; accessible
+ * names only — `.value` read solely for submit/button/reset inputs, matching
+ * buildSurfaceActionSearchExpr's nameOf precedence). Display-only output for
+ * the endpoint's post_click_state; never compared by the classifier.
  */
-export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): string {
+export function buildPageStateProbeExpr(opts: {
+  targetBox?: ElementBox;
+  collectSurfaceActions?: boolean;
+}): string {
   const targetBox = JSON.stringify(opts.targetBox ?? null);
+  const collectActions = JSON.stringify(opts.collectSurfaceActions === true);
   return `(function(){
     try{
       var OVERLAY_TITLE_MAX=120;
@@ -203,6 +284,7 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
       var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
       var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
       var TARGET_BOX=${targetBox};
+      var COLLECT_ACTIONS=${collectActions};
       function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
       function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
       function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
@@ -218,10 +300,62 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
           return true;
         }catch(e){ return false; }
       }
+      // Accessible name of one overlay action — SAME precedence as
+      // buildSurfaceActionSearchExpr's nameOf (aria-label → aria-labelledby →
+      // labels → img alt → title attr → .value ONLY for submit/button/reset
+      // inputs → innerText/textContent). Clipped to 80 chars.
+      function actionName(el,tag,type){
+        var al=attr(el,'aria-label'); if(txt(al)) return clip(al,80);
+        var lb=attr(el,'aria-labelledby');
+        if(lb){
+          var ids=lb.split(/\\s+/); var parts=[];
+          for(var i=0;i<ids.length;i++){ try{ var ref=document.getElementById(ids[i]); if(ref) parts.push(ref.textContent||''); }catch(e){} }
+          var t=txt(parts.join(' ')); if(t) return clip(t,80);
+        }
+        try{
+          if(el.labels&&el.labels.length){
+            var lp=[]; for(var j=0;j<el.labels.length;j++){ lp.push(el.labels[j].textContent||''); }
+            var lt=txt(lp.join(' ')); if(lt) return clip(lt,80);
+          }
+        }catch(e){}
+        try{ if(el.querySelector){ var img=el.querySelector('img'); if(img){ var a=attr(img,'alt'); if(txt(a)) return clip(a,80); } } }catch(e){}
+        var ti=attr(el,'title'); if(txt(ti)) return clip(ti,80);
+        if(tag==='input'&&(type==='submit'||type==='button'||type==='reset')){
+          try{ if(el.value!=null){ var v=txt(el.value); if(v) return clip(v,80); } }catch(e){}
+        }
+        var it=null; try{ it=(el.innerText!=null?el.innerText:el.textContent); }catch(e){ it=null; }
+        if(txt(it)) return clip(it,80);
+        return '';
+      }
+      // Dominant-overlay clickable action names (COLLECT_ACTIONS only). Bounded:
+      // scan <=40 nodes, return <=8. Names + dismiss flag only — no hrefs, no
+      // boxes, no values. Best-effort: any failure returns [].
+      function overlayActions(container){
+        var out=[];
+        try{
+          var nodes=container.querySelectorAll('a[href],button,[role="button"],input[type="submit"],input[type="button"]');
+          nodes=Array.prototype.slice.call(nodes);
+          var lim=Math.min(nodes.length,40);
+          for(var i=0;i<lim&&out.length<8;i++){
+            var el=nodes[i]; if(!el) continue;
+            if(!isVisibleNode(el)) continue;
+            var tag=(el.tagName||'').toLowerCase();
+            var rawType=attr(el,'type');
+            var type=rawType?String(rawType).toLowerCase():null;
+            if(el.disabled===true||attr(el,'aria-disabled')==='true') continue;
+            var nm=actionName(el,tag,type); if(!nm) continue;
+            var dis=false; try{ dis=isDismissEl(el,nm)===true; }catch(e){ dis=false; }
+            out.push({ name:nm, kind:(tag==='a'?'link':'button'), dismiss:dis });
+          }
+        }catch(e){ return []; }
+        return out;
+      }
       // Page-level active-overlay summary: scan structural overlay containers,
       // classify each with the SHARED overlayKindOf, and reduce to a compact
       // present/blocking/type/title_hash. Prefers blocking > dialog/alertdialog
       // > any, mirroring the snapshot page-map's active-overlay selection.
+      // title (clipped, value-free) and actions (COLLECT_ACTIONS) are DISPLAY
+      // additions for post_click_state; title_hash stays the comparison key.
       function overlaySummary(){
         var present=false, blocking=false, best=null, cnt=0;
         function rank(k){ var r=0; if(k.blocking) r+=1000; if(k.type==='dialog'||k.type==='alertdialog') r+=100; return r; }
@@ -241,7 +375,9 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
           if(!best||rank(k)>rank(best.k)){ best={ k:k, node:node }; }
         }
         var ttl=''; try{ ttl=best?overlayTitle(best.node):''; }catch(e){ ttl=''; }
-        return { present:present, blocking:blocking, overlay_type:best?best.k.type:null, title_hash:ttl?fnv(ttl):null, count:cnt };
+        var res={ present:present, blocking:blocking, overlay_type:best?best.k.type:null, title_hash:ttl?fnv(ttl):null, title:ttl?clip(ttl,120):null, count:cnt };
+        if(COLLECT_ACTIONS&&best){ res.actions=overlayActions(best.node); }
+        return res;
       }
       // Best-effort cart-quantity heuristic. Returns an integer or null — never
       // throws, never blocks verification when a site has no readable counter.
@@ -283,11 +419,14 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
       }
       var url=null; try{ url=document.location.href||null; }catch(e){ url=null; }
       var docTitle=''; try{ docTitle=document.title||''; }catch(e){ docTitle=''; }
+      var readyState=null; try{ var rs=document.readyState; if(rs==='loading'||rs==='interactive'||rs==='complete') readyState=rs; }catch(e){ readyState=null; }
       var bodyText=''; try{ bodyText=(document.body&&document.body.innerText)?String(document.body.innerText):''; }catch(e){ bodyText=''; }
       if(bodyText.length>4000) bodyText=bodyText.slice(0,4000);
       return {
         url: url,
         title_hash: docTitle?fnv(docTitle):null,
+        title: docTitle?clip(docTitle,120):null,
+        ready_state: readyState,
         overlay: overlaySummary(),
         cart_count: cartCount(),
         visible_text_hash: bodyText?fnv(bodyText):null,
@@ -295,7 +434,7 @@ export function buildPageStateProbeExpr(opts: { targetBox?: ElementBox }): strin
         status: "ok"
       };
     }catch(e){
-      return { url:null, title_hash:null, overlay:{ present:false, blocking:false, overlay_type:null, title_hash:null }, cart_count:null, visible_text_hash:null, focused_editable_at_target:false, status:"error" };
+      return { url:null, title_hash:null, title:null, ready_state:null, overlay:{ present:false, blocking:false, overlay_type:null, title_hash:null }, cart_count:null, visible_text_hash:null, focused_editable_at_target:false, status:"error" };
     }
   })()`;
 }

@@ -25,6 +25,7 @@ import {
   charCountBucket,
   clipRuntimeId,
   buildSyntheticSuccessText,
+  buildPostClickStateText,
   buildAntigenSnapshotText,
   deriveNavHintsFromSnapshot,
   classifyNavigationDiscipline,
@@ -3099,6 +3100,56 @@ describe("J. buildAntigenSnapshotText — pure formatter", () => {
       assert.ok(!text.includes(f), `leaked "${f}": ${text}`);
     }
   });
+
+  test("renders Active surfaces + Recommended actions when present (flag-on backend)", () => {
+    const data = {
+      snapshot_id: "snap_surf", element_count: 2,
+      active_surfaces: [
+        {
+          surface_id: "surf_1", surface_type: "dialog", blocking: true, dismissible: true,
+          title: "GLIMMA was added to your shopping bag",
+          actions: [
+            { ref: "ag_2", name: "Go to shopping bag", kind: "link", classification: "primary", action_intent: "navigation" },
+            { ref: "ag_3", name: "Continue shopping", kind: "button", classification: "dismiss", action_intent: "navigation" },
+            { ref: "ag_4", name: "Pay $8.47", kind: "button", classification: "secondary", action_intent: "final_commit", requires_handoff: true },
+          ],
+        },
+      ],
+      recommended_actions: [
+        { ref: "ag_2", name: "Go to shopping bag", surface_id: "surf_1", classification: "primary", reason: "active_surface_primary_action" },
+      ],
+      elements: [
+        {
+          ref: "ag_1", kind: "link", role: "link", name: "Shopping bag, 1 items",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+          likely_blocked_by_overlay: true,
+        },
+        {
+          ref: "ag_2", kind: "link", role: "link", name: "Go to shopping bag",
+          state: { visible: true, enabled: true, clickable: true, typeable: false },
+        },
+      ],
+    };
+    const text = buildAntigenSnapshotText(data, V);
+    assert.ok(text.includes("Active surfaces:"), text);
+    assert.ok(text.includes('- surf_1: dialog (blocking) — "GLIMMA was added to your shopping bag"'), text);
+    assert.ok(text.includes('primary "Go to shopping bag" [ref=ag_2]'), text);
+    assert.ok(text.includes('dismiss "Continue shopping" [ref=ag_3]'), text);
+    assert.ok(text.includes("[requires_handoff]"), text);
+    assert.ok(text.includes("Recommended actions"), text);
+    // Background header annotated; surface member is not.
+    const ag1Line = text.split("\n").find((l) => l.includes("[ref=ag_1]")) ?? "";
+    assert.ok(ag1Line.includes("[likely_blocked_by_overlay]"), ag1Line);
+    const ag2Lines = text.split("\n").filter((l) => l.includes("[ref=ag_2]") && l.startsWith("- "));
+    for (const l of ag2Lines) assert.ok(!l.includes("[likely_blocked_by_overlay]"), l);
+  });
+
+  test("omits Active surfaces / Recommended actions sections entirely when absent (flag off)", () => {
+    const text = buildAntigenSnapshotText(SAMPLE, V);
+    assert.ok(!text.includes("Active surfaces:"), text);
+    assert.ok(!text.includes("Recommended actions"), text);
+    assert.ok(!text.includes("likely_blocked_by_overlay"), text);
+  });
 });
 
 // ─── K. antigen_snapshot adapter tool — adapter-owned, no Playwright fallthrough ─
@@ -4477,5 +4528,313 @@ describe("G. Startup QA-env guard", () => {
     );
     assert.match(stderr, /realism=realistic/, `expected realism=realistic: ${stderr}`);
     adapter.kill("SIGTERM");
+  });
+});
+
+// ─── P. Post-click state realization (browser_click response) ─────────────────
+//
+// The backend's sanitized post_click_state must reach the agent: a click that
+// opens a modal returns the surface (type/title) + names-only actions; a click
+// that navigates returns query-free paths — WITHOUT requiring an extra
+// antigen_snapshot to find out what happened. Names only: refs always come from
+// one fresh antigen_snapshot.
+
+describe("P1. buildPostClickStateText — pure rendering", () => {
+  const modalState = {
+    change: "modal_opened",
+    navigation_or_route_detected: false,
+    url_changed: false,
+    title_changed: false,
+    main_content_changed: true,
+    surface: {
+      overlay_blocking: true,
+      overlay_type: "dialog",
+      title: "Choose how to check out",
+      surface_actions: [
+        { name: "Continue as guest", classification: "primary" },
+        { name: "Log in", classification: "secondary" },
+        { name: "Place order", classification: "secondary", requires_handoff: true },
+        { name: "Close", classification: "dismiss" },
+      ],
+    },
+    recommended_next_step: "refresh_snapshot",
+    next: "refs_require_fresh_snapshot",
+  };
+
+  test("modal: renders surface, names-only actions, handoff flag, decisive next step", () => {
+    const text = buildPostClickStateText(modalState, { intentVerified: true });
+    assert.ok(text.includes("Post-click state: modal_opened"), text);
+    assert.ok(text.includes('Post-click surface: dialog (blocking) — "Choose how to check out"'), text);
+    assert.ok(text.includes('primary "Continue as guest"'), text);
+    assert.ok(text.includes('"Place order" [requires_handoff]'), text);
+    assert.ok(text.includes('dismiss "Close"'), text);
+    assert.ok(text.includes("refs require one antigen_snapshot"), text);
+    assert.ok(text.includes("do NOT re-click or wait"), text);
+    assert.ok(!text.includes("ref="), `no refs in post-click block: ${text}`);
+  });
+
+  test("navigation: renders sanitized path transition + titles + ready_state", () => {
+    const text = buildPostClickStateText({
+      change: "navigation",
+      navigation_or_route_detected: true,
+      url_changed: true,
+      old_url_path: "/us/en/cart/",
+      new_url_path: "/us/en/checkout",
+      title_changed: true,
+      old_title: "Shopping bag",
+      new_title: "Checkout",
+      document_ready_state: "complete",
+      main_content_changed: true,
+      recommended_next_step: "refresh_snapshot",
+      next: "refs_require_fresh_snapshot",
+    });
+    assert.ok(text.includes("Post-click state: navigation"), text);
+    assert.ok(text.includes("URL path: /us/en/cart/ → /us/en/checkout (ready_state=complete)"), text);
+    assert.ok(text.includes('Title: "Shopping bag" → "Checkout"'), text);
+    assert.ok(text.includes("take one antigen_snapshot"), text);
+  });
+
+  test("still_loading: tells the agent to wait briefly then snapshot once", () => {
+    const text = buildPostClickStateText({
+      change: "still_loading",
+      navigation_or_route_detected: true,
+      url_changed: true,
+      title_changed: false,
+      main_content_changed: false,
+      document_ready_state: "interactive",
+      recommended_next_step: "wait_for_load_then_snapshot",
+      next: "refs_require_fresh_snapshot",
+    });
+    assert.ok(text.includes("Post-click state: still_loading"), text);
+    assert.ok(text.includes("wait briefly"), text);
+  });
+
+  test("none: explicit no-effect message, never a silent success", () => {
+    const text = buildPostClickStateText({
+      change: "none",
+      navigation_or_route_detected: false,
+      url_changed: false,
+      title_changed: false,
+      main_content_changed: false,
+      recommended_next_step: "try_alternate_ref",
+      next: "refs_require_fresh_snapshot",
+    });
+    assert.ok(text.includes("Post-click state: none"), text);
+    assert.ok(text.includes("do not blind-retry"), text);
+  });
+
+  test("absorbed click: unverified + persistent blocking surface warns explicitly", () => {
+    const text = buildPostClickStateText(
+      { ...modalState, change: "none" },
+      { intentVerified: false },
+    );
+    assert.ok(text.includes("likely absorbed"), text);
+  });
+
+  test("absent/malformed state renders nothing", () => {
+    assert.equal(buildPostClickStateText(undefined), "");
+    assert.equal(buildPostClickStateText(null), "");
+    assert.equal(buildPostClickStateText("nope"), "");
+    assert.equal(buildPostClickStateText({}), "");
+  });
+});
+
+describe("P2. adapter browser_click — post-click state passthrough", () => {
+  const guestModalClickBody = {
+    ok: true,
+    data: {
+      mode: "realistic_pointer_click",
+      pointer_path_point_count: 42,
+      pointer_start_source: "session",
+      pointer_state_persisted: true,
+      click_dispatched: true,
+      intent_verified: true,
+      verification_signal: "modal_opened",
+      outcome: "CLICK_VERIFIED",
+      recommended_next_step: "none",
+      verify_ms: 480,
+      settle_polls: 3,
+      post_click_state: {
+        change: "modal_opened",
+        navigation_or_route_detected: false,
+        url_changed: false,
+        title_changed: false,
+        main_content_changed: true,
+        surface: {
+          overlay_blocking: true,
+          overlay_type: "dialog",
+          title: "Choose how to check out",
+          surface_actions: [
+            { name: "Continue as guest", classification: "secondary" },
+            { name: "Log in", classification: "secondary" },
+            { name: "Close", classification: "dismiss" },
+          ],
+        },
+        recommended_next_step: "refresh_snapshot",
+        next: "refs_require_fresh_snapshot",
+      },
+    },
+  };
+
+  test("click that opens the guest modal: agent text carries verification + surface info (no extra snapshot needed)", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({ browserClickBody: guestModalClickBody });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 71, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Continue to checkout", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 71);
+    assert.ok(resp, `expected response for id=71, stdout was: ${stdoutBuf}`);
+    assert.ok(!resp.result?.isError, `expected success, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    // Verification scalars now agent-visible.
+    assert.ok(text.includes("intent_verified=true"), text);
+    assert.ok(text.includes("verification_signal=modal_opened"), text);
+    assert.ok(text.includes("outcome=CLICK_VERIFIED"), text);
+    assert.ok(text.includes("verify_ms=480"), text);
+    assert.ok(text.includes("settle_polls=3"), text);
+    // Post-click surface realization: modal + action names, no snapshot required.
+    assert.ok(text.includes("Post-click state: modal_opened"), text);
+    assert.ok(text.includes('"Choose how to check out"'), text);
+    assert.ok(text.includes('"Continue as guest"'), text);
+    // Names only — no refs/boxes/hrefs/query content anywhere in the output.
+    const postClickBlock = text.slice(text.indexOf("Post-click state:"));
+    assert.ok(!postClickBlock.includes("ref="), `no refs in post-click block: ${postClickBlock}`);
+    const FORBIDDEN = ["user_data_dir", "pass_id", "secret_ref", '"box"', "cdp_url", "post_click_internal", "title_hash"];
+    for (const f of FORBIDDEN) {
+      assert.ok(!stdoutBuf.includes(f), `forbidden internal "${f}" leaked to stdout`);
+    }
+  });
+
+  test("navigation click: agent text carries the sanitized path transition", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({
+      browserClickBody: {
+        ok: true,
+        data: {
+          mode: "realistic_pointer_click",
+          pointer_state_persisted: true,
+          click_dispatched: true,
+          intent_verified: true,
+          verification_signal: "url_changed",
+          outcome: "CLICK_VERIFIED",
+          recommended_next_step: "none",
+          verify_ms: 130,
+          settle_polls: 1,
+          post_click_state: {
+            change: "navigation",
+            navigation_or_route_detected: true,
+            url_changed: true,
+            old_url_path: "/us/en/cart/",
+            new_url_path: "/us/en/checkout",
+            title_changed: true,
+            old_title: "Shopping bag",
+            new_title: "Checkout",
+            document_ready_state: "complete",
+            main_content_changed: true,
+            recommended_next_step: "refresh_snapshot",
+            next: "refs_require_fresh_snapshot",
+          },
+        },
+      },
+    });
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 72, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "Shopping bag", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 72);
+    assert.ok(resp, `expected response for id=72, stdout was: ${stdoutBuf}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("Post-click state: navigation"), text);
+    assert.ok(text.includes("URL path: /us/en/cart/ → /us/en/checkout (ready_state=complete)"), text);
+    assert.ok(text.includes('Title: "Shopping bag" → "Checkout"'), text);
+    assert.ok(!stdoutBuf.includes("?session"), "query content must never appear");
+  });
+
+  test("legacy response without verification fields: today's text format unchanged", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer(); // default body: pointer metadata only
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 73, method: "tools/call",
+      params: { name: "browser_click", arguments: { element: "desk lamp", ref: "ag_1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 73);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("path=realistic_success"), text);
+    assert.ok(text.includes("pointer_path_point_count=42"), text);
+    assert.ok(!text.includes("Post-click state:"), `no post-click block without backend fields: ${text}`);
+    assert.ok(!text.includes("intent_verified"), `no verification keys without backend fields: ${text}`);
   });
 });

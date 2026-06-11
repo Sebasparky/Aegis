@@ -1,6 +1,47 @@
 import type { PaymentCardFillRequest, PaymentCardField } from "@aegis/types";
 import { fillOppwaIframeField } from "./paymentIframeFill.js";
 import { executeProtectedRealisticFill } from "./protectedRealisticFill.js";
+import { resolveAntigenRefForSession, type AntigenSnapshotElementRecord } from "./antigenSnapshotStore.js";
+
+/** An opaque Antigen snapshot ref token: `ag_` followed by one or more digits. */
+const ANTIGEN_REF_PATTERN = /^ag_\d+$/;
+
+/** True iff the string is a well-formed opaque `ag_*` snapshot ref (not a selector). */
+export function isAntigenRef(ref: string): boolean {
+  return ANTIGEN_REF_PATTERN.test(ref);
+}
+
+/**
+ * Build the in-page `selectorExpr` for a payment field from its resolved Antigen
+ * snapshot record. The snapshot already located the element robustly, so we reuse
+ * its stored identity instead of re-guessing with fragile selector heuristics:
+ *
+ *  - Prefer `document.getElementById(id)` when the snapshot captured a DOM id —
+ *    scroll-independent and exact.
+ *  - Otherwise fall back to `document.elementFromPoint(cx, cy)` at the box center
+ *    (the same box-center strategy the realistic click/type path uses), then walk
+ *    to the nearest fillable control so a hit on a wrapper still resolves.
+ *
+ * The id/box/coordinates live ONLY inside this CDP-evaluated expression — they are
+ * never returned to the agent, logged, or placed in any response/trace/error.
+ */
+export function buildRefSelectorExpr(record: AntigenSnapshotElementRecord): string {
+  const cx = record.box.x + record.box.width / 2;
+  const cy = record.box.y + record.box.height / 2;
+  const byIdExpr = record.id ? `document.getElementById(${JSON.stringify(record.id)})` : "null";
+  return `(function() {
+    var byId = ${byIdExpr};
+    if (byId) return byId;
+    var el = document.elementFromPoint(${cx}, ${cy});
+    if (el && el.tagName !== 'INPUT' && el.tagName !== 'SELECT' && el.tagName !== 'TEXTAREA') {
+      var up = el.closest && el.closest('input,select,textarea');
+      if (up) return up;
+      var down = el.querySelector && el.querySelector('input,select,textarea');
+      if (down) return down;
+    }
+    return el;
+  })()`;
+}
 
 // Purchase-control selector patterns — any selector matching these must be rejected at creation time.
 // This is a defence-in-depth validation; the runtime contains no click path.
@@ -199,10 +240,32 @@ export async function executePaymentCardFillViaCDP(
       return { success: false, error: "No page targets found via CDP." };
     }
 
-    const { selector_hint, label, placeholder, input_type } = fillRequest.element_hint ?? {};
+    const { antigen_ref, selector_hint, label, placeholder, input_type } = fillRequest.element_hint ?? {};
 
     let selectorExpr: string;
-    if (selector_hint) {
+    if (antigen_ref) {
+      // Highest-priority locator for top-level / parent-page payment fields (e.g.
+      // IKEA's expiry MM/YY and cardholder inputs). The agent passes only the opaque
+      // ag_* ref it received from antigen_snapshot; Aegis resolves it server-side to
+      // the snapshot's stored element and derives an id/box-based selector. We FAIL
+      // CLOSED on any resolution problem (stale/expired/wrong-session/missing) and ask
+      // for a fresh snapshot — we do NOT fall back to fragile selectors, and we never
+      // surface the id/box/coordinates to the agent.
+      if (!isAntigenRef(antigen_ref)) {
+        return { success: false, error: "INVALID_ANTIGEN_REF" };
+      }
+      const resolution = resolveAntigenRefForSession(
+        fillRequest.browser_session_id ?? "",
+        fillRequest.user_id,
+        antigen_ref,
+      );
+      if (resolution.status !== "ok") {
+        // no_snapshot | expired | ref_not_found → the snapshot the agent referenced is
+        // no longer valid for this session. Re-snapshot and retry; no fill is attempted.
+        return { success: false, error: "ANTIGEN_REF_STALE" };
+      }
+      selectorExpr = buildRefSelectorExpr(resolution.element);
+    } else if (selector_hint) {
       selectorExpr = `document.querySelector(${JSON.stringify(selector_hint)})`;
     } else if (label) {
       selectorExpr = `(function() {

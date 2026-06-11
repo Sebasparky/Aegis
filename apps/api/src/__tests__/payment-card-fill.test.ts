@@ -56,6 +56,7 @@ vi.mock("../runtime/paymentCardFill.js", () => ({
       ? { valid: false, reason: `Selector "${sel}" targets a prohibited element.` }
       : { valid: true };
   }),
+  isAntigenRef: vi.fn().mockImplementation((ref: string) => /^ag_\d+$/.test(ref)),
 }));
 
 // Stubs for transitive imports in agentApiRoutes
@@ -326,6 +327,36 @@ describe("POST /api/agent/v1/payment-card-fills — validation", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().ok).toBe(true);
+  });
+
+  it("rejects a malformed antigen_ref (not an ag_<n> token)", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const res = await agentPost("/api/agent/v1/payment-card-fills", {
+      domain: DOMAIN,
+      field: "cardholder_name",
+      page_url: `https://${DOMAIN}/pay`,
+      reason: "fill cardholder",
+      element_hint: { antigen_ref: "input[name=card]" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_ANTIGEN_REF");
+  });
+
+  it("accepts and persists a well-formed antigen_ref on the fill request", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const res = await agentPost("/api/agent/v1/payment-card-fills", {
+      domain: DOMAIN,
+      field: "cardholder_name",
+      page_url: `https://${DOMAIN}/pay`,
+      reason: "fill cardholder",
+      element_hint: { antigen_ref: "ag_12" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    const stored = paymentCardFillRequests.get(res.json().data.fill_request_id);
+    expect(stored?.element_hint?.antigen_ref).toBe("ag_12");
   });
 
   it("returns 404 for nonexistent payment_method_id", async () => {

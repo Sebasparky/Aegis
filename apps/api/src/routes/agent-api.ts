@@ -87,7 +87,7 @@ import {
 } from "../runtime/antigenSurfaceResolution.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
-import { executePaymentCardFillViaCDP, validateCardFillSelector } from "../runtime/paymentCardFill.js";
+import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef } from "../runtime/paymentCardFill.js";
 import { captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
 import {
   registerProtectedIframeRedaction,
@@ -5547,6 +5547,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           placeholder?: string;
           input_type?: string;
           selector_hint?: string;
+          antigen_ref?: string;
         };
         reason?: string;
         browser_session_id?: string;
@@ -5587,6 +5588,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         if (!selectorCheck.valid) {
           return sendError(reply, 400, "DANGEROUS_SELECTOR", selectorCheck.reason ?? "Selector targets a prohibited element.");
         }
+      }
+
+      // Validate antigen_ref if provided — it must be an opaque ag_* snapshot token,
+      // never a raw selector. Resolution to a concrete element happens server-side at
+      // execution time against the session's active snapshot.
+      if (body.element_hint?.antigen_ref !== undefined && !isAntigenRef(body.element_hint.antigen_ref)) {
+        return sendError(
+          reply, 400, "INVALID_ANTIGEN_REF",
+          "antigen_ref must be an opaque Antigen snapshot ref of the form 'ag_<n>' (from antigen_snapshot). It is not a CSS selector.",
+        );
       }
 
       // Validate browser_session_id / external_cdp_url mutual exclusion
@@ -6015,9 +6026,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       if (!fillResult.success) {
         const rawMsg = fillResult.error ?? "CDP fill failed";
-        const hint = rawMsg.toLowerCase().includes("element not found") || rawMsg.toLowerCase().includes("not found")
-          ? `${rawMsg}. Verify the browser_session_id in the fill request targets the runtime page that has the checkout form open.`
-          : rawMsg;
+        let hint = rawMsg;
+        if (rawMsg === "ANTIGEN_REF_STALE") {
+          hint =
+            "The antigen_ref no longer resolves for this session (the snapshot expired, the page changed, or the ref belongs to a different session). " +
+            "Take a fresh antigen_snapshot of the current payment page and retry the fill with the new ref.";
+        } else if (rawMsg === "INVALID_ANTIGEN_REF") {
+          hint = "antigen_ref must be an opaque 'ag_<n>' token from antigen_snapshot, not a selector.";
+        } else if (rawMsg.toLowerCase().includes("element not found") || rawMsg.toLowerCase().includes("not found")) {
+          hint = `${rawMsg}. Verify the browser_session_id in the fill request targets the runtime page that has the checkout form open.`;
+        }
         return sendError(reply, 500, "CDP_FILL_FAILED", hint);
       }
 

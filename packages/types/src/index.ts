@@ -2491,6 +2491,15 @@ export interface PaymentCardFillElementHint {
   input_type?: string;
   /** CSS selector targeting only the input field. Must not target button, submit, form, or a[href] elements. Validated at creation time. */
   selector_hint?: string;
+  /**
+   * Opaque Antigen snapshot ref (`ag_*`) for a top-level / parent-page payment
+   * field (e.g. expiry MM/YY, cardholder). Resolved server-side to the snapshot's
+   * stored element — the agent never sees the underlying id, box, coordinates, or
+   * selector. Highest-priority locator when present. Validated as an `ag_<n>` token
+   * only; it is NOT a CSS selector. Cross-origin iframe fields (card number / CVV)
+   * use the OPPWA iframe path and ignore this field.
+   */
+  antigen_ref?: string;
 }
 
 /** One user approval covering all requested card field fills for a single domain/payment-method combination. */

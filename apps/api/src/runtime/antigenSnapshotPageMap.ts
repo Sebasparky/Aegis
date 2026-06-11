@@ -34,7 +34,10 @@ import {
   OVERLAY_TYPE_VALUES,
   type ClickVerification,
   type OverlayProbeAction,
+  type FillProbeAction,
+  type PageStateProbe,
 } from "./antigenClickVerification.js";
+import type { ProtectedIframeFieldKind } from "./protectedIframeRedaction.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -1199,6 +1202,291 @@ export function buildPostClickState(
     if (opts.includeActions && Array.isArray(overlay.actions) && overlay.actions.length > 0) {
       const actions = buildPostClickSurfaceActions(overlay.actions, internal.after_url);
       if (actions.length > 0) surface.surface_actions = actions;
+    }
+    state.surface = surface;
+  }
+  return state;
+}
+
+// ─── Post-Fill State v1 (ANTIGEN_FILL_STATE, default-off) ────────────────────
+//
+// Post-fill REALIZATION summary, the protected-fill analogue of
+// post_click_state: after a profile/payment fill executes, the endpoint maps a
+// single after-probe (plus server-side fill truth and the iframe redaction
+// registry) into one compact object so the agent knows — in the fill response
+// itself — whether the fill landed, validation errors appeared, the next
+// "Continue" is enabled, masking/redaction is in order, and exactly why one
+// fresh antigen_snapshot is still needed. This removes the post-fill
+// re-snapshot / scroll-hunt / redaction-re-verification loop.
+//
+// SAFETY: names-only and allowlist-only, mirroring PostClickState. No refs
+// (refs come ONLY from antigen_snapshot — the constant `next` marker says so),
+// no selectors, no geometry, no field values (the probe's fill-state section
+// never reads `.value`; filled-state is data-antigen-filled marker COUNTS).
+// `raw_values_revealed_to_agent: false` is a TypeScript literal. Probe failure
+// degrades to outcome "unknown" and NEVER affects fill success reporting.
+
+export type PostFillOutcome =
+  | "ready_for_next_action" // ≥1 enabled, non-handoff next action; no validation errors
+  | "handoff_required_next" // only enabled candidates are final/irreversible (handoff tools)
+  | "validation_errors_present"
+  | "fill_incomplete" // failed_count > 0 (server-side truth, probe-independent)
+  | "no_next_action_visible" // fills ok but no enabled candidate found (scroll IN the snapshot)
+  | "unknown"; // probe unreadable — never affects fill success reporting
+
+export const POST_FILL_OUTCOMES: ReadonlySet<PostFillOutcome> = new Set<PostFillOutcome>([
+  "ready_for_next_action",
+  "handoff_required_next",
+  "validation_errors_present",
+  "fill_incomplete",
+  "no_next_action_visible",
+  "unknown",
+]);
+
+export type PostFillRecommendedNextStep =
+  | "snapshot_then_click_named_action"
+  | "review_validation_errors"
+  | "refresh_snapshot"
+  | "handoff_required";
+
+export interface PostFillAction {
+  name: string; // value-free accessible name, ≤80
+  classification: SurfaceActionClassification;
+  /** Present (true) when the control is disabled — a disabled action is never "primary". */
+  disabled?: true;
+  /** Final / irreversible / uncertain intent — must go through handoff tools; never "primary". */
+  requires_handoff?: true;
+}
+
+export interface PostFillMaskingSummary {
+  /** [data-antigen-filled] marker count (top document). Present when the probe was readable. */
+  dom_filled_marker_count?: number;
+  /** [data-antigen-masked] marker count (top document). Present when the probe was readable. */
+  visual_mask_marker_count?: number;
+  /** Registry-derived (server-side, no CDP): cross-origin iframe field kinds registered for screenshot redaction. */
+  iframe_redaction_fields?: ProtectedIframeFieldKind[];
+  /** Fail-closed report: the just-filled iframe field kind is MISSING from the registry. Never silent. */
+  iframe_redaction_mismatch?: true;
+}
+
+export interface PostFillState {
+  /** The one-glance realization signal. */
+  outcome: PostFillOutcome;
+  /** Server-side fill truth (from the fill entries) — probe-independent. */
+  filled_count: number;
+  failed_count: number;
+  /** Visible aria-invalid + non-empty alert regions, capped ≤99. Omitted when outcome is "unknown". */
+  validation_error_count?: number;
+  /** Names-only candidate next actions near the filled form (≤8, deduped). */
+  next_action_names?: PostFillAction[];
+  /** Present when an overlay is active after the fill. */
+  surface?: PostClickSurface;
+  masking: PostFillMaskingSummary;
+  /** Server-measured probe duration, bounded. */
+  probe_ms?: number;
+  /** Literal false — protected values are never returned to the agent. */
+  raw_values_revealed_to_agent: false;
+  recommended_next_step: PostFillRecommendedNextStep;
+  /** Constant marker: clickable refs come only from antigen_snapshot. */
+  next: "refs_require_fresh_snapshot";
+}
+
+const POST_FILL_MAX_ACTIONS = 8;
+const POST_FILL_VALIDATION_COUNT_CAP = 99;
+const POST_FILL_PROBE_MS_CAP = 600_000;
+
+/** Names-only next-action classification for post_fill_state. Mirrors
+ * buildPostClickSurfaceActions (dedupe by normalizeName, ≤8 cap, dismiss via
+ * page-side flag or dismiss-name pattern, requires_handoff via
+ * classifyActionIntent + SURFACE_LOW_RISK_INTENTS, handoff never "primary")
+ * with one fill-specific addition: actions carry a `disabled` flag, and a
+ * disabled action is never "primary" — in a fill response "primary" reads as
+ * the suggested next click, and a still-disabled "Continue" must be reported,
+ * not suggested. */
+function buildPostFillActions(
+  probeActions: FillProbeAction[],
+  url: string | null | undefined,
+): PostFillAction[] {
+  const seen = new Set<string>();
+  const cleaned = probeActions
+    .map((a) => ({ ...a, name: clip(a.name, 80) ?? "" }))
+    .filter((a) => {
+      if (!a.name) return false;
+      const key = normalizeName(a.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, POST_FILL_MAX_ACTIONS);
+
+  const isDismiss = (a: FillProbeAction): boolean => {
+    if (a.dismiss) return true;
+    const n = normalizeName(a.name);
+    return !!n && (DISMISS_NAME.test(n) || SURFACE_DISMISS_EXTRA.test(n));
+  };
+  const classified = cleaned.map((a) => {
+    const cls = classifyActionIntent({
+      action: "click",
+      text: a.name,
+      normalized_text: normalizeName(a.name),
+      kind: a.kind,
+      url: url ?? undefined,
+    });
+    const requiresHandoff =
+      cls.reversibility !== "reversible" || !SURFACE_LOW_RISK_INTENTS.has(cls.action_intent);
+    return { ...a, dismissAction: isDismiss(a), requiresHandoff };
+  });
+
+  // Primary candidacy: enabled, non-dismiss, non-handoff only.
+  const candidates = classified.filter(
+    (a) => !a.dismissAction && !a.requiresHandoff && a.disabled !== true,
+  );
+  const cta = candidates.filter((a) => isPrimaryActionName(normalizeName(a.name)));
+  const primaryName =
+    candidates.length === 1
+      ? candidates[0].name
+      : cta.length === 1
+        ? cta[0].name
+        : undefined;
+
+  return classified.map((a) => {
+    const action: PostFillAction = {
+      name: a.name,
+      classification: a.dismissAction
+        ? "dismiss"
+        : a.name === primaryName
+          ? "primary"
+          : "secondary",
+    };
+    if (a.disabled === true) action.disabled = true;
+    if (a.requiresHandoff) action.requires_handoff = true;
+    return action;
+  });
+}
+
+export interface BuildPostFillStateInput {
+  /** The after-fill probe (collectFillState). Absent/error → outcome "unknown". */
+  probe?: PageStateProbe;
+  probe_ms?: number;
+  /** Server-side fill truth from the fill entries / fill result. */
+  filled_count: number;
+  failed_count: number;
+  /** Registry-derived iframe redaction kinds for the browser session (payment path). */
+  iframe_redaction_fields?: ProtectedIframeFieldKind[];
+  /** The iframe field kind the fill just registered — mismatch check against the registry list. */
+  expected_iframe_field?: ProtectedIframeFieldKind;
+  /** Live page URL (internal input for intent classification only — never emitted). */
+  pageUrl?: string | null;
+}
+
+/**
+ * Maps the after-fill probe + server-side fill truth into the sanitized,
+ * agent-facing post_fill_state. Pure and deterministic — no DOM, no CDP, no env
+ * reads. `next_action_names` (the fill-state collection) is always included —
+ * it is the point of the feature; opts.includeActions gates only the
+ * overlay-collected `surface.surface_actions` (the caller sets it from
+ * isActiveSurfacesEnabled(), matching buildPostClickState). Explicit-field
+ * allowlist: the probe object is never spread.
+ */
+export function buildPostFillState(
+  input: BuildPostFillStateInput,
+  opts: { includeActions: boolean },
+): PostFillState {
+  const filledCount = Math.max(0, Math.floor(input.filled_count));
+  const failedCount = Math.max(0, Math.floor(input.failed_count));
+
+  const masking: PostFillMaskingSummary = {};
+  if (Array.isArray(input.iframe_redaction_fields) && input.iframe_redaction_fields.length > 0) {
+    masking.iframe_redaction_fields = [...input.iframe_redaction_fields];
+  }
+  if (
+    input.expected_iframe_field &&
+    !(input.iframe_redaction_fields ?? []).includes(input.expected_iframe_field)
+  ) {
+    masking.iframe_redaction_mismatch = true;
+  }
+
+  const probeOk = input.probe?.status === "ok" && !!input.probe.fill_state;
+  const fillProbe = probeOk ? input.probe!.fill_state! : undefined;
+
+  const base = {
+    filled_count: filledCount,
+    failed_count: failedCount,
+    masking,
+    raw_values_revealed_to_agent: false as const,
+    next: "refs_require_fresh_snapshot" as const,
+    ...(typeof input.probe_ms === "number" && input.probe_ms >= 0
+      ? { probe_ms: Math.min(Math.round(input.probe_ms), POST_FILL_PROBE_MS_CAP) }
+      : {}),
+  };
+
+  // Probe absent/unreadable: fill truth and registry state still reported; the
+  // page-level outcome is honestly "unknown" (never falsified, never blocking).
+  if (!fillProbe) {
+    return {
+      outcome: "unknown",
+      ...base,
+      recommended_next_step: "refresh_snapshot",
+    };
+  }
+
+  masking.dom_filled_marker_count = Math.max(0, Math.floor(fillProbe.filled_marker_count));
+  masking.visual_mask_marker_count = Math.max(0, Math.floor(fillProbe.masked_marker_count));
+
+  const validationCount = Math.min(
+    Math.max(0, Math.floor(fillProbe.invalid_count)) + Math.max(0, Math.floor(fillProbe.alert_count)),
+    POST_FILL_VALIDATION_COUNT_CAP,
+  );
+
+  const actions = buildPostFillActions(
+    Array.isArray(fillProbe.form_actions) ? fillProbe.form_actions : [],
+    input.pageUrl,
+  );
+
+  const enabledNonDismiss = actions.filter(
+    (a) => a.classification !== "dismiss" && a.disabled !== true,
+  );
+  const enabledClickable = enabledNonDismiss.filter((a) => a.requires_handoff !== true);
+  const enabledHandoffOnly =
+    enabledNonDismiss.length > 0 && enabledClickable.length === 0;
+
+  let outcome: PostFillOutcome;
+  if (failedCount > 0) outcome = "fill_incomplete";
+  else if (validationCount > 0) outcome = "validation_errors_present";
+  else if (enabledClickable.length > 0) outcome = "ready_for_next_action";
+  else if (enabledHandoffOnly) outcome = "handoff_required_next";
+  else outcome = "no_next_action_visible";
+
+  const recommended: PostFillRecommendedNextStep =
+    outcome === "ready_for_next_action"
+      ? "snapshot_then_click_named_action"
+      : outcome === "validation_errors_present"
+        ? "review_validation_errors"
+        : outcome === "handoff_required_next"
+          ? "handoff_required"
+          : "refresh_snapshot";
+
+  const state: PostFillState = {
+    outcome,
+    ...base,
+    validation_error_count: validationCount,
+    recommended_next_step: recommended,
+  };
+  if (actions.length > 0) state.next_action_names = actions;
+
+  const overlay = input.probe!.overlay;
+  const overlayTypeKnown =
+    !!overlay?.present && !!overlay.overlay_type && OVERLAY_TYPE_VALUES.has(overlay.overlay_type);
+  if (overlay && overlayTypeKnown) {
+    const surface: PostClickSurface = {
+      overlay_blocking: overlay.blocking === true,
+      overlay_type: overlay.overlay_type as AntigenOverlayType,
+    };
+    const title = clip(overlay.title ?? undefined, MESSAGE_MAX);
+    if (title) surface.title = title;
+    if (opts.includeActions && Array.isArray(overlay.actions) && overlay.actions.length > 0) {
+      const surfaceActions = buildPostClickSurfaceActions(overlay.actions, input.pageUrl ?? null);
+      if (surfaceActions.length > 0) surface.surface_actions = surfaceActions;
     }
     state.surface = surface;
   }

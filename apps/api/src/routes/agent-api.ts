@@ -54,7 +54,8 @@ import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
 import { extractAntigenSnapshotBundleViaCDP, type AntigenPageMeta } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
-import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
+import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
+import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
 import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTargetSelection.js";
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
@@ -6039,6 +6040,45 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         return sendError(reply, 500, "CDP_FILL_FAILED", hint);
       }
 
+      // Post-Fill State v1 (ANTIGEN_FILL_STATE, default-off): one short probe of
+      // the TOP document so the agent learns — in this response — whether the
+      // next action is enabled, validation errors appeared, and masking /
+      // iframe-redaction registry state is in order. Fail-closed: a probe
+      // failure degrades to outcome "unknown" and never affects the fill result.
+      // The internal probe is mapped ONLY through buildPostFillState (explicit
+      // allowlist) — never spread into the response.
+      let postFillState: ReturnType<typeof buildPostFillState> | undefined;
+      if (isFillStateEnabled()) {
+        const probeCdpUrl = cdpUrlOverride ?? process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+        if (probeCdpUrl) {
+          const probeResult = await runPostFillProbe({
+            cdpUrl: probeCdpUrl,
+            domain: fillRequest.domain,
+          });
+          const iframeFields = fillRequest.browser_session_id
+            ? getProtectedIframeRedactionFields(fillRequest.browser_session_id)
+            : undefined;
+          postFillState = buildPostFillState(
+            {
+              probe: probeResult?.probe,
+              probe_ms: probeResult?.probe_ms,
+              filled_count: 1,
+              failed_count: 0,
+              iframe_redaction_fields: iframeFields,
+              // Mismatch check mirrors the registration condition above — only
+              // when the fill actually went through a session-tracked iframe.
+              ...(fillResult.iframeProvider === "oppwa" &&
+              fillRequest.browser_session_id &&
+              fillResult.iframeFieldKind
+                ? { expected_iframe_field: fillResult.iframeFieldKind }
+                : {}),
+              pageUrl: probeResult?.probe?.url ?? null,
+            },
+            { includeActions: isActiveSurfacesEnabled() },
+          );
+        }
+      }
+
       // Response NEVER includes resolvedValue, payment_method_id, card_number_ref, cvv_ref
       return reply.send({
         ok: true,
@@ -6060,6 +6100,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             iframe_origin: fillResult.iframeOrigin,
             iframe_path: fillResult.iframePath,
           } : {}),
+          // Sanitized post-fill realization summary (ANTIGEN_FILL_STATE only).
+          ...(postFillState ? { post_fill_state: postFillState } : {}),
         },
       });
     },
@@ -6679,6 +6721,32 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       profileFieldFillRequests.set(fillRequestId, fillRequest);
       schedulePersist();
 
+      // Post-Fill State v1 (ANTIGEN_FILL_STATE, default-off): one short probe of
+      // the just-filled page so the agent learns — in this response — whether
+      // validation errors appeared and the next "Continue" is enabled, instead
+      // of re-snapshotting and scroll-hunting. Fail-closed: a probe failure
+      // degrades to outcome "unknown" and never affects the fill result. The
+      // internal probe is mapped ONLY through buildPostFillState (explicit
+      // allowlist) — never spread into the response.
+      let postFillState: ReturnType<typeof buildPostFillState> | undefined;
+      if (isFillStateEnabled() && cdpUrl) {
+        const probeResult = await runPostFillProbe({
+          cdpUrl,
+          domain: fillRequest.domain,
+          preferredTargetUrl: preferredTargetUrlProfile,
+        });
+        postFillState = buildPostFillState(
+          {
+            probe: probeResult?.probe,
+            probe_ms: probeResult?.probe_ms,
+            filled_count: filledCount,
+            failed_count: entries.length - filledCount,
+            pageUrl: probeResult?.probe?.url ?? null,
+          },
+          { includeActions: isActiveSurfacesEnabled() },
+        );
+      }
+
       return reply.send({
         ok: true,
         data: {
@@ -6689,6 +6757,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_profile_value_revealed_to_agent: false,
           raw_profile_values_revealed_to_agent: false,
           note: "Antigen injected profile field values directly via CDP. Raw values were never returned to the agent.",
+          // Sanitized post-fill realization summary (ANTIGEN_FILL_STATE only).
+          ...(postFillState ? { post_fill_state: postFillState } : {}),
         },
       });
     },

@@ -31,6 +31,16 @@
 // values, or secrets. The feature is gated behind ANTIGEN_CLICK_VERIFY
 // (default-off): when off, the runtime never builds a probe and the endpoint
 // response is byte-identical to today.
+//
+// FILL-STATE ADDITION (collectFillState, for post_fill_state / ANTIGEN_FILL_STATE):
+// the probe can additionally report COUNTS-ONLY validation/marker state plus
+// form-action NAMES with disabled flags. HARD RULE: the fill-state section
+// never reads `.value` of any input/select/textarea — filled-state comes from
+// `data-antigen-filled` marker COUNTS (protected fields are DOM-masked and read
+// back '' by design, so a value read would be both a leak vector and wrong).
+// The only `.value` read in this module remains the established
+// submit/button/reset caption branch inside actionName(). Alert-region text is
+// tested for non-emptiness page-side and never returned.
 
 import type { ElementBox } from "./nativePointerRuntime.js";
 import type { AntigenOverlayType } from "./antigenSnapshotRuntime.js";
@@ -50,6 +60,36 @@ export interface OverlayProbeAction {
   name: string; // accessible name, clipped page-side (≤80)
   kind: "button" | "link";
   dismiss: boolean;
+}
+
+/** One candidate next-action near a protected fill — DISPLAY ONLY (names +
+ * disabled flag, no geometry/refs/hrefs/values). Collected only when the probe
+ * is built with collectFillState; never read by the classifier. Unlike
+ * overlayActions, disabled elements are INCLUDED — a still-disabled "Continue"
+ * is exactly the signal post_fill_state must report. */
+export interface FillProbeAction {
+  name: string; // accessible name, clipped page-side (≤80)
+  kind: "button" | "link";
+  disabled: boolean; // el.disabled === true || aria-disabled === "true"
+  dismiss: boolean;
+}
+
+/** Counts-only validation/marker state after a protected fill (collectFillState
+ * only). Everything here is an integer or a names+flags action list — no field
+ * values, no selectors, no geometry. Display/decision input for the endpoint's
+ * post_fill_state; never read by classifyClickVerification. */
+export interface FillStateProbe {
+  /** Visible elements with aria-invalid="true" (attribute only). */
+  invalid_count: number;
+  /** Visible, non-empty [role="alert"] / [aria-live="assertive"] regions. */
+  alert_count: number;
+  /** Visible-page count of [data-antigen-filled="true"] markers (top document). */
+  filled_marker_count: number;
+  /** Visible-page count of [data-antigen-masked="true"] markers (top document). */
+  masked_marker_count: number;
+  /** ≤8 of ≤40 scanned candidate next actions. Scope: the form containing a
+   * filled marker → dominant overlay → document. */
+  form_actions: FillProbeAction[];
 }
 
 /** Compact page-level overlay summary used for before/after comparison. */
@@ -93,6 +133,10 @@ export interface PageStateProbe {
   cart_count: number | null;
   visible_text_hash: string | null;
   focused_editable_at_target: boolean;
+  // Counts-only post-fill validation/marker state — present ONLY when the probe
+  // was built with collectFillState (post_fill_state path). DISPLAY/decision
+  // input for buildPostFillState; never read by classifyClickVerification.
+  fill_state?: FillStateProbe;
   // "error" => the after-probe could not be read => the outcome is UNVERIFIED
   // (an unreadable probe is NOT evidence the click missed, so it is never
   // treated as a no-effect retry trigger).
@@ -231,6 +275,18 @@ export const CART_MUTATION_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 25
 // transition pays zero extra latency.
 export const CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS: readonly number[] = [150, 200, 250, 300, 300, 400];
 
+// Post-fill settle schedule (post_fill_state / ANTIGEN_FILL_STATE). Fills are
+// much cheaper to settle than clicks: input/change/blur handlers fire
+// synchronously during the fill (the protected fill executors already dispatch
+// blur), React commits within a frame, and common validator debounce is
+// 100–150ms. Probe immediately, then re-probe at most twice — early-exiting as
+// soon as the probe is readable AND decision-relevant state appeared
+// (validation errors visible, or ≥1 enabled next action). Worst case ~300ms of
+// waits; the typical fill exits on the first probe. Network-gated revalidation
+// (e.g. zip lookup) is deliberately out of budget — the follow-up
+// antigen_snapshot covers it.
+export const POST_FILL_SETTLE_SCHEDULE_MS: readonly number[] = [120, 180];
+
 /**
  * Pick the adaptive after-click settle schedule. Only cart_mutation and
  * checkout_transition clicks get an extended schedule, and only when they are
@@ -269,13 +325,21 @@ export function selectSettleSchedule(
  * names only — `.value` read solely for submit/button/reset inputs, matching
  * buildSurfaceActionSearchExpr's nameOf precedence). Display-only output for
  * the endpoint's post_click_state; never compared by the classifier.
+ *
+ * collectFillState (default false): additionally read the counts-only
+ * FillStateProbe (validation/marker counts + form-action names with disabled
+ * flags) for the endpoint's post_fill_state. The fill-state section never
+ * reads `.value` of any field — see the LEAK BOUNDARY header. When false, the
+ * returned probe value carries no fill_state key (shape unchanged from today).
  */
 export function buildPageStateProbeExpr(opts: {
   targetBox?: ElementBox;
   collectSurfaceActions?: boolean;
+  collectFillState?: boolean;
 }): string {
   const targetBox = JSON.stringify(opts.targetBox ?? null);
   const collectActions = JSON.stringify(opts.collectSurfaceActions === true);
+  const collectFillState = JSON.stringify(opts.collectFillState === true);
   return `(function(){
     try{
       var OVERLAY_TITLE_MAX=120;
@@ -285,6 +349,7 @@ export function buildPageStateProbeExpr(opts: {
       var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
       var TARGET_BOX=${targetBox};
       var COLLECT_ACTIONS=${collectActions};
+      var COLLECT_FILL_STATE=${collectFillState};
       function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
       function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
       function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
@@ -356,6 +421,10 @@ export function buildPageStateProbeExpr(opts: {
       // > any, mirroring the snapshot page-map's active-overlay selection.
       // title (clipped, value-free) and actions (COLLECT_ACTIONS) are DISPLAY
       // additions for post_click_state; title_hash stays the comparison key.
+      // Side channel: the dominant overlay NODE is stashed in bestOverlayNode
+      // (page-side only, never returned) so the fill-state scope chain can fall
+      // back to it without re-running dominance ranking.
+      var bestOverlayNode=null;
       function overlaySummary(){
         var present=false, blocking=false, best=null, cnt=0;
         function rank(k){ var r=0; if(k.blocking) r+=1000; if(k.type==='dialog'||k.type==='alertdialog') r+=100; return r; }
@@ -375,9 +444,65 @@ export function buildPageStateProbeExpr(opts: {
           if(!best||rank(k)>rank(best.k)){ best={ k:k, node:node }; }
         }
         var ttl=''; try{ ttl=best?overlayTitle(best.node):''; }catch(e){ ttl=''; }
+        bestOverlayNode=best?best.node:null;
         var res={ present:present, blocking:blocking, overlay_type:best?best.k.type:null, title_hash:ttl?fnv(ttl):null, title:ttl?clip(ttl,120):null, count:cnt };
         if(COLLECT_ACTIONS&&best){ res.actions=overlayActions(best.node); }
         return res;
+      }
+      // Counts-only post-fill validation/marker state (COLLECT_FILL_STATE only).
+      // LEAK BOUNDARY: never reads .value of any input/select/textarea —
+      // filled-state comes from data-antigen-filled marker COUNTS (protected
+      // fields are DOM-masked and read back '' by design). Alert-region text is
+      // tested for non-emptiness only and never returned. Best-effort: any
+      // failure returns zeroed counts and an empty action list.
+      function fillState(){
+        try{
+          var inv=0, alc=0, fm=0, mm=0, nodes, i;
+          try{
+            nodes=Array.prototype.slice.call(document.querySelectorAll('[aria-invalid="true"]'));
+            var n1=Math.min(nodes.length,200);
+            for(i=0;i<n1;i++){ if(isVisibleNode(nodes[i])) inv++; }
+          }catch(e){}
+          try{
+            nodes=Array.prototype.slice.call(document.querySelectorAll('[role="alert"],[aria-live="assertive"]'));
+            var n2=Math.min(nodes.length,60);
+            for(i=0;i<n2;i++){
+              var nd=nodes[i]; if(!isVisibleNode(nd)) continue;
+              var at=''; try{ at=txt(nd.textContent); }catch(e){ at=''; }
+              if(at) alc++;
+            }
+          }catch(e){}
+          try{ fm=document.querySelectorAll('[data-antigen-filled="true"]').length; }catch(e){}
+          try{ mm=document.querySelectorAll('[data-antigen-masked="true"]').length; }catch(e){}
+          // Next-action scope chain: the form containing a filled marker (the
+          // form just filled) -> dominant overlay -> document body.
+          var scope=null;
+          try{
+            var marker=document.querySelector('[data-antigen-filled="true"]');
+            if(marker&&marker.closest) scope=marker.closest('form');
+          }catch(e){ scope=null; }
+          if(!scope) scope=bestOverlayNode;
+          if(!scope) scope=document.body||document;
+          var acts=[];
+          try{
+            var cands=Array.prototype.slice.call(scope.querySelectorAll('a[href],button,[role="button"],input[type="submit"],input[type="button"]'));
+            var lim=Math.min(cands.length,40);
+            for(i=0;i<lim&&acts.length<8;i++){
+              var el=cands[i]; if(!el) continue;
+              if(!isVisibleNode(el)) continue;
+              var tag=(el.tagName||'').toLowerCase();
+              var rawType=attr(el,'type');
+              var type=rawType?String(rawType).toLowerCase():null;
+              var nm=actionName(el,tag,type); if(!nm) continue;
+              var dis=(el.disabled===true)||attr(el,'aria-disabled')==='true';
+              var dsm=false; try{ dsm=isDismissEl(el,nm)===true; }catch(e){ dsm=false; }
+              acts.push({ name:nm, kind:(tag==='a'?'link':'button'), disabled:dis===true, dismiss:dsm });
+            }
+          }catch(e){ acts=[]; }
+          return { invalid_count:inv, alert_count:alc, filled_marker_count:fm, masked_marker_count:mm, form_actions:acts };
+        }catch(e){
+          return { invalid_count:0, alert_count:0, filled_marker_count:0, masked_marker_count:0, form_actions:[] };
+        }
       }
       // Best-effort cart-quantity heuristic. Returns an integer or null — never
       // throws, never blocks verification when a site has no readable counter.
@@ -422,17 +547,21 @@ export function buildPageStateProbeExpr(opts: {
       var readyState=null; try{ var rs=document.readyState; if(rs==='loading'||rs==='interactive'||rs==='complete') readyState=rs; }catch(e){ readyState=null; }
       var bodyText=''; try{ bodyText=(document.body&&document.body.innerText)?String(document.body.innerText):''; }catch(e){ bodyText=''; }
       if(bodyText.length>4000) bodyText=bodyText.slice(0,4000);
-      return {
+      // overlaySummary() must run before fillState() so bestOverlayNode is set.
+      var ov=overlaySummary();
+      var probe={
         url: url,
         title_hash: docTitle?fnv(docTitle):null,
         title: docTitle?clip(docTitle,120):null,
         ready_state: readyState,
-        overlay: overlaySummary(),
+        overlay: ov,
         cart_count: cartCount(),
         visible_text_hash: bodyText?fnv(bodyText):null,
         focused_editable_at_target: focusedEditableAtTarget(TARGET_BOX),
         status: "ok"
       };
+      if(COLLECT_FILL_STATE){ probe.fill_state=fillState(); }
+      return probe;
     }catch(e){
       return { url:null, title_hash:null, title:null, ready_state:null, overlay:{ present:false, blocking:false, overlay_type:null, title_hash:null }, cart_count:null, visible_text_hash:null, focused_editable_at_target:false, status:"error" };
     }

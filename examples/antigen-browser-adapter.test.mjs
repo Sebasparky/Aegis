@@ -26,6 +26,7 @@ import {
   clipRuntimeId,
   buildSyntheticSuccessText,
   buildPostClickStateText,
+  buildPostFillStateText,
   buildAntigenSnapshotText,
   deriveNavHintsFromSnapshot,
   classifyNavigationDiscipline,
@@ -4836,5 +4837,164 @@ describe("P2. adapter browser_click — post-click state passthrough", () => {
     assert.ok(text.includes("pointer_path_point_count=42"), text);
     assert.ok(!text.includes("Post-click state:"), `no post-click block without backend fields: ${text}`);
     assert.ok(!text.includes("intent_verified"), `no verification keys without backend fields: ${text}`);
+  });
+});
+
+// ─── P4. buildPostFillStateText — pure rendering (post_fill_state) ────────────
+//
+// The protected-fill analogue of P1: allowlist-only rendering of the backend's
+// sanitized post_fill_state from the profile/payment fill execute responses.
+// Names-only actions with disabled/handoff flags, masking/redaction one-liner,
+// fail-closed iframe-mismatch warning, one decisive next step per outcome —
+// and never a ref, selector, query string, or value.
+
+describe("P4. buildPostFillStateText — pure rendering", () => {
+  const readyState = {
+    outcome: "ready_for_next_action",
+    filled_count: 4,
+    failed_count: 0,
+    validation_error_count: 0,
+    next_action_names: [
+      { name: "Continue to payment", classification: "primary" },
+      { name: "Save and continue later", classification: "secondary", disabled: true },
+      { name: "Place order", classification: "secondary", requires_handoff: true },
+      { name: "Close", classification: "dismiss" },
+    ],
+    masking: {
+      dom_filled_marker_count: 4,
+      visual_mask_marker_count: 4,
+      iframe_redaction_fields: ["card_number", "cvv"],
+    },
+    probe_ms: 142,
+    raw_values_revealed_to_agent: false,
+    recommended_next_step: "snapshot_then_click_named_action",
+    next: "refs_require_fresh_snapshot",
+  };
+
+  test("ready_for_next_action: names the primary, reports masking, forbids scroll-hunt/re-verification", () => {
+    const text = buildPostFillStateText(readyState);
+    assert.ok(text.includes("Post-fill state: ready_for_next_action"), text);
+    assert.ok(text.includes("Fill result: 4 filled, 0 failed; validation_errors=0"), text);
+    assert.ok(text.includes("4 DOM fill markers"), text);
+    assert.ok(text.includes("iframe redaction registered: card_number, cvv"), text);
+    assert.ok(text.includes('primary "Continue to payment"'), text);
+    assert.ok(text.includes('"Save and continue later" [disabled]'), text);
+    assert.ok(text.includes('"Place order" [requires_handoff]'), text);
+    assert.ok(text.includes('click "Continue to payment"'), text);
+    assert.ok(text.includes("do not scroll-hunt"), text);
+    assert.ok(text.includes("refs require one antigen_snapshot"), text);
+    assert.ok(!text.includes("ref="), `no refs in post-fill block: ${text}`);
+  });
+
+  test("validation_errors_present: review guidance, no blind retry", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      outcome: "validation_errors_present",
+      validation_error_count: 2,
+      recommended_next_step: "review_validation_errors",
+    });
+    assert.ok(text.includes("Post-fill state: validation_errors_present"), text);
+    assert.ok(text.includes("validation_errors=2"), text);
+    assert.ok(text.includes("review the flagged fields"), text);
+    assert.ok(text.includes("do not retry the fill blindly"), text);
+  });
+
+  test("handoff_required_next: explicit do-NOT-click-final-action instruction", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      outcome: "handoff_required_next",
+      next_action_names: [{ name: "Place order", classification: "secondary", requires_handoff: true }],
+      recommended_next_step: "handoff_required",
+    });
+    assert.ok(text.includes("Post-fill state: handoff_required_next"), text);
+    assert.ok(text.includes("do NOT click the final action yourself"), text);
+    assert.ok(text.includes("handoff tools"), text);
+  });
+
+  test("fill_incomplete: points at filled_fields and re-requesting only failures", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      outcome: "fill_incomplete",
+      filled_count: 2,
+      failed_count: 2,
+      recommended_next_step: "refresh_snapshot",
+    });
+    assert.ok(text.includes("Post-fill state: fill_incomplete"), text);
+    assert.ok(text.includes("Fill result: 2 filled, 2 failed"), text);
+    assert.ok(text.includes("re-request only the failed fields"), text);
+  });
+
+  test("no_next_action_visible: snapshot first, no blind scroll", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      outcome: "no_next_action_visible",
+      next_action_names: undefined,
+      recommended_next_step: "refresh_snapshot",
+    });
+    assert.ok(text.includes("Post-fill state: no_next_action_visible"), text);
+    assert.ok(text.includes("do not blind-scroll first"), text);
+  });
+
+  test("unknown: fill result stays authoritative; one confirming snapshot", () => {
+    const text = buildPostFillStateText({
+      outcome: "unknown",
+      filled_count: 3,
+      failed_count: 0,
+      masking: {},
+      raw_values_revealed_to_agent: false,
+      recommended_next_step: "refresh_snapshot",
+      next: "refs_require_fresh_snapshot",
+    });
+    assert.ok(text.includes("Post-fill state: unknown"), text);
+    assert.ok(text.includes("still authoritative"), text);
+    assert.ok(text.includes("take one antigen_snapshot"), text);
+  });
+
+  test("iframe redaction mismatch renders the fail-closed WARNING", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      masking: {
+        dom_filled_marker_count: 1,
+        visual_mask_marker_count: 1,
+        iframe_redaction_fields: ["card_number"],
+        iframe_redaction_mismatch: true,
+      },
+    });
+    assert.ok(text.includes("WARNING"), text);
+    assert.ok(text.includes("MISSING from the screenshot-redaction registry"), text);
+    assert.ok(text.includes("do not take screenshots"), text);
+  });
+
+  test("post-fill surface renders names-only overlay context", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      surface: { overlay_blocking: true, overlay_type: "dialog", title: "Verify your address" },
+    });
+    assert.ok(text.includes('Post-fill surface: dialog (blocking) — "Verify your address"'), text);
+  });
+
+  test("absent/malformed state renders nothing", () => {
+    assert.equal(buildPostFillStateText(undefined), "");
+    assert.equal(buildPostFillStateText(null), "");
+    assert.equal(buildPostFillStateText("nope"), "");
+    assert.equal(buildPostFillStateText({}), "");
+  });
+
+  test("leak boundary: planted refs/selectors/query strings never reach the rendered text", () => {
+    const text = buildPostFillStateText({
+      ...readyState,
+      // Hostile payload shape: unknown fields must be ignored, never stringified.
+      ref: "ag_42",
+      selector: "#card-number",
+      page_url: "https://x.test/checkout?session=tok_secret",
+      next_action_names: [
+        { name: "Continue to payment", classification: "primary", ref: "ag_9", href: "/a?b=1" },
+      ],
+    });
+    assert.ok(!text.includes("ag_42"), text);
+    assert.ok(!text.includes("ag_9"), text);
+    assert.ok(!text.includes("#card-number"), text);
+    assert.ok(!text.includes("tok_secret"), text);
+    assert.ok(!text.includes("?"), text);
   });
 });

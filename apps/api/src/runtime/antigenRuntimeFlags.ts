@@ -20,6 +20,7 @@ import { isClickVerifyEnabled } from "./antigenClickVerification.js";
 import { isActiveSurfacesEnabled } from "./antigenSnapshotPageMap.js";
 import { isSurfaceResolveEnabled } from "./antigenSurfaceResolution.js";
 import { isLogicalRefRecoveryEnabled } from "./antigenLogicalRecovery.js";
+import { isFillStateEnabled } from "./postFillProbe.js";
 import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
@@ -29,6 +30,7 @@ export interface AntigenRuntimeStatus {
   active_surfaces: boolean;
   surface_resolve: boolean;
   logical_recovery: boolean;
+  fill_state: boolean;
   /**
    * Pointer animation timing. "fast" maps to the internal "native" profile
    * (~120ms move, dev/QA); "realistic" is the production-safe default.
@@ -54,6 +56,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     active_surfaces: isActiveSurfacesEnabled(),
     surface_resolve: isSurfaceResolveEnabled(),
     logical_recovery: isLogicalRefRecoveryEnabled(),
+    fill_state: isFillStateEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
     browser_trace: traceEnabled(),
     timing_debug: timingEnabled(),
@@ -78,6 +81,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `active_surfaces=${s.active_surfaces}`,
     `surface_resolve=${s.surface_resolve}`,
     `logical_recovery=${s.logical_recovery}`,
+    `fill_state=${s.fill_state}`,
     `pointer_timing=${s.pointer_timing}`,
     `browser_trace=${s.browser_trace}`,
     `timing_debug=${s.timing_debug}`,

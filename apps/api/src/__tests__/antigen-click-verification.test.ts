@@ -15,9 +15,11 @@ import {
   CLICK_VERIFY_SETTLE_SCHEDULE_MS,
   CART_MUTATION_SETTLE_SCHEDULE_MS,
   CHECKOUT_TRANSITION_SETTLE_SCHEDULE_MS,
+  POST_FILL_SETTLE_SCHEDULE_MS,
   type PageStateProbe,
   type ClickVerificationContext,
 } from "../runtime/antigenClickVerification.js";
+import { isPostFillProbeSettled } from "../runtime/postFillProbe.js";
 import { buildOverlaySnippetJs } from "../runtime/antigenSnapshotRuntime.js";
 import { isAntigenPageChanged } from "../runtime/antigenSnapshotStore.js";
 
@@ -398,6 +400,98 @@ describe("buildPageStateProbeExpr — display state + surface-action collection 
     expect(() =>
       new Function(`return ${buildPageStateProbeExpr({ collectSurfaceActions: true, targetBox: { x: 1, y: 2, width: 3, height: 4 } })}`),
     ).not.toThrow();
+  });
+});
+
+describe("buildPageStateProbeExpr — fill-state collection (post_fill_state)", () => {
+  it("fill-state collection is OFF by default and ON only when requested", () => {
+    expect(buildPageStateProbeExpr({})).toContain("var COLLECT_FILL_STATE=false");
+    const on = buildPageStateProbeExpr({ collectFillState: true });
+    expect(on).toContain("var COLLECT_FILL_STATE=true");
+    expect(on).toContain("function fillState");
+    // The fill_state key is attached only behind the flag.
+    expect(on).toContain("if(COLLECT_FILL_STATE){ probe.fill_state=fillState(); }");
+  });
+
+  it("reads marker/validation ATTRIBUTES only — data-antigen-filled / data-antigen-masked / aria-invalid / role=alert", () => {
+    const expr = buildPageStateProbeExpr({ collectFillState: true });
+    expect(expr).toContain('[data-antigen-filled="true"]');
+    expect(expr).toContain('[data-antigen-masked="true"]');
+    expect(expr).toContain('[aria-invalid="true"]');
+    expect(expr).toContain('[role="alert"]');
+    // Disabled state is the fill-specific signal — collected, not skipped.
+    expect(expr).toContain("el.disabled===true");
+  });
+
+  it("introduces NO new field .value reads (the only .value read stays the guarded actionName caption branch)", () => {
+    const expr = buildPageStateProbeExpr({ collectFillState: true, collectSurfaceActions: true });
+    // Same bound the surface-action test asserts: null-check + read at the one
+    // guarded submit/button/reset site. The fill-state section must not add any.
+    const valueReads = expr.split("el.value").length - 1;
+    expect(valueReads).toBeLessThanOrEqual(2);
+    expect(expr).not.toContain(".value.length"); // filled-state is marker counts, never value length
+  });
+
+  it("collectFillState=false leaves the probe expression's return shape unchanged (no fill_state attach)", () => {
+    const off = buildPageStateProbeExpr({ collectSurfaceActions: true });
+    expect(off).toContain("var COLLECT_FILL_STATE=false");
+    // The attach is flag-guarded, so an off-flag probe value never carries fill_state.
+    expect(off).toContain("if(COLLECT_FILL_STATE){ probe.fill_state=fillState(); }");
+  });
+
+  it("remains syntactically valid JS with fill-state collection enabled", () => {
+    expect(() =>
+      new Function(`return ${buildPageStateProbeExpr({ collectFillState: true })}`),
+    ).not.toThrow();
+  });
+
+  it("post-fill settle schedule is short (≤2 re-probes, ≤300ms of waits)", () => {
+    expect(POST_FILL_SETTLE_SCHEDULE_MS.length).toBeLessThanOrEqual(2);
+    const total = POST_FILL_SETTLE_SCHEDULE_MS.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("isPostFillProbeSettled — early-exit predicate", () => {
+  const fillProbe = (fill: Partial<NonNullable<PageStateProbe["fill_state"]>>, status: "ok" | "error" = "ok") =>
+    probe({
+      status,
+      fill_state: {
+        invalid_count: 0,
+        alert_count: 0,
+        filled_marker_count: 1,
+        masked_marker_count: 0,
+        form_actions: [],
+        ...fill,
+      },
+    });
+
+  it("unsettled when the probe errored or carries no fill_state", () => {
+    expect(isPostFillProbeSettled(probe({ status: "error" }))).toBe(false);
+    expect(isPostFillProbeSettled(probe())).toBe(false);
+  });
+
+  it("settled on visible validation errors", () => {
+    expect(isPostFillProbeSettled(fillProbe({ invalid_count: 1 }))).toBe(true);
+    expect(isPostFillProbeSettled(fillProbe({ alert_count: 2 }))).toBe(true);
+  });
+
+  it("settled on an enabled non-dismiss next action; disabled/dismiss-only keeps polling", () => {
+    expect(
+      isPostFillProbeSettled(
+        fillProbe({ form_actions: [{ name: "Continue to payment", kind: "button", disabled: false, dismiss: false }] }),
+      ),
+    ).toBe(true);
+    expect(
+      isPostFillProbeSettled(
+        fillProbe({
+          form_actions: [
+            { name: "Continue to payment", kind: "button", disabled: true, dismiss: false },
+            { name: "Close", kind: "button", disabled: false, dismiss: true },
+          ],
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

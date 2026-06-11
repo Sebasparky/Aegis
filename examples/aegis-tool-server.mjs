@@ -26,6 +26,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { buildPostFillStateText } from "./lib/adapter-helpers.mjs";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -2140,6 +2141,12 @@ async function executePaymentCardFillHandoff({ fill_request_id } = {}) {
   if (!res.ok) {
     return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Card fill execution failed." };
   }
+  // Post-Fill State v1 (ANTIGEN_FILL_STATE): render the sanitized summary so the
+  // agent knows the next action / masking state without re-snapshotting blind.
+  if (res.data?.post_fill_state) {
+    const summary = buildPostFillStateText(res.data.post_fill_state);
+    if (summary) return { ...res.data, post_fill_summary: summary };
+  }
   return res.data;
 }
 
@@ -2301,6 +2308,12 @@ async function executeProfileFieldFill({ fill_request_id, browser_session_id, ex
   }
   if (!res.ok) {
     return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Profile field fill execution failed." };
+  }
+  // Post-Fill State v1 (ANTIGEN_FILL_STATE): render the sanitized summary so the
+  // agent knows the next action / validation state without re-snapshotting blind.
+  if (res.data?.post_fill_state) {
+    const summary = buildPostFillStateText(res.data.post_fill_state);
+    if (summary) return { ...res.data, post_fill_summary: summary };
   }
   return res.data;
 }

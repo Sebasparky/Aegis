@@ -690,6 +690,62 @@ describe("POST /api/agent/v1/payment-card-fills/:id/execute", () => {
     expect(recordKmsAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
   });
 
+  it("ANTIGEN_FILL_STATE off (default) → execute response carries NO post_fill_state key", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+      domain: DOMAIN, field: "expiry_combined",
+      page_url: `https://${DOMAIN}/pay`, reason: "fill expiry",
+    });
+    const { fill_request_id, authorization_id } = createRes.json().data;
+    await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+
+    const res = await agentPost(`/api/agent/v1/payment-card-fills/${fill_request_id}/execute`, {});
+    expect(res.statusCode).toBe(200);
+    expect("post_fill_state" in res.json().data).toBe(false);
+  });
+
+  it("ANTIGEN_FILL_STATE on + unreachable CDP → fill result unchanged, post_fill_state degrades to unknown", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const prevFlag = process.env.ANTIGEN_FILL_STATE;
+    const prevCdp = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+    process.env.ANTIGEN_FILL_STATE = "true";
+    // Unreachable on purpose: the probe must fail closed without affecting the fill.
+    process.env.AEGIS_PLAYWRIGHT_CDP_URL = "http://127.0.0.1:1";
+    try {
+      const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+        domain: DOMAIN, field: "expiry_combined",
+        page_url: `https://${DOMAIN}/pay`, reason: "fill expiry",
+      });
+      const { fill_request_id, authorization_id } = createRes.json().data;
+      await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+
+      const res = await agentPost(`/api/agent/v1/payment-card-fills/${fill_request_id}/execute`, {});
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Fill success reporting is untouched by the probe failure.
+      expect(body.data.status).toBe("filled");
+      expect(body.data.raw_values_revealed_to_agent).toBe(false);
+      expect(body.data.purchase_not_authorized).toBe(true);
+
+      // The summary is present, honest, and leak-free.
+      const pfs = body.data.post_fill_state;
+      expect(pfs).toBeDefined();
+      expect(pfs.outcome).toBe("unknown");
+      expect(pfs.filled_count).toBe(1);
+      expect(pfs.failed_count).toBe(0);
+      expect(pfs.raw_values_revealed_to_agent).toBe(false);
+      expect(pfs.next).toBe("refs_require_fresh_snapshot");
+      assertNoRawCardData(body);
+    } finally {
+      if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
+      else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+      else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
+    }
+  });
+
   it("executes cvv fill — calls KMS decrypt", async () => {
     const { recordKmsAuditEvent } = await import("../lib/kmsAudit.js");
     (recordKmsAuditEvent as any).mockClear();

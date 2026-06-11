@@ -208,6 +208,123 @@ export function buildPostClickStateText(state, opts = {}) {
 }
 
 /**
+ * Builds the agent-facing post-fill realization block from the backend's
+ * sanitized `post_fill_state` (profile/payment fill execute responses;
+ * ANTIGEN_FILL_STATE). The protected-fill analogue of buildPostClickStateText.
+ *
+ * Allowlist-only, same discipline: reads ONLY the documented safe fields
+ * (outcome enum, counts, names-only actions with disabled/handoff flags,
+ * masking summary). Never stringifies the raw payload. Returns "" when the
+ * state is absent/unusable.
+ *
+ * The block tells the agent the fill ALREADY landed (or didn't), that masking/
+ * redaction is already in order, and exactly what to do next — so it does not
+ * re-snapshot repeatedly, scroll-hunt for "Continue", or take an extra
+ * redaction-verification screenshot. Actions are NAMES ONLY — refs always come
+ * from one fresh antigen_snapshot.
+ *
+ * @param {object|undefined} state post_fill_state from the fill execute response.
+ * @returns {string} multi-line block ("" when not applicable)
+ */
+export function buildPostFillStateText(state) {
+  if (!state || typeof state !== "object") return "";
+  const outcome = snapClean(String(state.outcome ?? ""), 32);
+  if (!outcome) return "";
+
+  const lines = [];
+  const headline = {
+    ready_for_next_action: "the fill landed and an enabled next action is available.",
+    handoff_required_next: "the fill landed; the only enabled next actions are final/irreversible and must go through the Aegis handoff tools.",
+    validation_errors_present: "the page is showing validation errors after the fill.",
+    fill_incomplete: "one or more fields failed to fill — check filled_fields.",
+    no_next_action_visible: "the fill landed but no enabled next action is visible (it may be outside the viewport).",
+    unknown: "the post-fill page state could not be read; the fill result fields are still authoritative.",
+  }[outcome] ?? "post-fill state recorded.";
+  lines.push(`Post-fill state: ${outcome} — ${headline}`);
+
+  const filled = typeof state.filled_count === "number" ? state.filled_count : null;
+  const failed = typeof state.failed_count === "number" ? state.failed_count : null;
+  const validation = typeof state.validation_error_count === "number" ? state.validation_error_count : null;
+  if (filled !== null || failed !== null) {
+    let line = `Fill result: ${filled ?? "?"} filled, ${failed ?? "?"} failed`;
+    if (validation !== null) line += `; validation_errors=${validation}`;
+    lines.push(line);
+  }
+
+  // Masking / redaction — already verified server-side; no screenshot needed.
+  const masking = state.masking && typeof state.masking === "object" ? state.masking : null;
+  if (masking) {
+    const parts = [];
+    if (typeof masking.dom_filled_marker_count === "number") {
+      parts.push(`${masking.dom_filled_marker_count} DOM fill markers`);
+    }
+    if (typeof masking.visual_mask_marker_count === "number") {
+      parts.push(`${masking.visual_mask_marker_count} visually masked`);
+    }
+    if (Array.isArray(masking.iframe_redaction_fields) && masking.iframe_redaction_fields.length > 0) {
+      const kinds = masking.iframe_redaction_fields
+        .map((k) => snapClean(String(k), 24))
+        .filter(Boolean)
+        .join(", ");
+      if (kinds) parts.push(`iframe redaction registered: ${kinds}`);
+    }
+    if (parts.length > 0) lines.push(`Masking: ${parts.join("; ")}`);
+    if (masking.iframe_redaction_mismatch === true) {
+      lines.push(
+        "WARNING: a just-filled iframe field is MISSING from the screenshot-redaction registry — do not take screenshots of this page; surface this state to the user.",
+      );
+    }
+  }
+
+  // Candidate next actions — names only, with disabled/handoff flags.
+  const actions = Array.isArray(state.next_action_names) ? state.next_action_names : [];
+  let primaryName = "";
+  if (actions.length > 0) {
+    lines.push("Next actions (names only — refs require one antigen_snapshot):");
+    for (const a of actions) {
+      const name = snapClean(a?.name, 80);
+      if (!name) continue;
+      const cls = snapClean(a?.classification, 16) || "secondary";
+      if (cls === "primary" && !primaryName) primaryName = name;
+      let line = `- ${cls} "${name}"`;
+      if (a?.disabled === true) line += " [disabled]";
+      if (a?.requires_handoff === true) line += " [requires_handoff]";
+      lines.push(line);
+    }
+  }
+
+  // Active surface after the fill (modal/drawer) — names only.
+  const surface = state.surface && typeof state.surface === "object" ? state.surface : null;
+  if (surface) {
+    const type = snapClean(surface.overlay_type, 24) || "overlay";
+    const title = snapClean(surface.title, 120);
+    lines.push(
+      `Post-fill surface: ${type}${surface.overlay_blocking === true ? " (blocking)" : ""}${title ? ` — "${title}"` : ""}`,
+    );
+  }
+
+  // One decisive next step per outcome.
+  if (outcome === "ready_for_next_action") {
+    lines.push(
+      primaryName
+        ? `Next: take ONE antigen_snapshot and click "${primaryName}" — do not scroll-hunt, re-verify the fill, or take a redaction screenshot; masking is already reported above.`
+        : "Next: take ONE antigen_snapshot and click one of the enabled actions above — do not scroll-hunt or re-verify the fill.",
+    );
+  } else if (outcome === "validation_errors_present") {
+    lines.push("Next: take one antigen_snapshot and review the flagged fields before continuing — do not retry the fill blindly.");
+  } else if (outcome === "handoff_required_next") {
+    lines.push("Next: do NOT click the final action yourself — use the Aegis purchase-confirmation / handoff tools for it.");
+  } else if (outcome === "fill_incomplete") {
+    lines.push("Next: check filled_fields for the failed entries, take one antigen_snapshot, and re-request only the failed fields.");
+  } else if (outcome === "no_next_action_visible") {
+    lines.push("Next: take one antigen_snapshot and find the next action there — do not blind-scroll first.");
+  } else {
+    lines.push("Next: take one antigen_snapshot to confirm the current page state.");
+  }
+  return lines.join("\n");
+}
+
+/**
  * Builds the readable, agent-facing text for a successful antigen_snapshot
  * (Antigen Snapshot v2 page map).
  *

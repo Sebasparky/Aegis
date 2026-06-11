@@ -587,6 +587,69 @@ describe("POST /api/agent/v1/profile-field-fills/:id/execute", () => {
     expect(body.error.code).toBe("FILL_REQUEST_NOT_FOUND");
   });
 
+  it("12. ANTIGEN_FILL_STATE off (default) → response carries NO post_fill_state key", async () => {
+    seedDelegation();
+    seedProfileMemory(["first_name"]);
+
+    const { body: reqBody } = await agentPost("/api/agent/v1/profile-field-fills", {
+      domain: "checkout.test.local",
+      page_url: "https://checkout.test.local/cart",
+      requested_fields: [{ key: "first_name" }],
+      reason: "test",
+    });
+    const { statusCode, body } = await agentPost(
+      `/api/agent/v1/profile-field-fills/${reqBody.data.fill_request_id}/execute`,
+      {},
+    );
+
+    expect(statusCode).toBe(200);
+    expect("post_fill_state" in body.data).toBe(false);
+  });
+
+  it("13. ANTIGEN_FILL_STATE on + unreachable CDP → fill result unchanged, post_fill_state degrades to unknown", async () => {
+    seedDelegation();
+    seedProfileMemory(["first_name"]);
+    const prevFlag = process.env.ANTIGEN_FILL_STATE;
+    const prevCdp = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+    process.env.ANTIGEN_FILL_STATE = "true";
+    // Unreachable on purpose: the probe must fail closed without affecting the fill.
+    process.env.AEGIS_PLAYWRIGHT_CDP_URL = "http://127.0.0.1:1";
+    try {
+      const { body: reqBody } = await agentPost("/api/agent/v1/profile-field-fills", {
+        domain: "checkout.test.local",
+        page_url: "https://checkout.test.local/cart",
+        requested_fields: [{ key: "first_name" }],
+        reason: "test",
+      });
+      const { statusCode, body } = await agentPost(
+        `/api/agent/v1/profile-field-fills/${reqBody.data.fill_request_id}/execute`,
+        {},
+      );
+
+      // Fill success reporting is untouched by the probe failure.
+      expect(statusCode).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.data.all_filled).toBe(true);
+      expect(body.data.raw_profile_values_revealed_to_agent).toBe(false);
+
+      // The summary is present, honest, and leak-free.
+      const pfs = body.data.post_fill_state;
+      expect(pfs).toBeDefined();
+      expect(pfs.outcome).toBe("unknown");
+      expect(pfs.filled_count).toBe(1);
+      expect(pfs.failed_count).toBe(0);
+      expect(pfs.raw_values_revealed_to_agent).toBe(false);
+      expect(pfs.next).toBe("refs_require_fresh_snapshot");
+      expect(pfs.recommended_next_step).toBe("refresh_snapshot");
+      assertNoRawProfileData(body);
+    } finally {
+      if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
+      else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+      else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
+    }
+  });
+
   it("9. execute with different delegation → 403", async () => {
     seedDelegation();
     seedProfileMemory(["first_name"]);

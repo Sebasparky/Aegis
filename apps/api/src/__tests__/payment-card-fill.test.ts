@@ -46,18 +46,25 @@ vi.mock("../lib/kms.js", () => ({
 vi.mock("../lib/kmsAudit.js", () => ({ recordKmsAuditEvent: vi.fn() }));
 
 const cdpMock = { success: true as boolean, error: undefined as string | undefined };
-vi.mock("../runtime/paymentCardFill.js", () => ({
-  executePaymentCardFillViaCDP: vi.fn().mockImplementation(() =>
-    Promise.resolve(cdpMock.success ? { success: true } : { success: false, error: cdpMock.error ?? "CDP_FAIL" }),
-  ),
-  validateCardFillSelector: vi.fn().mockImplementation((sel: string) => {
-    const blocked = /\b(button|submit|form)\b|\[type\s*=\s*["']?submit|\[role\s*=\s*["']?button|a\[href/i;
-    return blocked.test(sel)
-      ? { valid: false, reason: `Selector "${sel}" targets a prohibited element.` }
-      : { valid: true };
-  }),
-  isAntigenRef: vi.fn().mockImplementation((ref: string) => /^ag_\d+$/.test(ref)),
-}));
+// Partial mock: the CDP executor and validators are controllable; the pure
+// ordering helpers (orderPaymentFillFields / isIframeCapablePaymentField) stay
+// REAL — the create/execute responses call them for recommended_fill_order.
+vi.mock("../runtime/paymentCardFill.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../runtime/paymentCardFill.js")>();
+  return {
+    ...actual,
+    executePaymentCardFillViaCDP: vi.fn().mockImplementation(() =>
+      Promise.resolve(cdpMock.success ? { success: true } : { success: false, error: cdpMock.error ?? "CDP_FAIL" }),
+    ),
+    validateCardFillSelector: vi.fn().mockImplementation((sel: string) => {
+      const blocked = /\b(button|submit|form)\b|\[type\s*=\s*["']?submit|\[role\s*=\s*["']?button|a\[href/i;
+      return blocked.test(sel)
+        ? { valid: false, reason: `Selector "${sel}" targets a prohibited element.` }
+        : { valid: true };
+    }),
+    isAntigenRef: vi.fn().mockImplementation((ref: string) => /^ag_\d+$/.test(ref)),
+  };
+});
 
 // Partial mock for the post-fill probe: isFillStateEnabled stays REAL (the flag
 // gate is part of what these tests prove); runPostFillProbe becomes controllable

@@ -156,6 +156,84 @@ export function formatProfileValueForTarget(
   return national;
 }
 
+// ─── Existing-value comparison (verify-and-correct) ──────────────────────────
+//
+// Page-prefilled values (browser autofill, cookies, site defaults) are UNTRUSTED.
+// "Non-empty" does not mean "correct": IKEA/Chrome may prepopulate city as "Taylor"
+// when the protected profile says "Ann Arbor". Before filling, the runtime reads the
+// field's current value (server-side only — never returned to the agent) and compares
+// it against the protected profile value under conservative, field-aware normalization.
+// Match → "already_correct" (nothing written). Mismatch or empty → overwrite through
+// the normal fill path → "corrected_existing_value" / "filled".
+
+/**
+ * Conservative field-aware normalization for equality comparison ONLY (never for
+ * filling). Trims, collapses internal whitespace; case-insensitive for name/city/
+ * email-like text; phone compares national digits; postal codes compare uppercased.
+ * Deliberately does NOT canonicalize address wording (St ≠ Street) — different
+ * addresses must never compare equal. Exported for unit testing.
+ */
+export function normalizeProfileValueForComparison(kind: ProfileFieldKind, value: string): string {
+  const collapsed = (value ?? "").trim().replace(/\s+/g, " ");
+  switch (kind) {
+    case "phone": {
+      const digits = collapsed.replace(/\D+/g, "");
+      return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+    }
+    case "postal_code":
+      return collapsed.toUpperCase();
+    default:
+      return collapsed.toLowerCase();
+  }
+}
+
+// Map a normalized region/country string to its canonical code so "Michigan",
+// "MI", and "US-MI" (or "United States" / "US") compare equal. Unknown values
+// pass through unchanged — no fuzzy matching.
+function regionCountryToken(kind: ProfileFieldKind, normalized: string): string {
+  const upper = normalized.toUpperCase();
+  const dashIdx = upper.indexOf("-");
+  const stripped = dashIdx > 0 ? upper.slice(dashIdx + 1) : upper;
+  if (kind === "region") {
+    if (US_STATE_MAP[stripped]) return stripped;
+    const abbr = US_STATE_REV_MAP[normalized];
+    if (abbr) return abbr;
+  }
+  if (kind === "country") {
+    if (COUNTRY_MAP[stripped]) return stripped;
+    const code = COUNTRY_REV_MAP[normalized];
+    if (code) return code;
+  }
+  return normalized;
+}
+
+/**
+ * Does the field's current value already equal the protected profile value?
+ * Compared against BOTH the canonical stored value and the field-formatted value
+ * (a phone mask may render "(555) 123-4567" for canonical "15551234567").
+ * Empty current value never matches. Comparison happens server-side inside the
+ * protected fill primitive — inputs and result never reach the agent.
+ * Exported for unit testing.
+ */
+export function profileValuesMatch(
+  kind: ProfileFieldKind,
+  currentRaw: string,
+  canonicalValue: string,
+  formattedValue: string,
+): boolean {
+  const cur = normalizeProfileValueForComparison(kind, currentRaw);
+  if (!cur) return false;
+  const candidates = [canonicalValue, formattedValue]
+    .map((v) => normalizeProfileValueForComparison(kind, v))
+    .filter((v) => v.length > 0);
+  if (candidates.includes(cur)) return true;
+  if (kind === "region" || kind === "country") {
+    const curTok = regionCountryToken(kind, cur);
+    return candidates.some((c) => regionCountryToken(kind, c) === curTok);
+  }
+  return false;
+}
+
 // Reuse same dangerous-selector rules as paymentCardFill.ts — profile fill targets input fields only.
 const DANGEROUS_SELECTOR_PATTERNS: RegExp[] = [
   /\bbutton\b/i,
@@ -669,6 +747,10 @@ export async function executeProfileFieldFillViaCDP(
       // the matched candidate's metadata (e.g. phone country-code stripping / mask shaping). This is
       // what gets injected; the raw canonical is still used only for the masked agent summary.
       let currentFillValue = "";
+      // True when the field carried a non-empty value that did NOT match the protected profile
+      // value (untrusted autofill/cookie prefill). Drives "corrected_existing_value" status and
+      // the fail-closed post-correction verify. The existing value itself stays server-side only.
+      let currentFieldHadWrongValue = false;
 
       // Track CDP command IDs for unambiguous response routing.
       let attachMsgId: number | null = null;
@@ -710,7 +792,24 @@ export async function executeProfileFieldFillViaCDP(
         entries.push({
           key: field.key,
           field_filled: true,
-          status: "filled",
+          status: currentFieldHadWrongValue ? "corrected_existing_value" : "filled",
+          masked_summary: maskProfileValue(field.key, rawValue),
+          raw_profile_value_revealed_to_agent: false,
+        });
+        timing.mark(`field_${field.key}`);
+        fieldIdx++;
+        advanceField();
+      };
+
+      // The field's existing value already matches the protected profile value — nothing
+      // written, no events dispatched. Masked summary derives from the vault value, never
+      // from the DOM value.
+      const recordAlreadyCorrect = (rawValue: string) => {
+        const field = fields[fieldIdx];
+        entries.push({
+          key: field.key,
+          field_filled: true,
+          status: "already_correct",
           masked_summary: maskProfileValue(field.key, rawValue),
           raw_profile_value_revealed_to_agent: false,
         });
@@ -762,6 +861,7 @@ export async function executeProfileFieldFillViaCDP(
         // Resolve-once: enumerate candidate fields (metadata only). Scoring + kind verification
         // happen in TS when the result returns. No selector is trusted blindly here.
         currentSelectorExpr = "null";
+        currentFieldHadWrongValue = false;
         phase = "resolve";
         send("Runtime.evaluate", { expression: ENUMERATE_CANDIDATES_JS, returnByValue: true }, sessionId!);
       };
@@ -811,7 +911,7 @@ export async function executeProfileFieldFillViaCDP(
               el.dispatchEvent(new Event('change', { bubbles: true }));
               el.dispatchEvent(new Event('blur', { bubbles: true }));
               el.setAttribute('data-antigen-filled', 'true');
-              return { ok: true };
+              return { ok: true, value_after: String(el.value || '') };
             })()`;
             phase = "input_setter_fallback";
             send("Runtime.evaluate", { expression: setterFallbackExpr, returnByValue: true }, sessionId!);
@@ -823,7 +923,7 @@ export async function executeProfileFieldFillViaCDP(
               el.dispatchEvent(new Event('change', { bubbles: true }));
               el.dispatchEvent(new Event('blur', { bubbles: true }));
               el.setAttribute('data-antigen-filled', 'true');
-              return { ok: true };
+              return { ok: true, value_after: String(el.value || '') };
             })()`;
             phase = "input_blur";
             send("Runtime.evaluate", { expression: blurExpr, returnByValue: true }, sessionId!);
@@ -858,7 +958,11 @@ export async function executeProfileFieldFillViaCDP(
               pattern: matched?.pattern ?? null,
             });
             currentSelectorExpr = fillIdSelectorExpr(resolution.fill_id);
-            // Include tagName so the next handler can branch on SELECT vs INPUT.
+            // Include tagName so the next handler can branch on SELECT vs INPUT, and the
+            // current value of input/textarea controls so the verify-and-correct precheck can
+            // compare it against the protected profile value. The current value flows ONLY
+            // CDP → this server process; it is never returned to the agent, logged, or traced.
+            // SELECT current-selection comparison happens in-page in the select fill expression.
             const iframeCheck = `(function() {
               var el = ${currentSelectorExpr};
               if (!el) return { ok: false, reason: 'element not found' };
@@ -867,14 +971,23 @@ export async function executeProfileFieldFillViaCDP(
                 if (node.tagName === 'IFRAME') return { ok: false, reason: 'IFRAME_NOT_SUPPORTED' };
                 node = node.parentNode;
               }
-              return { ok: true, tagName: el.tagName };
+              var cur = (el.tagName === 'SELECT') ? '' : String(el.value || '');
+              return { ok: true, tagName: el.tagName, current_value: cur };
             })()`;
             phase = "iframe_check";
             send("Runtime.evaluate", { expression: iframeCheck, returnByValue: true }, sessionId);
             return;
           }
 
-          const val = evalResult.value as { ok?: boolean; reason?: string; tagName?: string };
+          const val = evalResult.value as {
+            ok?: boolean;
+            reason?: string;
+            tagName?: string;
+            current_value?: string;
+            already_correct?: boolean;
+            had_other_value?: boolean;
+            value_after?: string;
+          };
 
           if (phase === "iframe_check") {
             if (!val?.ok) {
@@ -883,6 +996,19 @@ export async function executeProfileFieldFillViaCDP(
             }
             const selectorExpr = currentSelectorExpr;
             const resolvedValue = currentFillValue;
+
+            // Verify-and-correct precheck (input/textarea): the existing page value is
+            // untrusted unless it matches the protected profile value. Comparison stays
+            // entirely server-side; only the match outcome influences control flow.
+            if (val.tagName !== "SELECT") {
+              const currentRaw = typeof val.current_value === "string" ? val.current_value : "";
+              const canonical = resolvedValues.get(field.key) ?? "";
+              if (profileValuesMatch(field.key, currentRaw, canonical, resolvedValue)) {
+                recordAlreadyCorrect(canonical);
+                return;
+              }
+              currentFieldHadWrongValue = currentRaw.trim().length > 0;
+            }
 
             if (val.tagName === "SELECT") {
               // SELECT element — select the actual option (value + selectedIndex), then drive the
@@ -916,6 +1042,13 @@ export async function executeProfileFieldFillViaCDP(
                 }
                 if (idx === -1) return { ok: false, reason: 'select_option_not_found' };
                 var match = opts[idx];
+                // Verify-and-correct: an already-committed matching option is left untouched
+                // (no events). A different non-placeholder selection is untrusted page state
+                // and gets overwritten below; only a boolean flag leaves the page.
+                if (el.selectedIndex === idx && el.value === match.value && String(match.value).length > 0) {
+                  return { ok: true, already_correct: true };
+                }
+                var hadOther = el.selectedIndex >= 0 && String(el.value || '').length > 0;
                 try { el.focus(); } catch (e) {}
                 el.dispatchEvent(new Event('focus', { bubbles: true }));
                 el.selectedIndex = idx;
@@ -929,7 +1062,7 @@ export async function executeProfileFieldFillViaCDP(
                 var committed = (el.value === match.value) && (el.selectedIndex === idx) && el.selectedIndex >= 0 && String(match.value).length > 0;
                 var ariaInvalid = el.getAttribute('aria-invalid') === 'true';
                 if (!committed) return { ok: false, reason: 'select_commit_unverified' };
-                return { ok: true, verified: true, aria_invalid: ariaInvalid };
+                return { ok: true, verified: true, aria_invalid: ariaInvalid, had_other_value: hadOther };
               })()`;
               phase = "select_fill";
               send("Runtime.evaluate", { expression: selectFillExpr, returnByValue: true }, sessionId);
@@ -1133,7 +1266,7 @@ export async function executeProfileFieldFillViaCDP(
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 el.dispatchEvent(new Event('blur', { bubbles: true }));
                 el.setAttribute('data-antigen-filled', 'true');
-                return { ok: true };
+                return { ok: true, value_after: String(el.value || '') };
               })()`;
               phase = "input_blur";
               send("Runtime.evaluate", { expression: blurExpr, returnByValue: true }, sessionId);
@@ -1148,6 +1281,20 @@ export async function executeProfileFieldFillViaCDP(
           if (phase === "input_blur" || phase === "input_setter_fallback") {
             const rawValue = resolvedValues.get(field.key) ?? "";
             if (val?.ok) {
+              // Fail-closed post-correction verify: when an untrusted existing value was
+              // being overwritten, the field must now read back as the protected value
+              // (page JS may restore its own value after our events). Comparison stays
+              // server-side; the error is generic and carries no values.
+              if (currentFieldHadWrongValue) {
+                const after = typeof val.value_after === "string" ? val.value_after : "";
+                if (!profileValuesMatch(field.key, after, rawValue, currentFillValue)) {
+                  recordFailed(
+                    "FIELD_VALUE_MISMATCH_AFTER_CORRECTION: the existing field value did not match " +
+                    "the protected profile value and could not be overwritten.",
+                  );
+                  return;
+                }
+              }
               recordFilled(rawValue);
             } else {
               recordFailed(`CDP evaluate: ${val?.reason ?? "unknown"}`);
@@ -1158,7 +1305,12 @@ export async function executeProfileFieldFillViaCDP(
           if (phase === "select_fill") {
             const rawValue = resolvedValues.get(field.key) ?? "";
             if (val?.ok) {
-              recordFilled(rawValue);
+              if (val.already_correct) {
+                recordAlreadyCorrect(rawValue);
+              } else {
+                currentFieldHadWrongValue = val.had_other_value === true;
+                recordFilled(rawValue);
+              }
             } else {
               recordFailed(`CDP evaluate: ${val?.reason ?? "unknown"}`);
             }

@@ -2100,7 +2100,7 @@ async function waitForPaymentCardFillAuthorization({
     if (TERMINAL.has(auth.status)) {
       let next_action;
       if (auth.status === "approved") {
-        next_action = "Authorization approved. Call execute_payment_card_fill_handoff for each fill_request_id to fill the card fields.";
+        next_action = "Authorization approved. Call execute_payment_card_fill_handoff for each fill_request_id. Execute parent-page antigen_ref fields FIRST (expiry_combined, cardholder_name, billing_zip), then iframe fields LAST (card_number, cvv) — iframe fills can re-render the page and stale your ag_* refs.";
       } else {
         next_action = `Authorization ${auth.status}. Do not attempt card fill. Report outcome to the user.`;
       }
@@ -3928,6 +3928,11 @@ const TOOLS = [
       "     Then call wait_for_payment_card_fill_authorization with the returned authorization_id.\n" +
       "2. Once approved, call execute_payment_card_fill_handoff for each fill_request_id.\n" +
       "3. After all fields are filled, YOU decide whether to submit the form — Aegis does not submit for you.\n\n" +
+      "EXECUTION ORDER (multiple fields under one authorization):\n" +
+      "Fill parent-page antigen_ref fields FIRST — expiry_combined, cardholder_name, billing_zip — " +
+      "THEN iframe-capable fields LAST — card_number, cvv. Iframe (OPPWA) fills can re-render the page " +
+      "and invalidate the ag_* snapshot refs you are holding for the top-level fields; filling top-level " +
+      "fields first avoids a forced re-snapshot. Responses include recommended_fill_order — follow it.\n\n" +
       "FIELD NAMES: card_number, cvv, expiry_month, expiry_year, expiry_combined (MM/YY), cardholder_name, billing_zip\n\n" +
       "SELECTOR SAFETY: selector_hint must target the INPUT field only. Never use selectors for button, submit, form, a[href], or [role=button].\n\n" +
       "PAYMENT METHOD: omit payment_method_id to use the default payment method.",
@@ -4026,6 +4031,11 @@ const TOOLS = [
       "Call only after:\n" +
       "1. fill_request status is 'approved' (confirmed via request_payment_card_fill or wait_for_payment_card_fill_authorization)\n" +
       "2. The agent's browser is on the page containing the target field.\n\n" +
+      "EXECUTION ORDER: when several fields are approved under one authorization, execute parent-page\n" +
+      "antigen_ref fields FIRST (expiry_combined, cardholder_name, billing_zip), then iframe-capable fields\n" +
+      "LAST (card_number, cvv). The response's recommended_fill_order lists the remaining fields in safe order.\n" +
+      "If a response includes page_refs_likely_stale: true, the iframe fill may have re-rendered the page —\n" +
+      "take ONE fresh antigen_snapshot before using any previously captured ag_* ref.\n\n" +
       "If the field is inside an iframe, this call will return a clear error (IFRAME_NOT_SUPPORTED). " +
       "Do not attempt workarounds — iframes require a future Aegis increment.\n\n" +
       "If the field cannot be found, this call fails safely. Never try to click Next/Submit/Continue to recover.",
@@ -4240,8 +4250,15 @@ const TOOLS = [
       "- Card number, CVV, expiry → use request_payment_card_fill\n" +
       "- Login credentials → use request_secret_field_injection\n" +
       "- Final order button → use request_purchase_confirmation\n\n" +
+      "PREFILLED FIELDS ARE UNTRUSTED — DO NOT SKIP THEM:\n" +
+      "Pages, browser autofill, and cookies may prepopulate fields with WRONG values (e.g. a stale city). " +
+      "A non-empty field is not a correct field. Request EVERY field the form needs, even ones that look filled. " +
+      "Antigen compares the existing value against the protected profile value server-side and only overwrites " +
+      "on mismatch — per-field statuses: 'filled' (was empty), 'already_correct' (existing value matched, " +
+      "nothing written), 'corrected_existing_value' (wrong prefill overwritten). " +
+      "Neither the existing nor the expected value is ever revealed.\n\n" +
       "FLOW (values already stored):\n" +
-      "1. Call request_profile_field_fill with all checkout fields at once (up to 10 per call).\n" +
+      "1. Call request_profile_field_fill with all checkout fields at once (up to 10 per call) — including prefilled ones.\n" +
       "2. Call execute_profile_field_fill with the returned fill_request_id.\n" +
       "3. Verify the fields are filled in the browser, then proceed. " +
       "You own all navigation and form submission decisions.\n\n" +
@@ -4317,6 +4334,9 @@ const TOOLS = [
       "Execute a profile field fill — Antigen resolves values from encrypted vault and fills fields via CDP.\n\n" +
       "Call after request_profile_field_fill returns a fill_request_id.\n" +
       "Antigen fills all requested fields in a single CDP session.\n" +
+      "Prefilled page values are verified server-side against the protected profile value: " +
+      "matching fields report status 'already_correct' (nothing written); wrong prefills are " +
+      "overwritten and report 'corrected_existing_value'. Both count as successfully filled.\n" +
       "RAW VALUES ARE NEVER RETURNED. Response contains masked summaries only.\n" +
       "DOM field values are left intact so checkout pages can read and submit them normally.\n" +
       "This does NOT submit any form or authorize any purchase.",

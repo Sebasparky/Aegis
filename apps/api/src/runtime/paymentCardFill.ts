@@ -100,6 +100,45 @@ export function buildRefSelectorExpr(record: AntigenSnapshotElementRecord): stri
   })()`;
 }
 
+// ─── Payment fill execution ordering ─────────────────────────────────────────
+//
+// card_number / cvv (and sometimes the combined expiry) fill inside cross-origin PCI
+// iframes (OPPWA). Those iframe fills can re-render the host page, which stales every
+// top-level ag_* snapshot ref the agent was still holding — the hardened resolver then
+// fails closed and the agent pays a fresh-snapshot round trip. When several fields are
+// queued under one authorization, executing parent-page antigen_ref fields FIRST
+// (expiry, cardholder) and iframe-capable fields LAST avoids that staleness entirely.
+// Ordering is guidance for execution sequencing only — it does not weaken approval,
+// ref validation, or the fail-closed stale-ref behavior.
+
+/** True for fields that may route into a cross-origin PCI iframe (OPPWA). */
+export function isIframeCapablePaymentField(field: PaymentCardField): boolean {
+  return field === "card_number" || field === "cvv";
+}
+
+// Lower rank executes first. Parent-page fields precede iframe-capable fields;
+// expiry before cardholder mirrors the verified IKEA smoke order.
+const PAYMENT_FILL_ORDER_RANK: Record<PaymentCardField, number> = {
+  expiry_combined: 0,
+  expiry_month: 1,
+  expiry_year: 2,
+  cardholder_name: 3,
+  billing_zip: 4,
+  card_number: 100,
+  cvv: 101,
+};
+
+/**
+ * Sort payment fields into the safe execution order: parent-page (antigen_ref / top-level
+ * DOM) fields first, OPPWA-iframe-capable fields (card_number, cvv) last. Stable for
+ * unknown fields. Exported for unit testing and for recommended_fill_order responses.
+ */
+export function orderPaymentFillFields(fields: PaymentCardField[]): PaymentCardField[] {
+  return [...fields].sort(
+    (a, b) => (PAYMENT_FILL_ORDER_RANK[a] ?? 50) - (PAYMENT_FILL_ORDER_RANK[b] ?? 50),
+  );
+}
+
 // Purchase-control selector patterns — any selector matching these must be rejected at creation time.
 // This is a defence-in-depth validation; the runtime contains no click path.
 const DANGEROUS_SELECTOR_PATTERNS: RegExp[] = [

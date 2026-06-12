@@ -88,7 +88,7 @@ import {
 } from "../runtime/antigenSurfaceResolution.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
-import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef } from "../runtime/paymentCardFill.js";
+import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef, orderPaymentFillFields, isIframeCapablePaymentField } from "../runtime/paymentCardFill.js";
 import { captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
 import {
   registerProtectedIframeRedaction,
@@ -5735,6 +5735,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           expires_at: fillRequest.expires_at,
           next_action: cardFillNextAction(fillRequest.status, isPendingApproval),
           note: "This approval covers card field fill only. It does NOT authorize a purchase.",
+          // Execution-order guidance (field-kind enums only — no values, refs, or selectors).
+          // Iframe fills (card_number/cvv) can re-render the page and stale top-level ag_*
+          // refs, so parent-page antigen_ref fields must execute first.
+          iframe_capable_field: isIframeCapablePaymentField(fillRequest.field),
+          recommended_fill_order: orderPaymentFillFields(
+            auth.allowed_fields.filter((f) => !auth.fields_filled.includes(f)),
+          ),
+          execution_order_note:
+            "When filling multiple card fields under this authorization, execute parent-page " +
+            "antigen_ref fields FIRST (expiry, cardholder_name, billing_zip), then iframe-capable " +
+            "fields LAST (card_number, cvv). Iframe fills can re-render the page and invalidate " +
+            "snapshot refs needed for the remaining top-level fields.",
         },
       });
     },
@@ -6084,6 +6096,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
       }
 
+      // Remaining unfilled fields under this authorization, in safe execution order
+      // (field-kind enums only). After an iframe fill, any remaining parent-page fields
+      // mean the agent's held ag_* refs are likely stale — say so explicitly instead of
+      // letting the resolver's fail-closed path eat a round trip.
+      const remainingFields = orderPaymentFillFields(
+        auth.allowed_fields.filter((f) => !auth.fields_filled.includes(f)),
+      );
+      const remainingParentPageFields = remainingFields.filter((f) => !isIframeCapablePaymentField(f));
+      const iframeFillStaledRefs = !!fillResult.iframeProvider;
+
       // Response NEVER includes resolvedValue, payment_method_id, card_number_ref, cvv_ref
       return reply.send({
         ok: true,
@@ -6099,11 +6121,20 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           raw_values_revealed_to_agent: false,
           purchase_not_authorized: true,
           note: "Antigen injected the card field value directly via CDP. Raw values were never returned to the agent. This does NOT authorize a purchase.",
+          recommended_fill_order: remainingFields,
           // Iframe metadata — present only when fill was routed through an iframe provider
           ...(fillResult.iframeProvider ? {
             iframe_provider: fillResult.iframeProvider,
             iframe_origin: fillResult.iframeOrigin,
             iframe_path: fillResult.iframePath,
+            page_refs_likely_stale: true,
+            ...(remainingParentPageFields.length > 0 ? {
+              stale_ref_warning:
+                "This iframe fill may have re-rendered the page — previously captured ag_* refs " +
+                "are likely stale. Take a fresh antigen_snapshot before filling the remaining " +
+                `top-level fields (${remainingParentPageFields.join(", ")}). Next time, fill ` +
+                "parent-page antigen_ref fields BEFORE iframe fields (card_number, cvv).",
+            } : {}),
           } : {}),
           // Sanitized post-fill realization summary (ANTIGEN_FILL_STATE only).
           ...(postFillState ? { post_fill_state: postFillState } : {}),
@@ -6695,9 +6726,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
       const NOW = new Date().toISOString();
 
-      // Update last_used_at and uses on each memory item
+      // Update last_used_at and uses on each memory item. "corrected_existing_value" is a
+      // real injection (untrusted prefill overwritten); "already_correct" wrote nothing and
+      // records no use.
       for (const entry of entries) {
-        if (entry.status === "filled") {
+        if (entry.status === "filled" || entry.status === "corrected_existing_value") {
           const item = Array.from(privateProfileMemory.values()).find(
             (m) => m.field_kind === entry.key && m.user_id === MOCK_USER_ID,
           );
@@ -6714,8 +6747,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
       }
 
-      // Determine final status
-      const filledCount = entries.filter((e) => e.status === "filled").length;
+      // Determine final status — field_filled covers "filled", "already_correct"
+      // (verified match, nothing written), and "corrected_existing_value".
+      const filledCount = entries.filter((e) => e.field_filled).length;
       let finalStatus: ProfileFieldFillRequest["status"];
       if (filledCount === entries.length) finalStatus = "filled";
       else if (filledCount > 0) finalStatus = "partial";

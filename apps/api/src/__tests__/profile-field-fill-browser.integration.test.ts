@@ -317,4 +317,110 @@ describe.skipIf(!EXE)("Protected profile fill — real browser controlled form",
 
     expect(value).toBe("Ada"); // not "AdaAda"
   });
+
+  // ─── Verify-and-correct: prefilled page values are untrusted ────────────────
+
+  it("OVERWRITES a wrong prefilled city (the Taylor → Ann Arbor bug) and reports corrected_existing_value", async () => {
+    // Simulate site/browser autofill prepopulating the wrong city. Direct assignment fires
+    // no events — exactly like a restored/autofilled value the page model never saw.
+    await evalOnPage(cdpUrl, `(function(){ document.getElementById('city').value = 'Taylor'; return true; })()`);
+
+    const req = makeFillRequest([{ key: "city", label: "City" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["city", "Ann Arbor"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    const cityEntry = entries.find((e) => e.key === "city");
+    expect(cityEntry?.status).toBe("corrected_existing_value");
+    expect(cityEntry?.field_filled).toBe(true);
+    expect(cityEntry?.raw_profile_value_revealed_to_agent).toBe(false);
+
+    expect(await evalOnPage(cdpUrl, `document.getElementById('city').value`)).toBe("Ann Arbor");
+    expect(await evalOnPage(cdpUrl, `window.__model.city`)).toBe("Ann Arbor"); // events dispatched
+
+    // Neither the untrusted existing value nor the protected expected value leaks.
+    const json = JSON.stringify(entries);
+    expect(json).not.toContain("Taylor");
+    expect(json).not.toContain("Ann Arbor");
+  });
+
+  it("reports already_correct for a matching prefilled city (case/whitespace) WITHOUT rewriting", async () => {
+    await evalOnPage(
+      cdpUrl,
+      `(function(){ document.getElementById('city').value = ' ann  ARBOR '; window.__model.city = null; return true; })()`,
+    );
+
+    const req = makeFillRequest([{ key: "city", label: "City" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["city", "Ann Arbor"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    const cityEntry = entries.find((e) => e.key === "city");
+    expect(cityEntry?.status).toBe("already_correct");
+    expect(cityEntry?.field_filled).toBe(true);
+
+    // Untouched: value preserved verbatim and NO events were dispatched (model still null).
+    expect(await evalOnPage(cdpUrl, `document.getElementById('city').value`)).toBe(" ann  ARBOR ");
+    expect(await evalOnPage(cdpUrl, `window.__model.city`)).toBe(null);
+
+    expect(JSON.stringify(entries)).not.toContain("Ann Arbor");
+  });
+
+  it("treats a formatted-equivalent prefilled phone as already_correct", async () => {
+    await evalOnPage(
+      cdpUrl,
+      `(function(){ document.getElementById('phone').value = '(555) 123-4567'; window.__model.phone = null; return true; })()`,
+    );
+
+    const req = makeFillRequest([{ key: "phone", label: "Phone number" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["phone", "15551234567"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    expect(entries.find((e) => e.key === "phone")?.status).toBe("already_correct");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('phone').value`)).toBe("(555) 123-4567");
+    expect(await evalOnPage(cdpUrl, `window.__model.phone`)).toBe(null); // nothing dispatched
+  });
+
+  it("OVERWRITES wrong prefilled phone digits and the corrected value passes validation", async () => {
+    await evalOnPage(
+      cdpUrl,
+      `(function(){ document.getElementById('phone').value = '(555) 999-0000'; return true; })()`,
+    );
+
+    const req = makeFillRequest([{ key: "phone", label: "Phone number" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["phone", "15551234567"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    expect(entries.find((e) => e.key === "phone")?.status).toBe("corrected_existing_value");
+    const domValue = (await evalOnPage(cdpUrl, `document.getElementById('phone').value`)) as string;
+    expect(domValue.replace(/\D+/g, "")).toBe("5551234567");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('phone').getAttribute('aria-invalid')`)).toBe("false");
+    expect(JSON.stringify(entries)).not.toContain("9990000");
+  });
+
+  it("reports already_correct for a select whose option is already committed", async () => {
+    // The earlier region test committed MI. A repeat fill must not re-dispatch events.
+    await evalOnPage(cdpUrl, `(function(){ window.__model.state = null; return true; })()`);
+
+    const req = makeFillRequest([{ key: "region", label: "State" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["region", "MI"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    expect(entries.find((e) => e.key === "region")?.status).toBe("already_correct");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('state').value`)).toBe("MI");
+    expect(await evalOnPage(cdpUrl, `window.__model.state`)).toBe(null); // no events dispatched
+  });
+
+  it("OVERWRITES a wrong committed select option and reports corrected_existing_value", async () => {
+    await evalOnPage(
+      cdpUrl,
+      `(function(){ var s = document.getElementById('state'); s.value = 'OH'; return true; })()`,
+    );
+
+    const req = makeFillRequest([{ key: "region", label: "State" }]);
+    const resolved = new Map<ProfileFieldKind, string>([["region", "MI"]]);
+    const entries = await executeProfileFieldFillViaCDP(req, resolved, cdpUrl, `file://${FIXTURE}`);
+
+    expect(entries.find((e) => e.key === "region")?.status).toBe("corrected_existing_value");
+    expect(await evalOnPage(cdpUrl, `document.getElementById('state').value`)).toBe("MI");
+    expect(await evalOnPage(cdpUrl, `window.__model.state`)).toBe("MI"); // change event dispatched
+  });
 });

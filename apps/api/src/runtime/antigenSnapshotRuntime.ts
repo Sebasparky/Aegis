@@ -37,6 +37,8 @@
 
 import WebSocket from "ws";
 
+import type { HumanVerificationChallengeType } from "@aegis/types";
+
 import { BrowserTimingScope } from "./browserTiming.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -137,6 +139,22 @@ export interface AntigenOverlayInfo {
   modal_title?: string;
   /** This element is the overlay's close/dismiss control. */
   is_dismiss?: boolean;
+  /**
+   * The overlay container classified as a human-verification challenge
+   * ("Press & Hold to confirm you are a human", reCAPTCHA-style checkboxes,
+   * captcha prompts). Detected ONLY on structurally-blocking containers via
+   * strong text phrases — never on ordinary promo/marketing modals. Derived
+   * from value-free container text/titles/accessible names only.
+   */
+  human_verification?: true;
+  /** Challenge sub-type when `human_verification` is set. */
+  hv_challenge_type?: HumanVerificationChallengeType;
+  /**
+   * Internal: this element is the challenge's interactive control (the
+   * press-and-hold button or the human checkbox). Targeting metadata for the
+   * Human Presence Relay — stripped from the agent-facing view.
+   */
+  hv_control?: true;
   /** Internal: element is inside an [inert] ancestor (non-interactive background). */
   in_inert?: boolean;
   /** Internal: element is inside an aria-hidden background while a modal is open. */
@@ -285,6 +303,16 @@ const OVERLAY_TYPES: ReadonlySet<string> = new Set<AntigenOverlayType>([
   "toast",
   "drawer",
   "overlay",
+]);
+
+/** Valid hv_challenge_type values (mirrors HumanVerificationChallengeType). */
+export const HV_CHALLENGE_TYPES: ReadonlySet<string> = new Set<HumanVerificationChallengeType>([
+  "press_and_hold",
+  "checkbox_human",
+  "image_captcha",
+  "text_captcha",
+  "puzzle_captcha",
+  "unknown_human_verification",
 ]);
 
 /**
@@ -450,6 +478,17 @@ export function sanitizeOverlay(
   if (raw.in_inert === true) out.in_inert = true;
   if (raw.bg_hidden === true) out.bg_hidden = true;
   if (raw.background === true) out.background = true;
+  // Human-verification classification: booleans/enum only — the matched text
+  // never leaves the page. Unknown sub-type strings clamp to the safe default.
+  if (raw.human_verification === true) {
+    out.human_verification = true;
+    const hvType = raw.hv_challenge_type;
+    out.hv_challenge_type =
+      typeof hvType === "string" && HV_CHALLENGE_TYPES.has(hvType)
+        ? (hvType as HumanVerificationChallengeType)
+        : "unknown_human_verification";
+    if (raw.hv_control === true) out.hv_control = true;
+  }
   return out;
 }
 
@@ -616,6 +655,70 @@ export function buildOverlaySnippetJs(): string {
     // ─── Active-overlay / top-layer detection (structural, not keyword) ────
     function cssOf(el){ try{ return window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ return null; } }
     function matchesSafe(el,sel){ try{ return !!(el.matches&&el.matches(sel)); }catch(e){ return false; } }
+    // ─── Human-verification challenge classification (Human Presence Relay) ──
+    // STRONG phrases only — deliberately NO bare "challenge"/"verify"/"security"
+    // so promo/marketing modals ("We Missed You — 10% off") can never classify.
+    // Declared INSIDE this shared snippet (single definition for the snapshot
+    // extraction IIFE and post-click probes — zero drift). Only booleans/enums
+    // escape the page; the matched text never does.
+    var HV_TEXT_RE=/(confirm|verify|prove)\\s+(that\\s+)?you\\s*['\\u2019]?\\s*a?re\\s+(a\\s+)?human|i\\s*['\\u2019]?\\s*m\\s+not\\s+a\\s+robot|are\\s+you\\s+a\\s+robot|not\\s+a\\s+(ro)?bot|human\\s+verification|press\\s*(&|and)\\s*hold|security\\s+check|captcha|unusual\\s+(traffic|activity)|robot\\s+check|security\\s+challenge/i;
+    var HV_HOLD_RE=/press\\s*(&|and)\\s*hold|tap\\s*(&|and)\\s*hold|hold\\s+(the\\s+)?button|hold\\s+to\\s+confirm/i;
+    var HV_IMG_RE=/select\\s+(all\\s+)?(the\\s+)?(images|squares|pictures|tiles)/i;
+    var HV_TXT_RE=/(type|enter)\\s+the\\s+(characters|text|letters|words)/i;
+    var HV_PUZZLE_RE=/slide\\s+(the\\s+)?(puzzle|piece)|drag\\s+(the\\s+)?(puzzle|piece)|complete\\s+the\\s+puzzle/i;
+    var HV_CHECKBOX_SEL='input[type="checkbox"],[role="checkbox"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[src*="turnstile"]';
+    // Per-container memo (containers repeat across member elements; the scan is
+    // bounded but not free). Parallel arrays — container counts are tiny.
+    var _hvMemoK=[],_hvMemoV=[];
+    // Classify a container as a human-verification challenge. Returns the
+    // challenge sub-type string or null. Scans ONLY value-free text: the
+    // container's accessible title, a bounded normalized textContent slice, and
+    // button aria-labels. Never reads .value.
+    function humanVerificationOf(container){
+      for(var m=0;m<_hvMemoK.length;m++){ if(_hvMemoK[m]===container) return _hvMemoV[m]; }
+      var res=null;
+      try{
+        var scan='';
+        try{ scan=overlayTitle(container)+' '; }catch(e){}
+        var t=''; try{ t=String(container.textContent||''); }catch(e){ t=''; }
+        scan+=txt(t).slice(0,600);
+        try{
+          if(container.querySelectorAll){
+            var bs=container.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]');
+            for(var i=0;i<bs.length&&i<8;i++){ var bl=attr(bs[i],'aria-label'); if(bl) scan+=' '+String(bl); }
+          }
+        }catch(e){}
+        if(HV_TEXT_RE.test(scan)){
+          if(HV_HOLD_RE.test(scan)) res='press_and_hold';
+          else{
+            var cb=null; try{ cb=container.querySelector?container.querySelector(HV_CHECKBOX_SEL):null; }catch(e){ cb=null; }
+            if(cb||/i\\s*['\\u2019]?\\s*m\\s+not\\s+a\\s+robot/i.test(scan)) res='checkbox_human';
+            else if(HV_IMG_RE.test(scan)) res='image_captcha';
+            else if(HV_TXT_RE.test(scan)) res='text_captcha';
+            else if(HV_PUZZLE_RE.test(scan)) res='puzzle_captcha';
+            else res='unknown_human_verification';
+          }
+        }
+      }catch(e){ res=null; }
+      _hvMemoK.push(container); _hvMemoV.push(res);
+      return res;
+    }
+    // Is this element the challenge's interactive control? (press-hold button /
+    // human checkbox). Internal targeting metadata only.
+    function isHvControl(el,name,hvt){
+      var tg=(el.tagName||'').toLowerCase();
+      var role=(attr(el,'role')||'').toLowerCase();
+      var type=(attr(el,'type')||'').toLowerCase();
+      var nm=(name||'')+' '+(attr(el,'aria-label')||'');
+      if(hvt==='press_and_hold'){
+        var btn=tg==='button'||role==='button'||(tg==='input'&&(type==='button'||type==='submit'));
+        return btn&&HV_HOLD_RE.test(nm);
+      }
+      if(hvt==='checkbox_human'){
+        return (tg==='input'&&type==='checkbox')||role==='checkbox';
+      }
+      return false;
+    }
     // Memoized page-level check: is any modal-ish container currently open?
     var _hasModal;
     function hasModalMemo(){
@@ -683,6 +786,14 @@ export function buildOverlaySnippetJs(): string {
       var live=attr(node,'aria-live'); if(live){ live=String(live).toLowerCase(); if(live==='polite'||live==='assertive') return {type:'toast',blocking:false}; }
       var cls=(attr(node,'class')||'')+' '+(attr(node,'id')||'');
       if(OVERLAY_DRAWER_RE.test(cls)) return {type:'drawer',blocking:fixedCoverage(node)>=0.5};
+      // Human-verification interstitial WITHOUT dialog ARIA: PerimeterX-style
+      // "Press & Hold" widgets often ship as a bare fixed full-coverage dimmer
+      // with no role=dialog. A fixed high-coverage container whose text STRONGLY
+      // matches a human-verification phrase is a blocking challenge overlay.
+      // The strong-phrase regex plus the >=0.5 coverage requirement keeps promo
+      // heroes / sticky chrome excluded (they fail the text test). This is the
+      // ONLY keyword-assisted overlay branch, scoped to human verification.
+      if(fixedCoverage(node)>=0.5&&humanVerificationOf(node)) return {type:'dialog',blocking:true};
       // NO generic fixed-coverage overlay branch: a positioned high-z container
       // with no ARIA role / native dialog / popover / toast / drawer signal is
       // NOT treated as an overlay. Sticky filter toolbars, promo heroes, and
@@ -751,6 +862,17 @@ export function buildOverlaySnippetJs(): string {
       if(title) ov.modal_title=title;
       try{ if(isDismissEl(el,name)) ov.is_dismiss=true; }catch(e){}
       if(inInert) ov.in_inert=true;
+      // Human-verification classification — STRUCTURE FIRST (only blocking
+      // containers are scanned), strong keywords second. Emits booleans/enum
+      // only; the matched text never escapes the page.
+      if(blocking&&container){
+        var hvt=null; try{ hvt=humanVerificationOf(container); }catch(e){ hvt=null; }
+        if(hvt){
+          ov.human_verification=true;
+          ov.hv_challenge_type=hvt;
+          try{ if(isHvControl(el,name,hvt)) ov.hv_control=true; }catch(e){}
+        }
+      }
       return ov;
     }`;
 }

@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  Human Presence Relay fixture — Bath & Body Works-style press-and-hold
+  human-verification interstitial over a normal shopping page.
+
+  The modal clears only after a REAL pointer hold: mousedown on the button,
+  held for >= 600ms, then mouseup. A shorter hold shows "try again". This lets
+  integration tests prove the relay's live mirrored hold (press → heartbeats →
+  release) actually clears the challenge, and that an early release does not.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Body Care &amp; Home Fragrance</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .hv-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(20, 20, 20, 0.55);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .hv-modal {
+        background: #fff; border-radius: 10px; padding: 32px 40px;
+        width: 360px; text-align: center;
+      }
+      #hv-hold-btn {
+        margin-top: 18px; padding: 12px 40px; font-size: 15px;
+        border: 1px solid #2f6fde; border-radius: 22px;
+        background: #fff; color: #2f6fde; cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart">Cart</a>
+      <button id="add-to-bag">Add to bag</button>
+    </header>
+    <main>
+      <h1>Make Dad's Day Event</h1>
+      <p>Lowest price of the season on body care and cologne.</p>
+      <a href="/sale">Shop now</a>
+    </main>
+
+    <div class="hv-backdrop" id="hv-backdrop" role="dialog" aria-modal="true" aria-label="Before we continue">
+      <div class="hv-modal">
+        <h2>Before we continue...</h2>
+        <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+        <button id="hv-hold-btn" type="button">Press &amp; Hold</button>
+        <p id="hv-status" style="font-size: 12px; color: #888;">Reference ID 01234abcd</p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var REQUIRED_HOLD_MS = 600;
+        var btn = document.getElementById("hv-hold-btn");
+        var status = document.getElementById("hv-status");
+        var downAt = 0;
+        btn.addEventListener("mousedown", function () {
+          downAt = Date.now();
+          status.textContent = "Holding…";
+        });
+        btn.addEventListener("mouseup", function () {
+          var held = Date.now() - downAt;
+          if (downAt && held >= REQUIRED_HOLD_MS) {
+            var bd = document.getElementById("hv-backdrop");
+            bd.parentNode.removeChild(bd);
+            window.__hv_cleared = true;
+            window.__hv_held_ms = held;
+          } else {
+            status.textContent = "Released too early — try again.";
+            window.__hv_early_release_count = (window.__hv_early_release_count || 0) + 1;
+          }
+          downAt = 0;
+        });
+      })();
+    </script>
+  </body>
+</html>

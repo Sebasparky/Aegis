@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   listRouteRuns,
   approveRouteRun,
@@ -61,6 +62,9 @@ import {
   listAccountCreationStepRequests,
   submitStepEmail,
   type AccountCreationStepRequestView,
+  listHumanVerificationRequests,
+  cancelHumanVerificationRequest,
+  type HumanVerificationRequestView,
 } from "../../lib/api";
 import { findCredentialProviderByDomain, getInjectionSafetyCopy } from "../../lib/credentialProviders";
 import type { SensitiveGrant } from "@aegis/types";
@@ -1259,6 +1263,105 @@ function PendingChallengeCard({
   );
 }
 
+// ── Human verification (Human Presence Relay) card ────────────────────────────
+
+function PendingHumanVerificationCard({
+  req,
+  onCancel,
+}: {
+  req: HumanVerificationRequestView;
+  onCancel: () => Promise<void>;
+}) {
+  const [cancelling, setCancelling] = useState(false);
+  const [isExpired, setIsExpired] = useState(
+    req.status === "expired" || new Date(req.expires_at) < new Date(),
+  );
+  useEffect(() => {
+    if (isExpired) return;
+    const ms = new Date(req.expires_at).getTime() - Date.now();
+    if (ms <= 0) { setIsExpired(true); return; }
+    const t = setTimeout(() => setIsExpired(true), ms);
+    return () => clearTimeout(t);
+  }, [req.expires_at, isExpired]);
+
+  if (isExpired) {
+    return (
+      <div className="apr-card" style={{ opacity: 0.6 }}>
+        <div className="apr-card__head">
+          <div>
+            <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-3)", margin: "0 0 2px" }}>{req.challenge_label}</p>
+            <p style={{ fontSize: 11.5, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{req.domain}</p>
+          </div>
+          <span className="a-status a-status--quiet" style={{ flexShrink: 0 }}>Expired</span>
+        </div>
+        <div className="apr-card__body">
+          <div className="apr-box">
+            <p style={{ fontSize: 12, color: "var(--ink-4)", margin: 0 }}>
+              This verification request expired. If the challenge is still in the agent's browser, a new request will appear automatically.
+            </p>
+          </div>
+          <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{req.request_id}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="apr-card apr-card--amber">
+      <div className="apr-card__head">
+        <div>
+          <p style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink-1)", margin: "0 0 2px" }}>
+            {req.challenge_label}
+            {req.surface_title ? ` — “${req.surface_title}”` : ""}
+          </p>
+          <p style={{ fontSize: 11.5, color: "oklch(0.45 0.12 75)", fontFamily: "monospace", margin: 0 }}>{req.domain}</p>
+        </div>
+        <span className="a-status a-status--amber" style={{ flexShrink: 0 }}>
+          <span className="a-status__dot" />
+          {req.status === "in_progress" ? "In progress" : "Verification required"}
+        </span>
+      </div>
+
+      <div className="apr-card__body">
+        <SectionCard label="What's happening">
+          <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: "0 0 4px" }}>{req.instructions}</p>
+          <p style={{ fontSize: 11.5, color: "var(--ink-4)", margin: 0 }}>
+            Agent: <span style={{ color: "var(--ink-2)" }}>{req.agent_name ?? req.delegation_id}</span>
+            {" · "}Expires {formatExpiry(req.expires_at)}
+          </p>
+        </SectionCard>
+
+        <SectionCard label="Aegis guarantees">
+          <CheckList items={[
+            "Aegis relays your LIVE interaction into the browser — nothing is recorded or replayed.",
+            "The agent cannot see or bypass the challenge; only your presence clears it.",
+            "Completing this never authorizes a purchase or payment.",
+          ]} />
+        </SectionCard>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <Link
+            href={`/human-verification/${req.request_id}`}
+            className="a-btn a-btn--primary"
+            style={{ textDecoration: "none" }}
+          >
+            {req.relay_capable ? "Open verification" : "Manual verification required"}
+          </Link>
+          <button
+            disabled={cancelling}
+            onClick={async () => { setCancelling(true); try { await onCancel(); } finally { setCancelling(false); } }}
+            className="a-btn a-btn--danger"
+          >
+            {cancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 11, color: "var(--ink-4)", fontFamily: "monospace", margin: 0 }}>{req.request_id}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Login diagnostic card ──────────────────────────────────────────────────────
 
 function LoginDiagnosticCard({
@@ -1851,6 +1954,7 @@ export default function RouteRunApprovalsPage() {
   const [cardFillAuths, setCardFillAuths] = useState<PaymentCardFillAuthorizationView[]>([]);
   const [purchaseConfirmations, setPurchaseConfirmations] = useState<PurchaseConfirmationAuthorizationView[]>([]);
   const [challenges, setChallenges] = useState<SecurityChallengeView[]>([]);
+  const [humanVerifications, setHumanVerifications] = useState<HumanVerificationRequestView[]>([]);
   const [profileMemReqs, setProfileMemReqs] = useState<ProfileMemoryRequestView[]>([]);
   const [accountCreationReqs, setAccountCreationReqs] = useState<AccountCreationRequestView[]>([]);
   const [accountCreationStepReqs, setAccountCreationStepReqs] = useState<AccountCreationStepRequestView[]>([]);
@@ -1881,8 +1985,9 @@ export default function RouteRunApprovalsPage() {
       listProfileMemoryRequests("pending_user").catch(() => []),
       listAccountCreationRequests("pending_user").catch(() => []),
       listAccountCreationStepRequests().catch(() => []),
+      listHumanVerificationRequests().catch(() => []),
     ])
-      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs, acreqs, acStepReqs]) => {
+      .then(([r, s, a, inj, auths, chlgs, emailStatus, grants, diags, cardAuths, pconfs, pmreqs, acreqs, acStepReqs, hvReqs]) => {
         setRuns(r);
         setCredSessions(s);
         setAuthSessions(a);
@@ -1897,6 +2002,7 @@ export default function RouteRunApprovalsPage() {
         setProfileMemReqs(pmreqs);
         setAccountCreationReqs(acreqs);
         setAccountCreationStepReqs((acStepReqs as AccountCreationStepRequestView[]).filter(s => s.status === "pending_user" || s.status === "pending_external"));
+        setHumanVerifications(hvReqs as HumanVerificationRequestView[]);
         if (r.length > 0) {
           const ids = r.map((run) => run.run_id);
           setLoadingContexts(new Set(ids));
@@ -1936,6 +2042,18 @@ export default function RouteRunApprovalsPage() {
         setLoginDiagnostics(fresh);
       } catch { /* non-fatal */ }
     }, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Poll human-verification requests every 8 seconds — unconditionally, so a
+  // challenge the runtime just detected appears without a manual refresh.
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const fresh = await listHumanVerificationRequests();
+        setHumanVerifications(fresh);
+      } catch { /* non-fatal */ }
+    }, 8000);
     return () => clearInterval(id);
   }, []);
 
@@ -2124,6 +2242,16 @@ export default function RouteRunApprovalsPage() {
     }
   }
 
+  async function handleCancelHumanVerification(requestId: string) {
+    setActionError(null);
+    try {
+      await cancelHumanVerificationRequest(requestId);
+      setHumanVerifications((prev) => prev.filter((r) => r.request_id !== requestId));
+    } catch (err: any) {
+      setActionError(err.message ?? "Failed to cancel human-verification request.");
+    }
+  }
+
   function handleProfileMemReqSaved(id: string) {
     setProfileMemReqs((prev) => prev.filter((r) => r.request_id !== id));
   }
@@ -2146,7 +2274,7 @@ export default function RouteRunApprovalsPage() {
 
   const visibleDiagnostics = loginDiagnostics.filter((d) => !dismissedDiagnostics.has(d.diagnostic_id));
 
-  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + profileMemReqs.length + accountCreationReqs.length + accountCreationStepReqs.length;
+  const pendingCount = runs.length + credSessions.length + authSessions.length + injections.length + credAuths.length + cardFillAuths.length + purchaseConfirmations.length + challenges.length + humanVerifications.length + profileMemReqs.length + accountCreationReqs.length + accountCreationStepReqs.length;
 
   return (
     <div className="page">
@@ -2425,6 +2553,25 @@ export default function RouteRunApprovalsPage() {
                       injection={inj}
                       onApprove={() => handleApproveInjection(inj.injection_request_id)}
                       onDeny={() => handleDenyInjection(inj.injection_request_id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Human verification (Human Presence Relay) */}
+              {humanVerifications.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 16 }}>
+                    <div className="a-eyebrow" style={{ color: "oklch(0.45 0.12 75)", marginBottom: 4 }}>Human verification</div>
+                    <p style={{ fontSize: 12.5, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                      A site is asking for proof of human presence (press-and-hold or similar). Complete it here — Aegis relays your live interaction into the agent's browser without recording it.
+                    </p>
+                  </div>
+                  {humanVerifications.map((r) => (
+                    <PendingHumanVerificationCard
+                      key={r.request_id}
+                      req={r}
+                      onCancel={() => handleCancelHumanVerification(r.request_id)}
                     />
                   ))}
                 </div>

@@ -25,8 +25,9 @@
  */
 
 import { createHash } from "node:crypto";
-import type { ActionIntent } from "@aegis/types";
+import type { ActionIntent, HumanVerificationChallengeType } from "@aegis/types";
 import { classifyActionIntent } from "../detection/actionIntent.js";
+import { isHumanVerificationEnabled } from "./humanVerificationState.js";
 import type { AntigenSnapshotElementRecord } from "./antigenSnapshotStore.js";
 import type { AntigenPageMeta, AntigenOverlayType, AntigenCandidateKind } from "./antigenSnapshotRuntime.js";
 import { normalizeName } from "./antigenSnapshotRuntime.js";
@@ -106,6 +107,7 @@ export interface WarningOrModal {
     | "chat_widget"
     | "login_prompt"
     | "login_checkout"
+    | "human_verification"
     | "toast"
     | "unknown_overlay";
   /** Structural overlay kind when this warning came from overlay detection. */
@@ -488,6 +490,14 @@ function warningKindFor(
   const hasCart = CART_DRAWER_RE.test(text);
   const hasGuestCheckout = GUEST_CHECKOUT_RE.test(text);
 
+  // Human-verification challenge — FIRST, before any login/cart/toast logic:
+  // a "Press & Hold to confirm you are a human" modal must never collapse into
+  // a generic modal/login prompt. Page-side classification (strong phrases on
+  // structurally-blocking containers only) is the authority here.
+  if (isHumanVerificationEnabled() && group.some((r) => r.overlay?.human_verification === true)) {
+    return "human_verification";
+  }
+
   // Transient confirmation/announcement — never a login prompt.
   if (overlayType === "toast") return "toast";
   // Chat/help/support widget — nonblocking popover, never a modal/login prompt.
@@ -769,6 +779,16 @@ export interface ActiveSurface {
   /** The surface exposes at least one dismiss-classified action. */
   dismissible: boolean;
   actions: ActiveSurfaceAction[];
+  /**
+   * Set when this surface is a human-verification challenge. Its controls are
+   * never recommended and every action carries `requires_handoff` — clearing
+   * the challenge goes through the Human Presence Relay, never browser_click.
+   */
+  surface_kind?: "human_verification";
+  /** Challenge sub-type when surface_kind is "human_verification". */
+  challenge_type?: HumanVerificationChallengeType;
+  /** Literal true — only live user presence (Aegis UI relay) can clear this. */
+  user_presence_required?: true;
 }
 
 export interface RecommendedSurfaceAction {
@@ -795,6 +815,12 @@ export interface ActiveSurfacesResult {
    * is active. The endpoint annotates these `likely_blocked_by_overlay`.
    */
   likely_blocked_refs: string[];
+  /**
+   * Set when the dominant surface is a blocking human-verification challenge:
+   * the agent's next step is the Human Presence Relay (a HumanVerificationRequest
+   * the user completes in the Aegis UI), not any browser_click/browser_type.
+   */
+  recommended_next_step?: "human_presence_relay_required";
 }
 
 // Dismiss classification for surface actions. Includes "continue shopping"-style
@@ -871,6 +897,7 @@ export function buildActiveSurfaces(
   const surfaces: ActiveSurface[] = [];
   const recommended_actions: RecommendedSurfaceAction[] = [];
   let recommendedFromSurface = false;
+  let recommendedNextStep: ActiveSurfacesResult["recommended_next_step"];
 
   for (let i = 0; i < scored.length; i++) {
     const group = scored[i].group;
@@ -878,6 +905,12 @@ export function buildActiveSurfaces(
     const overlayType = group[0].overlay!.overlay_type;
     const blocking = group.some((r) => r.overlay?.blocking === true);
     const title = clip(group.map((r) => r.overlay?.modal_title).find(Boolean) ?? "", MESSAGE_MAX);
+    // Human-verification surface (flag-gated): its controls must never look
+    // like normal low-risk actions — every action requires a handoff and the
+    // surface never produces recommendations.
+    const hvMember = isHumanVerificationEnabled()
+      ? group.find((r) => r.overlay?.human_verification === true)
+      : undefined;
 
     const clickables = group.filter((r) => r.clickable && r.enabled);
     const dismissRefs = new Set(clickables.filter(isSurfaceDismissAction).map((r) => r.ref));
@@ -896,7 +929,9 @@ export function buildActiveSurfaces(
         url: url ?? undefined,
       });
       const requiresHandoff =
-        cls.reversibility !== "reversible" || !SURFACE_LOW_RISK_INTENTS.has(cls.action_intent);
+        !!hvMember ||
+        cls.reversibility !== "reversible" ||
+        !SURFACE_LOW_RISK_INTENTS.has(cls.action_intent);
       const action: ActiveSurfaceAction = {
         ref: r.ref,
         name: r.name,
@@ -920,14 +955,24 @@ export function buildActiveSurfaces(
       actions,
     };
     if (title) surface.title = title;
+    if (hvMember) {
+      surface.surface_kind = "human_verification";
+      surface.challenge_type =
+        hvMember.overlay?.hv_challenge_type ?? "unknown_human_verification";
+      surface.user_presence_required = true;
+      // The dominant (first-scored) surface being a blocking human-verification
+      // challenge drives the page-level next step: relay required.
+      if (i === 0 && blocking) recommendedNextStep = "human_presence_relay_required";
+    }
     surfaces.push(surface);
 
     // Recommendations come from the single dominant recommendable surface:
-    // never a toast (transient, may auto-dismiss) or a chat/help widget, and
-    // never an action that requires a handoff.
+    // never a toast (transient, may auto-dismiss), a chat/help widget, or a
+    // human-verification challenge (its controls are relay-only), and never an
+    // action that requires a handoff.
     const warningKind = warningKindFor(overlayType, group);
     const recommendable =
-      overlayType !== "toast" && warningKind !== "chat_widget" && warningKind !== "toast";
+      !hvMember && overlayType !== "toast" && warningKind !== "chat_widget" && warningKind !== "toast";
     if (!recommendedFromSurface && recommendable) {
       const rec = (a: ActiveSurfaceAction, reason: RecommendedSurfaceAction["reason"]) =>
         recommended_actions.push({
@@ -949,7 +994,17 @@ export function buildActiveSurfaces(
     }
   }
 
-  return { surfaces, recommended_actions, blocking_active, likely_blocked_refs };
+  const result: ActiveSurfacesResult = {
+    surfaces,
+    // While a blocking human-verification challenge dominates the page, no
+    // click recommendation is meaningful (background refs are guarded too) —
+    // the only next step is the Human Presence Relay.
+    recommended_actions: recommendedNextStep ? [] : recommended_actions,
+    blocking_active,
+    likely_blocked_refs,
+  };
+  if (recommendedNextStep) result.recommended_next_step = recommendedNextStep;
+  return result;
 }
 
 // ─── Post-Click State v1 (ANTIGEN_CLICK_VERIFY, default-off) ─────────────────

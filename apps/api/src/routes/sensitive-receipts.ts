@@ -6,6 +6,7 @@ import {
   secretFieldInjections,
   securityChallenges,
   challengeEmailResolutions,
+  humanVerificationRequests,
   credentialStepHandoffs,
   paymentCardFillHandoffs,
   purchaseConfirmationHandoffs,
@@ -61,6 +62,18 @@ const EVENT_GROUP_TYPES: Record<string, SensitiveActionEventType[]> = {
     "challenge_email_code_injected",
   ],
   payment: ["payment_card_fill_executed", "purchase_confirmation_submitted", "purchase_confirmation_failed"],
+  // Live presence relay — distinct from `challenge` (code injection): the
+  // authority here is fresh user presence mirrored through the Aegis UI.
+  human_presence: [
+    "human_verification_detected",
+    "human_presence_requested",
+    "human_presence_started",
+    "human_presence_completed",
+    "human_verification_completed",
+    "agent_resumed_after_human_presence",
+    "human_verification_expired",
+    "human_verification_failed",
+  ],
 };
 
 // ─── Route ────────────────────────────────────────────────────────────────────
@@ -299,6 +312,102 @@ export async function sensitiveReceiptsRouter(server: FastifyInstance): Promise<
             challenge_id: ch.challenge_id,
             ...(ch.browser_session_id ? { browser_session_id: ch.browser_session_id } : {}),
           });
+        }
+      }
+    }
+
+    // ── Human Presence Relay v1 ───────────────────────────────────────────────
+    // Derived at query time from humanVerificationRequests. Metadata only —
+    // never selectors, coordinates, boxes, or gesture data; presence never
+    // authorizes a purchase (purchase_authorized: false on every item).
+    // Skip if filtering by authorization_id or challenge_id — not linked.
+    if (!authFilter && !chFilter) {
+      for (const hvr of humanVerificationRequests.values()) {
+        if (hvr.user_id !== MOCK_USER_ID) continue;
+        if (bsFilter && hvr.browser_session_id !== bsFilter) continue;
+
+        const baseMeta = {
+          challenge_type: hvr.challenge_type,
+          domain: hvr.domain,
+          purchase_authorized: false,
+        };
+        const baseGuarantees = [
+          "No gesture stored or replayed — live presence only",
+          "Human verification never authorizes a purchase or payment",
+        ];
+        const push = (
+          eventType: SensitiveActionEventType,
+          timestamp: string,
+          description: string,
+          extraMeta: Record<string, string | boolean | number> = {},
+        ) => {
+          items.push({
+            item_id: `${eventType}:${hvr.request_id}:${timestamp}`,
+            event_type: eventType,
+            timestamp,
+            domain: hvr.domain,
+            description,
+            metadata: { ...baseMeta, ...extraMeta },
+            privacy_guarantees: baseGuarantees,
+            human_verification_request_id: hvr.request_id,
+            browser_session_id: hvr.browser_session_id,
+          });
+        };
+
+        push(
+          "human_verification_detected",
+          hvr.created_at,
+          `A human-verification challenge was detected on ${hvr.domain}`,
+        );
+        push(
+          "human_presence_requested",
+          hvr.created_at,
+          "Live user presence was requested via the Aegis UI",
+        );
+        if (hvr.started_at) {
+          push(
+            "human_presence_started",
+            hvr.started_at,
+            "User began the live verification interaction in the Aegis UI",
+            { hold_attempt_count: hvr.hold_attempt_count },
+          );
+        }
+        if (hvr.completed_at) {
+          push(
+            "human_presence_completed",
+            hvr.completed_at,
+            hvr.completion_mode === "manual_user_completion"
+              ? "User completed the challenge manually in the browser"
+              : "User completed the live presence interaction in the Aegis UI",
+            { hold_attempt_count: hvr.hold_attempt_count, ...(hvr.completion_mode ? { completion_mode: hvr.completion_mode } : {}) },
+          );
+          push(
+            "human_verification_completed",
+            hvr.completed_at,
+            `The human-verification challenge on ${hvr.domain} cleared`,
+          );
+        }
+        if (hvr.resumed_at) {
+          push(
+            "agent_resumed_after_human_presence",
+            hvr.resumed_at,
+            "Agent resumed with a fresh snapshot after human verification",
+          );
+        }
+        if (hvr.status === "expired") {
+          push(
+            "human_verification_expired",
+            hvr.expires_at,
+            "The human-verification request expired before completion",
+          );
+        }
+        if (hvr.status === "failed") {
+          push(
+            "human_verification_failed",
+            hvr.completed_at ?? hvr.expires_at,
+            "The live presence relay failed (browser/CDP error)",
+            hvr.error ? { error: sanitizeReceiptText(hvr.error, 80) } : {},
+          );
         }
       }
     }

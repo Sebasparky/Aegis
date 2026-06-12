@@ -5,7 +5,7 @@ import type { SensitiveActionTimelineItem, SensitiveActionEventType } from "@aeg
 import { listSensitiveReceiptTimeline } from "@/lib/api";
 
 type SinceOption = "24h" | "today" | "7d" | "all";
-type GroupOption = "all" | "browser" | "credential" | "challenge" | "email" | "payment";
+type GroupOption = "all" | "browser" | "credential" | "challenge" | "email" | "payment" | "human_presence";
 
 const SINCE_LABELS: Record<SinceOption, string> = {
   "24h": "Last 24h",
@@ -21,6 +21,7 @@ const GROUP_LABELS: Record<GroupOption, string> = {
   challenge: "Challenges",
   email: "Email resolver",
   payment: "Payments",
+  human_presence: "Human presence",
 };
 
 const EVENT_STYLES: Record<
@@ -101,6 +102,46 @@ const EVENT_STYLES: Record<
     dot: "bg-rose-500",
     badge: "bg-rose-950 text-rose-300 border-rose-800",
     label: "Purchase failed",
+  },
+  human_verification_detected: {
+    dot: "bg-violet-400",
+    badge: "bg-violet-950 text-violet-300 border-violet-800",
+    label: "Human check detected",
+  },
+  human_presence_requested: {
+    dot: "bg-violet-400",
+    badge: "bg-violet-950 text-violet-300 border-violet-800",
+    label: "Presence requested",
+  },
+  human_presence_started: {
+    dot: "bg-fuchsia-400",
+    badge: "bg-fuchsia-950 text-fuchsia-300 border-fuchsia-800",
+    label: "Presence started",
+  },
+  human_presence_completed: {
+    dot: "bg-fuchsia-500",
+    badge: "bg-fuchsia-950 text-fuchsia-200 border-fuchsia-800",
+    label: "Presence completed",
+  },
+  human_verification_completed: {
+    dot: "bg-emerald-400",
+    badge: "bg-emerald-950 text-emerald-300 border-emerald-800",
+    label: "Human check cleared",
+  },
+  agent_resumed_after_human_presence: {
+    dot: "bg-emerald-500",
+    badge: "bg-emerald-950 text-emerald-200 border-emerald-800",
+    label: "Agent resumed",
+  },
+  human_verification_expired: {
+    dot: "bg-gray-500",
+    badge: "bg-gray-800 text-gray-400 border-gray-700",
+    label: "Human check expired",
+  },
+  human_verification_failed: {
+    dot: "bg-rose-500",
+    badge: "bg-rose-950 text-rose-300 border-rose-800",
+    label: "Human check failed",
   },
 };
 

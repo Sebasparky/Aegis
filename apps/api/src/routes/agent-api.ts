@@ -86,6 +86,24 @@ import {
   resolveSurfaceActionBox,
   type AntigenSurfaceResolutionState,
 } from "../runtime/antigenSurfaceResolution.js";
+// Human Presence Relay v1 (ANTIGEN_HUMAN_VERIFICATION, default-off): blocking
+// human-verification surfaces auto-create a HumanVerificationRequest and arm a
+// pre-action guard that fails background clicks/types fast with
+// HUMAN_VERIFICATION_REQUIRED instead of producing stale-ref loops or logical
+// recovery behind the challenge.
+import {
+  isHumanVerificationEnabled,
+  getActiveHumanVerification,
+  clearActiveHumanVerification,
+} from "../runtime/humanVerificationState.js";
+import {
+  createOrReuseHumanVerificationRequest,
+  findActiveHumanVerificationRequest,
+  resolveChallengeNoLongerPresent,
+  lazyExpireHumanVerificationRequest,
+  humanVerificationAgentNextAction,
+} from "../lib/humanVerificationLifecycle.js";
+import { toAgentHumanVerificationView } from "./human-verification.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef, orderPaymentFillFields, isIframeCapablePaymentField } from "../runtime/paymentCardFill.js";
@@ -112,6 +130,7 @@ import {
   credentialUseAuthorizations,
   sensitiveGrants,
   securityChallenges,
+  humanVerificationRequests,
   paymentMethods,
   paymentCardFillAuthorizations,
   paymentCardFillRequests,
@@ -444,6 +463,58 @@ function resolveReadyRuntimeSession(
   const ready = findReadySessionByDelegationId(delegationId, userId);
   if (ready) return { kind: "rebound", session: ready, previous_runtime_id: runtimeId };
   return { kind: "none" };
+}
+
+/**
+ * Human Presence Relay pre-action guard. Runs in browser-click/type/set-value/
+ * scroll IMMEDIATELY after session resolution and BEFORE any ref resolution —
+ * so the stale-ref machinery, surface resolution, and logical recovery are
+ * never reached while a known blocking human-verification challenge is up.
+ * browser-snapshot is deliberately NOT guarded: it is the resume path.
+ *
+ * Returns true when the request was rejected (409 HUMAN_VERIFICATION_REQUIRED
+ * already sent). The payload carries metadata + agent guidance only — never
+ * selectors, coordinates, or refs.
+ */
+function rejectIfHumanVerificationActive(
+  session: TaskBrowserSession,
+  reply: any,
+  tool: string,
+): boolean {
+  if (!isHumanVerificationEnabled()) return false;
+  const marker = getActiveHumanVerification(session.browser_session_id);
+  if (!marker) return false;
+  const request = humanVerificationRequests.get(marker.request_id);
+  if (!request) {
+    clearActiveHumanVerification(session.browser_session_id);
+    return false;
+  }
+  lazyExpireHumanVerificationRequest(request);
+  // Terminal requests keep blocking (with the terminal status) until a fresh
+  // snapshot re-evaluates the page — the challenge itself is presumably still
+  // there; clicking behind it would only produce stale-ref loops.
+  recordBrowserTraceEvent(session.browser_session_id, {
+    event_type: "browser_tool_rejected",
+    browser_runtime_id: session.browser_session_id,
+    tool,
+    error_code: "HUMAN_VERIFICATION_REQUIRED",
+  });
+  reply.status(409).send({
+    ok: false,
+    error: {
+      code: "HUMAN_VERIFICATION_REQUIRED",
+      message:
+        "A human-verification challenge is blocking this page. It requires live user presence via the Aegis UI — do not attempt to click, type, or bypass it.",
+      request_id: request.request_id,
+      status: request.status,
+      challenge_type: request.challenge_type,
+      domain: request.domain,
+      user_presence_required: true,
+      purchase_authorized: false,
+      next_action: humanVerificationAgentNextAction(request),
+    },
+  });
+  return true;
 }
 
 export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
@@ -2483,6 +2554,31 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     },
   );
 
+  // ─── Human Presence Relay v1 ─────────────────────────────────────────────────
+
+  // GET /api/agent/v1/human-verification-requests/:requestId — agent polls the
+  // relay status (wait_for_human_verification). Safe view + next_action only:
+  // no selectors, coordinates, boxes, or gesture data. External agents cannot
+  // act on the request through this namespace — completion is user-only via
+  // the Aegis UI.
+  server.get<{ Params: { requestId: string } }>(
+    "/api/agent/v1/human-verification-requests/:requestId",
+    async (req, reply) => {
+      const delegation = await requireAgentToken(req, reply);
+      if (!delegation) return;
+
+      const request = humanVerificationRequests.get(req.params.requestId);
+      if (!request) {
+        return sendError(reply, 404, "HUMAN_VERIFICATION_REQUEST_NOT_FOUND", "Human-verification request not found.");
+      }
+      if (request.user_id !== MOCK_USER_ID || request.delegation_id !== delegation.id) {
+        return sendError(reply, 403, "FORBIDDEN", "Access denied to this human-verification request.");
+      }
+      lazyExpireHumanVerificationRequest(request);
+      return reply.send({ ok: true, data: toAgentHumanVerificationView(request) });
+    },
+  );
+
   // ─── Connected Email Challenge Resolver v1 ──────────────────────────────────
 
   function resolutionNextAction(status: ChallengeEmailResolutionStatus): string {
@@ -3714,6 +3810,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
     }
     const session = runtimeResolution.session; // ready
+    if (rejectIfHumanVerificationActive(session, reply, "browser_click")) return;
 
     // Antigen exact-ref path (Phase 4A): when ref is an Antigen ref (ag_<n>),
     // resolve the exact element box from the latest active snapshot for this
@@ -4421,6 +4518,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
     }
     const session = runtimeResolution.session; // ready
+    if (rejectIfHumanVerificationActive(session, reply, "browser_scroll_to_ref")) return;
 
     const refRaw = typeof body.ref === "string" ? body.ref : undefined;
     if (!refRaw || !/^ag_\d+$/.test(refRaw)) {
@@ -4575,6 +4673,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
     }
     const session = runtimeResolution.session; // ready
+    if (rejectIfHumanVerificationActive(session, reply, "browser_type")) return;
 
     const submitFlag = body.submit === true;
 
@@ -4874,6 +4973,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       return reply.status(409).send({ ok: false, error: { code: "RUNTIME_SESSION_CHANGED", message: "The browser runtime changed since this ref was captured. Reinitialize the runtime if needed, take a fresh antigen_snapshot, then act on the new refs — stale refs are not carried across runtime changes." } });
     }
     const session = runtimeResolution.session; // ready
+    if (rejectIfHumanVerificationActive(session, reply, "browser_set_value")) return;
 
     const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
     if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
@@ -5276,6 +5376,65 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       : undefined;
     const likelyBlockedRefs = new Set(activeSurfaces?.likely_blocked_refs ?? []);
 
+    // Human Presence Relay v1 (ANTIGEN_HUMAN_VERIFICATION, default-off, byte-
+    // identical when off). A blocking human-verification surface in THIS
+    // snapshot auto-creates (or reuses) the HumanVerificationRequest and arms
+    // the pre-action guard for the session. A snapshot with NO such surface
+    // resolves any open request (completed only if the user actually relayed
+    // presence), clears the guard, and stamps resumed_at on the first fresh
+    // snapshot after completion.
+    let hvSnapshotInfo:
+      | { request_id: string; status: string; challenge_type: string; domain: string; expires_at: string; instructions: string; next_action: string }
+      | undefined;
+    if (isHumanVerificationEnabled()) {
+      const hvMember = elements.find(
+        (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
+      );
+      if (hvMember) {
+        let hvDomain = "unknown";
+        try {
+          if (snapshot.url) hvDomain = new URL(snapshot.url).hostname;
+        } catch {
+          /* keep "unknown" */
+        }
+        const hvRequest = createOrReuseHumanVerificationRequest({
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          agent_name: delegation.agent_name,
+          browser_session_id: session.browser_session_id,
+          domain: hvDomain,
+          page_url: snapshot.url ?? "",
+          challenge_type: hvMember.overlay?.hv_challenge_type ?? "unknown_human_verification",
+          surface_title: hvMember.overlay?.modal_title,
+        });
+        hvSnapshotInfo = {
+          request_id: hvRequest.request_id,
+          status: hvRequest.status,
+          challenge_type: hvRequest.challenge_type,
+          domain: hvRequest.domain,
+          expires_at: hvRequest.expires_at,
+          instructions: hvRequest.instructions,
+          next_action: humanVerificationAgentNextAction(hvRequest),
+        };
+      } else {
+        const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
+        if (openRequest) resolveChallengeNoLongerPresent(openRequest);
+        clearActiveHumanVerification(session.browser_session_id);
+        // First fresh snapshot after a completion drives agent-resume audit.
+        for (const r of humanVerificationRequests.values()) {
+          if (
+            r.browser_session_id === session.browser_session_id &&
+            r.status === "completed" &&
+            !r.resumed_at
+          ) {
+            r.resumed_at = new Date().toISOString();
+            humanVerificationRequests.set(r.request_id, r);
+            schedulePersist();
+          }
+        }
+      }
+    }
+
     timing.mark("record_store_and_pagemap");
 
     // External elements + per-element qualitative status (additive, safe). When
@@ -5376,6 +5535,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ? {
               active_surfaces: activeSurfaces.surfaces,
               recommended_actions: activeSurfaces.recommended_actions,
+              ...(activeSurfaces.recommended_next_step
+                ? { recommended_next_step: activeSurfaces.recommended_next_step }
+                : {}),
+            }
+          : {}),
+        // Human Presence Relay (flag-gated): metadata + guidance only — never
+        // selectors, coordinates, or refs of the challenge control.
+        ...(hvSnapshotInfo
+          ? {
+              recommended_next_step: "human_presence_relay_required" as const,
+              human_verification: {
+                ...hvSnapshotInfo,
+                user_presence_required: true as const,
+                purchase_authorized: false as const,
+              },
             }
           : {}),
         action_hints: pageMap.action_hints,

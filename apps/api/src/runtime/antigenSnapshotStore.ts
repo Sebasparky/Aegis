@@ -30,6 +30,7 @@ import type {
   AntigenOverlayInfo,
   AntigenOverlayType,
 } from "./antigenSnapshotRuntime.js";
+import { isHumanVerificationEnabled } from "./humanVerificationState.js";
 import { newId } from "../store/index.js";
 
 // ─── TTL ─────────────────────────────────────────────────────────────────────
@@ -231,6 +232,13 @@ export interface ExternalAntigenSnapshotElement {
     modal_title?: string;
     is_dismiss?: boolean;
     is_primary?: boolean;
+    /**
+     * The overlay is a human-verification challenge (Human Presence Relay).
+     * Classification only — the internal control marker (`hv_control`) and all
+     * geometry stay internal.
+     */
+    human_verification?: true;
+    hv_challenge_type?: string;
   };
 }
 
@@ -579,6 +587,12 @@ export function toExternalAntigenSnapshotElement(
     };
     if (typeof ov.modal_title === "string" && ov.modal_title) overlay.modal_title = ov.modal_title;
     if (ov.is_dismiss === true) overlay.is_dismiss = true;
+    // Human-verification classification (flag-gated so flag-off output is
+    // byte-identical). `hv_control` is targeting metadata and NEVER copied.
+    if (isHumanVerificationEnabled() && ov.human_verification === true) {
+      overlay.human_verification = true;
+      overlay.hv_challenge_type = ov.hv_challenge_type ?? "unknown_human_verification";
+    }
     out.overlay = overlay;
   }
   return out;

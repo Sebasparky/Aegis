@@ -769,6 +769,100 @@ export const cancelSecurityChallenge = (challengeId: string) =>
     { method: "POST", body: JSON.stringify({}) },
   );
 
+// ─── Human Presence Relay v1 ──────────────────────────────────────────────────
+
+export type HumanVerificationChallengeType =
+  | "press_and_hold"
+  | "checkbox_human"
+  | "image_captcha"
+  | "text_captcha"
+  | "puzzle_captcha"
+  | "unknown_human_verification";
+
+export type HumanVerificationStatus =
+  | "pending_user"
+  | "in_progress"
+  | "completed"
+  | "expired"
+  | "failed"
+  | "cancelled";
+
+export interface HumanVerificationRequestView {
+  request_id: string;
+  delegation_id: string;
+  agent_name?: string;
+  browser_session_id: string;
+  domain: string;
+  page_url: string;
+  challenge_type: HumanVerificationChallengeType;
+  challenge_label: string;
+  relay_capable: boolean;
+  status: HumanVerificationStatus;
+  surface_title?: string;
+  instructions: string;
+  user_presence_required: true;
+  purchase_authorized: false;
+  hold_attempt_count: number;
+  completion_mode?: "relayed_live_presence" | "manual_user_completion";
+  created_at: string;
+  expires_at: string;
+  started_at?: string;
+  completed_at?: string;
+  resumed_at?: string;
+  error?: string;
+}
+
+export type HumanVerificationHoldView = HumanVerificationRequestView & {
+  hold_state?: "holding" | "released" | "released_fail_closed" | "challenge_gone";
+  held_ms?: number;
+  challenge_present?: boolean;
+  confirm_state?: "cleared" | "still_present" | "challenge_gone";
+};
+
+export const listHumanVerificationRequests = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<HumanVerificationRequestView[]>(`/api/internal/human-verification-requests${qs}`);
+};
+
+export const getHumanVerificationRequest = (id: string) =>
+  request<HumanVerificationRequestView>(`/api/internal/human-verification-requests/${id}`);
+
+export const startHumanVerificationHold = (id: string) =>
+  request<HumanVerificationHoldView>(
+    `/api/internal/human-verification-requests/${id}/hold-start`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const sendHumanVerificationHeartbeat = (id: string) =>
+  request<{ request_id: string; hold_state: "holding" | "released_fail_closed" }>(
+    `/api/internal/human-verification-requests/${id}/heartbeat`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const endHumanVerificationHold = (id: string) =>
+  request<HumanVerificationHoldView>(
+    `/api/internal/human-verification-requests/${id}/hold-end`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const confirmHumanPresence = (id: string) =>
+  request<HumanVerificationHoldView>(
+    `/api/internal/human-verification-requests/${id}/confirm`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const recheckHumanVerification = (id: string) =>
+  request<HumanVerificationHoldView>(
+    `/api/internal/human-verification-requests/${id}/recheck`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const cancelHumanVerificationRequest = (id: string) =>
+  request<HumanVerificationRequestView>(
+    `/api/internal/human-verification-requests/${id}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
 // ─── Profile Memory Requests v1 ──────────────────────────────────────────────
 
 export interface ProfileMemoryRequestView {
@@ -947,7 +1041,7 @@ export async function listSensitiveReceiptTimeline(params?: {
   authorization_id?: string;
   challenge_id?: string;
   since?: "today" | "24h" | "7d" | "all";
-  event_group?: "all" | "browser" | "credential" | "challenge" | "email" | "payment";
+  event_group?: "all" | "browser" | "credential" | "challenge" | "email" | "payment" | "human_presence";
   limit?: number;
 }): Promise<{ items: SensitiveActionTimelineItem[] }> {
   const url = new URL(`${BASE}/api/internal/sensitive-receipts/recent`);

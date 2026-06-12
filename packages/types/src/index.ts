@@ -610,7 +610,8 @@ export type UserApprovalSource =
   | "credential_authorization"              // credential injection approve path
   | "challenge_code_submission"             // security challenge code submit path
   | "payment_card_fill_authorization"       // payment card fill approve path
-  | "purchase_confirmation_authorization";  // purchase confirmation approve path
+  | "purchase_confirmation_authorization"   // purchase confirmation approve path
+  | "human_presence_verification";          // live human-verification relay completion
 export type UserApprovalOutcome = "pending" | "completed" | "failed" | "not_applicable";
 
 /**
@@ -716,9 +717,10 @@ export interface UserApprovalReceiptVerificationResult {
 // challenge_resolution (from security challenge code submission).
 
 export type SensitiveGrantType =
-  | "credential_injection"    // user approved a CredentialUseAuthorization
-  | "challenge_resolution"    // user submitted a challenge code via /submit-code
-  | "payment_card_fill";      // user approved a PaymentCardFillAuthorization
+  | "credential_injection"         // user approved a CredentialUseAuthorization
+  | "challenge_resolution"         // user submitted a challenge code via /submit-code
+  | "payment_card_fill"            // user approved a PaymentCardFillAuthorization
+  | "human_presence_verification"; // user relayed live presence through the Aegis UI
 
 export type SensitiveGrantStatus =
   | "active"     // grant is live and not yet expired or consumed
@@ -737,6 +739,7 @@ export interface SensitiveGrantScope {
   challenge_id?: string;        // challenge_resolution only — challenge ID, never the raw code
   authorization_id?: string;    // credential_injection / payment_card_fill — linked authorization ID
   payment_method_id?: string;   // payment_card_fill only — PaymentMethod.payment_method_id, never a raw value
+  human_verification_request_id?: string; // human_presence_verification only — request ID, never gesture data
 }
 
 export interface SensitiveGrant {
@@ -2332,6 +2335,65 @@ export interface ChallengeEmailResolution {
   updated_at: string;
 }
 
+// ─── Human Presence Relay v1 ──────────────────────────────────────────────────
+// A blocking human-verification challenge (e.g. "Press & Hold to confirm you
+// are a human") detected in the agent's browser. Antigen never auto-solves
+// these: it relays FRESH, LIVE user presence from the Aegis web UI into the
+// browser session. No gesture is ever stored or replayed, and completing a
+// human verification NEVER authorizes a purchase/payment.
+
+export type HumanVerificationChallengeType =
+  | "press_and_hold"
+  | "checkbox_human"
+  | "image_captcha"            // deferred in v1 — manual user handoff only
+  | "text_captcha"             // deferred in v1 — manual user handoff only
+  | "puzzle_captcha"           // deferred in v1 — manual user handoff only
+  | "unknown_human_verification";
+
+export type HumanVerificationStatus =
+  | "pending_user"
+  | "in_progress"
+  | "completed"
+  | "expired"
+  | "failed"
+  | "cancelled";
+
+export interface HumanVerificationRequest {
+  request_id: string; // "hvr_..."
+  user_id: string;
+  delegation_id: string;
+  /** Display name of the delegated agent (delegation.agent_name). */
+  agent_name?: string;
+  browser_session_id: string;
+  domain: string;
+  page_url: string;
+  challenge_type: HumanVerificationChallengeType;
+  status: HumanVerificationStatus;
+  /** Value-free clipped accessible title of the challenge surface. */
+  surface_title?: string;
+  instructions: string;
+  // Literal true — only live user presence relayed through the Aegis UI can
+  // clear the challenge; Antigen never synthesizes or replays the gesture.
+  user_presence_required: true;
+  // Literal false — human verification NEVER authorizes purchase/payment.
+  purchase_authorized: false;
+  /** Number of live hold/confirm attempts the user has relayed so far. */
+  hold_attempt_count: number;
+  /**
+   * How the challenge cleared: live presence mirrored through the Aegis UI, or
+   * the user solving it manually in the browser (captcha/unknown types).
+   * Recorded so receipts never claim a relay that didn't happen.
+   */
+  completion_mode?: "relayed_live_presence" | "manual_user_completion";
+  created_at: string;
+  expires_at: string;
+  started_at?: string;
+  completed_at?: string;
+  /** Set when the agent takes its first fresh snapshot after completion. */
+  resumed_at?: string;
+  error?: string;
+}
+
 // ─── Task Browser Lifecycle v1 ────────────────────────────────────────────────
 
 // ─── Capability-state action gating ──────────────────────────────────────────
@@ -2660,7 +2722,15 @@ export type SensitiveActionEventType =
   | "challenge_email_code_injected"
   | "payment_card_fill_executed"
   | "purchase_confirmation_submitted"
-  | "purchase_confirmation_failed";
+  | "purchase_confirmation_failed"
+  | "human_verification_detected"
+  | "human_presence_requested"
+  | "human_presence_started"
+  | "human_presence_completed"
+  | "human_verification_completed"
+  | "agent_resumed_after_human_presence"
+  | "human_verification_expired"
+  | "human_verification_failed";
 
 export interface SensitiveActionTimelineItem {
   item_id: string;
@@ -2675,6 +2745,7 @@ export interface SensitiveActionTimelineItem {
   challenge_id?: string;
   resolution_id?: string;
   purchase_confirmation_id?: string;
+  human_verification_request_id?: string;
 }
 
 // ─── Aegis Workspaces v0 ────────────────────────────────────────────────────

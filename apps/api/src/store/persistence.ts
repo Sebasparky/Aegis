@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
-import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, PublishedSkillVersion, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem, ProfileMemoryRequest, AccountCreationRequest } from "@aegis/types";
+import type { Collar, AgentTask, AgentDelegation, AgentConnector, AegisRoute, Skill, PublishedSkillVersion, InstalledSkill, RouteRun, RouteRunReceipt, AegisVaultPass, RoutePassBinding, DelegationPassport, ActionAuthorizationReceipt, WebsiteTrustAssertion, PaymentMethod, SpendingLimitStepUp, SecretFieldInjection, CredentialUseAuthorization, SecurityChallenge, ChallengeEmailResolution, HumanVerificationRequest, AegisWorkspace, WorkspaceTask, WorkspaceArtifact, UserApprovalReceipt, WebsiteTrustProfile, WebsiteViolationReceipt, SensitiveGrant, PaymentCardFillAuthorization, PaymentCardFillRequest, PurchaseConfirmationAuthorization, VerificationCard, DisclosureReceipt, TrustSignalDisclosureRecord, PrivateProfileMemoryItem, ProfileMemoryRequest, AccountCreationRequest } from "@aegis/types";
 import { buildSignedWebsiteTrustProfile, STANDARD_SAFETY_PROMISES } from "../lib/websiteTrustProfileSigning.js";
 import {
   users,
@@ -38,6 +38,7 @@ import {
   credentialUseAuthorizations,
   securityChallenges,
   challengeEmailResolutions,
+  humanVerificationRequests,
   aegisWorkspaces,
   workspaceTasks,
   workspaceArtifacts,
@@ -682,6 +683,7 @@ export function persistStore(): void {
       credentialUseAuthorizations: Array.from(credentialUseAuthorizations.entries()),
       securityChallenges: Array.from(securityChallenges.entries()),
       challengeEmailResolutions: Array.from(challengeEmailResolutions.entries()),
+      humanVerificationRequests: Array.from(humanVerificationRequests.entries()),
       aegisWorkspaces: Array.from(aegisWorkspaces.entries()),
       workspaceTasks: Array.from(workspaceTasks.entries()),
       workspaceArtifacts: Array.from(workspaceArtifacts.entries()),
@@ -827,6 +829,17 @@ export async function loadStore(): Promise<void> {
       securityChallenges.set(k, ch);
     }
 
+    // Human-verification requests — pending/in-progress states cannot survive restart
+    // (the browser CDP context is gone and live hold sessions were memory-only).
+    for (const [k, v] of (data.humanVerificationRequests ?? [])) {
+      const hvr = v as HumanVerificationRequest;
+      if (hvr.status === "pending_user" || hvr.status === "in_progress") {
+        hvr.status = "expired";
+        hvr.error = hvr.error ?? "expired_on_restart";
+      }
+      humanVerificationRequests.set(k, hvr);
+    }
+
     // Sensitive grants are session-bound — active grants are expired on restart because the
     // linked CredentialUseAuthorization or SecurityChallenge is also expired after restart.
     for (const [k, v] of (data.sensitiveGrants ?? [])) {
@@ -964,6 +977,7 @@ export async function resetStoreForDemo(): Promise<void> {
   credentialUseAuthorizations.clear();
   securityChallenges.clear();
   challengeEmailResolutions.clear();
+  humanVerificationRequests.clear();
   aegisWorkspaces.clear();
   workspaceTasks.clear();
   workspaceArtifacts.clear();

@@ -21,6 +21,7 @@ const ANTIGEN_KEYS = [
   "active_surfaces",
   "surface_resolve",
   "logical_recovery",
+  "human_verification",
   "fill_state",
   "pointer_timing",
   "browser_trace",

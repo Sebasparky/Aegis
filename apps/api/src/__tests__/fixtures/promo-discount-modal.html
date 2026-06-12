@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  Human Presence Relay NEGATIVE fixture — a normal blocking promo modal
+  ("We Missed You! Enjoy 10% off"). Structurally identical to a challenge
+  (role=dialog, aria-modal, full-page dimmer) but with marketing copy only.
+  MUST NOT classify as human_verification.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>We Missed You!</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      .promo-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(20, 20, 20, 0.55);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .promo-modal { background: #fff; border-radius: 10px; padding: 28px 36px; width: 360px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <header style="padding: 16px;">
+      <input id="search" type="search" placeholder="Search" aria-label="Search" />
+      <button id="search-btn">Search</button>
+    </header>
+
+    <div class="promo-backdrop" id="promo-backdrop" role="dialog" aria-modal="true" aria-label="We Missed You!">
+      <div class="promo-modal">
+        <h2>We Missed You!</h2>
+        <p>Enjoy 10% off your next order. Verify your email to claim the offer and confirm your subscription.</p>
+        <button id="promo-shop">Shop now</button>
+        <button id="promo-dismiss">No thanks</button>
+      </div>
+    </div>
+  </body>
+</html>

@@ -59,6 +59,7 @@ import {
   closeAllTaskBrowserSessions,
 } from "./runtime/taskBrowserSessions.js";
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
+import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
 import { browserRunTraceRoutes } from "./routes/browser-run-trace.js";
@@ -165,6 +166,7 @@ async function main() {
   await server.register(accountCreationRoutes);
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
+  await server.register(humanVerificationRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);
   await server.register(browserRunTraceRoutes);

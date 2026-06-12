@@ -519,11 +519,12 @@ export async function dispatchPointerMovePath(
 }
 
 /**
- * Dispatches a mousePressed + mouseReleased pair at the given point.
- * A brief hover pause before the press and a gap between press and release
- * vary by interaction mode, reflecting the risk profile of the action.
+ * Dispatches a left mousePressed at the given point after the mode's hover
+ * pause. The press is NOT released here — pair with releaseAtPoint. Used by
+ * clickAtPoint (press → gap → release) and by the Human Presence Relay, where
+ * the press is held open only while live user heartbeats arrive.
  */
-export async function clickAtPoint(
+export async function pressAtPoint(
   sendCdp: (method: string, params: Record<string, unknown>) => void,
   point: { x: number; y: number },
   mode: PointerInteractionMode,
@@ -538,7 +539,17 @@ export async function clickAtPoint(
     button: "left",
     clickCount: 1,
   });
-  await sleep(timing.click_gap_ms);
+}
+
+/**
+ * Dispatches a left mouseReleased at the given point IMMEDIATELY — no delay.
+ * The Human Presence Relay's fail-closed release path depends on this being
+ * instant; clickAtPoint inserts its own mode-dependent gap before calling it.
+ */
+export function releaseAtPoint(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  point: { x: number; y: number },
+): void {
   sendCdp("Input.dispatchMouseEvent", {
     type: "mouseReleased",
     x: point.x,
@@ -546,6 +557,23 @@ export async function clickAtPoint(
     button: "left",
     clickCount: 1,
   });
+}
+
+/**
+ * Dispatches a mousePressed + mouseReleased pair at the given point.
+ * A brief hover pause before the press and a gap between press and release
+ * vary by interaction mode, reflecting the risk profile of the action.
+ */
+export async function clickAtPoint(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  point: { x: number; y: number },
+  mode: PointerInteractionMode,
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  const timing = MODE_TIMING[mode];
+  await pressAtPoint(sendCdp, point, mode, sleep);
+  await sleep(timing.click_gap_ms);
+  releaseAtPoint(sendCdp, point);
 }
 
 /**

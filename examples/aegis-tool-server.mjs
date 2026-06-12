@@ -435,6 +435,7 @@ async function planAegisAction({ task, domain, credential_hint } = {}) {
           "8. Call execute_secret_field_injection for the password injection.",
           "9. Click Submit / Sign In yourself in your Playwright browser.",
           "9a. If a security verification challenge appears after Submit (device verification email, 2FA, TOTP): call report_security_challenge({ domain, page_url, challenge_type, browser_session_id }) — always include the browser_session_id from step 0. Without it, Aegis injects into the wrong browser port and fails. Then call wait_for_security_challenge, and either inject_security_challenge_code (manual) or request_challenge_email_resolution → wait_for_challenge_email_resolution → inject_challenge_email_code (Gmail). After injection, click Verify yourself.",
+          "9b. If a HUMAN-verification challenge appears (press-and-hold, 'not a robot' checkbox, captcha): do NOT click or solve it. The Aegis runtime detects it in antigen_snapshot and blocks background actions with HUMAN_VERIFICATION_REQUIRED (the error carries a request_id). Tell the user to open the Aegis UI under 'Human verification', call wait_for_human_verification({ request_id }), and after status='completed' take a FRESH antigen_snapshot before any other action.",
           "10. Continue using your browser for the rest of the task. Use your own tools (@playwright/mcp) to navigate, read, and summarize pages — Aegis does not observe or read page content on the External Browser Handoff path. Only call close_task_browser_session if you used an Aegis-managed session (step 0 bridge path), and only after the full task is complete.",
           "11. [GitHub repo listing and similar dynamic lists] After login, navigate to the target page yourself. Verify dynamic content: check displayed count, scroll to load all visible items, inspect pagination links. Do not claim 'all repos' or 'all items' unless you verified count and pagination. If uncertain, report exactly what you can see: 'I can see X items on the current page.' Aegis does not read or summarize content — you own the reading step.",
         ],
@@ -1315,6 +1316,57 @@ async function injectSecurityChallengeCode({ challenge_id } = {}) {
     raw_code_revealed_to_agent: false,
     ...(data.error ? { error: data.error } : {}),
     next_action: data.next_action,
+  };
+}
+
+// ─── Human Presence Relay v1 handler ──────────────────────────────────────────
+//
+// Human-verification challenges ("Press & Hold to confirm you are a human",
+// not-a-robot checkboxes, captchas) are NEVER reported or solved by the agent:
+// the Aegis runtime detects them in antigen_snapshot, creates the
+// HumanVerificationRequest itself, and blocks background browser actions with
+// HUMAN_VERIFICATION_REQUIRED. The agent's only job is to tell the user to open
+// the Aegis UI, wait here for a terminal status, then take a FRESH
+// antigen_snapshot before resuming.
+
+async function waitForHumanVerification({ request_id, timeout_ms = 180_000, poll_interval_ms = 2000 } = {}) {
+  if (!request_id) return { error: "VALIDATION_ERROR", message: "request_id is required." };
+
+  const TERMINAL = new Set(["completed", "expired", "failed", "cancelled"]);
+  const deadline = Date.now() + timeout_ms;
+
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await request("GET", `/api/agent/v1/human-verification-requests/${encodeURIComponent(request_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll human-verification request." };
+    }
+    const data = res.data;
+    if (TERMINAL.has(data.status)) {
+      return {
+        request_id: data.request_id,
+        status: data.status,
+        challenge_type: data.challenge_type,
+        domain: data.domain,
+        user_presence_required: true,
+        purchase_authorized: false,
+        ...(data.error ? { error: data.error } : {}),
+        next_action: data.next_action,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, poll_interval_ms));
+  }
+
+  return {
+    status: "timeout",
+    request_id,
+    user_presence_required: true,
+    purchase_authorized: false,
+    next_action: `The user has not completed the verification yet. Tell the user the human-verification request is waiting in the Aegis UI at ${APPROVAL_UI} under "Human verification". You can call wait_for_human_verification again with the same request_id.`,
   };
 }
 
@@ -4467,6 +4519,42 @@ const TOOLS = [
     },
   },
   {
+    name: "wait_for_human_verification",
+    description:
+      "Wait for the user to clear a human-verification challenge (press-and-hold, not-a-robot checkbox, captcha) " +
+      "through the Aegis Human Presence Relay. Call this after a browser tool returns HUMAN_VERIFICATION_REQUIRED " +
+      "(the error payload carries the request_id) or after antigen_snapshot returns " +
+      "recommended_next_step='human_presence_relay_required' with a human_verification block.\n\n" +
+      "PRODUCT BOUNDARIES:\n" +
+      "- The agent must NEVER click, type behind, or try to solve the challenge itself — Aegis relays LIVE user presence from the Aegis UI into the browser.\n" +
+      "- Tell the user: \"A human-verification challenge appeared. Please open the Aegis UI under 'Human verification' and complete it there.\"\n" +
+      "- Completing a human verification NEVER authorizes a purchase or payment.\n" +
+      "- After status='completed', you MUST take a fresh antigen_snapshot before any other browser action — all prior ag_* refs are invalid.\n\n" +
+      "Terminal statuses:\n" +
+      "- 'completed': Challenge cleared. Take a fresh antigen_snapshot, then resume.\n" +
+      "- 'expired': The request timed out (3 min). Take a fresh antigen_snapshot — if the challenge is still present, a new request is created automatically.\n" +
+      "- 'cancelled': User cancelled (or the challenge disappeared untouched). Take a fresh antigen_snapshot.\n" +
+      "- 'failed': Browser/CDP error during the relay. Take a fresh antigen_snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: {
+          type: "string",
+          description: "The hvr_* request_id from the HUMAN_VERIFICATION_REQUIRED error payload or the snapshot's human_verification block.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Maximum milliseconds to wait before returning a timeout result. Default: 180000 (3 minutes — the request TTL).",
+        },
+        poll_interval_ms: {
+          type: "number",
+          description: "Milliseconds between poll attempts. Default: 2000.",
+        },
+      },
+      required: ["request_id"],
+    },
+  },
+  {
     name: "request_challenge_email_resolution",
     description:
       "Request Gmail-based automatic resolution for a live GitHub device verification challenge. " +
@@ -5104,6 +5192,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       break;
     case "inject_security_challenge_code":
       result = await injectSecurityChallengeCode(a);
+      break;
+    case "wait_for_human_verification":
+      result = await waitForHumanVerification(a);
       break;
     case "request_challenge_email_resolution":
       result = await requestChallengeEmailResolution(a);

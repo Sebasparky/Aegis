@@ -213,7 +213,8 @@ const STATIC_BROWSER_TOOLS = [
   },
   {
     name: "browser_click",
-    description: "Click left mouse button on an element on the page",
+    description:
+      "Click left mouse button on an element on the page. If this returns HUMAN_VERIFICATION_REQUIRED, a blocking human-verification challenge (press-and-hold / not-a-robot / captcha) is on the page: do NOT retry, click the challenge, or try to bypass it — tell the user to open the Aegis UI under 'Human verification', call wait_for_human_verification with the request_id from the error, and after status='completed' take a fresh antigen_snapshot before any other action.",
     inputSchema: {
       type: "object",
       properties: {

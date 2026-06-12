@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+  Human Presence Relay fixture — "I'm not a robot" checkbox interstitial.
+  Clicking the checkbox clears the modal (one mirrored click from the relay).
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Security check</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      .hv-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(20, 20, 20, 0.55);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .hv-modal { background: #fff; border-radius: 10px; padding: 28px 36px; width: 340px; }
+      .hv-row { display: flex; align-items: center; gap: 10px; border: 1px solid #ccc; border-radius: 6px; padding: 14px; }
+    </style>
+  </head>
+  <body>
+    <header style="padding: 16px;">
+      <input id="search" type="search" placeholder="Search" aria-label="Search" />
+      <a id="home-link" href="/">Home</a>
+    </header>
+
+    <div class="hv-backdrop" id="hv-backdrop" role="dialog" aria-modal="true" aria-label="Security check">
+      <div class="hv-modal">
+        <h2>Verify you are human</h2>
+        <div class="hv-row">
+          <input id="hv-checkbox" type="checkbox" aria-label="I'm not a robot" />
+          <label for="hv-checkbox">I'm not a robot</label>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      document.getElementById("hv-checkbox").addEventListener("click", function () {
+        var bd = document.getElementById("hv-backdrop");
+        bd.parentNode.removeChild(bd);
+        window.__hv_cleared = true;
+      });
+    </script>
+  </body>
+</html>

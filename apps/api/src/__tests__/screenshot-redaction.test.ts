@@ -25,7 +25,7 @@ import { PNG } from "pngjs";
 import WebSocket from "ws";
 import { chromium } from "playwright";
 
-import { redactPngBoxes, captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
+import { redactPngBoxes, captureRedactedScreenshot, buildTopLevelRemaskExpr } from "../runtime/screenshotRedaction.js";
 import { executeProtectedRealisticFill } from "../runtime/protectedRealisticFill.js";
 
 // ─── Part 1: pure pixel-pass redactor ────────────────────────────────────────
@@ -470,5 +470,199 @@ describe.skipIf(!EXE)("Redacted Screenshot — cross-origin OPPWA iframe redacti
     expect(shot.ok).toBe(false);
     if (shot.ok) return;
     expect(shot.error_code).toBe("SCREENSHOT_REDACTION_FAILED");
+  }, 20_000);
+});
+
+// ─── Part 4: real Chromium — top-level remask after a page re-render ──────────
+//
+// Reproduces the live IKEA expiry leak: the protected fill tags the expiry input
+// `data-antigen-masked` + `data-antigen-field`, then the OPPWA widget re-init
+// REPLACES the node, silently wiping both. The screenshot path must, driven by the
+// caller's expectedTopLevelFields (the server-side registry), re-locate the live
+// field by precise selectors, re-apply the mask, and redact it — or FAIL CLOSED
+// with redaction_mismatch when the field cannot be safely re-located. It must
+// never claim full redaction while the protected value is visible.
+
+const FAKE_EXPIRY = "12/27";
+
+describe.skipIf(!EXE)("Redacted Screenshot — top-level remask after re-render", () => {
+  let proc: ChildProcess;
+  let userDataDir: string;
+  let cdpUrl: string;
+  let wsUrl: string;
+  let targetId: string;
+  let captureWorks = false;
+
+  beforeAll(async () => {
+    const port = await freePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    userDataDir = mkdtempSync(join(tmpdir(), "vision-remask-it-"));
+    proc = spawn(
+      EXE!,
+      [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--force-device-scale-factor=1",
+        `file://${FIXTURE}`,
+      ],
+      { stdio: "ignore" },
+    );
+    await waitForCdp(cdpUrl);
+    await new Promise((res) => setTimeout(res, 300));
+    wsUrl = await browserWsUrl(cdpUrl);
+    targetId = await pageTargetId(cdpUrl);
+
+    // Add an OPPWA-style expiry input to the checkout fixture (same accessible
+    // shape as IKEA's: name="card.expiry", autocomplete="cc-exp").
+    await evalOnPage(
+      cdpUrl,
+      `(function(){
+        var l = document.createElement('label'); l.htmlFor = 'expiry'; l.textContent = 'Expiration date';
+        var i = document.createElement('input');
+        i.id = 'expiry'; i.name = 'card.expiry'; i.type = 'text';
+        i.setAttribute('autocomplete', 'cc-exp'); i.setAttribute('placeholder', 'MM / YY');
+        var pay = document.querySelector('#pay');
+        pay.parentNode.insertBefore(l, pay); pay.parentNode.insertBefore(i, pay);
+        return true;
+      })()`,
+    );
+
+    // Fill it through the protected primitive — tags data-antigen-masked + data-antigen-field.
+    const res = await executeProtectedRealisticFill({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      selectorExpr: `document.querySelector('#expiry')`,
+      value: FAKE_EXPIRY,
+      maskDomValue: true,
+      visualMask: true,
+      typingProfile: "username",
+      requestId: "remask_test_expiry",
+      domain: "checkout.test",
+      fieldLabel: "expiry_combined",
+    });
+    expect(res.success).toBe(true);
+
+    const probe = await captureRedactedScreenshot({ browserWsUrl: wsUrl, pageTargetId: targetId });
+    captureWorks = probe.ok;
+  }, 30_000);
+
+  afterAll(() => {
+    try {
+      proc?.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("tags the filled field with its field kind (fill-time)", async () => {
+    const kind = await evalOnPage(cdpUrl, `document.querySelector('#expiry').getAttribute('data-antigen-field')`);
+    expect(kind).toBe("expiry_combined");
+  });
+
+  it("re-render replacement wipes the marker; the remask pass re-locates and re-masks the live field", async () => {
+    // Simulate the OPPWA widget re-init: replace the input with a fresh node of the
+    // same accessible shape carrying the rendered value but NO antigen attributes.
+    await evalOnPage(
+      cdpUrl,
+      `(function(){
+        var old = document.querySelector('#expiry');
+        var n = document.createElement('input');
+        n.id = 'expiry'; n.name = 'card.expiry'; n.type = 'text';
+        n.setAttribute('autocomplete', 'cc-exp'); n.setAttribute('placeholder', 'MM / YY');
+        n.value = '${FAKE_EXPIRY}';
+        old.parentNode.replaceChild(n, old);
+        return true;
+      })()`,
+    );
+    const before = await evalOnPage(cdpUrl, `document.querySelector('#expiry').getAttribute('data-antigen-masked')`);
+    expect(before).toBe(null); // marker is gone — this is the leak condition
+
+    const remask = (await evalOnPage(cdpUrl, buildTopLevelRemaskExpr(["expiry_combined"]))) as {
+      ok: boolean;
+      covered: string[];
+      remasked: string[];
+      missing: string[];
+    };
+    expect(remask.ok).toBe(true);
+    expect(remask.remasked).toContain("expiry_combined");
+    expect(remask.missing).toEqual([]);
+
+    const after = await evalOnPage(cdpUrl, `document.querySelector('#expiry').getAttribute('data-antigen-masked')`);
+    expect(after).toBe("true");
+    const textSecurity = await evalOnPage(
+      cdpUrl,
+      `document.querySelector('#expiry').style.getPropertyValue('-webkit-text-security')`,
+    );
+    expect(textSecurity).toBe("disc");
+  });
+
+  it("a second pass reports the re-masked field as covered (idempotent)", async () => {
+    const remask = (await evalOnPage(cdpUrl, buildTopLevelRemaskExpr(["expiry_combined"]))) as {
+      ok: boolean;
+      covered: string[];
+      remasked: string[];
+      missing: string[];
+    };
+    expect(remask.ok).toBe(true);
+    expect(remask.covered).toContain("expiry_combined");
+    expect(remask.remasked).toEqual([]);
+  });
+
+  it("capture with expectedTopLevelFields redacts the remounted expiry region", async () => {
+    if (!captureWorks) return; // environment cannot screenshot — remask + fail-closed cover the rest
+    // Wipe the marker again so capture itself must perform the remask.
+    await evalOnPage(
+      cdpUrl,
+      `(function(){var e=document.querySelector('#expiry');e.removeAttribute('data-antigen-masked');e.removeAttribute('data-antigen-field');e.style.removeProperty('-webkit-text-security');return true;})()`,
+    );
+    const shot = await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedTopLevelFields: ["expiry_combined"],
+    });
+    expect(shot.ok).toBe(true);
+    if (!shot.ok) return;
+    expect(shot.redacted_field_count).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(shot)).not.toContain(FAKE_EXPIRY);
+
+    const rect = (await evalOnPage(
+      cdpUrl,
+      `(function(){var r=document.querySelector('#expiry').getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height,vw:window.innerWidth};})()`,
+    )) as { x: number; y: number; w: number; h: number; vw: number };
+    const png = PNG.sync.read(Buffer.from(shot.base64, "base64"));
+    const scale = png.width / rect.vw;
+    const cx = Math.round((rect.x + rect.w / 2) * scale);
+    const cy = Math.round((rect.y + rect.h / 2) * scale);
+    const idx = (png.width * cy + cx) << 2;
+    expect([png.data[idx], png.data[idx + 1], png.data[idx + 2]]).toEqual([0, 0, 0]);
+  }, 20_000);
+
+  // Must run last — removes the expiry field to assert the mismatch fail-closed path.
+  it("fails closed with redaction_mismatch when the field cannot be re-located (never claims full redaction)", async () => {
+    await evalOnPage(cdpUrl, `(function(){var e=document.querySelector('#expiry');if(e)e.remove();return true;})()`);
+    const shot = await captureRedactedScreenshot({
+      browserWsUrl: wsUrl,
+      pageTargetId: targetId,
+      expectedTopLevelFields: ["expiry_combined"],
+    });
+    expect(shot.ok).toBe(false);
+    if (shot.ok) return;
+    expect(shot.error_code).toBe("SCREENSHOT_REDACTION_FAILED");
+    expect(shot.redaction_mismatch).toBe(true);
+    expect(shot.missing_field_kinds).toEqual(["expiry_combined"]);
+    // No image, no values, no selectors in the failure result.
+    expect(JSON.stringify(shot)).not.toContain(FAKE_EXPIRY);
+    expect(JSON.stringify(shot)).not.toContain("card.expiry");
+    expect((shot as Record<string, unknown>).base64).toBeUndefined();
   }, 20_000);
 });

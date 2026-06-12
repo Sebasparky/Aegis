@@ -243,6 +243,9 @@ export async function executeProtectedRealisticFill(
   // layer can find exactly this registered protected field. text-security is purely
   // visual; the submittable value is unchanged. The title + outline are the human
   // "Antigen filled this" affordance. Never embeds or reads the value.
+  // `data-antigen-field` carries the field-kind enum (never a value) so the
+  // screenshot-time remask pass (screenshotRedaction.ts — keep styles in sync) can
+  // verify THIS kind's mask survived later page re-renders.
   const visualMaskInputBlock = visualMask
     ? `
     try {
@@ -252,6 +255,7 @@ export async function executeProtectedRealisticFill(
       el.style.setProperty('outline-offset', '1px', 'important');
       el.setAttribute('title', 'Filled by Antigen');
       el.setAttribute('data-antigen-masked', 'true');
+      el.setAttribute('data-antigen-field', ${JSON.stringify(params.fieldLabel)});
     } catch (e) {}`
     : "";
 
@@ -269,6 +273,7 @@ export async function executeProtectedRealisticFill(
       el.style.setProperty('outline-offset', '1px', 'important');
       el.setAttribute('title', 'Filled by Antigen');
       el.setAttribute('data-antigen-masked', 'true');
+      el.setAttribute('data-antigen-field', ${JSON.stringify(params.fieldLabel)});
     } catch (e) {}`
     : "";
 

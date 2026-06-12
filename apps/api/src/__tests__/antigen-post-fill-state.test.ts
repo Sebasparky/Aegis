@@ -286,6 +286,26 @@ describe("buildPostFillState — masking / redaction summary", () => {
     expect(s.masking.iframe_redaction_mismatch).toBe(true);
   });
 
+  it("fewer live mask markers than registered top-level fields → top_level_mask_missing (re-render wiped a mask)", () => {
+    const s = build({ probe: probe({ masked_marker_count: 1 }), expected_top_level_masked: 2 });
+    expect(s.masking.top_level_mask_missing).toBe(true);
+    assertLeakFree(s);
+  });
+
+  it("live mask markers ≥ registered top-level fields → no top_level_mask_missing (extra markers only inflate)", () => {
+    const equal = build({ probe: probe({ masked_marker_count: 2 }), expected_top_level_masked: 2 });
+    expect(equal.masking.top_level_mask_missing).toBeUndefined();
+    const extra = build({ probe: probe({ masked_marker_count: 5 }), expected_top_level_masked: 2 });
+    expect(extra.masking.top_level_mask_missing).toBeUndefined();
+  });
+
+  it("no registered top-level fields or unreadable probe → no top_level_mask_missing (never fabricated)", () => {
+    const none = build({ probe: probe({ masked_marker_count: 0 }) });
+    expect(none.masking.top_level_mask_missing).toBeUndefined();
+    const unreadable = build({ probe: probe({}, { status: "error" }), expected_top_level_masked: 2 });
+    expect(unreadable.masking.top_level_mask_missing).toBeUndefined();
+  });
+
   it("expected iframe field with an EMPTY registry → mismatch flag", () => {
     const s = build({ probe: probe(), expected_iframe_field: "card_number" });
     expect(s.masking.iframe_redaction_mismatch).toBe(true);

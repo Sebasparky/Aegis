@@ -21,6 +21,55 @@ export type ProtectedIframeFieldKind = "card_number" | "cvv" | "expiry";
 // keyed by browser_session_id → set of filled protected iframe field kinds
 const protectedIframeRedactions = new Map<string, Set<ProtectedIframeFieldKind>>();
 
+// ─── Top-level protected-field redaction registry ─────────────────────────────
+//
+// Records which protected payment-card fields Antigen filled on the TOP document
+// (parent page) with visualMask, per browser session. The fill primitive tags the
+// node `data-antigen-masked` at fill time, but hydrated checkouts (OPPWA widget
+// re-init after PAN/CVV iframe fills) can REPLACE the node afterwards, silently
+// dropping the marker — the live IKEA expiry leak. This registry is the server-side
+// truth "this field kind was filled and must be visually protected"; the screenshot
+// path uses it to re-locate and re-mask the live field at capture time and FAIL
+// CLOSED if it cannot. Same storage rules as the iframe registry above: memory-only,
+// field-kind enums only — never values, selectors, coordinates, or boxes.
+
+/** Top-level card fields that carry visualMask after fill (everything but billing_zip). */
+export type ProtectedTopLevelFieldKind =
+  | "card_number"
+  | "cvv"
+  | "expiry_month"
+  | "expiry_year"
+  | "expiry_combined"
+  | "cardholder_name";
+
+// keyed by browser_session_id → set of filled protected TOP-LEVEL field kinds
+const protectedTopLevelRedactions = new Map<string, Set<ProtectedTopLevelFieldKind>>();
+
+/** Record a successful top-level (non-iframe) protected card field fill for this session. */
+export function registerProtectedTopLevelRedaction(
+  browserSessionId: string,
+  field: ProtectedTopLevelFieldKind,
+): void {
+  if (!browserSessionId) return;
+  let set = protectedTopLevelRedactions.get(browserSessionId);
+  if (!set) {
+    set = new Set<ProtectedTopLevelFieldKind>();
+    protectedTopLevelRedactions.set(browserSessionId, set);
+  }
+  set.add(field);
+}
+
+/**
+ * Top-level protected field kinds the screenshot path must verify/re-mask for this
+ * session. Empty array when none. Field-kind enums only.
+ */
+export function getProtectedTopLevelRedactionFields(
+  browserSessionId: string,
+): ProtectedTopLevelFieldKind[] {
+  const set = protectedTopLevelRedactions.get(browserSessionId);
+  return set ? Array.from(set) : [];
+}
+
 /**
  * Record that a protected card field was filled inside a supported cross-origin
  * iframe for this session. `provider` is "oppwa" in v1 (the only supported PCI
@@ -51,7 +100,8 @@ export function getProtectedIframeRedactionFields(
   return set ? Array.from(set) : [];
 }
 
-/** Drop a session's registry entry (best-effort hygiene on session close). */
+/** Drop a session's registry entries — iframe AND top-level (best-effort hygiene on session close). */
 export function clearProtectedIframeRedactions(browserSessionId: string): void {
   protectedIframeRedactions.delete(browserSessionId);
+  protectedTopLevelRedactions.delete(browserSessionId);
 }

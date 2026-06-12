@@ -1267,6 +1267,12 @@ export interface PostFillMaskingSummary {
   iframe_redaction_fields?: ProtectedIframeFieldKind[];
   /** Fail-closed report: the just-filled iframe field kind is MISSING from the registry. Never silent. */
   iframe_redaction_mismatch?: true;
+  /**
+   * Fewer live `data-antigen-masked` markers than top-level protected fields filled
+   * in this session — a page re-render likely replaced a masked node (the screenshot
+   * path re-masks or fails closed; this surfaces the condition early). Never silent.
+   */
+  top_level_mask_missing?: true;
 }
 
 export interface PostFillState {
@@ -1375,6 +1381,14 @@ export interface BuildPostFillStateInput {
   iframe_redaction_fields?: ProtectedIframeFieldKind[];
   /** The iframe field kind the fill just registered — mismatch check against the registry list. */
   expected_iframe_field?: ProtectedIframeFieldKind;
+  /**
+   * Registry-derived count of top-level protected fields filled with visualMask in
+   * this session. Compared against the probe's live masked-marker count: fewer live
+   * markers than expected means a re-render wiped a mask (extra markers — e.g.
+   * iframe containers tagged by a prior screenshot — only inflate, so only the
+   * under-count is meaningful).
+   */
+  expected_top_level_masked?: number;
   /** Live page URL (internal input for intent classification only — never emitted). */
   pageUrl?: string | null;
 }
@@ -1432,6 +1446,13 @@ export function buildPostFillState(
 
   masking.dom_filled_marker_count = Math.max(0, Math.floor(fillProbe.filled_marker_count));
   masking.visual_mask_marker_count = Math.max(0, Math.floor(fillProbe.masked_marker_count));
+  if (
+    typeof input.expected_top_level_masked === "number" &&
+    input.expected_top_level_masked > 0 &&
+    masking.visual_mask_marker_count < input.expected_top_level_masked
+  ) {
+    masking.top_level_mask_missing = true;
+  }
 
   const validationCount = Math.min(
     Math.max(0, Math.floor(fillProbe.invalid_count)) + Math.max(0, Math.floor(fillProbe.alert_count)),

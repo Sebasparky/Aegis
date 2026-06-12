@@ -434,12 +434,22 @@ re-verifies the payment stage:
      `Illegal invocation`, no `TARGET_NOT_FILLABLE`.
    - Every fill execute response includes **`post_fill_state`** (realized outcome —
      not absent) and the adapter output includes **`post_fill_summary`**.
-   - **Redaction metric = 4/4**: card_number, cvv, expiry_combined, AND
-     cardholder_name all carry `data-antigen-masked` and render masked in the
-     redacted screenshot (all four have `visualMask=true` in `paymentCardFill.ts`;
-     billing ZIP is intentionally visible and excluded from the metric). If expiry
-     renders visibly despite `visualMask=true`, record it as a defect to
-     investigate — do **not** lower the metric to 3.
+   - **Redaction metric = 4/4 means ACTUAL visible protection**: card_number, cvv,
+     expiry_combined, AND cardholder_name are each genuinely blacked out (or
+     otherwise visually protected) **in the rendered screenshot** — not merely
+     counted by a registry or by leftover `data-antigen-masked` markers. A stale
+     marker on a detached/replaced node does NOT count. (All four have
+     `visualMask=true` in `paymentCardFill.ts`; billing ZIP is intentionally
+     visible and excluded from the metric.)
+   - **Re-render resilience**: hydrated checkouts (OPPWA widget re-init after
+     PAN/CVV iframe fills) can replace a masked top-level node and wipe its
+     marker. The screenshot path verifies every registry-recorded top-level
+     protected field at capture time and re-masks the live node; if a field
+     cannot be safely re-located it FAILS CLOSED with
+     `SCREENSHOT_REDACTION_FAILED` + `redaction_mismatch` instead of returning an
+     image — it must never claim 4/4 while a protected value is visible. A
+     mismatch failure or a `post_fill_state.masking.top_level_mask_missing` flag
+     is a defect to investigate — do **not** lower the metric to 3.
    - No raw sensitive values in any response, snapshot, screenshot, or the network
      trace.
    - **Pay / place-order is never clicked.** Card-fill approval is

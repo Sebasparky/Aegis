@@ -2,6 +2,8 @@ import WebSocket from "ws";
 import { PNG } from "pngjs";
 
 import { BrowserTimingScope } from "./browserTiming.js";
+import { fieldRemaskSelectors } from "./paymentCardFill.js";
+import type { ProtectedTopLevelFieldKind } from "./protectedIframeRedaction.js";
 
 /**
  * Redacted Screenshot capture — vision-channel protection for protected fills.
@@ -44,11 +46,31 @@ export interface CaptureRedactedScreenshotParams {
    * iframe internals are never inspected.
    */
   expectedIframeFields?: Array<"card_number" | "cvv" | "expiry">;
+  /**
+   * Protected card fields Antigen filled on the TOP document with visualMask in
+   * this session (from the top-level redaction registry). The fill-time
+   * `data-antigen-masked` marker can be wiped when a hydrated checkout re-renders
+   * the node after the fill (OPPWA widget re-init — the live IKEA expiry leak), so
+   * for each expected field the capture path VERIFIES a live, visible masked node
+   * of that kind still exists, and otherwise re-locates the field by precise
+   * field-specific selectors and re-applies the mask. If a field can neither be
+   * verified nor safely re-located, capture FAILS CLOSED with
+   * `redaction_mismatch` — it never reports full redaction while a protected
+   * value may be visible.
+   */
+  expectedTopLevelFields?: ProtectedTopLevelFieldKind[];
 }
 
 export type CaptureRedactedScreenshotResult =
   | { ok: true; base64: string; mimeType: "image/png"; redacted_field_count: number }
-  | { ok: false; error_code: "SCREENSHOT_REDACTION_FAILED" };
+  | {
+      ok: false;
+      error_code: "SCREENSHOT_REDACTION_FAILED";
+      /** True when an expected protected top-level field could not be verified or re-masked. */
+      redaction_mismatch?: true;
+      /** Field-kind enums only — never selectors, boxes, or values. */
+      missing_field_kinds?: ProtectedTopLevelFieldKind[];
+    };
 
 interface RedactBox {
   x: number;
@@ -128,6 +150,66 @@ function buildIframeMarkExpr(fields: Array<"card_number" | "cvv" | "expiry">): s
 })(${JSON.stringify(fields)})`;
 }
 
+/**
+ * Verify-or-remask expression for protected TOP-LEVEL card fields. For each expected
+ * field kind:
+ *   1. covered if a live, VISIBLE element still carries
+ *      `data-antigen-masked="true"` + `data-antigen-field="<kind>"` (fill-time tag);
+ *   2. otherwise re-locate the field by its precise selector list (first VISIBLE
+ *      match in priority order — hydrated widgets keep hidden original inputs, so
+ *      visibility is the discriminator) and re-apply the visual mask + tags. The
+ *      style blocks mirror protectedRealisticFill.ts — keep them in sync;
+ *   3. otherwise the kind is reported `missing` so the caller can FAIL CLOSED.
+ * Never reads or embeds any value; returns field-kind enums only.
+ * Exported for unit testing.
+ */
+export function buildTopLevelRemaskExpr(fields: ProtectedTopLevelFieldKind[]): string {
+  const selectorMap: Record<string, string[]> = {};
+  for (const f of fields) selectorMap[f] = fieldRemaskSelectors(f);
+  return `(function(map){
+  try {
+    function visible(el) {
+      if (!el || !el.getBoundingClientRect) return false;
+      var r = el.getBoundingClientRect();
+      if (!r || r.width <= 0 || r.height <= 0) return false;
+      var s = window.getComputedStyle(el);
+      return s.visibility !== 'hidden' && s.display !== 'none';
+    }
+    function remask(el, kind) {
+      if (el.tagName === 'SELECT') {
+        el.style.setProperty('color', 'transparent', 'important');
+        el.style.setProperty('text-shadow', '0 0 7px rgba(0,0,0,0.6)', 'important');
+      } else {
+        el.style.setProperty('-webkit-text-security', 'disc', 'important');
+        el.style.setProperty('text-security', 'disc', 'important');
+      }
+      el.style.setProperty('outline', '2px solid #ff5000', 'important');
+      el.style.setProperty('outline-offset', '1px', 'important');
+      el.setAttribute('title', 'Filled by Antigen');
+      el.setAttribute('data-antigen-masked', 'true');
+      el.setAttribute('data-antigen-field', kind);
+    }
+    var covered = [], remasked = [], missing = [];
+    for (var kind in map) {
+      var tagged = document.querySelectorAll('[data-antigen-masked="true"][data-antigen-field="' + kind + '"]');
+      var ok = false;
+      for (var i = 0; i < tagged.length; i++) { if (visible(tagged[i])) { ok = true; break; } }
+      if (ok) { covered.push(kind); continue; }
+      var sels = map[kind];
+      var el = null;
+      for (var j = 0; j < sels.length && !el; j++) {
+        var cands;
+        try { cands = document.querySelectorAll(sels[j]); } catch (e) { continue; }
+        for (var k = 0; k < cands.length; k++) { if (visible(cands[k])) { el = cands[k]; break; } }
+      }
+      if (!el) { missing.push(kind); continue; }
+      try { remask(el, kind); remasked.push(kind); } catch (e) { missing.push(kind); }
+    }
+    return { ok: true, covered: covered, remasked: remasked, missing: missing };
+  } catch (e) { return { ok: false, reason: String(e) }; }
+})(${JSON.stringify(selectorMap)})`;
+}
+
 const REMOVE_OVERLAY_EXPR = `(function(){
   try {
     var l = document.getElementById('__antigen_redact_layer');
@@ -171,7 +253,7 @@ export function redactPngBoxes(
 export async function captureRedactedScreenshot(
   params: CaptureRedactedScreenshotParams,
 ): Promise<CaptureRedactedScreenshotResult> {
-  const { browserWsUrl, pageTargetId, expectedIframeFields = [] } = params;
+  const { browserWsUrl, pageTargetId, expectedIframeFields = [], expectedTopLevelFields = [] } = params;
 
   // Dev-only latency markers (gated). Sanitized: stage labels + durations +
   // counts only — never image bytes, boxes, URLs, or field values.
@@ -241,6 +323,37 @@ export async function captureRedactedScreenshot(
         }
       }
       timing.mark("iframe_mark");
+
+      // 0b. Verify/re-mask the protected TOP-LEVEL fields. A later page re-render
+      //     (OPPWA widget re-init) may have replaced a masked node, wiping its
+      //     fill-time marker — the live IKEA expiry leak. Each expected field must
+      //     either still have a live visible masked node or be safely re-located and
+      //     re-masked; anything else FAILS CLOSED with redaction_mismatch. Never
+      //     report full redaction while a protected value may be visible.
+      if (expectedTopLevelFields.length > 0) {
+        const remaskRes = await send(
+          "Runtime.evaluate",
+          { expression: buildTopLevelRemaskExpr(expectedTopLevelFields), returnByValue: true },
+          sessionId,
+        );
+        const remaskVal = (remaskRes?.result as Record<string, unknown> | undefined)?.value as
+          | { ok?: boolean; covered?: string[]; remasked?: string[]; missing?: string[] }
+          | undefined;
+        if (!remaskVal?.ok) return finish(FAIL);
+        const missing = (Array.isArray(remaskVal.missing) ? remaskVal.missing : []).filter(
+          (m): m is ProtectedTopLevelFieldKind =>
+            (expectedTopLevelFields as string[]).includes(m as string),
+        );
+        if (missing.length > 0) {
+          return finish({
+            ok: false,
+            error_code: "SCREENSHOT_REDACTION_FAILED",
+            redaction_mismatch: true,
+            missing_field_kinds: missing,
+          });
+        }
+      }
+      timing.mark("toplevel_remask");
 
       // 1. Lay overlay boxes and collect the registered-field rects.
       const overlayRes = await send("Runtime.evaluate", { expression: OVERLAY_EXPR, returnByValue: true }, sessionId);

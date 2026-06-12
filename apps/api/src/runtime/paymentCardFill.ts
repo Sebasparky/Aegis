@@ -17,10 +17,23 @@ export function isAntigenRef(ref: string): boolean {
  * its stored identity instead of re-guessing with fragile selector heuristics:
  *
  *  - Prefer `document.getElementById(id)` when the snapshot captured a DOM id —
- *    scroll-independent and exact.
+ *    scroll-independent and exact. A non-fillable id-hit (an id on a wrapper) is
+ *    walked, not returned raw.
  *  - Otherwise fall back to `document.elementFromPoint(cx, cy)` at the box center
  *    (the same box-center strategy the realistic click/type path uses), then walk
- *    to the nearest fillable control so a hit on a wrapper still resolves.
+ *    to the nearest fillable control: label association (`closest('label')` →
+ *    `.control` / `htmlFor` / descendant), `closest()`, then a bounded ancestor
+ *    walk (≤3 levels) preferring a descendant control whose rect CONTAINS the
+ *    point, else nearest-by-center under a 150px cap. Floating-label markup —
+ *    where the point hit is an overlay span, not the input — resolves to the real
+ *    control this way.
+ *  - FAIL CLOSED: resolves to `null` when no fillable control is found, so the
+ *    fill primitive reports `element_not_found` instead of attempting native
+ *    input calls on a decorative node ("Illegal invocation").
+ *
+ * When the snapshot recorded the element as input/select/textarea, only that tag
+ * is accepted as the resolution target (prevents grabbing an adjacent control of
+ * a different shape).
  *
  * The id/box/coordinates live ONLY inside this CDP-evaluated expression — they are
  * never returned to the agent, logged, or placed in any response/trace/error.
@@ -29,17 +42,61 @@ export function buildRefSelectorExpr(record: AntigenSnapshotElementRecord): stri
   const cx = record.box.x + record.box.width / 2;
   const cy = record.box.y + record.box.height / 2;
   const byIdExpr = record.id ? `document.getElementById(${JSON.stringify(record.id)})` : "null";
+  const wanted = ["input", "select", "textarea"].includes(record.tag)
+    ? record.tag
+    : "input,select,textarea";
   return `(function() {
-    var byId = ${byIdExpr};
-    if (byId) return byId;
-    var el = document.elementFromPoint(${cx}, ${cy});
-    if (el && el.tagName !== 'INPUT' && el.tagName !== 'SELECT' && el.tagName !== 'TEXTAREA') {
-      var up = el.closest && el.closest('input,select,textarea');
-      if (up) return up;
-      var down = el.querySelector && el.querySelector('input,select,textarea');
-      if (down) return down;
+    var SEL = ${JSON.stringify(wanted)};
+    var cx = ${cx}, cy = ${cy};
+    function fillable(n) {
+      if (!n || !n.tagName) return false;
+      if (n.tagName !== 'INPUT' && n.tagName !== 'SELECT' && n.tagName !== 'TEXTAREA') return false;
+      return SEL === 'input,select,textarea' || n.tagName === SEL.toUpperCase();
     }
-    return el;
+    function fromLabel(n) {
+      var lab = (n && n.closest) ? n.closest('label') : null;
+      if (!lab) return null;
+      if (lab.control && fillable(lab.control)) return lab.control;
+      if (lab.htmlFor) { var t = document.getElementById(lab.htmlFor); if (fillable(t)) return t; }
+      var d = lab.querySelector(SEL);
+      return fillable(d) ? d : null;
+    }
+    function containsPoint(n) {
+      var r = n.getBoundingClientRect();
+      return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+    }
+    function bestDescendant(root) {
+      if (!root || !root.querySelectorAll) return null;
+      var list = root.querySelectorAll(SEL);
+      var best = null, bestD = Infinity;
+      for (var i = 0; i < list.length; i++) {
+        if (!fillable(list[i])) continue;
+        if (containsPoint(list[i])) return list[i];
+        var r = list[i].getBoundingClientRect();
+        var dx = (r.left + r.width / 2) - cx, dy = (r.top + r.height / 2) - cy;
+        var d2 = dx * dx + dy * dy;
+        if (d2 < bestD) { bestD = d2; best = list[i]; }
+      }
+      return (best && bestD <= 150 * 150) ? best : null;
+    }
+    function resolve(start) {
+      if (fillable(start)) return start;
+      var viaLabel = fromLabel(start);
+      if (viaLabel) return viaLabel;
+      var up = (start && start.closest) ? start.closest(SEL) : null;
+      if (up && fillable(up)) return up;
+      var node = start;
+      for (var depth = 0; node && depth <= 3; depth++) {
+        var hit = bestDescendant(node);
+        if (hit) return hit;
+        node = node.parentElement;
+      }
+      return null;
+    }
+    var byId = ${byIdExpr};
+    if (byId) { var r1 = resolve(byId); if (r1) return r1; }
+    var el = document.elementFromPoint(cx, cy);
+    return el ? resolve(el) : null;
   })()`;
 }
 

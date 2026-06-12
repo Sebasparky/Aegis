@@ -32,7 +32,7 @@ const mockState = vi.hoisted(() => ({
   // Per-phase canned eval responses (the `value` of result.result.value).
   iframeResult: { ok: true, tagName: "INPUT" } as unknown,
   boxResult: { ok: true, box: { x: 100, y: 200, width: 220, height: 40 }, viewport: { width: 1280, height: 800 } } as unknown,
-  focusResult: { ok: true } as unknown,
+  focusResult: { ok: true, focused: true } as unknown,
   verifyResult: { ok: true, reason: "value_present" } as unknown,
   selectResult: { ok: true, verified: true } as unknown,
   maskResult: { ok: true } as unknown,
@@ -43,7 +43,7 @@ const mockState = vi.hoisted(() => ({
     this.allSentMessages = [];
     this.iframeResult = { ok: true, tagName: "INPUT" };
     this.boxResult = { ok: true, box: { x: 100, y: 200, width: 220, height: 40 }, viewport: { width: 1280, height: 800 } };
-    this.focusResult = { ok: true };
+    this.focusResult = { ok: true, focused: true };
     this.verifyResult = { ok: true, reason: "value_present" };
     this.selectResult = { ok: true, verified: true };
     this.maskResult = { ok: true };
@@ -428,6 +428,121 @@ describe("executeProtectedRealisticFill — fail closed", () => {
     const result = await p;
     expect(result.success).toBe(false);
     expect(result.error).toBe("element_not_found");
+  });
+
+  it("fails closed with TARGET_NOT_FILLABLE when the resolved element is not a fillable control", async () => {
+    // The live IKEA cardholder bug: a floating-label span/div resolved instead of
+    // the input, and the HTMLInputElement-prototype setter call on it threw
+    // "TypeError: Illegal invocation" mid-focus. Now the tag gate fails closed
+    // BEFORE any focus/typing is attempted.
+    mockState.iframeResult = { ok: true, tagName: "DIV" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams({ value: "Jane Cardholder", fieldLabel: "cardholder_name" }));
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("TARGET_NOT_FILLABLE (DIV)");
+    expect(result.error).not.toContain("Illegal invocation");
+    // Structural metadata only — no coordinates, selector, or value in the error.
+    expect(result.error).not.toMatch(/\d{2,}/);
+    expect(result.error).not.toContain("Jane Cardholder");
+    // The fill aborted before focus/typing: no focus/clear eval, no key events,
+    // no insertText, no pointer events.
+    expect(evalExprs().some((e) => e.includes("deleteContentBackward"))).toBe(false);
+    expect(methodCalls("Input.dispatchKeyEvent")).toHaveLength(0);
+    expect(methodCalls("Input.dispatchMouseEvent")).toHaveLength(0);
+    expect(methodCalls("Input.insertText")).toHaveLength(0);
+  });
+
+  it("treats a TEXTAREA as a fillable input and uses the tag-aware native setter", async () => {
+    mockState.iframeResult = { ok: true, tagName: "TEXTAREA" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams());
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(result.success).toBe(true);
+    expect(result.field_shape).toBe("input");
+    // The focus/clear expression picks the prototype by tagName — a TEXTAREA must
+    // never receive the HTMLInputElement setter (that throws Illegal invocation).
+    const focusExpr = evalExprs().find((e) => e.includes("deleteContentBackward"));
+    expect(focusExpr).toBeDefined();
+    expect(focusExpr!).toContain("HTMLTextAreaElement.prototype");
+    expect(focusExpr!).toContain("el.tagName === 'TEXTAREA'");
+  });
+});
+
+// ─── 3b. Focus robustness (cardholder Illegal-invocation regression) ─────────
+
+describe("executeProtectedRealisticFill — focus robustness", () => {
+  it("calls focus with the element as receiver, with a prototype-call fallback", async () => {
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams());
+    await vi.runAllTimersAsync();
+    await p;
+    const focusExpr = evalExprs().find((e) => e.includes("deleteContentBackward"));
+    expect(focusExpr).toBeDefined();
+    // Cascade: el.focus({preventScroll}) → HTMLElement.prototype.focus.call(el) →
+    // focus/focusin events. Never a detached method reference.
+    expect(focusExpr!).toContain("el.focus({ preventScroll: true })");
+    expect(focusExpr!).toContain("HTMLElement.prototype.focus.call(el)");
+    expect(focusExpr!).toContain("document.activeElement === el");
+    expect(focusExpr!).not.toMatch(/var\s+\w+\s*=\s*el\.focus\b/);
+    // Tag gate inside the same evaluation (defense-in-depth for inter-phase races).
+    expect(focusExpr!).toContain("TARGET_NOT_FILLABLE");
+  });
+
+  it("does NOT type when focus could not be verified — element-targeted setter instead", async () => {
+    // Typing (key events / insertText) delivers text to whatever IS focused; with
+    // unverified focus the protected value could land in an arbitrary element.
+    mockState.focusResult = { ok: true, focused: false };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams());
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(result.success).toBe(true);
+    expect(methodCalls("Input.dispatchKeyEvent")).toHaveLength(0);
+    expect(methodCalls("Input.insertText")).toHaveLength(0);
+    // The element-targeted setter fallback ran (value JSON-encoded inside the
+    // expression only — same as the proven secret path).
+    expect(evalExprs().some((e) => e.includes(`setter.call(el, ${JSON.stringify(CARD)})`))).toBe(true);
+    expect(result.realism?.fallback_used).toBe(true);
+    expect(result.realism?.fallback_reason).toBe("focus_unverified");
+    expect(result.realism?.strategy).toBe("direct_assignment");
+    // Value never reaches the agent-facing result.
+    expect(JSON.stringify(result)).not.toContain(CARD);
+  });
+
+  it("keeps the typing path for legacy focus shapes without the focused field", async () => {
+    mockState.focusResult = { ok: true };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams());
+    await vi.runAllTimersAsync();
+    const result = await p;
+    expect(result.success).toBe(true);
+    expect(methodCalls("Input.dispatchKeyEvent")).toHaveLength(CARD.length);
+  });
+
+  it("setter fallback verifies persistence through the native getter and reports value_not_persisted", async () => {
+    mockState.verifyResult = { ok: false, reason: "empty_after_typing" };
+    mockState.insertTextError = true;
+    mockState.fallbackResult = { ok: false, reason: "value_not_persisted" };
+    vi.useFakeTimers();
+    const p = executeProtectedRealisticFill(baseParams());
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("CDP fallback: value_not_persisted");
+    // The fallback expression reads through the NATIVE getter (mask-immune) and
+    // returns only a boolean-derived reason — never the value.
+    const fbExpr = evalExprs().find((e) => e.includes("data-antigen-filled") && e.includes("new Event('input'"));
+    expect(fbExpr).toBeDefined();
+    expect(fbExpr!).toContain("value_not_persisted");
+    expect(fbExpr!).toContain("nativeGetter.call(el)");
+    expect(JSON.stringify(result)).not.toContain(CARD);
   });
 });
 

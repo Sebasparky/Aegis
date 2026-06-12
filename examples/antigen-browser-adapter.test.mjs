@@ -27,6 +27,7 @@ import {
   buildSyntheticSuccessText,
   buildPostClickStateText,
   buildPostFillStateText,
+  withPostFillSummary,
   buildAntigenSnapshotText,
   deriveNavHintsFromSnapshot,
   classifyNavigationDiscipline,
@@ -4996,5 +4997,77 @@ describe("P4. buildPostFillStateText — pure rendering", () => {
     assert.ok(!text.includes("#card-number"), text);
     assert.ok(!text.includes("tok_secret"), text);
     assert.ok(!text.includes("?"), text);
+  });
+});
+
+// ─── P5. withPostFillSummary — fill-handler pass-through contract ─────────────
+//
+// The live IKEA smoke could not distinguish "the API never emitted
+// post_fill_state" from "the adapter dropped it". This group pins the adapter
+// side: the API data object is passed through UNTOUCHED (post_fill_state
+// preserved by reference) and post_fill_summary is appended only when the state
+// renders. Both fill execute handlers route through this helper.
+
+describe("P5. withPostFillSummary — fill-handler pass-through", () => {
+  const fillData = {
+    fill_request_id: "pcfr_1",
+    status: "filled",
+    raw_values_revealed_to_agent: false,
+    purchase_not_authorized: true,
+    post_fill_state: {
+      outcome: "ready_for_next_action",
+      filled_count: 1,
+      failed_count: 0,
+      validation_error_count: 0,
+      next_action_names: [{ name: "Continue", classification: "primary" }],
+      raw_values_revealed_to_agent: false,
+      recommended_next_step: "snapshot_then_click_named_action",
+      next: "refs_require_fresh_snapshot",
+    },
+  };
+
+  test("preserves post_fill_state AND appends a non-empty post_fill_summary", () => {
+    const out = withPostFillSummary(fillData);
+    // The state object survives untouched (same reference — nothing stripped).
+    assert.equal(out.post_fill_state, fillData.post_fill_state);
+    assert.equal(out.status, "filled");
+    assert.equal(typeof out.post_fill_summary, "string");
+    assert.ok(out.post_fill_summary.startsWith("Post-fill state:"), out.post_fill_summary);
+    assert.ok(out.post_fill_summary.includes("ready_for_next_action"), out.post_fill_summary);
+  });
+
+  test("data without post_fill_state is returned unchanged — no key added", () => {
+    const plain = { fill_request_id: "pcfr_2", status: "filled" };
+    const out = withPostFillSummary(plain);
+    assert.equal(out, plain);
+    assert.ok(!("post_fill_summary" in out));
+  });
+
+  test("unrenderable state (missing outcome) → data unchanged, state still present", () => {
+    const data = { status: "filled", post_fill_state: { filled_count: 1 } };
+    const out = withPostFillSummary(data);
+    assert.equal(out, data);
+    assert.equal(out.post_fill_state, data.post_fill_state);
+    assert.ok(!("post_fill_summary" in out));
+  });
+
+  test("undefined/null data passes through (error paths never throw here)", () => {
+    assert.equal(withPostFillSummary(undefined), undefined);
+    assert.equal(withPostFillSummary(null), null);
+  });
+
+  test("leak boundary: a poisoned extra field never reaches the rendered summary", () => {
+    const out = withPostFillSummary({
+      ...fillData,
+      post_fill_state: {
+        ...fillData.post_fill_state,
+        secret_ref: "devvault://nope",
+        page_url: "https://x.test/pay?session=tok_secret",
+      },
+    });
+    assert.ok(out.post_fill_summary, "summary expected");
+    assert.ok(!out.post_fill_summary.includes("devvault"), out.post_fill_summary);
+    assert.ok(!out.post_fill_summary.includes("tok_secret"), out.post_fill_summary);
+    assert.ok(!out.post_fill_summary.includes("?"), out.post_fill_summary);
   });
 });

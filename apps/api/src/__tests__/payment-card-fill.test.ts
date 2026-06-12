@@ -59,6 +59,19 @@ vi.mock("../runtime/paymentCardFill.js", () => ({
   isAntigenRef: vi.fn().mockImplementation((ref: string) => /^ag_\d+$/.test(ref)),
 }));
 
+// Partial mock for the post-fill probe: isFillStateEnabled stays REAL (the flag
+// gate is part of what these tests prove); runPostFillProbe becomes controllable
+// so the happy path can be exercised without a live CDP endpoint. Default
+// undefined keeps the flag-off and degrade-to-unknown tests semantically intact.
+const probeMock = vi.hoisted(() => ({ result: undefined as unknown }));
+vi.mock("../runtime/postFillProbe.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../runtime/postFillProbe.js")>();
+  return {
+    ...actual,
+    runPostFillProbe: vi.fn().mockImplementation(async () => probeMock.result),
+  };
+});
+
 // Stubs for transitive imports in agentApiRoutes
 vi.mock("../runtime/secretInjection.js", () => ({ executeSecretInjectionViaCDP: vi.fn() }));
 vi.mock("../runtime/challengeInjection.js", () => ({ challengeCodes: new Map(), executeChallengeInjectionViaCDP: vi.fn() }));
@@ -150,6 +163,7 @@ beforeEach(() => {
   userApprovalReceipts.clear();
   cdpMock.success = true;
   cdpMock.error = undefined;
+  probeMock.result = undefined;
 });
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -741,6 +755,132 @@ describe("POST /api/agent/v1/payment-card-fills/:id/execute", () => {
     } finally {
       if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
       else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+      else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
+    }
+  });
+
+  it("ANTIGEN_FILL_STATE on + probe success → post_fill_state present with a REALIZED outcome (the live-smoke gap)", async () => {
+    // The live IKEA smoke ran with the flag unset on the API process, so no
+    // post_fill_state ever appeared and nothing caught it. This is the missing
+    // happy-path proof: flag on + fill success + reachable probe → the execute
+    // response itself carries the realized envelope.
+    seedDelegation();
+    seedPaymentMethod();
+    const prevFlag = process.env.ANTIGEN_FILL_STATE;
+    const prevSurfaces = process.env.ANTIGEN_ACTIVE_SURFACES;
+    const prevCdp = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+    process.env.ANTIGEN_FILL_STATE = "true";
+    process.env.ANTIGEN_ACTIVE_SURFACES = "true";
+    process.env.AEGIS_PLAYWRIGHT_CDP_URL = "http://127.0.0.1:9222";
+    probeMock.result = {
+      probe: {
+        url: `https://${DOMAIN}/pay`,
+        title_hash: "t1",
+        title: "Payment",
+        ready_state: "complete",
+        overlay: { present: false, blocking: false, overlay_type: null, title_hash: null },
+        cart_count: null,
+        visible_text_hash: "v1",
+        focused_editable_at_target: false,
+        status: "ok",
+        fill_state: {
+          invalid_count: 0,
+          alert_count: 0,
+          filled_marker_count: 1,
+          masked_marker_count: 1,
+          form_actions: [{ name: "Continue", kind: "button", disabled: false, dismiss: false }],
+        },
+      },
+      probe_ms: 120,
+    };
+    try {
+      const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+        domain: DOMAIN, field: "cardholder_name",
+        page_url: `https://${DOMAIN}/pay`, reason: "fill cardholder",
+      });
+      const { fill_request_id, authorization_id } = createRes.json().data;
+      await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+
+      const res = await agentPost(`/api/agent/v1/payment-card-fills/${fill_request_id}/execute`, {});
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.data.status).toBe("filled");
+
+      const pfs = body.data.post_fill_state;
+      expect(pfs).toBeDefined();
+      // Realized — NOT the degraded "unknown" shape.
+      expect(pfs.outcome).toBe("ready_for_next_action");
+      expect(pfs.filled_count).toBe(1);
+      expect(pfs.failed_count).toBe(0);
+      expect(pfs.validation_error_count).toBe(0);
+      expect(pfs.raw_values_revealed_to_agent).toBe(false);
+      // Names-only next actions realized from the probe.
+      expect(pfs.next_action_names).toBeDefined();
+      expect(JSON.stringify(pfs.next_action_names)).toContain("Continue");
+      assertNoRawCardData(body);
+    } finally {
+      if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
+      else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevSurfaces === undefined) delete process.env.ANTIGEN_ACTIVE_SURFACES;
+      else process.env.ANTIGEN_ACTIVE_SURFACES = prevSurfaces;
+      if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+      else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
+    }
+  });
+
+  it("ANTIGEN_FILL_STATE on + probe success with ANTIGEN_ACTIVE_SURFACES off → still realized (gate affects only surface actions)", async () => {
+    seedDelegation();
+    seedPaymentMethod();
+    const prevFlag = process.env.ANTIGEN_FILL_STATE;
+    const prevSurfaces = process.env.ANTIGEN_ACTIVE_SURFACES;
+    const prevCdp = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+    process.env.ANTIGEN_FILL_STATE = "true";
+    delete process.env.ANTIGEN_ACTIVE_SURFACES;
+    process.env.AEGIS_PLAYWRIGHT_CDP_URL = "http://127.0.0.1:9222";
+    probeMock.result = {
+      probe: {
+        url: `https://${DOMAIN}/pay`,
+        title_hash: "t1",
+        title: "Payment",
+        ready_state: "complete",
+        overlay: { present: false, blocking: false, overlay_type: null, title_hash: null },
+        cart_count: null,
+        visible_text_hash: "v1",
+        focused_editable_at_target: false,
+        status: "ok",
+        fill_state: {
+          invalid_count: 0,
+          alert_count: 0,
+          filled_marker_count: 1,
+          masked_marker_count: 1,
+          form_actions: [{ name: "Continue", kind: "button", disabled: false, dismiss: false }],
+        },
+      },
+      probe_ms: 95,
+    };
+    try {
+      const createRes = await agentPost("/api/agent/v1/payment-card-fills", {
+        domain: DOMAIN, field: "expiry_combined",
+        page_url: `https://${DOMAIN}/pay`, reason: "fill expiry",
+      });
+      const { fill_request_id, authorization_id } = createRes.json().data;
+      await server.inject({ method: "POST", url: `/api/internal/payment-card-fill-authorizations/${authorization_id}/approve` });
+
+      const res = await agentPost(`/api/agent/v1/payment-card-fills/${fill_request_id}/execute`, {});
+      expect(res.statusCode).toBe(200);
+      const pfs = res.json().data.post_fill_state;
+      expect(pfs).toBeDefined();
+      expect(pfs.outcome).toBe("ready_for_next_action");
+      // next_action_names is the point of the feature and stays present; the
+      // ANTIGEN_ACTIVE_SURFACES gate covers only overlay surface_actions.
+      expect(pfs.next_action_names).toBeDefined();
+      expect(pfs.surface).toBeUndefined();
+    } finally {
+      if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
+      else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevSurfaces === undefined) delete process.env.ANTIGEN_ACTIVE_SURFACES;
+      else process.env.ANTIGEN_ACTIVE_SURFACES = prevSurfaces;
       if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
       else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
     }

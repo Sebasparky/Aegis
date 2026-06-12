@@ -29,6 +29,25 @@ Allowlist-only by construction (`getAntigenRuntimeStatus()` in
 is a boolean, never the CDP URL; no secrets/tokens/cookies/vault/KMS. **Set Antigen flags in
 the same shell that starts `apps/api`** — that was the source of the confusion.
 
+**Update (2026-06-11, post-IKEA-payment-smoke):** the live smoke hit this exact failure
+mode again — `post_fill_state` was absent from both fill execute responses because
+`ANTIGEN_FILL_STATE` was never set on the API process (the wiring itself was complete and
+correct; happy-path tests now pin it in `payment-card-fill.test.ts` /
+`profile-field-fill.test.ts`, the adapter pass-through in `withPostFillSummary`, and
+`runtime-status.test.ts` asserts `fill_state` reporting). **Step 0 — `curl -s
+localhost:4000/api/runtime/status | jq .antigen` with captured output — is now a mandatory
+hard gate before any smoke is recorded as operator-verified.** The QA doc's API start
+snippet and env table now include `ANTIGEN_FILL_STATE`, `ANTIGEN_ACTIVE_SURFACES`,
+`ANTIGEN_CLICK_VERIFY`, `ANTIGEN_SURFACE_RESOLVE`, `ANTIGEN_LOGICAL_REF_RECOVERY` as
+API-side rows. Same smoke's second defect — cardholder_name `CDP evaluate (focus):
+TypeError: Illegal invocation` — was a non-fillable floating-label resolution handed to the
+protected fill primitive; fixed by the fail-closed tag gate + tag-aware native setter in
+`protectedRealisticFill.ts` and the hardened `buildRefSelectorExpr` (label association,
+bounded ancestor walk, point containment, null fail-closed) in `paymentCardFill.ts`; proven
+in a real-Chromium integration test (`payment-card-fill-browser.integration.test.ts`,
+floating-label fixture). See `docs/dev/antigen-browser-qa.md` → "Next QA milestone —
+focused payment-stage smoke" for the re-verification recipe and the 4/4 redaction metric.
+
 ---
 
 ## Email OTP Delivery v1 Completed (2026-05-25)

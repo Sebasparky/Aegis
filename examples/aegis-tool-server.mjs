@@ -26,7 +26,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { buildPostFillStateText } from "./lib/adapter-helpers.mjs";
+import { withPostFillSummary } from "./lib/adapter-helpers.mjs";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -2143,11 +2143,7 @@ async function executePaymentCardFillHandoff({ fill_request_id } = {}) {
   }
   // Post-Fill State v1 (ANTIGEN_FILL_STATE): render the sanitized summary so the
   // agent knows the next action / masking state without re-snapshotting blind.
-  if (res.data?.post_fill_state) {
-    const summary = buildPostFillStateText(res.data.post_fill_state);
-    if (summary) return { ...res.data, post_fill_summary: summary };
-  }
-  return res.data;
+  return withPostFillSummary(res.data);
 }
 
 // ─── Purchase Confirmation handlers ──────────────────────────────────────────
@@ -2311,11 +2307,7 @@ async function executeProfileFieldFill({ fill_request_id, browser_session_id, ex
   }
   // Post-Fill State v1 (ANTIGEN_FILL_STATE): render the sanitized summary so the
   // agent knows the next action / validation state without re-snapshotting blind.
-  if (res.data?.post_fill_state) {
-    const summary = buildPostFillStateText(res.data.post_fill_state);
-    if (summary) return { ...res.data, post_fill_summary: summary };
-  }
-  return res.data;
+  return withPostFillSummary(res.data);
 }
 
 // ─── Workspace handlers ───────────────────────────────────────────────────────

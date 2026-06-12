@@ -325,6 +325,26 @@ export function buildPostFillStateText(state) {
 }
 
 /**
+ * Pass-through wrapper used by the fill execute tool handlers: preserves the
+ * API response untouched (including `post_fill_state` when present) and appends
+ * the rendered `post_fill_summary` when the state is usable. The API response
+ * is NEVER stripped — when `post_fill_state` is absent or unrenderable the data
+ * object is returned unchanged (no `post_fill_summary` key added).
+ *
+ * Extracted from the inline blocks in the execute_profile_field_fill /
+ * execute_payment_card_fill_handoff handlers so the pass-through contract is
+ * unit-testable (importing the tool server itself starts it).
+ *
+ * @param {object|undefined} data the API response `data` object
+ * @returns {object|undefined} same data, plus `post_fill_summary` when renderable
+ */
+export function withPostFillSummary(data) {
+  if (!data || typeof data !== "object" || !data.post_fill_state) return data;
+  const summary = buildPostFillStateText(data.post_fill_state);
+  return summary ? { ...data, post_fill_summary: summary } : data;
+}
+
+/**
  * Builds the readable, agent-facing text for a successful antigen_snapshot
  * (Antigen Snapshot v2 page map).
  *

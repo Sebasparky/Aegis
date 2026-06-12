@@ -135,23 +135,54 @@ describe("isAntigenRef", () => {
 // ─── 2. buildRefSelectorExpr ──────────────────────────────────────────────────
 
 describe("buildRefSelectorExpr", () => {
-  it("prefers getElementById when the snapshot captured an id", () => {
+  it("prefers getElementById when the snapshot captured an id — and walks a non-fillable id-hit", () => {
     const expr = buildRefSelectorExpr({ id: "card-holder", box: { x: 10, y: 20, width: 100, height: 30 } } as never);
     expect(expr).toContain('document.getElementById("card-holder")');
-    expect(expr).toContain("document.elementFromPoint("); // box-center fallback still present
-    expect(expr).toContain("closest('input,select,textarea')");
+    expect(expr).toContain("document.elementFromPoint(cx, cy)"); // box-center fallback still present
+    // The id-hit goes through resolve() — a wrapper id no longer returns raw.
+    expect(expr).toContain("var r1 = resolve(byId)");
   });
 
   it("uses elementFromPoint at the box center when no id is present", () => {
     const expr = buildRefSelectorExpr({ id: null, box: { x: 100, y: 200, width: 240, height: 40 } } as never);
     // center = (100 + 120, 200 + 20) = (220, 220)
-    expect(expr).toContain("document.elementFromPoint(220, 220)");
+    expect(expr).toContain("var cx = 220, cy = 220");
+    expect(expr).toContain("document.elementFromPoint(cx, cy)");
     expect(expr).toContain("var byId = null");
   });
 
   it("never embeds a raw value (record carries no value)", () => {
     const expr = buildRefSelectorExpr({ id: "x", box: { x: 0, y: 0, width: 10, height: 10 } } as never);
     expect(expr).not.toMatch(/4242|cvv|password|cardholder value/i);
+  });
+
+  it("fails closed: resolves to null when nothing fillable is found (no raw element tail)", () => {
+    const expr = buildRefSelectorExpr({ id: null, box: { x: 0, y: 0, width: 10, height: 10 } } as never);
+    // The old bug: `return el;` handed a label/span/div to the fill primitive,
+    // whose HTMLInputElement-prototype setter call then threw "Illegal invocation".
+    expect(expr).not.toMatch(/return el;/);
+    expect(expr).toContain("return el ? resolve(el) : null");
+    expect(expr).toContain("return null");
+  });
+
+  it("walks floating-label markup: label association + bounded ancestor walk + 150px cap", () => {
+    const expr = buildRefSelectorExpr({ id: null, box: { x: 0, y: 0, width: 10, height: 10 } } as never);
+    expect(expr).toContain("closest('label')");
+    expect(expr).toContain("htmlFor");
+    expect(expr).toContain("lab.control");
+    expect(expr).toContain("depth <= 3");
+    expect(expr).toContain("150 * 150");
+    expect(expr).toContain("containsPoint");
+  });
+
+  it("restricts candidates to the snapshot-recorded tag when it is fillable", () => {
+    const inputExpr = buildRefSelectorExpr({ id: null, tag: "input", box: { x: 0, y: 0, width: 10, height: 10 } } as never);
+    expect(inputExpr).toContain(`var SEL = "input"`);
+    const selectExpr = buildRefSelectorExpr({ id: null, tag: "select", box: { x: 0, y: 0, width: 10, height: 10 } } as never);
+    expect(selectExpr).toContain(`var SEL = "select"`);
+    // Unknown/unfillable recorded tag → all three accepted.
+    const otherExpr = buildRefSelectorExpr({ id: null, tag: "div", box: { x: 0, y: 0, width: 10, height: 10 } } as never);
+    expect(otherExpr).toContain(`var SEL = "input,select,textarea"`);
   });
 });
 
@@ -190,7 +221,8 @@ describe("executePaymentCardFillViaCDP — antigen_ref bridge", () => {
 
     expect(result.success).toBe(true);
     const selectorExpr = String(fillSpy.calls[0].selectorExpr);
-    expect(selectorExpr).toContain("document.elementFromPoint(220, 220)");
+    expect(selectorExpr).toContain("var cx = 220, cy = 220");
+    expect(selectorExpr).toContain("document.elementFromPoint(cx, cy)");
     expect(selectorExpr).not.toContain(".wpwl-control-expiry");
   });
 });

@@ -114,6 +114,15 @@ function getOrCreatePointerState(key: string): PointerRuntimeState {
   return state;
 }
 
+// Tag-aware native value setter — picks the INPUT vs TEXTAREA prototype descriptor
+// by the element's own tagName, so the native setter is always invoked with a
+// matching receiver (calling the HTMLInputElement setter on anything else throws
+// "TypeError: Illegal invocation"). `el` must already be tag-gated to
+// INPUT/TEXTAREA. Raw JS for in-page IIFEs only (no TS arrows — the Node tsconfig
+// has no DOM lib).
+const NATIVE_VALUE_SETTER_JS = `var __vsProto = (el.tagName === 'TEXTAREA') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(__vsProto, 'value').set;`;
+
 /**
  * Fill a single protected sensitive field via realistic browser interaction.
  *
@@ -179,17 +188,33 @@ export async function executeProtectedRealisticFill(
     } catch (e) { return { ok: false, reason: String(e) }; }
   })()`;
 
-  // INPUT: focus + clear existing/placeholder/masked value. No value here.
+  // INPUT/TEXTAREA: focus + clear existing/placeholder/masked value. No value here.
+  // Tag-gated fail-closed: a non-fillable resolution (e.g. a floating-label span or
+  // wrapper div) must produce a structured reason, never an "Illegal invocation"
+  // from a wrong-receiver native call. Focus is always invoked with the element as
+  // receiver, with a prototype-call fallback and a focus-event last resort; focus
+  // failure alone never aborts here — `focused` reports whether focus verifiably
+  // landed so the caller can avoid typing into an unverified target.
   const focusExpr = `(function() {
     try {
       var el = ${selectorExpr};
       if (!el) return { ok: false, reason: 'element not found' };
+      var tag = el.tagName;
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA') return { ok: false, reason: 'TARGET_NOT_FILLABLE (' + tag + ')' };
       el.scrollIntoView({ block: 'nearest' });
-      el.focus();
-      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      var focused = false;
+      try { el.focus({ preventScroll: true }); focused = (document.activeElement === el); } catch (e) {}
+      if (!focused) { try { HTMLElement.prototype.focus.call(el); focused = (document.activeElement === el); } catch (e) {} }
+      if (!focused) {
+        try {
+          el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
+          el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        } catch (e) {}
+      }
+      ${NATIVE_VALUE_SETTER_JS}
       setter.call(el, '');
       el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
-      return { ok: true };
+      return { ok: true, focused: focused };
     } catch (e) { return { ok: false, reason: String(e) }; }
   })()`;
 
@@ -205,10 +230,11 @@ export async function executeProtectedRealisticFill(
   // native control value, which is left intact.
   const valueGetterMaskBlock = maskDomValue
     ? `
-    var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    var __mProto = (el.tagName === 'TEXTAREA') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    var maskSetter = Object.getOwnPropertyDescriptor(__mProto, 'value').set;
     Object.defineProperty(el, 'value', {
       get: function() { return ''; },
-      set: function(v) { setter.call(el, v); },
+      set: function(v) { maskSetter.call(el, v); },
       configurable: true,
     });`
     : "";
@@ -273,16 +299,27 @@ export async function executeProtectedRealisticFill(
     return { ok: true };
   })()`;
 
-  // INPUT: setter fallback (only if Input.insertText also fails). Value is JSON-encoded
-  // in this expression — same as the proven secret path; never logged or returned.
+  // INPUT/TEXTAREA: setter fallback (only if Input.insertText also fails, or focus
+  // could not be verified — typing delivers text to whatever is focused, so an
+  // unverified focus target gets the element-targeted native setter instead).
+  // Value is JSON-encoded in this expression — same as the proven secret path;
+  // never logged or returned. Reports filled only if the value verifiably
+  // persisted: the read goes through the NATIVE getter (before any value-getter
+  // mask is installed, and immune to an already-installed mask from a prior fill)
+  // and only a boolean leaves the page — never the value.
   const setterFallbackExpr = `(function() {
     var el = ${selectorExpr};
     if (!el) return { ok: false, reason: 'element not found' };
-    var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    var tag = el.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA') return { ok: false, reason: 'TARGET_NOT_FILLABLE (' + tag + ')' };
+    ${NATIVE_VALUE_SETTER_JS}
     setter.call(el, ${JSON.stringify(value)});
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));${maskBlock}
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    var nativeGetter = Object.getOwnPropertyDescriptor(__vsProto, 'value').get;
+    var cur = nativeGetter.call(el);
+    if (!(cur && cur.length > 0)) return { ok: false, reason: 'value_not_persisted' };${maskBlock}
     el.setAttribute('data-antigen-filled', 'true');
     return { ok: true };
   })()`;
@@ -427,9 +464,15 @@ export async function executeProtectedRealisticFill(
           realism.mode = "direct";
           realism.strategy = "direct_assignment";
           selectId = send("Runtime.evaluate", { expression: selectFillExpr, returnByValue: true }, sessionId!);
-        } else {
+        } else if (val.tagName === "INPUT" || val.tagName === "TEXTAREA") {
           fieldShape = "input";
           boxId = send("Runtime.evaluate", { expression: boxExpr, returnByValue: true }, sessionId!);
+        } else {
+          // Fail closed: the resolved element is not a fillable control (a
+          // floating-label span / wrapper div / decorative node). Structural tag
+          // name only — never a selector, coordinates, or value. Proceeding would
+          // call native input methods with a wrong receiver ("Illegal invocation").
+          finish(false, `TARGET_NOT_FILLABLE (${val.tagName ?? "UNKNOWN"})`);
         }
         return;
       }
@@ -513,9 +556,22 @@ export async function executeProtectedRealisticFill(
       // INPUT: focus/clear result → realistic typing (or direct insert).
       if (id === focusId) {
         const evalVal = ((result?.result as Record<string, unknown> | undefined)?.value) as
-          { ok?: boolean; reason?: string } | undefined;
+          { ok?: boolean; reason?: string; focused?: boolean } | undefined;
         if (!evalVal?.ok) {
           finish(false, `CDP evaluate (focus): ${evalVal?.reason ?? "element not found"}`);
+          return;
+        }
+
+        // Focus could not be verified on the target element. Do NOT type: key
+        // events and Input.insertText deliver text to whatever IS focused, which
+        // risks the protected value landing in an arbitrary element. Use the
+        // element-targeted native setter instead (strict `=== false` so legacy
+        // shapes without the field keep the typing path).
+        if (evalVal.focused === false) {
+          realism.fallback_used = true;
+          realism.fallback_reason = "focus_unverified";
+          realism.strategy = "direct_assignment";
+          fallbackId = send("Runtime.evaluate", { expression: setterFallbackExpr, returnByValue: true }, sessionId!);
           return;
         }
 

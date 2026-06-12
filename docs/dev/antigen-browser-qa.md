@@ -58,10 +58,19 @@ pointer realism, trace dispositions) only runs when the QA env flags are set. Th
 | `ANTIGEN_ADAPTER_REQUIRE_QA_ENV` | adapter | `true` | Fail-closed guard. Adapter FATALs before serving tools if any QA flag is missing. |
 | `ANTIGEN_POINTER_DEBUG_OVERLAY` | **API** | `true` | Pointer-path debug overlay (set on the API process, not the adapter). |
 | `ANTIGEN_CDP_DIAGNOSTICS` | **API** | `true` | CDP diagnostics (set on the API process). |
+| `ANTIGEN_FILL_STATE` | **API** | `true` | `post_fill_state` realization envelope on the profile/payment fill execute responses (+ `post_fill_summary` in adapter output). |
+| `ANTIGEN_ACTIVE_SURFACES` | **API** | `true` | Active-surface enrichment in snapshots and surface actions in post-states. |
+| `ANTIGEN_CLICK_VERIFY` | **API** | `true` | `post_click_state` verification on `browser_click`. |
+| `ANTIGEN_SURFACE_RESOLVE` | **API** | `true` | Surface-scoped stale-ref re-resolution inside live overlays. |
+| `ANTIGEN_LOGICAL_REF_RECOVERY` | **API** | `true` | Same-page logical re-find for box-drift stale refs (click-only). |
 
 > The CDP endpoint is **not** an env var — the adapter resolves it at runtime via
-> `POST /api/agent/v1/runtime/browser-endpoint`. `ANTIGEN_POINTER_DEBUG_OVERLAY` and
-> `ANTIGEN_CDP_DIAGNOSTICS` are **API-side** flags.
+> `POST /api/agent/v1/runtime/browser-endpoint`. The rows marked **API** are
+> **API-process** flags: export them in the shell that runs `npm run dev` for
+> `apps/api` — NEVER only in the adapter/MCP shell. A flag set on the adapter but
+> not the API silently looks inactive (this exact mistake made `post_fill_state`
+> absent during a live smoke while everyone believed it was on). Step 0 below
+> catches it.
 
 **The invariant that matters is not wrapper-vs-inline launch** (see
 [Launching the adapter](#launching-the-adapter-macos--claude-local-mcp)) — it is that the
@@ -73,7 +82,7 @@ adapter starts with **all required QA env present** and the **fail-closed guard 
 
 ### 1. Start the API for visible realistic QA
 
-Run the API with the API-side hard-mode env (pointer overlay + CDP diagnostics included):
+Run the API with the FULL API-side env (hard mode + realization flags):
 
 ```sh
 ANTIGEN_BROWSER_TRACE=true \
@@ -83,8 +92,29 @@ ANTIGEN_INPUT_REALISM=realistic \
 ANTIGEN_BROWSER_HEADLESS=false \
 ANTIGEN_POINTER_DEBUG_OVERLAY=true \
 ANTIGEN_CDP_DIAGNOSTICS=true \
+ANTIGEN_FILL_STATE=true \
+ANTIGEN_ACTIVE_SURFACES=true \
+ANTIGEN_CLICK_VERIFY=true \
+ANTIGEN_SURFACE_RESOLVE=true \
+ANTIGEN_LOGICAL_REF_RECOVERY=true \
 npm run dev
 ```
+
+### 1b. Step 0 — verify the API process flags (HARD GATE, before any smoke)
+
+```sh
+curl -s http://localhost:4000/api/runtime/status | jq .antigen
+```
+
+Require, at minimum: `fill_state=true`, `active_surfaces=true`, `click_verify=true`,
+`headless=false`, `cdp_port_configured=true`. The startup log line
+(`[AntigenRuntimeFlags] … fill_state=… …`) must agree.
+
+**A smoke run may NOT be recorded as "operator-verified" unless this gate's
+output was captured first.** In the 2026-06-11 live IKEA smoke, Step 0 was
+skipped ("recorded as operator-verified" without curling) and `ANTIGEN_FILL_STATE`
+turned out to be unset on the API process — every `post_fill_state` assertion was
+silently vacuous. The flags endpoint exists precisely to make this a 2-second check.
 
 ### 2. Seed demo data
 
@@ -230,6 +260,26 @@ headless session on 9222 stays invisible. Run through this before each visible Q
 
 ---
 
+## Navigation discipline for smoke prompts (binding)
+
+Smoke prompts must instruct the agent — and reports must verify — the following:
+
+- **Direct `browser_navigate` is allowed ONLY for the initial homepage load**
+  (e.g. `https://www.ikea.com/us/en/`). Everything after that is normal site flow.
+- All subsequent movement: `antigen_snapshot` → `browser_click` on fresh `ag_*`
+  refs → act on `post_click_state` / `post_fill_state` and the active-surface
+  recommended actions. Search happens through the visible search input via
+  `browser_type`.
+- **Never `browser_navigate` directly to product / cart / checkout / payment
+  URLs.** The adapter's `ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION=true` hard
+  mode enforces this fail-closed (`ANTIGEN_REALISTIC_NAVIGATION_REQUIRED`), but
+  the prompt must not ask for it in the first place.
+- The sole exception is an **explicitly labeled diagnostic URL-loading test** —
+  which must be recorded in the report as a diagnostic, never as a smoke step,
+  and never counts toward smoke pass criteria.
+- A run that reaches payment through clicks is a **full site-flow setup** and the
+  report should say so; a deeplink shortcut is not a valid payment-stage smoke.
+
 ## Successful IKEA QA recipe
 
 Drive the agent through this exact flow. **Stop before checkout/login/shipping/payment/
@@ -362,16 +412,41 @@ snapshot reports — `browser_set_value`/`browser_fill` exact-replacement + idem
 
 ---
 
-## Next QA milestone
+## Next QA milestone — focused payment-stage smoke
 
-Extend the verified IKEA flow **into checkout**, under Antigen mediation:
+The 2026-06-11 live IKEA smoke verified the checkout flow through payment with two
+defects, both since fixed in code: `post_fill_state` absent (API flag unset — see
+Step 0) and the cardholder_name `Illegal invocation` (floating-label resolution —
+fixed in `buildRefSelectorExpr` + the protected-fill tag gate). The next run
+re-verifies the payment stage:
 
-1. From homepage → search → add-to-bag, proceed into the **checkout flow**.
-2. Allow the agent to fill **shipping / contact / payment / card** fields **only through
-   Antigen-mediated handoffs** — never via raw browser fills of sensitive values.
-3. **Do not place the final order.**
-4. The final **place-order / confirm-purchase** step must **require approval** and must
-   **not** be clicked if approval is denied or not granted.
+1. **Step 0 hard gate first** (section 1b): capture `/api/runtime/status` output;
+   `fill_state`, `active_surfaces`, `click_verify` must be `true`.
+2. Reach payment through **full site flow** (navigation discipline above): homepage
+   navigate once → cookie → search → product → add to bag → cart → checkout →
+   continue as guest → profile fill (`request_profile_field_fill` →
+   `execute_profile_field_fill`) → one-snapshot + one-click handoff to payment.
+3. Card fill: `request_payment_card_fill` for **card_number, cvv, expiry_combined,
+   cardholder_name** with fresh `ag_*` refs; user approves at `/route-run-approvals`;
+   `execute_payment_card_fill_handoff` per field.
+4. Pass criteria:
+   - **cardholder_name fills** via `element_hint.antigen_ref` — no
+     `Illegal invocation`, no `TARGET_NOT_FILLABLE`.
+   - Every fill execute response includes **`post_fill_state`** (realized outcome —
+     not absent) and the adapter output includes **`post_fill_summary`**.
+   - **Redaction metric = 4/4**: card_number, cvv, expiry_combined, AND
+     cardholder_name all carry `data-antigen-masked` and render masked in the
+     redacted screenshot (all four have `visualMask=true` in `paymentCardFill.ts`;
+     billing ZIP is intentionally visible and excluded from the metric). If expiry
+     renders visibly despite `visualMask=true`, record it as a defect to
+     investigate — do **not** lower the metric to 3.
+   - No raw sensitive values in any response, snapshot, screenshot, or the network
+     trace.
+   - **Pay / place-order is never clicked.** Card-fill approval is
+     `purchase_not_authorized=true`; final submission requires the separate
+     `request_purchase_confirmation` handoff, which must NOT be invoked.
+5. Close the session; the report must state the run was a full site-flow setup
+   (not a deeplink shortcut).
 
-Until this milestone is run and verified, do not claim checkout, payment entry, or
-place-order protection has been tested or proven.
+Until this milestone is run and verified, do not claim payment entry or place-order
+protection has been re-proven after the cardholder/post_fill_state fixes.

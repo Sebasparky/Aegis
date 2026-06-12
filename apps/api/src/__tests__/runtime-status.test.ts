@@ -36,6 +36,7 @@ const MUTATED = [
   "ANTIGEN_CLICK_VERIFY",
   "ANTIGEN_ACTIVE_SURFACES",
   "ANTIGEN_SURFACE_RESOLVE",
+  "ANTIGEN_FILL_STATE",
   "ANTIGEN_POINTER_TIMING",
   "ANTIGEN_BROWSER_HEADLESS",
   "AEGIS_PLAYWRIGHT_CDP_URL",
@@ -85,6 +86,21 @@ describe("GET /api/runtime/status", () => {
     expect(body.antigen.pointer_timing).toBe("fast");
     expect(typeof body.pid).toBe("number");
     expect(typeof body.uptime_seconds).toBe("number");
+  });
+
+  it("reports fill_state=true when ANTIGEN_FILL_STATE is set — the live-smoke Step 0 gate", async () => {
+    // The post_fill_state live-smoke absence was exactly this: the flag was set
+    // in the adapter shell but not the API process. /api/runtime/status is the
+    // mandatory pre-smoke check that catches it.
+    process.env.ANTIGEN_FILL_STATE = "true";
+    const body = (await getStatus()).json();
+    expect(body.antigen.fill_state).toBe(true);
+  });
+
+  it("reports fill_state=false by default (flag unset)", async () => {
+    delete process.env.ANTIGEN_FILL_STATE;
+    const body = (await getStatus()).json();
+    expect(body.antigen.fill_state).toBe(false);
   });
 
   it("non-'true' values resolve to false / realistic default", async () => {
@@ -144,5 +160,12 @@ describe("formatAntigenRuntimeFlagsLine", () => {
     expect(line).toContain("cdp_port_configured=true");
     // The raw CDP URL must never appear in the log line.
     expect(line).not.toContain("http://localhost:9222");
+  });
+
+  it("includes fill_state in the startup line, tracking the env flag", () => {
+    process.env.ANTIGEN_FILL_STATE = "true";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=true");
+    delete process.env.ANTIGEN_FILL_STATE;
+    expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=false");
   });
 });

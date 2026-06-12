@@ -6034,6 +6034,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             "Take a fresh antigen_snapshot of the current payment page and retry the fill with the new ref.";
         } else if (rawMsg === "INVALID_ANTIGEN_REF") {
           hint = "antigen_ref must be an opaque 'ag_<n>' token from antigen_snapshot, not a selector.";
+        } else if (rawMsg.includes("TARGET_NOT_FILLABLE")) {
+          hint =
+            `${rawMsg}. The element resolved for this field is not a fillable control (input/select/textarea) — ` +
+            "common with floating-label markup where an overlay covers the field. " +
+            "Take a fresh antigen_snapshot and retry with the ag_* ref of the actual input control.";
         } else if (rawMsg.toLowerCase().includes("element not found") || rawMsg.toLowerCase().includes("not found")) {
           hint = `${rawMsg}. Verify the browser_session_id in the fill request targets the runtime page that has the checkout form open.`;
         }

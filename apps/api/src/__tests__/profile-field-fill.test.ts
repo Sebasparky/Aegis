@@ -71,6 +71,19 @@ vi.mock("../runtime/profileFieldFill.js", () => ({
   }),
 }));
 
+// Partial mock for the post-fill probe: isFillStateEnabled stays REAL (the flag
+// gate is part of what these tests prove); runPostFillProbe becomes controllable
+// so the happy path can be exercised without a live CDP endpoint. Default
+// undefined keeps the flag-off and degrade-to-unknown tests semantically intact.
+const probeMock = vi.hoisted(() => ({ result: undefined as unknown }));
+vi.mock("../runtime/postFillProbe.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../runtime/postFillProbe.js")>();
+  return {
+    ...actual,
+    runPostFillProbe: vi.fn().mockImplementation(async () => probeMock.result),
+  };
+});
+
 // Stubs for transitive imports
 vi.mock("../runtime/paymentCardFill.js", () => ({
   executePaymentCardFillViaCDP: vi.fn(),
@@ -160,6 +173,7 @@ beforeEach(() => {
   profileMemoryRequests.clear();
   profileFillMock.success = true;
   profileFillMock.error = undefined;
+  probeMock.result = undefined;
 });
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -641,6 +655,73 @@ describe("POST /api/agent/v1/profile-field-fills/:id/execute", () => {
       expect(pfs.raw_values_revealed_to_agent).toBe(false);
       expect(pfs.next).toBe("refs_require_fresh_snapshot");
       expect(pfs.recommended_next_step).toBe("refresh_snapshot");
+      assertNoRawProfileData(body);
+    } finally {
+      if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;
+      else process.env.ANTIGEN_FILL_STATE = prevFlag;
+      if (prevCdp === undefined) delete process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+      else process.env.AEGIS_PLAYWRIGHT_CDP_URL = prevCdp;
+    }
+  });
+
+  it("14. ANTIGEN_FILL_STATE on + probe success → post_fill_state present with a REALIZED outcome (the live-smoke gap)", async () => {
+    // The live IKEA smoke ran with the flag unset on the API process, so no
+    // post_fill_state ever appeared and nothing caught it. This is the missing
+    // happy-path proof: flag on + fill success + reachable probe → the execute
+    // response itself carries the realized envelope.
+    seedDelegation();
+    seedProfileMemory(["first_name", "last_name"]);
+    const prevFlag = process.env.ANTIGEN_FILL_STATE;
+    const prevCdp = process.env.AEGIS_PLAYWRIGHT_CDP_URL;
+    process.env.ANTIGEN_FILL_STATE = "true";
+    process.env.AEGIS_PLAYWRIGHT_CDP_URL = "http://127.0.0.1:9222";
+    probeMock.result = {
+      probe: {
+        url: "https://checkout.test.local/cart",
+        title_hash: "t1",
+        title: "Checkout",
+        ready_state: "complete",
+        overlay: { present: false, blocking: false, overlay_type: null, title_hash: null },
+        cart_count: null,
+        visible_text_hash: "v1",
+        focused_editable_at_target: false,
+        status: "ok",
+        fill_state: {
+          invalid_count: 0,
+          alert_count: 0,
+          filled_marker_count: 2,
+          masked_marker_count: 2,
+          form_actions: [{ name: "Continue to payment", kind: "button", disabled: false, dismiss: false }],
+        },
+      },
+      probe_ms: 110,
+    };
+    try {
+      const { body: reqBody } = await agentPost("/api/agent/v1/profile-field-fills", {
+        domain: "checkout.test.local",
+        page_url: "https://checkout.test.local/cart",
+        requested_fields: [{ key: "first_name" }, { key: "last_name" }],
+        reason: "test",
+      });
+      const { statusCode, body } = await agentPost(
+        `/api/agent/v1/profile-field-fills/${reqBody.data.fill_request_id}/execute`,
+        {},
+      );
+
+      expect(statusCode).toBe(200);
+      expect(body.data.all_filled).toBe(true);
+
+      const pfs = body.data.post_fill_state;
+      expect(pfs).toBeDefined();
+      // Realized — NOT the degraded "unknown" shape.
+      expect(pfs.outcome).toBe("ready_for_next_action");
+      expect(pfs.filled_count).toBe(2);
+      expect(pfs.failed_count).toBe(0);
+      expect(pfs.validation_error_count).toBe(0);
+      expect(pfs.raw_values_revealed_to_agent).toBe(false);
+      expect(pfs.recommended_next_step).toBe("snapshot_then_click_named_action");
+      expect(pfs.next_action_names).toBeDefined();
+      expect(JSON.stringify(pfs.next_action_names)).toContain("Continue to payment");
       assertNoRawProfileData(body);
     } finally {
       if (prevFlag === undefined) delete process.env.ANTIGEN_FILL_STATE;

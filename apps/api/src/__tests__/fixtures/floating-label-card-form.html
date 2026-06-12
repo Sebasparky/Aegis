@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Floating-label card form fixture</title>
+<!--
+  Reproduces the live IKEA payment-page cardholder shape: a floating-label
+  overlay SPAN covers each input, so document.elementFromPoint at the input's
+  box center returns the overlay — not the input. The legacy resolver handed
+  that span to the fill primitive, whose HTMLInputElement-prototype setter call
+  threw "TypeError: Illegal invocation".
+
+  Fields:
+    #cardholder      input under #cardholder-overlay (the live-failure shape)
+    #masked-field    input under #masked-overlay (maskDomValue variant)
+    #expiry          plain input, center hits the input directly (regression)
+    #pair-a/#pair-b  two adjacent inputs under one wide overlay — point
+                     containment must pick the right one
+    #decoy           decorative div >150px from any input (fail-closed case)
+-->
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  .form { padding: 24px; width: 620px; }
+  .field { position: relative; margin-bottom: 18px; width: 260px; }
+  input { width: 260px; height: 36px; font-size: 14px; padding: 4px 8px; box-sizing: border-box; }
+  .float-overlay {
+    position: absolute; left: 0; top: 0; width: 260px; height: 36px;
+    display: flex; align-items: center; padding-left: 8px; box-sizing: border-box;
+    color: #888; background: transparent;
+  }
+  #decoy {
+    position: absolute; left: 700px; top: 520px; width: 120px; height: 40px;
+    background: #eee;
+  }
+</style>
+</head>
+<body>
+<div class="form">
+  <div class="field" id="cardholder-wrap">
+    <input id="cardholder" name="cardholder" autocomplete="cc-name" type="text">
+    <span class="float-overlay" id="cardholder-overlay">Card holder</span>
+  </div>
+  <div class="field" id="masked-wrap">
+    <input id="masked-field" name="masked-field" type="text">
+    <span class="float-overlay" id="masked-overlay">Masked field</span>
+  </div>
+  <div class="field">
+    <input id="expiry" name="expiry" autocomplete="cc-exp" type="text" placeholder="MM/YY">
+  </div>
+  <div class="field" id="pair-wrap" style="width: 540px;">
+    <input id="pair-a" name="pair-a" type="text">
+    <input id="pair-b" name="pair-b" type="text" style="margin-left: 12px;">
+    <span class="float-overlay" id="pair-overlay" style="width: 540px;">Pair overlay</span>
+  </div>
+</div>
+<div id="decoy">decorative</div>
+<script>
+  // Boolean-only landing proof for the masked variant (never records the value).
+  window.__maskedFieldSawValue = false;
+  document.getElementById('masked-field').addEventListener('input', function (e) {
+    if (e.target.value && e.target.value.length > 0) window.__maskedFieldSawValue = true;
+  });
+</script>
+</body>
+</html>

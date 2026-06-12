@@ -254,6 +254,20 @@ export function fieldFallbackSelectors(field: PaymentCardField): string[] {
   }
 }
 
+/**
+ * Field-specific selectors for screenshot-time re-location of a protected top-level
+ * card field whose `data-antigen-masked` marker was wiped by a page re-render (OPPWA
+ * widget re-init). Same priority list as `fieldFallbackSelectors` MINUS the generic
+ * any-text-input last resort: re-masking must be precise-or-fail — masking "the first
+ * text input" instead of the real expiry would hide the leak the redaction
+ * mismatch check exists to surface. Selectors are consumed only inside the CDP
+ * remask expression; never returned to the agent.
+ */
+export function fieldRemaskSelectors(field: PaymentCardField): string[] {
+  const generic = 'input[type="text"],input[type="tel"],input:not([type])';
+  return fieldFallbackSelectors(field).filter((s) => s !== generic);
+}
+
 export async function executePaymentCardFillViaCDP(
   fillRequest: PaymentCardFillRequest,
   resolvedValue: string,

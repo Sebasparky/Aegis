@@ -93,6 +93,8 @@ import { captureRedactedScreenshot } from "../runtime/screenshotRedaction.js";
 import {
   registerProtectedIframeRedaction,
   getProtectedIframeRedactionFields,
+  registerProtectedTopLevelRedaction,
+  getProtectedTopLevelRedactionFields,
 } from "../runtime/protectedIframeRedaction.js";
 import { executeProfileFieldFillViaCDP, validateProfileFillSelector } from "../runtime/profileFieldFill.js";
 import { executePurchaseConfirmation } from "../runtime/purchaseConfirmationHandoff.js";
@@ -5457,25 +5459,36 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // ones to mark + redact (field-kind enums only). If any cannot be located at
     // capture time, captureRedactedScreenshot fails closed.
     const expectedIframeFields = getProtectedIframeRedactionFields(session.browser_session_id);
+    // Top-level protected fields (expiry, cardholder, non-iframe PAN/CVV) must be
+    // verified/re-masked at capture time — fill-time DOM markers do not survive
+    // hydrated checkout re-renders (the live IKEA expiry leak).
+    const expectedTopLevelFields = getProtectedTopLevelRedactionFields(session.browser_session_id);
     const shot = await captureRedactedScreenshot({
       browserWsUrl: resolved.browserWsUrl,
       pageTargetId: resolved.target.id,
       expectedIframeFields,
+      expectedTopLevelFields,
     });
 
     if (!shot.ok) {
-      // Counts/booleans only — never boxes, values, or base64.
+      // Counts/booleans/field-kind enums only — never boxes, values, or base64.
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: session.browser_session_id,
         tool: "browser_take_screenshot",
-        error_code: "SCREENSHOT_REDACTION_FAILED",
+        error_code: shot.redaction_mismatch ? "SCREENSHOT_REDACTION_MISMATCH" : "SCREENSHOT_REDACTION_FAILED",
       });
+      const mismatchDetail = shot.redaction_mismatch
+        ? ` A protected filled field could not be verified as masked after a page re-render` +
+          (shot.missing_field_kinds?.length ? ` (${shot.missing_field_kinds.join(", ")})` : "") +
+          `. Redaction is reported honestly — never a full-redaction claim while a protected value may be visible.`
+        : "";
       return sendError(
         reply,
         502,
         "SCREENSHOT_REDACTION_FAILED",
-        "Antigen could not capture a redacted screenshot. To protect filled sensitive values it will not return an unredacted image.",
+        "Antigen could not capture a redacted screenshot. To protect filled sensitive values it will not return an unredacted image." +
+          mismatchDetail,
       );
     }
 
@@ -5996,6 +6009,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           fillResult.iframeFieldKind
         ) {
           registerProtectedIframeRedaction(fillRequest.browser_session_id, fillResult.iframeFieldKind, "oppwa");
+        } else if (fillRequest.browser_session_id && fillRequest.field !== "billing_zip") {
+          // Parent-page fill of a visually-masked card field (expiry, cardholder, or
+          // PAN/CVV on non-iframe checkouts). Register it so the screenshot path can
+          // verify the mask survived later re-renders and re-mask or fail closed —
+          // the fill-time DOM marker alone is not durable (OPPWA re-init wipes it).
+          registerProtectedTopLevelRedaction(fillRequest.browser_session_id, fillRequest.field);
         }
 
         // Update authorization fields_filled
@@ -6075,6 +6094,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           const iframeFields = fillRequest.browser_session_id
             ? getProtectedIframeRedactionFields(fillRequest.browser_session_id)
             : undefined;
+          // Registry-derived count of top-level masked fields — surfaces a wiped
+          // mask (re-rendered node) in this response as top_level_mask_missing.
+          const expectedTopLevelMasked = fillRequest.browser_session_id
+            ? getProtectedTopLevelRedactionFields(fillRequest.browser_session_id).length
+            : 0;
           postFillState = buildPostFillState(
             {
               probe: probeResult?.probe,
@@ -6082,6 +6106,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               filled_count: 1,
               failed_count: 0,
               iframe_redaction_fields: iframeFields,
+              ...(expectedTopLevelMasked > 0
+                ? { expected_top_level_masked: expectedTopLevelMasked }
+                : {}),
               // Mismatch check mirrors the registration condition above — only
               // when the fill actually went through a session-tracked iframe.
               ...(fillResult.iframeProvider === "oppwa" &&

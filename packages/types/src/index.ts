@@ -3133,11 +3133,17 @@ export interface ProfileFieldFillRequest {
   error?: string;
 }
 
-/** Per-field result within a profile fill response. Masked summary only — no raw value. */
+/** Per-field result within a profile fill response. Masked summary only — no raw value.
+ *
+ * Page-prefilled values (autofill, cookies, site defaults) are UNTRUSTED: Antigen compares
+ * the current value against the protected profile value server-side and overwrites on
+ * mismatch. "already_correct" = existing value matched, nothing written;
+ * "corrected_existing_value" = existing value differed and was overwritten. Neither the
+ * existing DOM value nor the expected value is ever returned to the agent. */
 export interface ProfileFieldFillEntry {
   key: ProfileFieldKind;
   field_filled: boolean;
-  status: "filled" | "failed" | "not_found";
+  status: "filled" | "already_correct" | "corrected_existing_value" | "failed" | "not_found";
   /** e.g. "*** Main St, Ann Arbor, MI 4***" — computed by Antigen, never the raw value. */
   masked_summary?: string;
   /** Always the literal false — raw profile values are never returned to the agent. */

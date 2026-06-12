@@ -146,6 +146,39 @@ export async function buildAgentSafeObservationSnapshot(
   const rawElements = await page.evaluate(`(function() {
     var MAX_ELEMENTS = 100;
 
+    // Search-intent override — keep in sync with the classifySensitivity copy in
+    // antigenSnapshotRuntime.ts. An explicitly search-shaped field is not a
+    // secret sink. Consulted AFTER the strong rules (password type, cc-*, ssn,
+    // routing) so sensitive signals always win; vetoed by sensitive wording,
+    // sensitive autocomplete, or a checkout/payment/login form ancestor.
+    var SEARCH_TOKEN_RE = /[\\s_-](search|query|q|keywords|keyword|find)[\\s_-]/;
+    var SEARCH_TEXT_RE = /\\bsearch\\b|what are you looking for/;
+    var SEARCH_VETO_RE = /password|passcode|secret|otp|one.time|verification|cvv|cvc|card.?number|cc-|ssn|social.security|routing|account.?number|iban|e-?mail|user.?name|login|sign.?in|phone|telephone|address|postal|zip.?code|birth|dob/;
+    var SENSITIVE_FORM_RE = /checkout|payment|billing|login|sign.?in|register/;
+    function isSearchIntent(el, type, name, id, ac, ph, combined) {
+      if (SEARCH_VETO_RE.test(combined)) return false;
+      if (/cc-|current-password|new-password|one-time-code/.test(ac)) return false;
+      var role = (el.getAttribute('role') || '').toLowerCase();
+      var al = (el.getAttribute('aria-label') || '').toLowerCase();
+      var signal = type === 'search' || role === 'searchbox'
+        || SEARCH_TOKEN_RE.test(' ' + name + ' ' + id + ' ')
+        || SEARCH_TEXT_RE.test(ph) || SEARCH_TEXT_RE.test(al);
+      var node = el.parentElement, depth = 0;
+      while (node && depth < 8) {
+        var tg = (node.tagName || '').toLowerCase();
+        var r = ((node.getAttribute && node.getAttribute('role')) || '').toLowerCase();
+        if (tg === 'form') {
+          var fsig = ((node.getAttribute('action') || '') + ' ' + (node.getAttribute('id') || '') + ' ' + (node.getAttribute('aria-label') || '')).toLowerCase();
+          if (SENSITIVE_FORM_RE.test(fsig)) return false;
+          if (/search/.test(fsig)) signal = true;
+        }
+        if (r === 'search') signal = true;
+        node = node.parentElement; depth++;
+      }
+      return signal;
+    }
+
+    // Keep in sync with the classifySensitivity copy in antigenSnapshotRuntime.ts.
     function classifySensitivity(el) {
       var type = (el.type || '').toLowerCase();
       var name = (el.name || '').toLowerCase();
@@ -159,7 +192,9 @@ export async function buildAgentSafeObservationSnapshot(
       if (/cc-exp/.test(ac)) return 'payment';
       if (/ssn|social.security|passport|license|dob|birthdate|date.of.birth/.test(combined)) return 'identity';
       if (/routing|account.number|bank.account|account_number/.test(combined)) return 'financial';
-      if (/password|passcode|pin |secret|token|key/.test(combined)) return 'credential';
+      // Search override — only here; the strong rules above always win.
+      try { if (isSearchIntent(el, type, name, id, ac, ph, combined)) return null; } catch (e) {}
+      if (/password|passcode|pin |secret|token|api.?key|passkey|[\\s_-]key[\\s_-]/.test(combined)) return 'credential';
       if (/card|payment|billing|checkout/.test(combined)) return 'payment';
       return null;
     }

@@ -318,6 +318,71 @@ describe("POST /api/agent/v1/runtime/browser-type — Antigen ag_* path", () => 
     expect(JSON.stringify(body)).not.toContain("4242424242424242");
   });
 
+  it("TYPES into a non-sensitive search field (no injection handoff)", async () => {
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Search products",
+        normalized_name: "search products",
+        value_meta: { sensitive: false, sensitivity: null, value_present: false, value_length: 0 },
+      }),
+    ]);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Search products", text: "desk lamp", submit: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(typeKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({ text: "desk lamp", submit: true }));
+  });
+
+  it("end-to-end: a keyword-style search box built through the REAL classifier is typeable", async () => {
+    // Runs the production extraction IIFE on a generic keyword-named search input
+    // (the shape that used to misclassify as credential via the bare `key`
+    // substring), seeds the resulting candidate, and proves browser-type accepts it.
+    const { buildAntigenExtractionExpr, mapRawToCandidate } = await import("../runtime/antigenSnapshotRuntime.js");
+    const searchEl = {
+      tagName: "INPUT",
+      textContent: "", innerText: "", value: "",
+      disabled: false, readOnly: false, isContentEditable: false, labels: [],
+      parentElement: null, previousElementSibling: null,
+      getAttribute: (n: string) =>
+        ({ type: "text", name: "field-keywords", id: "twotabsearchtextbox", placeholder: "Search by keyword" } as Record<string, string>)[n] ?? null,
+      getBoundingClientRect: () => ({ left: 100, top: 80, width: 220, height: 36 }),
+      querySelector: () => null,
+    };
+    const g = global as Record<string, unknown>;
+    const savedDoc = g["document"];
+    const savedWin = g["window"];
+    g["window"] = {
+      innerWidth: 1280, innerHeight: 800,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", position: "static", zIndex: "auto" }),
+    };
+    g["document"] = { querySelectorAll: () => [searchEl], getElementById: () => null };
+    let candidates;
+    try {
+      const expr = buildAntigenExtractionExpr({ maxCandidates: 50, viewportOnly: false });
+      const raw = new Function(`return ${expr}`)() as unknown[];
+      candidates = raw.map((r, i) => mapRawToCandidate(r as never, i));
+    } finally {
+      g["document"] = savedDoc;
+      g["window"] = savedWin;
+    }
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].value_meta?.sensitive).toBe(false);
+
+    seedSession();
+    seedSnapshot(candidates);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Search by keyword", text: "desk lamp" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(typeKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({ text: "desk lamp" }));
+  });
+
   it("returns 422 ANTIGEN_REF_NOT_TYPEABLE for a disabled field", async () => {
     seedSession();
     seedSnapshot([inputCandidate({ enabled: false })]);

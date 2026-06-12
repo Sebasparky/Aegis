@@ -323,6 +323,36 @@ input-driven search via a visible `ag_*` search input, which returns
 
 ---
 
+## Generic ecommerce search smoke (search-field sensitivity)
+
+**Background.** The 2026-06-12 multi-merchant cart-building smoke exposed a
+**general search-field misclassification bug**: the sensitivity classifier's bare
+`key` substring matched keyword-style search input names (e.g. `name="field-keywords"`),
+classifying ordinary merchant search boxes as credential fields and refusing
+`browser_type`/`browser_fill` with `SENSITIVE_FIELD_REQUIRES_INJECTION`. The fix is
+**broader ecommerce search support, not a merchant-specific workaround**: a
+conservative search-intent override in `classifySensitivity`
+(`antigenSnapshotRuntime.ts`, mirrored in `agentSafeObservation.ts`) plus a bounded
+`key` token — see `docs/antigen-snapshot/security-and-privacy.md` →
+"Search-Intent Override". Strong sensitive signals (password type, `cc-*`, SSN,
+routing) always win over search-like signals.
+
+**Recipe (search-only — NOT a cart smoke):**
+
+1. Navigate to a merchant homepage via `browser_navigate` (homepage only).
+2. Take an `antigen_snapshot`; confirm the header search input reports
+   `value.sensitive: false` and `state.typeable: true`.
+3. Type a search term into the search box via `browser_type` (with `submit: true`)
+   or `browser_fill` — expect success, **no** `SENSITIVE_FIELD_REQUIRES_INJECTION`.
+4. Confirm the search results page loads.
+5. **Stop.** No add-to-cart, no login, no checkout, no protected data.
+
+**Negative companion (protection regression):** on a login page, `browser_type`
+into the password field must still return `SENSITIVE_FIELD_REQUIRES_INJECTION`,
+and payment fields must still return `SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL`.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -351,6 +381,11 @@ input-driven search via a visible `ag_*` search input, which returns
 - Pointer paths are **viewport-bounded** (generated path points are clamped to the
   viewport before dispatch while the real final click target is preserved). Intermediate
   human-like overshoot is **not** fail-closed — only the dispatched path is bounded.
+- Obvious search inputs (`type=search`, `role=searchbox`, search/keyword-named,
+  search landmark) classify **non-sensitive** and are typeable through generic
+  browser tools; credential/payment/identity fields still refuse with
+  `SENSITIVE_FIELD_REQUIRES_INJECTION` / `SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL`.
+  Sensitive signals always override search-like signals.
 
 ---
 

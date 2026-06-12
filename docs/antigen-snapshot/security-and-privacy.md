@@ -105,6 +105,37 @@ Sensitivity is classified by `classifySensitivity` (same patterns as
 `sanitizeValueMeta` (TS, defense-in-depth), and `toExternalAntigenSnapshotElement`
 (external view). A raw password/card/CVV value must never appear in any layer.
 
+### Search-Intent Override
+
+Ordinary site/merchant search inputs are NOT sensitive fields — search terms must
+be typeable through the generic `browser_type` / `browser_set_value` tools without
+the injection handoff. `classifySensitivity` therefore applies a conservative
+search-intent override:
+
+- **Strong sensitive rules always win.** The override is consulted only AFTER the
+  high-precision rules (`type=password`, `cc-*` autocomplete, CVV/CVC, SSN/passport,
+  routing/account-number). A field with `name="search"` and `autocomplete="cc-number"`
+  classifies `payment`.
+- **The override can only suppress the weak substring heuristics** (the generic
+  `password|…|key` and `card|payment|billing|checkout` catch-alls), and only when
+  the field carries an explicit search signal: `type="search"`, `role="searchbox"`,
+  a search/query/keyword-style token in `name`/`id`, clear search wording in the
+  placeholder or `aria-label`, or an ancestor `role="search"` landmark / search form.
+- **Vetoes (sensitive context overrides search-like signals):** any credential /
+  identity / contact / payment wording in the field's own attributes (password,
+  OTP, verification, cvv, card number, email, username, login, phone, address,
+  zip, DOB, …), a sensitive autocomplete value, or an ancestor `<form>` whose
+  action/id/aria-label indicates checkout / payment / billing / login / register.
+- **Fail-closed:** if the override helper throws, classification falls back to the
+  stricter pre-override behavior. Fields with no explicit search signal are
+  completely unaffected — e.g. a field literally named `giftcard` with no search
+  wording still classifies `payment` (known-conservative limitation).
+
+The weak credential heuristic was also tightened: the bare `key` substring (which
+misclassified keyword-style search boxes, e.g. `name="field-keywords"`, as
+credential fields) is now bounded (`api key` / `passkey` / standalone `key`
+tokens still match; `keyword`, `monkey`, `keyboard` do not).
+
 ---
 
 ## Snapshot Extraction Does Not Execute Actions

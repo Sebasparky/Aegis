@@ -602,6 +602,149 @@ describe("extraction — sensitive value protection", () => {
   });
 });
 
+// ─── 8a. Search-field sensitivity (anti-overfire) ──────────────────────────────
+// Ordinary merchant search boxes must classify non-sensitive (typeable through
+// generic browser tools), while real credential/payment/identity fields keep
+// refusing. Sensitive signals always beat search-like signals.
+
+describe("extraction — search-field sensitivity (anti-overfire)", () => {
+  it("type=search with a search placeholder is non-sensitive and typeable", () => {
+    const el = makeEl({ tag: "input", type: "search", attrs: { placeholder: "Search products" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.value_meta?.sensitivity).toBeNull();
+    expect(c.typeable).toBe(true);
+  });
+
+  it("role=searchbox text input is non-sensitive and typeable", () => {
+    const el = makeEl({ tag: "input", type: "text", attrs: { role: "searchbox", "aria-label": "Search" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.typeable).toBe(true);
+  });
+
+  it("keyword-style search field (name=field-keywords) is non-sensitive with value captured", () => {
+    // The bare `key` substring used to classify any keyword-named search box as
+    // a credential field. Generic pattern — not merchant-specific.
+    const el = makeEl({
+      tag: "input",
+      type: "text",
+      value: "desk lamp",
+      attrs: { name: "field-keywords", id: "twotabsearchtextbox", placeholder: "Search by keyword" },
+    });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.value_meta?.sensitivity).toBeNull();
+    expect(c.value_meta?.value).toBe("desk lamp");
+    expect(c.typeable).toBe(true);
+  });
+
+  it("header nav search inside a role=search landmark is non-sensitive", () => {
+    const input = tnode({ tag: "input", type: "text", attrs: { name: "q", "aria-label": "Search" } });
+    const root = tnode({
+      tag: "header",
+      children: [fillerLinks(6), tnode({ tag: "div", attrs: { role: "search" }, children: [input] })],
+    });
+    const [c] = extractTree([input], root);
+    expect(c.value_meta?.sensitive).toBe(false);
+    expect(c.typeable).toBe(true);
+  });
+
+  it("role=search ancestor rescues a 'search gift cards' box from the weak card rule", () => {
+    const input = tnode({
+      tag: "input",
+      type: "text",
+      attrs: { name: "gift-card-code-search", "aria-label": "Search gift cards" },
+    });
+    const root = tnode({ tag: "div", attrs: { role: "search" }, children: [input] });
+    const [c] = extractTree([input], root);
+    expect(c.value_meta?.sensitive).toBe(false);
+  });
+
+  it("checkout/payment form ancestor vetoes the search override (sensitive context wins)", () => {
+    const input = tnode({ tag: "input", type: "text", attrs: { name: "gift-card-code", placeholder: "Search" } });
+    const root = tnode({ tag: "form", attrs: { action: "/checkout/payment" }, children: [input] });
+    const [c] = extractTree([input], root);
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.sensitivity).toBe("payment");
+  });
+
+  it("login email field classification is unchanged by search-like id/placeholder", () => {
+    const control = makeEl({ tag: "input", type: "email", attrs: { name: "email", autocomplete: "email" } });
+    const variant = makeEl({
+      tag: "input",
+      type: "email",
+      attrs: { name: "email", autocomplete: "email", id: "header-search-email", placeholder: "Search" },
+    });
+    const [cc] = extractCandidates([control]);
+    const [cv] = extractCandidates([variant]);
+    expect(cv.value_meta?.sensitive).toBe(cc.value_meta?.sensitive);
+    expect(cv.value_meta?.sensitivity).toBe(cc.value_meta?.sensitivity);
+  });
+
+  it("password field stays credential even with search wording in the placeholder", () => {
+    const el = makeEl({
+      tag: "input",
+      type: "password",
+      value: "hunter2-SECRET",
+      attrs: { placeholder: "Search your password manager" },
+    });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.sensitivity).toBe("credential");
+    expect(JSON.stringify(c)).not.toContain("hunter2-SECRET");
+  });
+
+  it("checkout phone field stays sensitive despite a Search placeholder", () => {
+    const el = makeEl({ tag: "input", type: "tel", attrs: { name: "checkout-phone", placeholder: "Search" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(true);
+  });
+
+  it("billing address field stays sensitive despite a Search placeholder", () => {
+    const el = makeEl({ tag: "input", type: "text", attrs: { name: "billing-address", placeholder: "Search" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.sensitivity).toBe("payment");
+  });
+
+  it("payment card field stays payment even with a search-like id (strong rule wins)", () => {
+    const el = makeEl({
+      tag: "input",
+      type: "text",
+      value: "4111111111111111",
+      attrs: { autocomplete: "cc-number", id: "search-card-input" },
+    });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.sensitivity).toBe("payment");
+    expect(JSON.stringify(c)).not.toContain("4111111111111111");
+  });
+
+  it("conflict: search-like name with cc autocomplete classifies payment (sensitive wins)", () => {
+    const el = makeEl({ tag: "input", type: "text", attrs: { name: "search", autocomplete: "cc-number" } });
+    const [c] = extractCandidates([el]);
+    expect(c.value_meta?.sensitive).toBe(true);
+    expect(c.value_meta?.sensitivity).toBe("payment");
+  });
+
+  it("tightened key rule still catches real key fields", () => {
+    const apiKey = makeEl({ tag: "input", type: "text", attrs: { name: "api_key" } });
+    const passkey = makeEl({ tag: "input", type: "text", attrs: { name: "passkey" } });
+    const literalKey = makeEl({ tag: "input", type: "text", attrs: { name: "key" } });
+    expect(extractCandidates([apiKey])[0].value_meta?.sensitivity).toBe("credential");
+    expect(extractCandidates([passkey])[0].value_meta?.sensitivity).toBe("credential");
+    expect(extractCandidates([literalKey])[0].value_meta?.sensitivity).toBe("credential");
+  });
+
+  it("tightened key rule no longer fires on keyword-ish names", () => {
+    const keyword = makeEl({ tag: "input", type: "text", attrs: { name: "keyword", placeholder: "Search" } });
+    const monkey = makeEl({ tag: "input", type: "text", attrs: { name: "monkey-name" } });
+    expect(extractCandidates([keyword])[0].value_meta?.sensitive).toBe(false);
+    expect(extractCandidates([monkey])[0].value_meta?.sensitive).toBe(false);
+  });
+});
+
 // ─── 8b. Redacted current-value metadata (skip-aware exact fill) ──────────────
 
 describe("extraction — value_meta", () => {

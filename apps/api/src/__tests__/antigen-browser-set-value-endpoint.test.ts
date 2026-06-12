@@ -285,6 +285,25 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     expect(JSON.stringify(body)).not.toContain("4242424242424242");
   });
 
+  it("FILLS a non-sensitive search field (no injection handoff)", async () => {
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Search products",
+        normalized_name: "search products",
+        value_meta: { sensitive: false, sensitivity: null, value_present: false, value_length: 0 },
+      }),
+    ]);
+    setValueMock.mockResolvedValueOnce({
+      success: true, fillable: true, changed: true, verified: true,
+      element_kind: "input", actual_value: "desk lamp", actual_value_present: true, actual_value_length: 9, duration_ms: 8,
+    });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "desk lamp" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(setValueMock).toHaveBeenCalledWith(expect.objectContaining({ value: "desk lamp" }));
+  });
+
   it("surfaces VALUE_MISMATCH from the runtime as a structured 422", async () => {
     seedSession();
     seedSnapshot([inputCandidate()]);

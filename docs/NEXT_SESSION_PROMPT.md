@@ -47,6 +47,8 @@ bounded ancestor walk, point containment, null fail-closed) in `paymentCardFill.
 in a real-Chromium integration test (`payment-card-fill-browser.integration.test.ts`,
 floating-label fixture). See `docs/dev/antigen-browser-qa.md` → "Next QA milestone —
 focused payment-stage smoke" for the re-verification recipe and the 4/4 redaction metric.
+For the consolidated milestone handoff (what was fixed, what is live-verified, what remains
+open), see `docs/dev/ikea-checkout-milestone.md`.
 
 ---
 

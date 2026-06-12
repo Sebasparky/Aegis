@@ -414,6 +414,9 @@ snapshot reports — `browser_set_value`/`browser_fill` exact-replacement + idem
 
 ## Next QA milestone — focused payment-stage smoke
 
+> Consolidated milestone handoff (result, key fixes, open items, commits):
+> [`docs/dev/ikea-checkout-milestone.md`](./ikea-checkout-milestone.md).
+
 The 2026-06-11 live IKEA smoke verified the checkout flow through payment with two
 defects, both since fixed in code: `post_fill_state` absent (API flag unset — see
 Step 0) and the cardholder_name `Illegal invocation` (floating-label resolution —

@@ -79,7 +79,13 @@ export type BrowserTraceEventType =
   // adapter via the internal navigation-disposition route. Carries only
   // `navigation_disposition` (enum-gated), a short clipped `navigation_reason`,
   // and host+path-reduced url_before/url_after — no query strings or internals.
-  | "browser_navigation_disposition";
+  | "browser_navigation_disposition"
+  // Action preflight order (Human Presence Relay v1): one event per preflight
+  // stage on a ref-based browser action, proving the HV-before-stale-ref ordering
+  // invariant held. Carries only `preflight_stage` (enum-gated), `hv_marker_present`,
+  // and `hv_detected` booleans — never selectors, refs, challenge text, iframe
+  // details, URLs, or any page content.
+  | "action_preflight";
 
 /** Which surface handled a browser tool call. */
 export type BrowserToolSurface =
@@ -146,6 +152,35 @@ export type NavigationDisposition =
   | "no_recent_snapshot"
   | "no_matching_ref"
   | "no_cart_ref";
+
+/**
+ * Action-preflight ordering stages (Human Presence Relay v1). Emitted in order on
+ * a ref-based browser action so the HV-before-stale-ref invariant is auditable
+ * from the trace alone. Value-free: stage label only, never refs/selectors/text.
+ *
+ *  - action_started: the ref-based action handler entered preflight.
+ *  - hv_marker_checked: the cached active-HV marker (from a prior snapshot) was read.
+ *  - hv_probe_checked: the live page-level HV probe ran (no cached marker was active).
+ *  - ref_resolution_started: HV was ruled out; the action proceeded to resolve the ref.
+ *  - returned_human_verification_required: preflight short-circuited with 409 HV.
+ *  - returned_ref_stale: the action returned ANTIGEN_REF_STALE AFTER HV was ruled out.
+ */
+export type ActionPreflightStage =
+  | "action_started"
+  | "hv_marker_checked"
+  | "hv_probe_checked"
+  | "ref_resolution_started"
+  | "returned_human_verification_required"
+  | "returned_ref_stale";
+
+const ACTION_PREFLIGHT_STAGES = new Set<ActionPreflightStage>([
+  "action_started",
+  "hv_marker_checked",
+  "hv_probe_checked",
+  "ref_resolution_started",
+  "returned_human_verification_required",
+  "returned_ref_stale",
+]);
 
 const NAVIGATION_DISPOSITIONS = new Set<NavigationDisposition>([
   "direct_navigation_allowed",
@@ -256,6 +291,13 @@ export interface BrowserTraceEvent {
   // Total wall time for the whole tool call (endpoint-measured). Duration only —
   // sanitized to a non-negative integer like verify_ms; never carries identifiers.
   total_ms?: number;
+  // ── Action-preflight ordering (Human Presence Relay v1) ──────────────────────
+  // Present on `action_preflight` events. `preflight_stage` is enum-gated; the two
+  // booleans expose only WHETHER an HV marker was present / WHETHER the live probe
+  // detected a wall — never the challenge type, selectors, refs, or page content.
+  preflight_stage?: ActionPreflightStage;
+  hv_marker_present?: boolean;
+  hv_detected?: boolean;
 }
 
 /** Input accepted by recordBrowserTraceEvent — everything except the store-managed `ts`. */
@@ -467,6 +509,12 @@ export function recordBrowserTraceEvent(
     if (Number.isFinite(event.post_click_actions_count)) {
       safe.post_click_actions_count = Math.max(0, Math.min(32, Math.floor(event.post_click_actions_count as number)));
     }
+    // ── Action-preflight ordering — enum-gated stage + plain booleans only. ──
+    if (event.preflight_stage !== undefined && ACTION_PREFLIGHT_STAGES.has(event.preflight_stage)) {
+      safe.preflight_stage = event.preflight_stage;
+    }
+    if (typeof event.hv_marker_present === "boolean") safe.hv_marker_present = event.hv_marker_present;
+    if (typeof event.hv_detected === "boolean") safe.hv_detected = event.hv_detected;
 
     let entry = traces.get(browserRuntimeId);
     if (!entry) {

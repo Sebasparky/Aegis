@@ -69,7 +69,7 @@ import { readLiveCdpPageUrl, resolveSnapshotCdpTarget } from "../runtime/cdpTarg
 // Dev-only, behavior-neutral, sanitized browser run trace (gated by
 // ANTIGEN_BROWSER_TRACE=true). Recording never alters tool results and never
 // leaks cdp_url, coordinates, profile paths, secrets, or raw typed text.
-import { recordBrowserTraceEvent, sanitizeTraceUrl } from "../runtime/browserRunTrace.js";
+import { recordBrowserTraceEvent, sanitizeTraceUrl, type ActionPreflightStage } from "../runtime/browserRunTrace.js";
 import { BrowserTimingScope, timingEnabled } from "../runtime/browserTiming.js";
 // Same-page logical-ref recovery (env-gated, default-off). When enabled, a
 // recoverable ANTIGEN_REF_STALE on a clearly low-risk click target is retried
@@ -484,33 +484,37 @@ function resolveReadyRuntimeSession(
 const PAGE_HV_PROBE_MAX_ELEMENTS = 3;
 
 /**
- * Human Presence Relay pre-action guard. Runs in browser-click/type/set-value/
- * scroll IMMEDIATELY after session resolution and BEFORE any ref resolution —
- * so the stale-ref machinery, surface resolution, and logical recovery are
- * never reached while a known blocking human-verification challenge is up.
- * browser-snapshot is deliberately NOT guarded: it is the resume path.
- *
- * Returns true when the request was rejected (409 HUMAN_VERIFICATION_REQUIRED
- * already sent). The payload carries metadata + agent guidance only — never
- * selectors, coordinates, or refs.
+ * Value-free preflight-ordering trace helper. No-op unless ANTIGEN_BROWSER_TRACE
+ * is on. Emits only the enum-gated stage plus two booleans — never refs,
+ * selectors, challenge text, iframe details, URLs, or any page content.
  */
-function rejectIfHumanVerificationActive(
+function recordActionPreflight(
+  session: TaskBrowserSession,
+  tool: string,
+  stage: ActionPreflightStage,
+  extra?: { hv_marker_present?: boolean; hv_detected?: boolean },
+): void {
+  recordBrowserTraceEvent(session.browser_session_id, {
+    event_type: "action_preflight",
+    browser_runtime_id: session.browser_session_id,
+    tool,
+    preflight_stage: stage,
+    ...extra,
+  });
+}
+
+/**
+ * Sends the canonical 409 HUMAN_VERIFICATION_REQUIRED response for an active
+ * request and records the rejection trace. Shared by the cached-marker guard and
+ * the stale-ref live-probe path so both emit an identical, internals-free payload.
+ */
+function sendHumanVerificationRequired(
   session: TaskBrowserSession,
   reply: any,
   tool: string,
-): boolean {
-  if (!isHumanVerificationEnabled()) return false;
-  const marker = getActiveHumanVerification(session.browser_session_id);
-  if (!marker) return false;
-  const request = humanVerificationRequests.get(marker.request_id);
-  if (!request) {
-    clearActiveHumanVerification(session.browser_session_id);
-    return false;
-  }
-  lazyExpireHumanVerificationRequest(request);
-  // Terminal requests keep blocking (with the terminal status) until a fresh
-  // snapshot re-evaluates the page — the challenge itself is presumably still
-  // there; clicking behind it would only produce stale-ref loops.
+  request: { request_id: string; status: string; challenge_type: string; domain: string },
+): void {
+  recordActionPreflight(session, tool, "returned_human_verification_required");
   recordBrowserTraceEvent(session.browser_session_id, {
     event_type: "browser_tool_rejected",
     browser_runtime_id: session.browser_session_id,
@@ -529,9 +533,129 @@ function rejectIfHumanVerificationActive(
       domain: request.domain,
       user_presence_required: true,
       purchase_authorized: false,
-      next_action: humanVerificationAgentNextAction(request),
+      next_action: humanVerificationAgentNextAction(request as any),
     },
   });
+}
+
+/**
+ * Live page-level human-verification probe. Resolves the session's CDP target the
+ * SAME way antigen_snapshot does and runs the SAME page-level wall detector
+ * (detectPageHumanVerificationWallViaCDP), so a challenge raised AFTER the last
+ * snapshot — the live B&BW "Press & Hold" case, where no prior snapshot armed the
+ * marker — is detectable at action time rather than being misreported as stale.
+ *
+ * Best-effort and fail-safe: a missing target or any transport/parse error yields
+ * null, so a probe failure always fails OPEN (the action returns its original
+ * result). Returns enum/booleans only — it never reads iframe internals or page
+ * content.
+ */
+async function detectLiveHumanVerificationWall(session: TaskBrowserSession) {
+  try {
+    const resolved = await resolveSnapshotCdpTarget(session.cdp_url);
+    const resolvedTarget = resolved
+      ? { browserWsUrl: resolved.browserWsUrl, pageTarget: { id: resolved.target.id, url: resolved.target.url } }
+      : undefined;
+    if (!resolvedTarget) return null;
+    return await detectPageHumanVerificationWallViaCDP({ cdpUrl: session.cdp_url, resolvedTarget });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Human Presence Relay pre-action guard. Runs in browser-click/type/set-value/
+ * scroll IMMEDIATELY after session resolution and BEFORE any ref resolution.
+ *
+ * This guard is the CHEAP, cached-marker half of the invariant: it consults only
+ * the in-memory marker armed by a prior snapshot (or by an earlier stale-ref live
+ * probe). It runs NO CDP probe, so it adds no latency to the common path. The
+ * complementary live probe runs lazily ONLY on the stale-ref branch
+ * (rejectStaleRefAsHumanVerification) — together they enforce: a ref-based action
+ * may NOT surface ANTIGEN_REF_STALE until human verification has been ruled out.
+ * browser-snapshot is deliberately NOT guarded: it is the resume path.
+ *
+ * Returns true when the request was rejected (409 HUMAN_VERIFICATION_REQUIRED
+ * already sent). The payload carries metadata + agent guidance only — never
+ * selectors, coordinates, or refs.
+ */
+function rejectIfHumanVerificationActive(
+  session: TaskBrowserSession,
+  reply: any,
+  tool: string,
+): boolean {
+  if (!isHumanVerificationEnabled()) return false;
+
+  recordActionPreflight(session, tool, "action_started");
+
+  const marker = getActiveHumanVerification(session.browser_session_id);
+  const request = marker ? humanVerificationRequests.get(marker.request_id) : undefined;
+  if (marker && !request) {
+    // Marker points at a GC'd request — drop it; the action proceeds and the
+    // stale-ref live probe (if reached) is the backstop.
+    clearActiveHumanVerification(session.browser_session_id);
+  }
+  recordActionPreflight(session, tool, "hv_marker_checked", { hv_marker_present: !!request });
+
+  if (!request) {
+    // No active cached marker → let the action proceed to ref resolution. A
+    // challenge that appeared after the last snapshot is caught lazily on the
+    // stale-ref branch, never here, so the happy path pays no probe cost.
+    recordActionPreflight(session, tool, "ref_resolution_started");
+    return false;
+  }
+
+  // A known challenge is up. Terminal requests keep blocking until a fresh
+  // snapshot re-evaluates the page — clicking behind it would only loop on stale.
+  lazyExpireHumanVerificationRequest(request);
+  sendHumanVerificationRequired(session, reply, tool, request);
+  return true;
+}
+
+/**
+ * Stale-ref live HV backstop. Called ONLY at the moment a ref-based action is
+ * about to return ANTIGEN_REF_STALE. Runs the live page-level probe; if a wall is
+ * present it creates/reuses the HV request (which arms the marker so the NEXT
+ * action short-circuits in the cheap guard) and sends 409 HUMAN_VERIFICATION_-
+ * REQUIRED. Returns true when it sent that 409 (caller must return immediately);
+ * false when no HV was detected OR the probe failed open — in which case the
+ * caller proceeds with the original ANTIGEN_REF_STALE response.
+ *
+ * This placement preserves the invariant (HV is ruled out before any stale ref is
+ * surfaced) while keeping the live CDP probe OFF the successful-action path.
+ */
+async function rejectStaleRefAsHumanVerification(
+  session: TaskBrowserSession,
+  reply: any,
+  tool: string,
+  delegation: { id: string; agent_name?: string },
+): Promise<boolean> {
+  if (!isHumanVerificationEnabled()) return false;
+
+  const wall = await detectLiveHumanVerificationWall(session);
+  recordActionPreflight(session, tool, "hv_probe_checked", { hv_detected: !!wall });
+  if (!wall) return false; // no HV, or probe failed open → fall through to stale
+
+  let hvDomain = "unknown";
+  try {
+    if (session.current_url) hvDomain = new URL(session.current_url).hostname;
+  } catch {
+    /* keep "unknown" */
+  }
+  // Create/reuse the request — this also arms the session marker, so the NEXT
+  // action short-circuits in rejectIfHumanVerificationActive without re-probing.
+  const request = createOrReuseHumanVerificationRequest({
+    user_id: MOCK_USER_ID,
+    delegation_id: delegation.id,
+    agent_name: delegation.agent_name,
+    browser_session_id: session.browser_session_id,
+    domain: hvDomain,
+    page_url: session.current_url ?? "",
+    challenge_type: wall.hv_challenge_type,
+    surface_title: "Access challenge",
+    page_level: wall.page_level === true,
+  });
+  sendHumanVerificationRequired(session, reply, tool, request);
   return true;
 }
 
@@ -4183,10 +4307,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         if (refResult.error === "ANTIGEN_REF_STALE") {
           // Surface-aware stale message: a gone surface is useful signal (the
           // panel/dialog closed) — tell the agent that instead of a generic stale.
+          // Invariant backstop: before surfacing ANTIGEN_REF_STALE, run the live
+          // page-level HV probe. A challenge raised after the last snapshot (the
+          // live B&BW case) is detected here and returns 409 instead of stale.
+          if (await rejectStaleRefAsHumanVerification(session, reply, "browser_click", delegation)) return;
           const staleMessage =
             surfaceState === "failed_surface_gone"
               ? "The active surface (panel/dialog) this ref belonged to is no longer present — it likely closed. Take a fresh antigen_snapshot and act on the current page state."
               : "Antigen ref is stale. Take a new antigen_snapshot and retry.";
+          // Closes the preflight ordering trace: ANTIGEN_REF_STALE is reached only
+          // AFTER human verification was ruled out by the live probe above.
+          recordActionPreflight(session, "browser_click", "returned_ref_stale");
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: staleMessage, ...(staleSignal ?? {}), ...(surfaceState !== undefined ? { surface_resolution_state: surfaceState } : { recovery_state: recoveryState }), ...ttlFailField } });
         }
         const code = refResult.error === "REALISM_DISABLED" ? "REALISM_DISABLED" : "REALISTIC_CLICK_FAILED";
@@ -4837,6 +4968,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
+          // Invariant backstop: rule out human verification via the live probe
+          // before surfacing a stale ref (challenge raised after last snapshot).
+          if (await rejectStaleRefAsHumanVerification(session, reply, "browser_type", delegation)) return;
+          recordActionPreflight(session, "browser_type", "returned_ref_stale");
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...ttlFailField } });
         }
         return reply.status(422).send({ ok: false, error: { code: failCode, message: refResult.error ?? "Realistic typing failed.", ...ttlFailField }, data: { char_count_bucket: refResult.char_count_bucket, duration_ms: refResult.duration_ms } });
@@ -5100,6 +5235,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         error_code: failCode,
         ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
       });
+      // Invariant backstop: before surfacing ANTIGEN_REF_STALE, run the live
+      // page-level HV probe (challenge raised after the last snapshot).
+      if (failCode === "ANTIGEN_REF_STALE") {
+        if (await rejectStaleRefAsHumanVerification(session, reply, "browser_set_value", delegation)) return;
+        recordActionPreflight(session, "browser_set_value", "returned_ref_stale");
+      }
       const messages: Record<string, string> = {
         ANTIGEN_REF_PAGE_CHANGED: "The page changed since this snapshot. Take a fresh antigen_snapshot.",
         ANTIGEN_REF_OUT_OF_VIEWPORT: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.",

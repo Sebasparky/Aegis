@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+import http from "node:http";
 import WebSocket from "ws";
 import { chromium } from "playwright";
 
@@ -36,6 +37,7 @@ import {
   extractAntigenSnapshotCandidatesViaCDP,
   extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
+  collectPageHvWallDebugViaCDP,
   type AntigenSnapshotCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
 import {
@@ -66,6 +68,11 @@ const FIXTURE_ECOMM_IFRAME = fileURLToPath(new URL("./fixtures/ecommerce-marketi
 // background (20+ extractable refs). element_count is high, so the low-element
 // fast path skips — the cheap hint must fire and the probe must still classify.
 const FIXTURE_OVERLAY_WALL = fileURLToPath(new URL("./fixtures/overlay-wall-preserved-background.html", import.meta.url));
+// OOPIF / cross-origin-iframe wall: the challenge text AND control render INSIDE
+// the cross-origin iframe, so the top document has NO HV text. Only the
+// text-INDEPENDENT OOPIF path (inaccessible iframe + OOPIF child target +
+// blocking overlay) classifies it.
+const FIXTURE_OOPIF_NO_TEXT = fileURLToPath(new URL("./fixtures/oopif-overlay-no-text-wall.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -193,8 +200,24 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
   let proc: ChildProcess;
   let userDataDir: string;
   let cdpUrl: string;
+  // Tiny cross-site origin server (127.0.0.1) used to host a REAL OOPIF for the
+  // cross-origin-iframe wall test. file:// parent + http://127.0.0.1 child are
+  // cross-site, so under --site-per-process the iframe becomes an OOPIF child
+  // target visible to CDP Target.getTargets.
+  let challengeServer: http.Server;
+  let challengeUrl: string;
 
   beforeAll(async () => {
+    challengeServer = http.createServer((_req, res) => {
+      // Minimal challenge body. No bearing on detection (text is never read from
+      // the cross-origin iframe); it only needs to be a real cross-site document.
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<!doctype html><title>c</title><button id=h>hold</button>");
+    });
+    const serverPort = await freePort();
+    await new Promise<void>((resolve) => challengeServer.listen(serverPort, "127.0.0.1", resolve));
+    challengeUrl = `http://127.0.0.1:${serverPort}/challenge`;
+
     const port = await freePort();
     cdpUrl = `http://127.0.0.1:${port}`;
     userDataDir = mkdtempSync(join(tmpdir(), "antigen-hv-it-"));
@@ -204,6 +227,9 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${userDataDir}`,
         "--headless=new",
+        // Force OOPIFs for cross-site iframes so the OOPIF-wall test sees a real
+        // child target (matches the live B&BW cross-origin-iframe shape).
+        "--site-per-process",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",
@@ -218,6 +244,7 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
 
   afterAll(() => {
     try { proc?.kill("SIGKILL"); } catch { /* ignore */ }
+    try { challengeServer?.close(); } catch { /* ignore */ }
     try { if (userDataDir) rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
@@ -530,5 +557,83 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     await gotoFixture(cdpUrl, FIXTURE_OVERLAY_WALL);
     expect(await withHvFlag("false", detectWall)).toBeNull();
     expect(await withHvFlag("false", bundleHint)).toBeUndefined();
+  }, 20_000);
+
+  // ─── OOPIF / cross-origin-iframe wall with NO top-document HV text ─────────
+  // The live B&BW Press & Hold popup shape: text + control live inside the
+  // cross-origin iframe, so the top document carries no HV language. The
+  // text-independent OOPIF path is the only one that classifies it.
+  it("classifies the OOPIF no-text wall as unknown_human_verification (text-independent path)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_OOPIF_NO_TEXT);
+    // Point the host iframe at the cross-site origin so it becomes a REAL OOPIF
+    // child target (the fixture ships about:blank as a static placeholder).
+    await withPageSession(cdpUrl, async ({ evaluate }) => {
+      await evaluate(
+        `(function(){var f=document.querySelector('#hv-host iframe'); if(f){ f.removeAttribute('sandbox'); f.src=${JSON.stringify(challengeUrl)}; } return true;})()`,
+      );
+    });
+    // Allow the cross-site document to load and the OOPIF child target to spawn.
+    await new Promise((res) => setTimeout(res, 800));
+
+    // No candidate/screen-level hv member (the control is in the cross-origin iframe).
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.filter((c) => c.overlay?.human_verification === true)).toHaveLength(0);
+
+    // The cheap hint fires via the OOPIF shape (inaccessible iframe + blocking
+    // overlay), independent of any top-document text.
+    expect(await withHvFlag("true", bundleHint)).toBe(true);
+
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).not.toBeNull();
+    expect(wall!.human_verification).toBe(true);
+    expect(wall!.page_level).toBe(true);
+    // Never asserts press_and_hold — the challenge text is unreadable.
+    expect(wall!.hv_challenge_type).toBe("unknown_human_verification");
+    expect(wall!.user_presence_required).toBe(true);
+    expect(wall!.blocking).toBe(true);
+  }, 20_000);
+
+  it("flag OFF: the OOPIF no-text wall is not classified and emits no hint (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_OOPIF_NO_TEXT);
+    expect(await withHvFlag("false", detectWall)).toBeNull();
+    expect(await withHvFlag("false", bundleHint)).toBeUndefined();
+  }, 20_000);
+
+  it("does NOT classify a visible-iframe page with no blocking overlay (negative)", async () => {
+    // ecommerce-marketing-iframe has a visible (possibly cross-origin) iframe but
+    // NO fixed full-coverage backdrop / click-intercept, so neither the text path
+    // nor the OOPIF path classifies it — even with the flag on.
+    await gotoFixture(cdpUrl, FIXTURE_ECOMM_IFRAME);
+    expect(await withHvFlag("true", detectWall)).toBeNull();
+  }, 20_000);
+
+  // ─── HV debug telemetry signals against a REAL wall (ANTIGEN_HV_DEBUG path) ──
+  // Validates that the dev-only debug probe reports correct value-free signals so
+  // a live B&BW run can pinpoint which condition fails. Positive (overlay wall)
+  // and negative (plain access-denied) fixtures exercise both outcomes.
+  async function debugProbe() {
+    return collectPageHvWallDebugViaCDP({ resolvedTarget: await resolveTarget() });
+  }
+
+  it("debug probe reports HV text + inaccessible iframe + would_classify on the overlay wall", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_OVERLAY_WALL);
+    const dbg = await withHvFlag("true", debugProbe);
+    expect(dbg.result).toBe("positive");
+    if (dbg.result === "error") throw new Error("expected signals");
+    expect(dbg.signals.top_doc_text_flags.hv_text_seen).toBe(true);
+    expect(dbg.signals.top_doc_text_flags.press_hold_seen).toBe(true);
+    expect(dbg.signals.iframe_flags.visible_iframe_seen).toBe(true);
+    expect(dbg.signals.iframe_flags.inaccessible_iframe_seen).toBe(true);
+    expect(dbg.signals.iframe_flags.iframe_count_bucket).not.toBe("zero");
+    expect(dbg.signals.would_classify).toBe(true);
+  }, 20_000);
+
+  it("debug probe reports would_classify=false on a plain access-denied page (no HV language)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_DENIED_PLAIN);
+    const dbg = await withHvFlag("true", debugProbe);
+    expect(dbg.result).toBe("null");
+    if (dbg.result === "error") throw new Error("expected signals");
+    expect(dbg.signals.top_doc_text_flags.hv_text_seen).toBe(false);
+    expect(dbg.signals.would_classify).toBe(false);
   }, 20_000);
 });

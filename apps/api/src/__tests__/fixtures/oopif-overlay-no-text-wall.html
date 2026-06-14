@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Men's Body Care</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* Full-page blocking dimmer: fixed, full-coverage, high z-index. This is
+         the structural BLOCKER (fixed_overlay_seen + center click-intercept). */
+      #hv-dimmer {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.62);
+      }
+      /* Centered host card. It carries NO text — the entire challenge (text AND
+         control) renders inside the cross-origin (sandboxed, opaque-origin)
+         iframe, which becomes an OOPIF child target. */
+      #hv-host {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10000;
+        width: 340px;
+        height: 220px;
+        background: #fff;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      #hv-host iframe { width: 340px; height: 220px; border: 0; display: block; }
+    </style>
+  </head>
+  <body>
+    <!--
+      OOPIF / cross-origin-iframe human-verification wall — the live B&BW
+      "Press & Hold" popup shape confirmed by the CDP diagnostic:
+        - the challenge text AND button render INSIDE a single cross-origin
+          (sandboxed, opaque-origin) iframe → an OOPIF child target,
+        - so the TOP DOCUMENT carries NO human/bot/press-hold/verify/captcha/
+          access-denied language at all (text-path detectors find nothing),
+        - a fixed full-coverage dimmer blocks interaction (fixed_overlay_seen +
+          center click-intercept),
+        - the ecommerce background DOM is fully preserved (20+ visible refs).
+      Only the text-INDEPENDENT OOPIF path classifies this:
+        visible_iframe_seen && inaccessible_iframe_seen &&
+        oopif_or_child_target_seen && (fixed_overlay_seen || click_intercept).
+    -->
+
+    <!-- ── Preserved background page (20+ interactive controls) ─────────────── -->
+    <header>
+      <a href="/">Home</a>
+      <a href="/account">Account</a>
+      <a href="/bag">Bag</a>
+      <input type="search" name="q" placeholder="Search products" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/body-care">Body Care</a>
+      <a href="/fragrance">Fragrance</a>
+      <a href="/soaps">Soaps &amp; Sanitizers</a>
+      <a href="/candles">Candles</a>
+      <a href="/gifts">Gifts</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>Men's Body Care</h1>
+      <div class="cats">
+        <a href="/body-wash">Body Wash &amp; Scrub</a>
+        <a href="/deodorant">Deodorant</a>
+        <a href="/lotion">Lotion</a>
+        <a href="/cologne">Cologne</a>
+      </div>
+      <div class="grid">
+        <div class="card"><a href="/p/1">Teakwood Wash</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/2">Graphite Spray</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/3">Ocean Lotion</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/4">Mahogany Bar</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/5">Cedar Mist</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/6">Noir Cologne</a><button type="button">Add to bag</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+
+    <!-- ── Blocking overlay; the challenge is ENTIRELY inside the OOPIF ──────── -->
+    <div id="hv-dimmer"></div>
+    <div id="hv-host" role="presentation">
+      <iframe sandbox="allow-scripts" src="about:blank" title="challenge"></iframe>
+    </div>
+  </body>
+</html>

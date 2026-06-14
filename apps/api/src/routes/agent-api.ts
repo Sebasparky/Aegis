@@ -55,7 +55,11 @@ import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
 import {
   extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
+  collectPageHvWallDebugViaCDP,
   type AntigenPageMeta,
+  type HumanVerificationDebug,
+  type PageWallProbeReason,
+  type PageWallProbeResult,
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -98,6 +102,7 @@ import {
 // recovery behind the challenge.
 import {
   isHumanVerificationEnabled,
+  isHvDebugEnabled,
   getActiveHumanVerification,
   clearActiveHumanVerification,
 } from "../runtime/humanVerificationState.js";
@@ -5409,6 +5414,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // control is inside a cross-origin iframe (zero candidate elements). Drives a
     // synthesized blocking active surface + manual-completion guidance.
     let pageLevelHv = false;
+    // Dev-only HV diagnostic (ANTIGEN_HV_DEBUG). Populated below, attached to the
+    // response only when BOTH HV flags are on. Purely observational — it never
+    // influences detection or response classification.
+    let hvDebug: HumanVerificationDebug | undefined;
     if (isHumanVerificationEnabled()) {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
@@ -5420,13 +5429,58 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // (near-)empty of candidates — the full-denial wall shape. Best-effort and
       // fail-safe (null on any error). The hint is false on clean pages, so
       // normal snapshots pay no extra round-trip; never runs when flag off.
-      const pageWall =
-        !hvMember && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS)
-          ? await detectPageHumanVerificationWallViaCDP({
-              cdpUrl: session.cdp_url,
-              resolvedTarget,
-            })
-          : null;
+      const pageWallAttempted = !hvMember && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS);
+      const pageWall = pageWallAttempted
+        ? await detectPageHumanVerificationWallViaCDP({
+            cdpUrl: session.cdp_url,
+            resolvedTarget,
+          })
+        : null;
+
+      // ── HV debug telemetry (dev-only; gated by ANTIGEN_HV_DEBUG below) ──
+      // page_wall_probe_result reflects the PRODUCTION probe outcome only; the
+      // separate debug probe contributes the granular *_flags and an error code
+      // for the null-vs-error question. Both never affect classification.
+      if (isHvDebugEnabled()) {
+        const reason: PageWallProbeReason = hvMember
+          ? "skipped_hv_member"
+          : hvWallHint
+            ? "hv_wall_hint"
+            : elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS
+              ? "low_element_count"
+              : "skipped_clean";
+        const prodResult: PageWallProbeResult = !pageWallAttempted
+          ? "not_attempted"
+          : pageWall
+            ? "positive"
+            : "null";
+        hvDebug = {
+          hv_enabled: true,
+          elements_count: elements.length,
+          hv_member_found: !!hvMember,
+          hv_wall_hint: hvWallHint,
+          page_wall_probe_considered: !hvMember,
+          page_wall_probe_attempted: pageWallAttempted,
+          page_wall_probe_reason: reason,
+          page_wall_probe_result: prodResult,
+        };
+        // Only run the extra debug probe when production actually attempted —
+        // never on clean snapshots — so it can reveal WHICH gate failed.
+        if (pageWallAttempted) {
+          const dbg = await collectPageHvWallDebugViaCDP({ resolvedTarget });
+          if (dbg.result === "error") {
+            hvDebug.page_wall_probe_error_code = dbg.error_code;
+          } else {
+            hvDebug.top_doc_title_flags = dbg.signals.top_doc_title_flags;
+            hvDebug.top_doc_text_flags = dbg.signals.top_doc_text_flags;
+            hvDebug.iframe_flags = dbg.signals.iframe_flags;
+            hvDebug.blocker_flags = dbg.signals.blocker_flags;
+            hvDebug.overlay_intercept_flags = dbg.signals.overlay_intercept_flags;
+            hvDebug.oopif_flags = dbg.signals.oopif_flags;
+            hvDebug.would_classify_oopif = dbg.signals.would_classify_oopif;
+          }
+        }
+      }
 
       if (hvMember || pageWall) {
         let hvDomain = "unknown";
@@ -5624,6 +5678,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           : {}),
         action_hints: pageMap.action_hints,
         elements: externalElements,
+        // Dev-only HV diagnostic — present only when BOTH ANTIGEN_HUMAN_VERIFICATION
+        // and ANTIGEN_HV_DEBUG are on (hvDebug is otherwise undefined). Booleans,
+        // enums, and buckets only; never raw text/URLs/selectors/geometry/refs.
+        ...(hvDebug ? { human_verification_debug: hvDebug } : {}),
       },
     };
 

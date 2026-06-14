@@ -21,6 +21,16 @@ export function isHumanVerificationEnabled(): boolean {
   return process.env.ANTIGEN_HUMAN_VERIFICATION === "true";
 }
 
+/**
+ * HV debug telemetry flag — dev-only. Gates the safe `human_verification_debug`
+ * object on antigen_snapshot responses. Effective ONLY when
+ * ANTIGEN_HUMAN_VERIFICATION is also true; never emits raw page content. Purely
+ * diagnostic — it does not influence any detection or response classification.
+ */
+export function isHvDebugEnabled(): boolean {
+  return process.env.ANTIGEN_HV_DEBUG === "true";
+}
+
 const activeHumanVerification = new Map<string, ActiveHumanVerificationMarker>();
 
 export function setActiveHumanVerification(

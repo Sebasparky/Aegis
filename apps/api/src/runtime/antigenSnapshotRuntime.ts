@@ -1587,12 +1587,25 @@ export interface PageHumanVerificationWall {
 
 /**
  * Builds the page-level wall probe IIFE. Reuses the shared overlay snippet
- * (HV_TEXT_RE / HV_HOLD_RE / txt — single source, zero drift) and adds a
- * page-level scan. SCREEN_HV_ENABLED is threaded from the env flag, so flag-off
- * returns null instantly (byte-identical). The function NEVER traverses or reads
- * the cross-origin iframe: `contentDocument` is only TOUCHED inside try/catch to
- * learn that it is inaccessible. STRONG HV text is REQUIRED — a generic "access
- * denied" page with no human/bot/press-hold language never classifies.
+ * (HV_TEXT_RE / HV_HOLD_RE / fixedCoverage / txt — single source, zero drift)
+ * and adds a page-level scan. SCREEN_HV_ENABLED is threaded from the env flag, so
+ * flag-off returns null instantly (byte-identical). The function NEVER traverses
+ * or reads the cross-origin iframe: `contentDocument` is only TOUCHED inside
+ * try/catch to learn that it is inaccessible.
+ *
+ * Returns a value-free signal object (booleans + a challenge-type enum), NOT a
+ * final verdict. Two classification paths consume it:
+ *  - TEXT path (`text_classified`): STRONG HV text in the top document AND an
+ *    inaccessible iframe — the original B&BW full-denial / overlay-wall shapes. A
+ *    generic "access denied" page with no human/bot/press-hold language never
+ *    classifies. Carries `press_and_hold` when hold language is present.
+ *  - OOPIF path (decided server-side in detectPageHumanVerificationWallViaCDP):
+ *    the challenge renders inside a cross-origin iframe so NO HV text is readable
+ *    from the top document. The page emits visible/inaccessible-iframe and
+ *    fixed-overlay/click-intercept booleans here; the server ANDs them with an
+ *    OOPIF child target (observable only via CDP Target.getTargets). Reported as
+ *    `unknown_human_verification` — we must not assert press_and_hold for text we
+ *    cannot read.
  */
 export function buildPageHumanVerificationWallExpr(): string {
   return `(function(){
@@ -1606,65 +1619,160 @@ export function buildPageHumanVerificationWallExpr(): string {
     function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
     ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
     if(!SCREEN_HV_ENABLED) return null;
-    // Bounded, value-free top-document text. STRONG human-verification phrase is
-    // the necessary condition; the denial banner alone is never sufficient.
-    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
-    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
-    if(!HV_TEXT_RE.test(bodyText)&&!HV_TEXT_RE.test(titleText)) return null;
-    var hasHold=HV_HOLD_RE.test(bodyText)||HV_HOLD_RE.test(titleText);
-    // At least one VISIBLE iframe whose contentDocument is inaccessible
-    // (cross-origin / opaque origin → access throws or is null). We never read it.
-    var hasInaccessibleIframe=false;
+    // ── Text-INDEPENDENT overlay/iframe signals (always computed) ─────────────
+    // These carry the OOPIF wall case (the live B&BW Press & Hold popup) whose
+    // challenge text/button render inside a cross-origin iframe and are therefore
+    // NOT readable from the top document. Booleans only; the iframe is never read
+    // (contentDocument is only TOUCHED in try/catch to learn it is inaccessible).
+    var visibleIframe=false, inaccessibleIframe=false;
     try{
       var frames=document.querySelectorAll('iframe');
       for(var i=0;i<frames.length&&i<20;i++){
         var fr=frames[i],r=null; try{ r=fr.getBoundingClientRect(); }catch(e){}
         if(!r||!(r.width>0&&r.height>0)) continue;
+        visibleIframe=true;
         var accessible=false; try{ accessible=!!fr.contentDocument; }catch(e){ accessible=false; }
-        if(!accessible){ hasInaccessibleIframe=true; break; }
+        if(!accessible){ inaccessibleIframe=true; }
       }
     }catch(e){}
-    if(!hasInaccessibleIframe) return null;
-    // Count NORMAL top-document interactive controls. Bounded scan, early exit
-    // once the low threshold is exceeded.
-    var normalInteractive=0;
+    // Fixed/sticky high-z >=0.5-coverage backdrop among body's top two DOM levels.
+    // Reuses fixedCoverage() from the shared snippet — the SAME blocking test the
+    // structural path uses (zero drift). Sticky headers / promo heroes fail the
+    // >=0.5 coverage + z>=10 test so they never count.
+    var fixedOverlay=false;
     try{
-      var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
-      for(var j=0;j<ctrls.length&&j<200;j++){
-        var c=ctrls[j],cr=null; try{ cr=c.getBoundingClientRect(); }catch(e){}
-        if(cr&&cr.width>0&&cr.height>0){ normalInteractive++; if(normalInteractive>3) break; }
+      if(document.body){
+        var ch=document.body.children;
+        for(var k=0;k<ch.length&&k<80&&!fixedOverlay;k++){
+          if(fixedCoverage(ch[k])>=0.5){ fixedOverlay=true; break; }
+          var gc=ch[k].children;
+          for(var g=0;gc&&g<gc.length&&g<24;g++){ if(fixedCoverage(gc[g])>=0.5){ fixedOverlay=true; break; } }
+        }
       }
     }catch(e){}
-    // Two valid wall shapes:
-    //  (a) full-denial wall — the wall REPLACES the page (normalInteractive<=3);
-    //  (b) overlay wall — a blocking wall over a STILL-PRESENT background (the
-    //      live B&BW shape: 20+ extractable refs). "Few controls" is NOT a valid
-    //      requirement for (b). When the background is preserved we instead
-    //      require one supporting signal so a normal page that merely MENTIONS a
-    //      verification phrase (e.g. a marketing iframe + stray copy) can never
-    //      classify: a full-page fixed/high-z >=0.5-coverage blocker/card, OR
-    //      strong wall-context text (before-we-continue / reference id / access
-    //      denied). Strong HV text + an inaccessible iframe are still REQUIRED
-    //      above. fixedCoverage() is the SAME blocking test the structural path
-    //      uses (reused from the shared overlay snippet — zero drift).
-    if(normalInteractive>3){
-      var hasFullPageBlocker=false;
+    // Click intercept: the element at the viewport center sits beneath a fixed/
+    // sticky high-z >=0.5-coverage overlay ancestor (depth<=8). Reuses
+    // fixedCoverage() — no new coverage logic. Never reads .value or the iframe.
+    function clickInterceptSeen(){
       try{
-        if(document.body){
-          var ch=document.body.children;
-          for(var k=0;k<ch.length&&k<80&&!hasFullPageBlocker;k++){
-            if(fixedCoverage(ch[k])>=0.5){ hasFullPageBlocker=true; break; }
-            var gc=ch[k].children;
-            for(var g=0;gc&&g<gc.length&&g<24;g++){ if(fixedCoverage(gc[g])>=0.5){ hasFullPageBlocker=true; break; } }
-          }
+        var cx=Math.floor((window.innerWidth||0)/2), cy=Math.floor((window.innerHeight||0)/2);
+        if(cx<=0||cy<=0) return false;
+        var el=document.elementFromPoint(cx,cy), depth=0;
+        while(el&&depth<8){ if(fixedCoverage(el)>=0.5) return true; el=el.parentElement; depth++; }
+      }catch(e){}
+      return false;
+    }
+    var clickIntercept=clickInterceptSeen();
+    // ── Existing top-document TEXT path (classification UNCHANGED) ────────────
+    // STRONG human-verification phrase is the necessary condition; the denial
+    // banner alone is never sufficient. Two valid shapes when text IS present:
+    //  (a) full-denial wall — wall REPLACES the page (normalInteractive<=3);
+    //  (b) overlay wall over a STILL-PRESENT background — requires a full-page
+    //      blocker OR strong wall-context text (before-we-continue / reference id
+    //      / access denied) so a marketing iframe + stray copy can't classify.
+    // An inaccessible iframe is REQUIRED for the text path too.
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    var hasHold=HV_HOLD_RE.test(bodyText)||HV_HOLD_RE.test(titleText);
+    var textClassified=false;
+    if((HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText))&&inaccessibleIframe){
+      var normalInteractive=0;
+      try{
+        var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
+        for(var j=0;j<ctrls.length&&j<200;j++){
+          var c=ctrls[j],cr=null; try{ cr=c.getBoundingClientRect(); }catch(e){}
+          if(cr&&cr.width>0&&cr.height>0){ normalInteractive++; if(normalInteractive>3) break; }
         }
       }catch(e){}
-      var HV_WALL_CTX_RE=/before\\s+we\\s+continue|reference\\s+id|access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
-      var hasSupportText=HV_WALL_CTX_RE.test(bodyText)||HV_WALL_CTX_RE.test(titleText);
-      if(!hasFullPageBlocker&&!hasSupportText) return null;
+      if(normalInteractive>3){
+        var HV_WALL_CTX_RE=/before\\s+we\\s+continue|reference\\s+id|access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
+        var hasSupportText=HV_WALL_CTX_RE.test(bodyText)||HV_WALL_CTX_RE.test(titleText);
+        textClassified=(fixedOverlay||hasSupportText);
+      } else {
+        textClassified=true;
+      }
     }
-    return { human_verification:true, hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification', user_presence_required:true, blocking:true, page_level:true };
+    // Booleans/enum only. The OOPIF corroborating decision (which also requires an
+    // OOPIF child target, observable ONLY via CDP) is made server-side in
+    // detectPageHumanVerificationWallViaCDP — never here.
+    return {
+      text_classified:!!textClassified,
+      hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification',
+      visible_iframe_seen:!!visibleIframe,
+      inaccessible_iframe_seen:!!inaccessibleIframe,
+      fixed_overlay_seen:!!fixedOverlay,
+      click_intercept_overlay_seen:!!clickIntercept
+    };
   })()`;
+}
+
+/**
+ * Browser-wide OOPIF / child-target presence from a CDP `Target.getTargets`
+ * `targetInfos` array. An out-of-process (cross-origin) iframe gets its own CDP
+ * target of type `iframe` (or `webview`); same-process subframes do not appear
+ * here. Booleans only — never returns targetId/url/title.
+ *
+ * SCOPING NOTE (v1): this is browser-wide, not scoped to the page's frame tree.
+ * That is acceptable because the OOPIF flag is CORROBORATING-ONLY: the OOPIF wall
+ * classification additionally requires the page-scoped in-page signals (a visible
+ * inaccessible iframe AND a blocking overlay/click-intercept), so a stray OOPIF in
+ * another tab can never classify a page on its own.
+ */
+export function hasOopifChildTarget(targetInfos: unknown): boolean {
+  if (!Array.isArray(targetInfos)) return false;
+  for (const t of targetInfos) {
+    const type = (t as { type?: unknown } | null)?.type;
+    if (type === "iframe" || type === "webview") return true;
+  }
+  return false;
+}
+
+/**
+ * Pure classification of the page-wall probe value + the CDP-only OOPIF flag into
+ * a final verdict. Extracted so the dual-path decision is unit-testable without a
+ * browser. Returns null unless a path matches.
+ *
+ * - TEXT path: `text_classified` (strong top-document HV text + inaccessible
+ *   iframe, computed in the page IIFE). Honors the page's challenge-type enum
+ *   (e.g. press_and_hold).
+ * - OOPIF path: STRICT, text-independent —
+ *   `visible_iframe_seen && inaccessible_iframe_seen && oopifTargetSeen &&
+ *    (fixed_overlay_seen || click_intercept_overlay_seen)`. The OOPIF flag is
+ *   corroborating-only and can never classify on its own. Reported as
+ *   `unknown_human_verification` (the challenge text is unreadable).
+ */
+export function classifyPageWallSignals(
+  value: unknown,
+  oopifTargetSeen: boolean,
+): PageHumanVerificationWall | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+
+  if (v.text_classified === true) {
+    const ct: HumanVerificationChallengeType =
+      v.hv_challenge_type === "press_and_hold" ? "press_and_hold" : "unknown_human_verification";
+    return {
+      human_verification: true,
+      hv_challenge_type: ct,
+      user_presence_required: true,
+      blocking: true,
+      page_level: true,
+    };
+  }
+
+  const visibleIframe = v.visible_iframe_seen === true;
+  const inaccessibleIframe = v.inaccessible_iframe_seen === true;
+  const blockingOverlay = v.fixed_overlay_seen === true || v.click_intercept_overlay_seen === true;
+  if (visibleIframe && inaccessibleIframe && oopifTargetSeen === true && blockingOverlay) {
+    return {
+      human_verification: true,
+      hv_challenge_type: "unknown_human_verification",
+      user_presence_required: true,
+      blocking: true,
+      page_level: true,
+    };
+  }
+  return null;
 }
 
 /**
@@ -1672,6 +1780,10 @@ export function buildPageHumanVerificationWallExpr(): string {
  * Best-effort and fail-safe: returns null on any transport/parse error or when
  * no resolved target is available — it must NEVER throw into the snapshot path.
  * The result carries enum/booleans only; no iframe internals are read.
+ *
+ * On the SAME browser WS, a browser-level `Target.getTargets` runs before the
+ * page attach to learn whether an OOPIF child target exists (the text-independent
+ * corroborating signal for the cross-origin-iframe HV wall).
  */
 export async function detectPageHumanVerificationWallViaCDP(params: {
   cdpUrl: string;
@@ -1681,15 +1793,17 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
   if (!resolvedTarget) return null;
   const expr = buildPageHumanVerificationWallExpr();
 
-  let value: unknown;
+  let probe: { value: unknown; oopifTargetSeen: boolean };
   try {
-    value = await new Promise<unknown>((resolve, reject) => {
+    probe = await new Promise<{ value: unknown; oopifTargetSeen: boolean }>((resolve, reject) => {
       const ws = new WebSocket(resolvedTarget.browserWsUrl);
       let msgId = 1;
+      let getTargetsId: number;
       let attachId: number;
       let evalId: number;
       let settled = false;
       let sid: string | null = null;
+      let oopifTargetSeen = false;
       const timer = setTimeout(() => fail(new Error("Page-level HV wall probe timed out.")), 6_000);
       const send = (method: string, p: Record<string, unknown>, s?: string): number => {
         const id = msgId++;
@@ -1703,7 +1817,7 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
         settled = true;
         clearTimeout(timer);
         ws.close();
-        resolve(v);
+        resolve({ value: v, oopifTargetSeen });
       };
       const fail = (e: Error) => {
         if (settled) return;
@@ -1717,7 +1831,9 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
         reject(e);
       };
       ws.on("open", () => {
-        attachId = send("Target.attachToTarget", { targetId: resolvedTarget.pageTarget.id, flatten: true });
+        // Browser-level command — no sessionId. Enumerate child targets first so
+        // the OOPIF corroborating signal is known before classification.
+        getTargetsId = send("Target.getTargets", {});
       });
       ws.on("error", (e: Error) => fail(e));
       ws.on("message", (data: Buffer | string) => {
@@ -1730,6 +1846,11 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
         const id = msg.id as number | undefined;
         if (id === undefined) return;
         const result = msg.result as Record<string, unknown> | undefined;
+        if (id === getTargetsId) {
+          oopifTargetSeen = hasOopifChildTarget(result?.targetInfos);
+          attachId = send("Target.attachToTarget", { targetId: resolvedTarget.pageTarget.id, flatten: true });
+          return;
+        }
         if (id === attachId) {
           if (!result?.sessionId) {
             fail(new Error("CDP attach failed: no sessionId."));
@@ -1749,19 +1870,11 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
     return null;
   }
 
-  if (!value || typeof value !== "object") return null;
-  const v = value as Record<string, unknown>;
-  if (v.human_verification !== true || v.page_level !== true) return null;
-  // Re-validate the enum server-side; never trust the raw page value blindly.
-  const ct: HumanVerificationChallengeType =
-    v.hv_challenge_type === "press_and_hold" ? "press_and_hold" : "unknown_human_verification";
-  return {
-    human_verification: true,
-    hv_challenge_type: ct,
-    user_presence_required: true,
-    blocking: true,
-    page_level: true,
-  };
+  const { value, oopifTargetSeen } = probe;
+  // Dual-path classification (TEXT path / corroborating OOPIF path) — pure and
+  // unit-tested in classifyPageWallSignals. Never trusts the raw page value
+  // blindly: the enum and every term are re-validated there.
+  return classifyPageWallSignals(value, oopifTargetSeen);
 }
 
 /**
@@ -1771,13 +1884,22 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
  * `detectPageHumanVerificationWallViaCDP` confirming probe is worth running on
  * a snapshot whose background DOM is preserved (the overlay-wall shape, where
  * element_count is high and the low-element fast path would otherwise skip the
- * probe). Deliberately conservative: the two NECESSARY wall conditions only —
- * strong HV text (shared HV_TEXT_RE, zero drift) AND a visible inaccessible
- * iframe. It NEVER reads the cross-origin iframe (contentDocument is only
- * TOUCHED in try/catch to learn it is inaccessible), returns booleans only, and
- * is byte-identical when the flag is off (SCREEN_HV_ENABLED early-return). The
- * full probe remains the strict authority — a true hint only gates whether it
- * runs, never what it decides.
+ * probe). Deliberately conservative — it gates the probe via either NECESSARY
+ * wall shape:
+ *  - TEXT shape: strong HV text (shared HV_TEXT_RE, zero drift) AND a visible
+ *    inaccessible iframe; OR
+ *  - OOPIF shape: a visible inaccessible iframe AND a blocking overlay
+ *    (fixedCoverage>=0.5 backdrop OR center click-intercept) — NO text required,
+ *    so the cross-origin-iframe wall (whose text is unreadable) still gates the
+ *    probe. A normal marketing iframe with no blocking overlay does NOT (it lacks
+ *    the >=0.5-coverage fixed/sticky high-z backdrop), so clean pages still pay no
+ *    extra round-trip.
+ * It NEVER reads the cross-origin iframe (contentDocument is only TOUCHED in
+ * try/catch to learn it is inaccessible), returns booleans only, and is
+ * byte-identical when the flag is off (SCREEN_HV_ENABLED early-return). The full
+ * probe (which also requires an OOPIF child target for the OOPIF shape) remains
+ * the strict authority — a true hint only gates whether it runs, never what it
+ * decides.
  */
 export function buildPageHvWallHintExpr(): string {
   return `(function(){
@@ -1791,9 +1913,7 @@ export function buildPageHvWallHintExpr(): string {
     function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
     ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
     if(!SCREEN_HV_ENABLED) return { hint:false };
-    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
-    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
-    if(!HV_TEXT_RE.test(bodyText)&&!HV_TEXT_RE.test(titleText)) return { hint:false };
+    // A visible inaccessible iframe is REQUIRED for both shapes.
     var hasInaccessibleIframe=false;
     try{
       var frames=document.querySelectorAll('iframe');
@@ -1804,8 +1924,378 @@ export function buildPageHvWallHintExpr(): string {
         if(!accessible){ hasInaccessibleIframe=true; break; }
       }
     }catch(e){}
-    return { hint: !!hasInaccessibleIframe };
+    if(!hasInaccessibleIframe) return { hint:false };
+    // TEXT shape: strong HV text in the top document.
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    if(HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText)) return { hint:true };
+    // OOPIF shape: a blocking overlay (fixed >=0.5-coverage backdrop OR center
+    // click-intercept), text-independent. Reuses fixedCoverage() — zero drift.
+    var fixedOverlay=false;
+    try{
+      if(document.body){
+        var ch=document.body.children;
+        for(var k=0;k<ch.length&&k<80&&!fixedOverlay;k++){
+          if(fixedCoverage(ch[k])>=0.5){ fixedOverlay=true; break; }
+          var gc=ch[k].children;
+          for(var g=0;gc&&g<gc.length&&g<24;g++){ if(fixedCoverage(gc[g])>=0.5){ fixedOverlay=true; break; } }
+        }
+      }
+    }catch(e){}
+    var clickIntercept=false;
+    try{
+      var cx=Math.floor((window.innerWidth||0)/2), cy=Math.floor((window.innerHeight||0)/2);
+      if(cx>0&&cy>0){
+        var el=document.elementFromPoint(cx,cy), depth=0;
+        while(el&&depth<8){ if(fixedCoverage(el)>=0.5){ clickIntercept=true; break; } el=el.parentElement; depth++; }
+      }
+    }catch(e){}
+    return { hint: !!(fixedOverlay||clickIntercept) };
   })()`;
+}
+
+// ─── Page-level HV wall DEBUG telemetry (ANTIGEN_HV_DEBUG, dev-only) ──────────
+//
+// Strictly diagnostic. Unlike the production probe (buildPageHumanVerificationWallExpr)
+// this NEVER early-returns: it computes every wall signal so the snapshot debug
+// object can reveal exactly which condition failed on a live wall. It reuses the
+// SAME shared overlay-snippet primitives (HV_TEXT_RE / HV_HOLD_RE / fixedCoverage
+// / txt) so its booleans cannot drift from production. It emits booleans, enums,
+// and buckets ONLY — never raw title/body text, iframe src, selectors, geometry,
+// refs, cookies, storage, or HTML. It does NOT influence response classification.
+
+/** Coarse iframe-count bucket — never the raw count. */
+export type IframeCountBucket = "zero" | "one" | "few" | "many";
+
+/** Enumerated CDP/eval failure point for the debug probe (never raw error text). */
+export type PageHvWallDebugErrorCode =
+  | "cdp_connect_failed"
+  | "target_attach_failed"
+  | "runtime_eval_failed"
+  | "invalid_result"
+  | "unknown";
+
+/** Granular, value-free signals from the debug page-eval probe. */
+export interface PageHvWallDebugSignals {
+  top_doc_title_flags: { access_denied_title: boolean };
+  top_doc_text_flags: {
+    hv_text_seen: boolean;
+    press_hold_seen: boolean;
+    before_continue_seen: boolean;
+    not_bot_seen: boolean;
+    reference_id_phrase_seen: boolean;
+  };
+  iframe_flags: {
+    iframe_count_bucket: IframeCountBucket;
+    visible_iframe_seen: boolean;
+    inaccessible_iframe_seen: boolean;
+  };
+  blocker_flags: { full_page_blocker_seen: boolean; support_text_seen: boolean };
+  /** Text-independent OOPIF-path blocking-overlay signals. */
+  overlay_intercept_flags: { fixed_overlay_seen: boolean; click_intercept_overlay_seen: boolean };
+  /** OOPIF / child-target presence (from CDP Target.getTargets, browser-wide). */
+  oopif_flags: { oopif_target_seen: boolean };
+  /** Mirrors the EXACT production TEXT-path wall decision from the same signals. */
+  would_classify: boolean;
+  /**
+   * Mirrors the EXACT production OOPIF-path decision: visible_iframe_seen &&
+   * inaccessible_iframe_seen && oopif_target_seen && (fixed_overlay_seen ||
+   * click_intercept_overlay_seen). Lets a live ANTIGEN_HV_DEBUG run confirm the
+   * cross-origin-iframe wall path on the real page.
+   */
+  would_classify_oopif: boolean;
+}
+
+/** Result of the debug probe CDP run — discriminated by the connection outcome. */
+export type PageHvWallDebugResult =
+  | { result: "positive" | "null"; signals: PageHvWallDebugSignals }
+  | { result: "error"; error_code: PageHvWallDebugErrorCode };
+
+/**
+ * Builds the DEBUG page-eval IIFE. Computes every wall signal without early
+ * return and derives `would_classify` using the identical condition chain as
+ * buildPageHumanVerificationWallExpr (strong HV text AND a visible inaccessible
+ * iframe AND (normalInteractive<=3 OR full-page blocker OR support text)). Raw
+ * JS string (no DOM lib / TS arrows). Returns booleans/enums/buckets only.
+ */
+export function buildPageHvWallDebugExpr(): string {
+  return `(function(){
+    var OVERLAY_TITLE_MAX=120;
+    var OVERLAY_WALK_DEPTH=12;
+    var OVERLAY_DRAWER_RE=/(drawer|flyout|off-?canvas|side-?panel|slide-?over|snackbar)/i;
+    var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
+    var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
+    function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
+    function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
+    ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
+    // bodyText/titleText are read ONLY to test regexes; their content never leaves.
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    var HV_WALL_CTX_RE=/before\\s+we\\s+continue|reference\\s+id|access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
+    var ACCESS_DENIED_RE=/access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
+    var BEFORE_CONTINUE_RE=/before\\s+we\\s+continue/i;
+    var NOT_BOT_RE=/not\\s+a\\s+(ro)?bot|i\\s*['\\u2019]?\\s*m\\s+not\\s+a\\s+robot/i;
+    var REF_ID_RE=/reference\\s+id/i;
+    var hvTextSeen=HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText);
+    var pressHoldSeen=HV_HOLD_RE.test(bodyText)||HV_HOLD_RE.test(titleText);
+    var beforeContinueSeen=BEFORE_CONTINUE_RE.test(bodyText)||BEFORE_CONTINUE_RE.test(titleText);
+    var notBotSeen=NOT_BOT_RE.test(bodyText)||NOT_BOT_RE.test(titleText);
+    var refIdSeen=REF_ID_RE.test(bodyText)||REF_ID_RE.test(titleText);
+    var accessDeniedTitle=ACCESS_DENIED_RE.test(titleText);
+    var supportTextSeen=HV_WALL_CTX_RE.test(bodyText)||HV_WALL_CTX_RE.test(titleText);
+    // Iframe scan — counts/visibility/inaccessibility only; contentDocument is
+    // only TOUCHED in try/catch to learn it is opaque. src is NEVER read.
+    var iframeCount=0,visibleIframe=false,inaccessibleIframe=false;
+    try{
+      var frames=document.querySelectorAll('iframe');
+      iframeCount=frames.length;
+      for(var i=0;i<frames.length&&i<20;i++){
+        var fr=frames[i],r=null; try{ r=fr.getBoundingClientRect(); }catch(e){}
+        if(!r||!(r.width>0&&r.height>0)) continue;
+        visibleIframe=true;
+        var accessible=false; try{ accessible=!!fr.contentDocument; }catch(e){ accessible=false; }
+        if(!accessible){ inaccessibleIframe=true; }
+      }
+    }catch(e){}
+    var bucket = iframeCount===0?'zero':(iframeCount===1?'one':(iframeCount<=4?'few':'many'));
+    // Normal top-document interactive controls (same bounded scan as production).
+    var normalInteractive=0;
+    try{
+      var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
+      for(var j=0;j<ctrls.length&&j<200;j++){
+        var c=ctrls[j],cr=null; try{ cr=c.getBoundingClientRect(); }catch(e){}
+        if(cr&&cr.width>0&&cr.height>0){ normalInteractive++; if(normalInteractive>3) break; }
+      }
+    }catch(e){}
+    var fullPageBlocker=false;
+    try{
+      if(document.body){
+        var ch=document.body.children;
+        for(var k=0;k<ch.length&&k<80&&!fullPageBlocker;k++){
+          if(fixedCoverage(ch[k])>=0.5){ fullPageBlocker=true; break; }
+          var gc=ch[k].children;
+          for(var g=0;gc&&g<gc.length&&g<24;g++){ if(fixedCoverage(gc[g])>=0.5){ fullPageBlocker=true; break; } }
+        }
+      }
+    }catch(e){}
+    // Center click-intercept (text-independent OOPIF signal). Reuses fixedCoverage().
+    var clickIntercept=false;
+    try{
+      var cx=Math.floor((window.innerWidth||0)/2), cy=Math.floor((window.innerHeight||0)/2);
+      if(cx>0&&cy>0){
+        var iel=document.elementFromPoint(cx,cy), idepth=0;
+        while(iel&&idepth<8){ if(fixedCoverage(iel)>=0.5){ clickIntercept=true; break; } iel=iel.parentElement; idepth++; }
+      }
+    }catch(e){}
+    var hasHold=pressHoldSeen;
+    // would_classify mirrors buildPageHumanVerificationWallExpr's TEXT path EXACTLY:
+    // strong HV text AND a visible inaccessible iframe AND (background replaced
+    // (<=3 controls) OR a full-page blocker OR strong wall-context support text).
+    var wouldClassify=false;
+    if(hvTextSeen&&inaccessibleIframe){
+      if(normalInteractive>3){ wouldClassify=(fullPageBlocker||supportTextSeen); }
+      else { wouldClassify=true; }
+    }
+    // Page-portion of the OOPIF path (the OOPIF child-target term is ANDed
+    // server-side in collectPageHvWallDebugViaCDP, the only place that can see it).
+    var oopifPageCondition=!!(visibleIframe&&inaccessibleIframe&&(fullPageBlocker||clickIntercept));
+    return {
+      top_doc_title_flags:{ access_denied_title:!!accessDeniedTitle },
+      top_doc_text_flags:{ hv_text_seen:!!hvTextSeen, press_hold_seen:!!pressHoldSeen, before_continue_seen:!!beforeContinueSeen, not_bot_seen:!!notBotSeen, reference_id_phrase_seen:!!refIdSeen },
+      iframe_flags:{ iframe_count_bucket:bucket, visible_iframe_seen:!!visibleIframe, inaccessible_iframe_seen:!!inaccessibleIframe },
+      blocker_flags:{ full_page_blocker_seen:!!fullPageBlocker, support_text_seen:!!supportTextSeen },
+      overlay_intercept_flags:{ fixed_overlay_seen:!!fullPageBlocker, click_intercept_overlay_seen:!!clickIntercept },
+      oopif_page_condition:oopifPageCondition,
+      would_classify:!!wouldClassify,
+      hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification'
+    };
+  })()`;
+}
+
+/**
+ * Coerces the raw page value into a strict, value-free signal object.
+ * `oopifTargetSeen` is supplied by the caller (it can only be learned via CDP
+ * Target.getTargets, never from the page) and is ANDed with the page-portion
+ * OOPIF condition to compute `would_classify_oopif`.
+ */
+function sanitizePageHvWallDebugSignals(
+  value: unknown,
+  oopifTargetSeen = false,
+): PageHvWallDebugSignals | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  const t = v.top_doc_title_flags as Record<string, unknown> | undefined;
+  const x = v.top_doc_text_flags as Record<string, unknown> | undefined;
+  const f = v.iframe_flags as Record<string, unknown> | undefined;
+  const b = v.blocker_flags as Record<string, unknown> | undefined;
+  const oi = v.overlay_intercept_flags as Record<string, unknown> | undefined;
+  if (!t || !x || !f || !b || !oi) return null;
+  const bucketRaw = f.iframe_count_bucket;
+  const bucket: IframeCountBucket =
+    bucketRaw === "zero" || bucketRaw === "one" || bucketRaw === "few" || bucketRaw === "many"
+      ? bucketRaw
+      : "zero";
+  return {
+    top_doc_title_flags: { access_denied_title: t.access_denied_title === true },
+    top_doc_text_flags: {
+      hv_text_seen: x.hv_text_seen === true,
+      press_hold_seen: x.press_hold_seen === true,
+      before_continue_seen: x.before_continue_seen === true,
+      not_bot_seen: x.not_bot_seen === true,
+      reference_id_phrase_seen: x.reference_id_phrase_seen === true,
+    },
+    iframe_flags: {
+      iframe_count_bucket: bucket,
+      visible_iframe_seen: f.visible_iframe_seen === true,
+      inaccessible_iframe_seen: f.inaccessible_iframe_seen === true,
+    },
+    blocker_flags: {
+      full_page_blocker_seen: b.full_page_blocker_seen === true,
+      support_text_seen: b.support_text_seen === true,
+    },
+    overlay_intercept_flags: {
+      fixed_overlay_seen: oi.fixed_overlay_seen === true,
+      click_intercept_overlay_seen: oi.click_intercept_overlay_seen === true,
+    },
+    oopif_flags: { oopif_target_seen: oopifTargetSeen === true },
+    would_classify: v.would_classify === true,
+    would_classify_oopif: v.oopif_page_condition === true && oopifTargetSeen === true,
+  };
+}
+
+/**
+ * DEBUG-ONLY: connects to the live page over CDP and evaluates the debug probe,
+ * surfacing the failure point (instead of swallowing it like the production
+ * probe) via an enumerated error code. Booleans/enums/buckets only. Never reads
+ * iframe internals. Best-effort: any unexpected condition resolves to a typed
+ * error result rather than throwing into the snapshot path. Purely diagnostic —
+ * the caller MUST NOT let this influence response classification.
+ */
+export async function collectPageHvWallDebugViaCDP(params: {
+  resolvedTarget?: { browserWsUrl: string; pageTarget: { id: string; url: string } };
+}): Promise<PageHvWallDebugResult> {
+  const { resolvedTarget } = params;
+  if (!resolvedTarget) return { result: "error", error_code: "cdp_connect_failed" };
+  const expr = buildPageHvWallDebugExpr();
+
+  let outcome: PageHvWallDebugResult;
+  try {
+    outcome = await new Promise<PageHvWallDebugResult>((resolve) => {
+      const ws = new WebSocket(resolvedTarget.browserWsUrl);
+      let msgId = 1;
+      let getTargetsId: number;
+      let attachId: number;
+      let evalId: number;
+      let settled = false;
+      let sid: string | null = null;
+      let oopifTargetSeen = false;
+      const timer = setTimeout(() => finish({ result: "error", error_code: "unknown" }), 6_000);
+      const send = (method: string, p: Record<string, unknown>, s?: string): number => {
+        const id = msgId++;
+        const m: Record<string, unknown> = { id, method, params: p };
+        if (s) m.sessionId = s;
+        ws.send(JSON.stringify(m));
+        return id;
+      };
+      const finish = (r: PageHvWallDebugResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        resolve(r);
+      };
+      ws.on("open", () => {
+        // Browser-level — no sessionId. Learn the OOPIF child-target signal first.
+        getTargetsId = send("Target.getTargets", {});
+      });
+      ws.on("error", () => finish({ result: "error", error_code: "cdp_connect_failed" }));
+      ws.on("message", (data: Buffer | string) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id as number | undefined;
+        if (id === undefined) return;
+        const result = msg.result as Record<string, unknown> | undefined;
+        if (id === getTargetsId) {
+          oopifTargetSeen = hasOopifChildTarget(result?.targetInfos);
+          attachId = send("Target.attachToTarget", { targetId: resolvedTarget.pageTarget.id, flatten: true });
+          return;
+        }
+        if (id === attachId) {
+          if (!result?.sessionId) {
+            finish({ result: "error", error_code: "target_attach_failed" });
+            return;
+          }
+          sid = result.sessionId as string;
+          evalId = send("Runtime.evaluate", { expression: expr, returnByValue: true }, sid);
+          return;
+        }
+        if (id === evalId) {
+          if (msg.error || (result as Record<string, unknown> | undefined)?.exceptionDetails) {
+            finish({ result: "error", error_code: "runtime_eval_failed" });
+            return;
+          }
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          const signals = sanitizePageHvWallDebugSignals(evalResult?.value, oopifTargetSeen);
+          if (!signals) {
+            finish({ result: "error", error_code: "invalid_result" });
+            return;
+          }
+          finish({
+            result: signals.would_classify || signals.would_classify_oopif ? "positive" : "null",
+            signals,
+          });
+        }
+      });
+    });
+  } catch {
+    return { result: "error", error_code: "unknown" };
+  }
+  return outcome;
+}
+
+/** Orchestration-level reason the production page-wall probe ran (or didn't). */
+export type PageWallProbeReason =
+  | "hv_wall_hint"
+  | "low_element_count"
+  | "skipped_hv_member"
+  | "skipped_clean";
+
+/** Production page-wall probe outcome (NOT the debug probe's result). */
+export type PageWallProbeResult = "positive" | "null" | "not_attempted";
+
+/**
+ * The safe, dev-only debug object attached to antigen_snapshot responses when
+ * BOTH ANTIGEN_HUMAN_VERIFICATION and ANTIGEN_HV_DEBUG are on. Booleans, enums,
+ * and buckets only. `page_wall_probe_result` reflects the PRODUCTION probe; the
+ * granular `*_flags` and `page_wall_probe_error_code` come from the separate
+ * debug probe and never affect classification.
+ */
+export interface HumanVerificationDebug {
+  hv_enabled: boolean;
+  elements_count: number;
+  hv_member_found: boolean;
+  hv_wall_hint: boolean;
+  page_wall_probe_considered: boolean;
+  page_wall_probe_attempted: boolean;
+  page_wall_probe_reason: PageWallProbeReason;
+  page_wall_probe_result: PageWallProbeResult;
+  page_wall_probe_error_code?: PageHvWallDebugErrorCode;
+  top_doc_title_flags?: PageHvWallDebugSignals["top_doc_title_flags"];
+  top_doc_text_flags?: PageHvWallDebugSignals["top_doc_text_flags"];
+  iframe_flags?: PageHvWallDebugSignals["iframe_flags"];
+  blocker_flags?: PageHvWallDebugSignals["blocker_flags"];
+  overlay_intercept_flags?: PageHvWallDebugSignals["overlay_intercept_flags"];
+  oopif_flags?: PageHvWallDebugSignals["oopif_flags"];
+  would_classify_oopif?: boolean;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────

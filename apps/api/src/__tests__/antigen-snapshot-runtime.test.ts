@@ -90,6 +90,8 @@ import {
   sanitizeContext,
   sanitizeValueMeta,
   ANTIGEN_CANDIDATE_SELECTOR,
+  classifyPageWallSignals,
+  hasOopifChildTarget,
   type RawAntigenCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
 
@@ -1778,5 +1780,91 @@ describe("extractAntigenSnapshotBundleViaCDP — single-connection bundle", () =
     for (const banned of ["cdp_url", "user_data_dir", "secret_ref", "password", "ws://"]) {
       expect(serialized).not.toContain(banned);
     }
+  });
+});
+
+// ─── Page-level HV wall classification (dual TEXT / OOPIF path) ───────────────
+// Pure, browser-free coverage of the combination predicate consumed by
+// detectPageHumanVerificationWallViaCDP. The OOPIF flag (CDP-only) is supplied
+// as the second arg; the page signals are supplied as the value object.
+
+describe("hasOopifChildTarget", () => {
+  it("is true when a Target.getTargets infos array contains an iframe/webview target", () => {
+    expect(hasOopifChildTarget([{ type: "page" }, { type: "iframe" }])).toBe(true);
+    expect(hasOopifChildTarget([{ type: "webview" }])).toBe(true);
+  });
+
+  it("is false for page/worker/service_worker only, or non-arrays", () => {
+    expect(hasOopifChildTarget([{ type: "page" }, { type: "service_worker" }, { type: "worker" }])).toBe(false);
+    expect(hasOopifChildTarget(undefined)).toBe(false);
+    expect(hasOopifChildTarget(null)).toBe(false);
+    expect(hasOopifChildTarget({})).toBe(false);
+  });
+});
+
+describe("classifyPageWallSignals", () => {
+  const oopifSignals = {
+    text_classified: false,
+    hv_challenge_type: "unknown_human_verification",
+    visible_iframe_seen: true,
+    inaccessible_iframe_seen: true,
+    fixed_overlay_seen: true,
+    click_intercept_overlay_seen: false,
+  };
+
+  it("TEXT path: classifies with the page's challenge-type enum (press_and_hold)", () => {
+    const wall = classifyPageWallSignals(
+      { text_classified: true, hv_challenge_type: "press_and_hold" },
+      false,
+    );
+    expect(wall).not.toBeNull();
+    expect(wall!.page_level).toBe(true);
+    expect(wall!.hv_challenge_type).toBe("press_and_hold");
+    expect(wall!.blocking).toBe(true);
+    expect(wall!.user_presence_required).toBe(true);
+  });
+
+  it("OOPIF path: classifies as unknown_human_verification when all terms hold", () => {
+    const wall = classifyPageWallSignals(oopifSignals, true);
+    expect(wall).not.toBeNull();
+    expect(wall!.page_level).toBe(true);
+    // Never asserts press_and_hold — the challenge text is unreadable.
+    expect(wall!.hv_challenge_type).toBe("unknown_human_verification");
+  });
+
+  it("OOPIF path: click-intercept satisfies the blocking-overlay term", () => {
+    const wall = classifyPageWallSignals(
+      { ...oopifSignals, fixed_overlay_seen: false, click_intercept_overlay_seen: true },
+      true,
+    );
+    expect(wall).not.toBeNull();
+    expect(wall!.hv_challenge_type).toBe("unknown_human_verification");
+  });
+
+  it("OOPIF flag is corroborating-only: never classifies without an OOPIF child target", () => {
+    expect(classifyPageWallSignals(oopifSignals, false)).toBeNull();
+  });
+
+  it("OOPIF path: null without a blocking overlay (visible iframe alone is not enough)", () => {
+    expect(
+      classifyPageWallSignals(
+        { ...oopifSignals, fixed_overlay_seen: false, click_intercept_overlay_seen: false },
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("OOPIF path: null without an inaccessible iframe", () => {
+    expect(classifyPageWallSignals({ ...oopifSignals, inaccessible_iframe_seen: false }, true)).toBeNull();
+  });
+
+  it("OOPIF path: null without a visible iframe", () => {
+    expect(classifyPageWallSignals({ ...oopifSignals, visible_iframe_seen: false }, true)).toBeNull();
+  });
+
+  it("returns null for non-object / empty values", () => {
+    expect(classifyPageWallSignals(null, true)).toBeNull();
+    expect(classifyPageWallSignals(undefined, true)).toBeNull();
+    expect(classifyPageWallSignals({}, true)).toBeNull();
   });
 });

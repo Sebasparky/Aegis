@@ -892,3 +892,100 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — unified CDP target (3a
     expect(res.json().data.url).toBe("https://fallback.test/cached/");
   });
 });
+
+// ─── HV debug telemetry (ANTIGEN_HV_DEBUG, dev-only) ─────────────────────────
+// Strictly diagnostic. human_verification_debug must be ABSENT unless BOTH
+// ANTIGEN_HUMAN_VERIFICATION and ANTIGEN_HV_DEBUG are "true", and must contain
+// only booleans/enums/buckets when present (never raw text/URLs/selectors/refs).
+describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_debug", () => {
+  // The full set of keys the debug object is ever allowed to carry. Any key
+  // outside this set is a leak risk and fails the test.
+  const ALLOWED_KEYS = new Set([
+    "hv_enabled",
+    "elements_count",
+    "hv_member_found",
+    "hv_wall_hint",
+    "page_wall_probe_considered",
+    "page_wall_probe_attempted",
+    "page_wall_probe_reason",
+    "page_wall_probe_result",
+    "page_wall_probe_error_code",
+    "top_doc_title_flags",
+    "top_doc_text_flags",
+    "iframe_flags",
+    "blocker_flags",
+  ]);
+
+  function withEnv(
+    vars: { hv?: string; debug?: string },
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const prevHv = process.env.ANTIGEN_HUMAN_VERIFICATION;
+    const prevDebug = process.env.ANTIGEN_HV_DEBUG;
+    const set = (k: string, v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    set("ANTIGEN_HUMAN_VERIFICATION", vars.hv);
+    set("ANTIGEN_HV_DEBUG", vars.debug);
+    return fn().finally(() => {
+      set("ANTIGEN_HUMAN_VERIFICATION", prevHv);
+      set("ANTIGEN_HV_DEBUG", prevDebug);
+    });
+  }
+
+  async function snapshotData() {
+    seedSession();
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json().data;
+  }
+
+  it("is ABSENT when both flags are off", async () => {
+    await withEnv({ hv: undefined, debug: undefined }, async () => {
+      const data = await snapshotData();
+      expect(data.human_verification_debug).toBeUndefined();
+    });
+  });
+
+  it("is ABSENT when ANTIGEN_HV_DEBUG is off even with ANTIGEN_HUMAN_VERIFICATION on", async () => {
+    await withEnv({ hv: "true", debug: undefined }, async () => {
+      const data = await snapshotData();
+      expect(data.human_verification_debug).toBeUndefined();
+    });
+  });
+
+  it("is ABSENT when only ANTIGEN_HV_DEBUG is on (HV gate off)", async () => {
+    await withEnv({ hv: undefined, debug: "true" }, async () => {
+      const data = await snapshotData();
+      expect(data.human_verification_debug).toBeUndefined();
+    });
+  });
+
+  it("is PRESENT (safe booleans/enums only) when BOTH flags are on", async () => {
+    await withEnv({ hv: "true", debug: "true" }, async () => {
+      const data = await snapshotData();
+      const dbg = data.human_verification_debug;
+      expect(dbg).toBeDefined();
+      // Only whitelisted keys — no raw text/URL/selector/ref keys can appear.
+      for (const k of Object.keys(dbg)) expect(ALLOWED_KEYS.has(k)).toBe(true);
+      // Orchestration fields reflect the real path: 3 candidates (<=3) with no
+      // per-member HV → the low-element page-wall probe is attempted; production
+      // returns null (no resolved target in this harness) and the debug probe
+      // surfaces a typed connect error (no real CDP). No raw signals leak.
+      expect(dbg.hv_enabled).toBe(true);
+      expect(dbg.elements_count).toBe(3);
+      expect(dbg.hv_member_found).toBe(false);
+      expect(dbg.hv_wall_hint).toBe(false);
+      expect(dbg.page_wall_probe_considered).toBe(true);
+      expect(dbg.page_wall_probe_attempted).toBe(true);
+      expect(dbg.page_wall_probe_reason).toBe("low_element_count");
+      expect(dbg.page_wall_probe_result).toBe("null");
+      expect(dbg.page_wall_probe_error_code).toBe("cdp_connect_failed");
+    });
+  });
+});

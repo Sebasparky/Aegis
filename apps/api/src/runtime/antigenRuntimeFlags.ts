@@ -20,7 +20,7 @@ import { isClickVerifyEnabled } from "./antigenClickVerification.js";
 import { isActiveSurfacesEnabled } from "./antigenSnapshotPageMap.js";
 import { isSurfaceResolveEnabled } from "./antigenSurfaceResolution.js";
 import { isLogicalRefRecoveryEnabled } from "./antigenLogicalRecovery.js";
-import { isHumanVerificationEnabled } from "./humanVerificationState.js";
+import { isHumanVerificationEnabled, isHvDebugEnabled } from "./humanVerificationState.js";
 import { isFillStateEnabled } from "./postFillProbe.js";
 import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
@@ -32,6 +32,12 @@ export interface AntigenRuntimeStatus {
   surface_resolve: boolean;
   logical_recovery: boolean;
   human_verification: boolean;
+  /**
+   * Whether ANTIGEN_HV_DEBUG is on. Dev-only HV wall debug telemetry is emitted
+   * only when this AND human_verification are both true. Metadata flag only — no
+   * challenge text, URLs, selectors, refs, iframe srcs, or HTML are ever logged.
+   */
+  hv_debug: boolean;
   fill_state: boolean;
   /**
    * Pointer animation timing. "fast" maps to the internal "native" profile
@@ -59,6 +65,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     surface_resolve: isSurfaceResolveEnabled(),
     logical_recovery: isLogicalRefRecoveryEnabled(),
     human_verification: isHumanVerificationEnabled(),
+    hv_debug: isHvDebugEnabled(),
     fill_state: isFillStateEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
     browser_trace: traceEnabled(),
@@ -74,7 +81,8 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
 /**
  * One-line sanitized startup log string, e.g.:
  * [AntigenRuntimeFlags] click_verify=true active_surfaces=true surface_resolve=true
- *   logical_recovery=true pointer_timing=fast browser_trace=true timing_debug=true
+ *   logical_recovery=true human_verification=true hv_debug=false fill_state=true
+ *   pointer_timing=fast browser_trace=true timing_debug=true
  *   require_antigen_tools=false headless=false cdp_port_configured=true
  */
 export function formatAntigenRuntimeFlagsLine(): string {
@@ -85,6 +93,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `surface_resolve=${s.surface_resolve}`,
     `logical_recovery=${s.logical_recovery}`,
     `human_verification=${s.human_verification}`,
+    `hv_debug=${s.hv_debug}`,
     `fill_state=${s.fill_state}`,
     `pointer_timing=${s.pointer_timing}`,
     `browser_trace=${s.browser_trace}`,

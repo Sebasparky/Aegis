@@ -22,6 +22,7 @@ const ANTIGEN_KEYS = [
   "surface_resolve",
   "logical_recovery",
   "human_verification",
+  "hv_debug",
   "fill_state",
   "pointer_timing",
   "browser_trace",
@@ -38,6 +39,7 @@ const MUTATED = [
   "ANTIGEN_ACTIVE_SURFACES",
   "ANTIGEN_SURFACE_RESOLVE",
   "ANTIGEN_FILL_STATE",
+  "ANTIGEN_HV_DEBUG",
   "ANTIGEN_POINTER_TIMING",
   "ANTIGEN_BROWSER_HEADLESS",
   "AEGIS_PLAYWRIGHT_CDP_URL",
@@ -168,5 +170,15 @@ describe("formatAntigenRuntimeFlagsLine", () => {
     expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=true");
     delete process.env.ANTIGEN_FILL_STATE;
     expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=false");
+  });
+
+  it("includes hv_debug in the startup line, tracking the env flag (true/false only)", () => {
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("hv_debug=true");
+    // Non-'true' values resolve to false, like the other boolean flags.
+    process.env.ANTIGEN_HV_DEBUG = "1";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("hv_debug=false");
+    delete process.env.ANTIGEN_HV_DEBUG;
+    expect(formatAntigenRuntimeFlagsLine()).toContain("hv_debug=false");
   });
 });

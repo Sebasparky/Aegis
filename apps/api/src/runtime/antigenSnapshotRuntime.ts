@@ -1625,8 +1625,8 @@ export function buildPageHumanVerificationWallExpr(): string {
       }
     }catch(e){}
     if(!hasInaccessibleIframe) return null;
-    // Very few/no NORMAL top-document interactive controls (the wall replaces the
-    // real page). Bounded scan, early exit once the low threshold is exceeded.
+    // Count NORMAL top-document interactive controls. Bounded scan, early exit
+    // once the low threshold is exceeded.
     var normalInteractive=0;
     try{
       var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
@@ -1635,7 +1635,34 @@ export function buildPageHumanVerificationWallExpr(): string {
         if(cr&&cr.width>0&&cr.height>0){ normalInteractive++; if(normalInteractive>3) break; }
       }
     }catch(e){}
-    if(normalInteractive>3) return null;
+    // Two valid wall shapes:
+    //  (a) full-denial wall — the wall REPLACES the page (normalInteractive<=3);
+    //  (b) overlay wall — a blocking wall over a STILL-PRESENT background (the
+    //      live B&BW shape: 20+ extractable refs). "Few controls" is NOT a valid
+    //      requirement for (b). When the background is preserved we instead
+    //      require one supporting signal so a normal page that merely MENTIONS a
+    //      verification phrase (e.g. a marketing iframe + stray copy) can never
+    //      classify: a full-page fixed/high-z >=0.5-coverage blocker/card, OR
+    //      strong wall-context text (before-we-continue / reference id / access
+    //      denied). Strong HV text + an inaccessible iframe are still REQUIRED
+    //      above. fixedCoverage() is the SAME blocking test the structural path
+    //      uses (reused from the shared overlay snippet — zero drift).
+    if(normalInteractive>3){
+      var hasFullPageBlocker=false;
+      try{
+        if(document.body){
+          var ch=document.body.children;
+          for(var k=0;k<ch.length&&k<80&&!hasFullPageBlocker;k++){
+            if(fixedCoverage(ch[k])>=0.5){ hasFullPageBlocker=true; break; }
+            var gc=ch[k].children;
+            for(var g=0;gc&&g<gc.length&&g<24;g++){ if(fixedCoverage(gc[g])>=0.5){ hasFullPageBlocker=true; break; } }
+          }
+        }
+      }catch(e){}
+      var HV_WALL_CTX_RE=/before\\s+we\\s+continue|reference\\s+id|access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
+      var hasSupportText=HV_WALL_CTX_RE.test(bodyText)||HV_WALL_CTX_RE.test(titleText);
+      if(!hasFullPageBlocker&&!hasSupportText) return null;
+    }
     return { human_verification:true, hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification', user_presence_required:true, blocking:true, page_level:true };
   })()`;
 }
@@ -1735,6 +1762,50 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
     blocking: true,
     page_level: true,
   };
+}
+
+/**
+ * Builds the CHEAP page-level human-verification *hint* IIFE evaluated on the
+ * already-open snapshot session. It returns `{ hint: boolean }` and is the
+ * latency-cheap precheck that decides whether the (separate-connection) full
+ * `detectPageHumanVerificationWallViaCDP` confirming probe is worth running on
+ * a snapshot whose background DOM is preserved (the overlay-wall shape, where
+ * element_count is high and the low-element fast path would otherwise skip the
+ * probe). Deliberately conservative: the two NECESSARY wall conditions only —
+ * strong HV text (shared HV_TEXT_RE, zero drift) AND a visible inaccessible
+ * iframe. It NEVER reads the cross-origin iframe (contentDocument is only
+ * TOUCHED in try/catch to learn it is inaccessible), returns booleans only, and
+ * is byte-identical when the flag is off (SCREEN_HV_ENABLED early-return). The
+ * full probe remains the strict authority — a true hint only gates whether it
+ * runs, never what it decides.
+ */
+export function buildPageHvWallHintExpr(): string {
+  return `(function(){
+    var OVERLAY_TITLE_MAX=120;
+    var OVERLAY_WALK_DEPTH=12;
+    var OVERLAY_DRAWER_RE=/(drawer|flyout|off-?canvas|side-?panel|slide-?over|snackbar)/i;
+    var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
+    var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
+    function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
+    function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
+    ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
+    if(!SCREEN_HV_ENABLED) return { hint:false };
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    if(!HV_TEXT_RE.test(bodyText)&&!HV_TEXT_RE.test(titleText)) return { hint:false };
+    var hasInaccessibleIframe=false;
+    try{
+      var frames=document.querySelectorAll('iframe');
+      for(var i=0;i<frames.length&&i<20;i++){
+        var fr=frames[i],r=null; try{ r=fr.getBoundingClientRect(); }catch(e){}
+        if(!r||!(r.width>0&&r.height>0)) continue;
+        var accessible=false; try{ accessible=!!fr.contentDocument; }catch(e){ accessible=false; }
+        if(!accessible){ hasInaccessibleIframe=true; break; }
+      }
+    }catch(e){}
+    return { hint: !!hasInaccessibleIframe };
+  })()`;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
@@ -1905,6 +1976,13 @@ export async function extractAntigenPageMetaViaCDP(
 export interface AntigenSnapshotBundle {
   candidates: AntigenSnapshotCandidate[];
   pageMeta?: AntigenPageMeta;
+  // Cheap page-level human-verification *hint* (present only when
+  // ANTIGEN_HUMAN_VERIFICATION is on). True when strong HV text AND a visible
+  // inaccessible iframe are present in the top document — the precheck that
+  // gates the full confirming wall probe on snapshots whose background DOM is
+  // preserved (high element_count). Best-effort: `undefined` when the flag is
+  // off or the hint eval failed/timed out.
+  hvWallHint?: boolean;
 }
 
 /** Sub-timeout for the best-effort page-meta eval after candidates returned. */
@@ -1981,16 +2059,26 @@ export async function extractAntigenSnapshotBundleViaCDP(
 
   const candidateExpr = buildAntigenExtractionExpr({ maxCandidates, viewportOnly });
   const pageMetaExpr = buildAntigenPageMetaExpr();
+  // Page-level HV hint: a cheap third eval on the SAME session, dispatched ONLY
+  // when ANTIGEN_HUMAN_VERIFICATION is on. Flag off → the eval is never sent and
+  // the meta-only flow below is byte-identical to before.
+  const hvEnabled = isHumanVerificationEnabled();
+  const hvHintExpr = hvEnabled ? buildPageHvWallHintExpr() : "";
 
-  const { raw, rawMeta } = await new Promise<{ raw: RawAntigenCandidate[]; rawMeta: unknown }>(
-    (resolve, reject) => {
+  const { raw, rawMeta, rawHint } = await new Promise<{
+    raw: RawAntigenCandidate[];
+    rawMeta: unknown;
+    rawHint: unknown;
+  }>((resolve, reject) => {
       const ws = new WebSocket(browserWsUrl);
       let msgId = 1;
       let cdpSessionId: string | null = null;
       let attachId: number;
       let candidateEvalId: number;
       let metaEvalId: number | undefined;
+      let hintEvalId: number | undefined;
       let candidateRecords: RawAntigenCandidate[] = [];
+      let metaValue: unknown;
       let settled = false;
       let metaTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -2010,7 +2098,11 @@ export async function extractAntigenSnapshotBundleViaCDP(
         return id;
       };
 
-      const succeed = (value: { raw: RawAntigenCandidate[]; rawMeta: unknown }) => {
+      const succeed = (value: {
+        raw: RawAntigenCandidate[];
+        rawMeta: unknown;
+        rawHint: unknown;
+      }) => {
         if (settled) return;
         settled = true;
         clearTimeout(candidateTimer);
@@ -2038,8 +2130,10 @@ export async function extractAntigenSnapshotBundleViaCDP(
 
       ws.on("error", (err: Error) => {
         // Candidates not yet delivered → candidate-path failure (same code as the
-        // standalone path). After candidates, a socket error only costs the meta.
-        if (metaEvalId !== undefined) succeed({ raw: candidateRecords, rawMeta: undefined });
+        // standalone path). After candidates, a socket error only costs the
+        // best-effort meta/hint — succeed with whatever was already captured.
+        if (metaEvalId !== undefined)
+          succeed({ raw: candidateRecords, rawMeta: metaValue, rawHint: undefined });
         else fail(Object.assign(new Error(`CDP socket error: ${err.message}`), { code: "CDP_FETCH_FAILED" }));
       });
 
@@ -2073,11 +2167,14 @@ export async function extractAntigenSnapshotBundleViaCDP(
           // Candidates are safe — stop the candidate deadline and start the
           // best-effort meta eval on the SAME session with its own sub-timeout.
           clearTimeout(candidateTimer);
-          metaTimer = setTimeout(() => succeed({ raw: candidateRecords, rawMeta: undefined }), BUNDLE_PAGE_META_TIMEOUT_MS);
+          metaTimer = setTimeout(
+            () => succeed({ raw: candidateRecords, rawMeta: undefined, rawHint: undefined }),
+            BUNDLE_PAGE_META_TIMEOUT_MS,
+          );
           try {
             metaEvalId = sendMsg("Runtime.evaluate", { expression: pageMetaExpr, returnByValue: true }, cdpSessionId!);
           } catch {
-            succeed({ raw: candidateRecords, rawMeta: undefined });
+            succeed({ raw: candidateRecords, rawMeta: undefined, rawHint: undefined });
           }
           return;
         }
@@ -2085,14 +2182,43 @@ export async function extractAntigenSnapshotBundleViaCDP(
         if (metaEvalId !== undefined && id === metaEvalId) {
           timing.mark("eval_pagemeta");
           const evalResult = result?.result as Record<string, unknown> | undefined;
-          succeed({ raw: candidateRecords, rawMeta: evalResult?.value });
+          metaValue = evalResult?.value;
+          // Flag off → finish exactly as before (meta-only, byte-identical).
+          if (!hvEnabled) {
+            succeed({ raw: candidateRecords, rawMeta: metaValue, rawHint: undefined });
+            return;
+          }
+          // Flag on → dispatch the cheap hint eval on the SAME session, re-arming
+          // the best-effort sub-timeout so a missing hint can never hang.
+          if (metaTimer) clearTimeout(metaTimer);
+          metaTimer = setTimeout(
+            () => succeed({ raw: candidateRecords, rawMeta: metaValue, rawHint: undefined }),
+            BUNDLE_PAGE_META_TIMEOUT_MS,
+          );
+          try {
+            hintEvalId = sendMsg("Runtime.evaluate", { expression: hvHintExpr, returnByValue: true }, cdpSessionId!);
+          } catch {
+            succeed({ raw: candidateRecords, rawMeta: metaValue, rawHint: undefined });
+          }
+          return;
+        }
+
+        if (hintEvalId !== undefined && id === hintEvalId) {
+          timing.mark("eval_hvhint");
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          succeed({ raw: candidateRecords, rawMeta: metaValue, rawHint: evalResult?.value });
         }
       });
-    },
-  );
+    });
 
   const candidates = raw.slice(0, maxCandidates).map((rec, i) => mapRawToCandidate(rec, i));
   const pageMeta = sanitizePageMeta(rawMeta);
+  // Re-validate the raw hint server-side: a boolean from { hint: boolean } only,
+  // never the raw page value blindly. `undefined` when flag off / eval skipped.
+  const hvWallHint =
+    rawHint && typeof rawHint === "object" && typeof (rawHint as { hint?: unknown }).hint === "boolean"
+      ? (rawHint as { hint: boolean }).hint
+      : undefined;
   timing.mark("sanitize_map");
   timing.end({
     candidate_count: candidates.length,
@@ -2100,7 +2226,11 @@ export async function extractAntigenSnapshotBundleViaCDP(
     pre_resolved: !!resolvedTarget,
     viewport_only: viewportOnly,
   });
-  return { candidates, ...(pageMeta !== undefined ? { pageMeta } : {}) };
+  return {
+    candidates,
+    ...(pageMeta !== undefined ? { pageMeta } : {}),
+    ...(hvWallHint !== undefined ? { hvWallHint } : {}),
+  };
 }
 
 /**

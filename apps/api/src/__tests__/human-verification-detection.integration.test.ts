@@ -34,6 +34,7 @@ import { chromium } from "playwright";
 import type { HumanVerificationRequest } from "@aegis/types";
 import {
   extractAntigenSnapshotCandidatesViaCDP,
+  extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
   type AntigenSnapshotCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -61,6 +62,10 @@ const FIXTURE_SPLIT_PROMO = fileURLToPath(new URL("./fixtures/split-overlay-prom
 const FIXTURE_WALL_XORIGIN = fileURLToPath(new URL("./fixtures/denial-wall-cross-origin-iframe.html", import.meta.url));
 const FIXTURE_DENIED_PLAIN = fileURLToPath(new URL("./fixtures/access-denied-plain.html", import.meta.url));
 const FIXTURE_ECOMM_IFRAME = fileURLToPath(new URL("./fixtures/ecommerce-marketing-iframe.html", import.meta.url));
+// Live B&BW OVERLAY-wall shape: a blocking wall over a STILL-PRESENT ecommerce
+// background (20+ extractable refs). element_count is high, so the low-element
+// fast path skips — the cheap hint must fire and the probe must still classify.
+const FIXTURE_OVERLAY_WALL = fileURLToPath(new URL("./fixtures/overlay-wall-preserved-background.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -484,5 +489,46 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     await gotoFixture(cdpUrl, FIXTURE_ECOMM_IFRAME);
     const wall = await withHvFlag("true", detectWall);
     expect(wall).toBeNull();
+  }, 20_000);
+
+  // ─── Overlay wall over a PRESERVED background (the live B&BW regression) ───
+  async function bundleHint(): Promise<boolean | undefined> {
+    const b = await extractAntigenSnapshotBundleViaCDP({
+      cdpUrl,
+      viewportOnly: false,
+      resolvedTarget: await resolveTarget(),
+    });
+    return b.hvWallHint;
+  }
+
+  it("classifies an OVERLAY wall over a preserved background (many refs) as a page-level human-verification surface", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_OVERLAY_WALL);
+
+    // The background DOM is fully present: 20+ extractable candidates remain, and
+    // NONE is the press-and-hold control (it lives in the cross-origin iframe), so
+    // the candidate/screen-level detectors find no human_verification member.
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.length).toBeGreaterThan(20);
+    expect(cands.filter((c) => c.overlay?.human_verification === true)).toHaveLength(0);
+
+    // The cheap in-bundle hint fires (strong HV text + an inaccessible iframe),
+    // which is what gates the confirming probe when element_count is high.
+    expect(await withHvFlag("true", bundleHint)).toBe(true);
+
+    // The confirming probe classifies it despite the high background-control
+    // count — the relaxed internal gate accepts a full-page blocker + wall text.
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).not.toBeNull();
+    expect(wall!.human_verification).toBe(true);
+    expect(wall!.page_level).toBe(true);
+    expect(wall!.hv_challenge_type).toBe("press_and_hold");
+    expect(wall!.user_presence_required).toBe(true);
+    expect(wall!.blocking).toBe(true);
+  }, 20_000);
+
+  it("flag OFF: the overlay wall is not classified and emits no hint (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_OVERLAY_WALL);
+    expect(await withHvFlag("false", detectWall)).toBeNull();
+    expect(await withHvFlag("false", bundleHint)).toBeUndefined();
   }, 20_000);
 });

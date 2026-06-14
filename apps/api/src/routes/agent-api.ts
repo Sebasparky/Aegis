@@ -5321,6 +5321,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // fields only; they are never emitted to the agent.
     let candidates: AntigenSnapshotCandidate[];
     let pageMeta: AntigenPageMeta | undefined;
+    // Cheap page-level HV hint from the same extraction session (present only
+    // when ANTIGEN_HUMAN_VERIFICATION is on). Gates the confirming wall probe on
+    // overlay-wall snapshots whose background DOM is preserved (high element
+    // count), where the low-element fast path would otherwise skip the probe.
+    let hvWallHint = false;
     try {
       const bundle = await extractAntigenSnapshotBundleViaCDP({
         cdpUrl: session.cdp_url,
@@ -5330,6 +5335,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       });
       candidates = bundle.candidates;
       pageMeta = bundle.pageMeta;
+      hvWallHint = bundle.hvWallHint === true;
       timing.mark("candidate_and_meta_extract");
     } catch {
       recordBrowserTraceEvent(session.browser_session_id, {
@@ -5407,12 +5413,15 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
       );
-      // Page-level fallback: only when NO per-candidate HV member was found AND
-      // the page is (near-)empty of candidates — the B&BW cross-origin-iframe
-      // wall shape. Best-effort and fail-safe (null on any error). Keeps normal
-      // pages untouched (they have many candidates) and never runs when flag off.
+      // Page-level fallback: run the confirming probe when NO per-candidate HV
+      // member was found AND either (a) the cheap hint fired — strong HV text +
+      // an inaccessible iframe — which catches the live B&BW OVERLAY wall whose
+      // background DOM is preserved (high element_count), OR (b) the page is
+      // (near-)empty of candidates — the full-denial wall shape. Best-effort and
+      // fail-safe (null on any error). The hint is false on clean pages, so
+      // normal snapshots pay no extra round-trip; never runs when flag off.
       const pageWall =
-        !hvMember && elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS
+        !hvMember && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS)
           ? await detectPageHumanVerificationWallViaCDP({
               cdpUrl: session.cdp_url,
               resolvedTarget,

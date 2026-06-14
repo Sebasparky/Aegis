@@ -31,6 +31,9 @@ const extractMock = vi.hoisted(() => vi.fn());
 const pageMetaMock = vi.hoisted(() => vi.fn());
 const bundleMock = vi.hoisted(() => vi.fn());
 const pageWallMock = vi.hoisted(() => vi.fn());
+// Cheap in-bundle page-level HV hint. Resolves `undefined` by default (flag off /
+// no hint); page-level tests opt in via hvHintMock.mockResolvedValue(true).
+const hvHintMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
@@ -43,7 +46,17 @@ vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
     } catch {
       pageMeta = undefined;
     }
-    return { candidates, ...(pageMeta !== undefined ? { pageMeta } : {}) };
+    let hvWallHint: unknown;
+    try {
+      hvWallHint = await hvHintMock(params);
+    } catch {
+      hvWallHint = undefined;
+    }
+    return {
+      candidates,
+      ...(pageMeta !== undefined ? { pageMeta } : {}),
+      ...(hvWallHint !== undefined ? { hvWallHint } : {}),
+    };
   });
   return {
     ...actual,
@@ -302,8 +315,9 @@ beforeEach(() => {
   liveUrlMock.mockResolvedValue(PAGE_URL);
   resolveTargetMock.mockResolvedValue(null);
   pageMetaMock.mockResolvedValue(undefined);
-  // Default: no page-level wall — only the page-level tests opt in.
+  // Default: no page-level wall and no hint — only the page-level tests opt in.
   pageWallMock.mockResolvedValue(null);
+  hvHintMock.mockResolvedValue(undefined);
   clickKnownBoxMock.mockResolvedValue({ success: true });
 });
 
@@ -345,6 +359,65 @@ describe("page-level wall (cross-origin iframe) → request auto-create", () => 
     expect(request.status).toBe("pending_user");
     expect(request.page_level).toBe(true);
     expect(request.challenge_type).toBe("press_and_hold");
+  });
+
+  // Plain background candidates with NO HV member — the live overlay-wall shape
+  // where the wall blocks a still-present page. More than PAGE_HV_PROBE_MAX_ELEMENTS
+  // so the low-element fast path does NOT fire; only the hint can gate the probe.
+  function manyBackgroundCandidates(): AntigenSnapshotCandidate[] {
+    return Array.from({ length: 8 }, (_, i) =>
+      candidate({ index: i, name: `Add to bag ${i}`, normalized_name: `add to bag ${i}` }),
+    );
+  }
+
+  it("OVERLAY wall over a preserved background: hint gates the probe despite high element_count", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    hvHintMock.mockResolvedValue(true); // strong HV text + inaccessible iframe
+    const data = await takeSnapshot(manyBackgroundCandidates());
+
+    // Background DOM preserved, yet the probe still ran (gated by the hint).
+    expect(data.element_count).toBeGreaterThan(3);
+    expect(pageWallMock).toHaveBeenCalled();
+    expect(data.page_level_human_verification).toBe(true);
+    expect(data.recommended_next_step).toBe("human_presence_relay_required");
+
+    const hvSurface = (data.active_surfaces ?? []).find(
+      (s: Record<string, unknown>) => s.surface_kind === "human_verification",
+    );
+    expect(hvSurface).toBeDefined();
+    expect(hvSurface.challenge_type).toBe("press_and_hold");
+    expect(hvSurface.page_level).toBe(true);
+    expect(hvSurface.user_presence_required).toBe(true);
+
+    expect(theRequest().page_level).toBe(true);
+  });
+
+  it("background click after overlay-wall detection returns HUMAN_VERIFICATION_REQUIRED, not ANTIGEN_REF_STALE", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    hvHintMock.mockResolvedValue(true);
+    await takeSnapshot(manyBackgroundCandidates());
+
+    const res = await server.inject({
+      method: "POST",
+      url: "/api/agent/v1/runtime/browser-click",
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    // The guard short-circuits BEFORE ref resolution — the click executor that
+    // would otherwise surface ANTIGEN_REF_STALE is never reached.
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expectNoSecrets(res.body);
+  });
+
+  it("no hint + high element_count: the probe is NOT run (clean pages pay nothing)", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    hvHintMock.mockResolvedValue(false);
+    const data = await takeSnapshot(manyBackgroundCandidates());
+    expect(pageWallMock).not.toHaveBeenCalled();
+    expect(data.page_level_human_verification).toBeUndefined();
+    expect(data.human_verification).toBeUndefined();
   });
 
   it("arms the guard: click/type/set-value/scroll are rejected HUMAN_VERIFICATION_REQUIRED", async () => {

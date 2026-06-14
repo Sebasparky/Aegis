@@ -1,0 +1,56 @@
+<!doctype html>
+<!--
+  Negative fixture for the screen-level (split-overlay) human-verification path.
+
+  STRUCTURALLY IDENTICAL to split-overlay-press-and-hold.html — a full-page
+  textless dimmer plus a SEPARATE centered foreground card — so the screen-level
+  blocker check passes. The card carries ordinary marketing copy ("We Missed
+  You — 10% off"), so the strong-phrase test (HV_TEXT_RE) must NOT match and the
+  page must NOT classify as human_verification. This pins the new path against
+  over-firing on promo/marketing interstitials, which share the same shape.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Wallflowers &amp; Diffusers</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .grid { display: flex; gap: 16px; padding: 24px; }
+      .card { width: 180px; }
+      #promo-dimmer {
+        position: fixed; inset: 0; z-index: 9998;
+        background: rgba(20, 20, 20, 0.45);
+      }
+      #promo-card {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 9999; width: 360px; padding: 32px 40px;
+        background: #fff; border-radius: 10px; text-align: center;
+      }
+      #promo-card button { margin: 14px 6px 0; padding: 10px 28px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart">Cart</a>
+    </header>
+    <main>
+      <h1>Wallflowers &amp; Diffusers</h1>
+      <div class="grid">
+        <div class="card"><a href="/p/mahogany">Mahogany Teakwood Intense</a></div>
+        <div class="card"><a href="/p/champagne">Champagne Toast</a></div>
+        <div class="card"><a href="/p/clean-house">Clean House Vibes</a></div>
+      </div>
+    </main>
+
+    <div id="promo-dimmer"></div>
+    <div id="promo-card">
+      <h2>We Missed You!</h2>
+      <p>Enjoy 10% off your next order. Today only — don't miss out.</p>
+      <button id="promo-shop" type="button">Shop now</button>
+      <button id="promo-dismiss" type="button">No thanks</button>
+    </div>
+  </body>
+</html>

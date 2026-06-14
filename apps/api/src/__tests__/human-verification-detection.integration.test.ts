@@ -49,6 +49,11 @@ import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 const FIXTURE_HOLD = fileURLToPath(new URL("./fixtures/press-and-hold-modal.html", import.meta.url));
 const FIXTURE_CHECKBOX = fileURLToPath(new URL("./fixtures/checkbox-human-modal.html", import.meta.url));
 const FIXTURE_PROMO = fileURLToPath(new URL("./fixtures/promo-discount-modal.html", import.meta.url));
+// Split-overlay fixtures: a TEXTLESS full-page dimmer + a SEPARATE foreground
+// card — neither node alone is both blocking AND text-positive, so only the
+// screen-level (flag-gated) detector classifies them.
+const FIXTURE_SPLIT_HOLD = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold.html", import.meta.url));
+const FIXTURE_SPLIT_PROMO = fileURLToPath(new URL("./fixtures/split-overlay-promo.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -357,5 +362,72 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
 
     const probe = await runProbe(cdpUrl);
     expect(probe.present).toBe(false);
+  }, 20_000);
+
+  // ─── Screen-level (split-overlay) detection ──────────────────────────────
+  // The dimmer and challenge card are SEPARATE siblings; this is the case the
+  // per-container detector misses. The screen-level path is flag-gated
+  // (ANTIGEN_HUMAN_VERIFICATION) and threaded into the extraction IIFE at build
+  // time, so each test sets the env var before snapshotting and restores it.
+  async function withHvFlag<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.ANTIGEN_HUMAN_VERIFICATION;
+    if (value === undefined) delete process.env.ANTIGEN_HUMAN_VERIFICATION;
+    else process.env.ANTIGEN_HUMAN_VERIFICATION = value;
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.ANTIGEN_HUMAN_VERIFICATION;
+      else process.env.ANTIGEN_HUMAN_VERIFICATION = prev;
+    }
+  }
+
+  it("classifies a SPLIT overlay (textless dimmer + separate card) as human_verification", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD);
+    const cands = await withHvFlag("true", snapshot);
+
+    // The Press & Hold control is the single blocking human_verification member,
+    // even though its only overlay ancestor (the card) is not itself blocking.
+    const holdBtn = cands.find((c) => /press\s*&\s*hold/i.test(c.name));
+    expect(holdBtn).toBeDefined();
+    expect(holdBtn!.overlay?.blocking).toBe(true);
+    expect(holdBtn!.overlay?.human_verification).toBe(true);
+    expect(holdBtn!.overlay?.hv_challenge_type).toBe("press_and_hold");
+    expect(holdBtn!.overlay?.hv_control).toBe(true);
+
+    // The background search input is NOT an overlay member — it is blocked
+    // downstream via blocking_active, not by ad-hoc mutation here.
+    const search = cands.find((c) => c.tag === "input" && /search/i.test(c.name));
+    expect(search).toBeDefined();
+    expect(search!.overlay?.human_verification).toBeUndefined();
+
+    // Exactly one human_verification member is emitted (just the control).
+    const hvMembers = cands.filter((c) => c.overlay?.human_verification === true);
+    expect(hvMembers).toHaveLength(1);
+  }, 20_000);
+
+  it("does NOT classify a SPLIT promo overlay (We Missed You) even with the flag on", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_PROMO);
+    const cands = await withHvFlag("true", snapshot);
+
+    const shopBtn = cands.find((c) => /shop now/i.test(c.name));
+    expect(shopBtn).toBeDefined();
+    for (const c of cands) {
+      expect(c.overlay?.human_verification).toBeUndefined();
+      expect(c.overlay?.hv_control).toBeUndefined();
+    }
+  }, 20_000);
+
+  it("flag OFF is byte-identical: the SPLIT overlay is not classified", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD);
+    const cands = await withHvFlag("false", snapshot);
+
+    const holdBtn = cands.find((c) => /press\s*&\s*hold/i.test(c.name));
+    expect(holdBtn).toBeDefined();
+    expect(holdBtn!.overlay?.human_verification).toBeUndefined();
+    expect(holdBtn!.overlay?.hv_control).toBeUndefined();
+    // No new blocking overlay member is invented when the flag is off.
+    for (const c of cands) {
+      expect(c.overlay?.human_verification).toBeUndefined();
+    }
   }, 20_000);
 });

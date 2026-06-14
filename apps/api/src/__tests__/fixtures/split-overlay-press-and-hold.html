@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+  Screen-level (split-overlay) human-verification fixture — models the real
+  Bath & Body Works / PerimeterX "Before we continue… / Press & Hold" wall.
+
+  The DECOUPLED shape is the whole point: the full-page dimmer and the challenge
+  card are SEPARATE SIBLINGS, and NEITHER alone passes the per-container test:
+
+    - #hv-dimmer  : fixed, inset:0, high z-index → BLOCKING, but TEXTLESS,
+                    no role="dialog", no aria-modal.
+    - #hv-card    : fixed, centered, high z-index, carries the strong phrase,
+                    but is SMALL (coverage < 0.5), no role="dialog", no aria-modal.
+
+  The old per-container detector misses this (no single node is both blocking
+  AND human-verification text-positive). The screen-level detector classifies it
+  by combining the full-page blocker with the strong phrase in the foreground
+  card. Background search/product refs remain in the DOM but must be blocked.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Wallflowers &amp; Diffusers</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .grid { display: flex; gap: 16px; padding: 24px; }
+      .card { width: 180px; }
+      /* Full-page dimmer — blocking, but carries NO text and NO dialog ARIA. */
+      #hv-dimmer {
+        position: fixed; inset: 0; z-index: 9998;
+        background: rgba(20, 20, 20, 0.45);
+      }
+      /* Challenge card — a SEPARATE sibling. Positioned + high z so it is the
+         foreground card, but small (coverage < 0.5) and NOT a dialog. */
+      #hv-card {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 9999; width: 360px; padding: 32px 40px;
+        background: #fff; border-radius: 10px; text-align: center;
+      }
+      #hv-hold-btn {
+        margin-top: 18px; padding: 12px 40px; font-size: 15px;
+        border: 1px solid #2f6fde; border-radius: 22px;
+        background: #fff; color: #2f6fde; cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart">Cart</a>
+    </header>
+    <main>
+      <h1>Wallflowers &amp; Diffusers</h1>
+      <div class="grid">
+        <div class="card"><a href="/p/mahogany">Mahogany Teakwood Intense</a></div>
+        <div class="card"><a href="/p/champagne">Champagne Toast</a></div>
+        <div class="card"><a href="/p/clean-house">Clean House Vibes</a></div>
+      </div>
+    </main>
+
+    <!-- Two SEPARATE siblings: textless dimmer + text-bearing foreground card. -->
+    <div id="hv-dimmer"></div>
+    <div id="hv-card">
+      <h2>Before we continue...</h2>
+      <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+      <button id="hv-hold-btn" type="button">Press &amp; Hold</button>
+      <p id="hv-status" style="font-size: 12px; color: #888;">Reference ID 77d28970-677f-11f1-a659</p>
+    </div>
+
+    <script>
+      (function () {
+        var REQUIRED_HOLD_MS = 600;
+        var btn = document.getElementById("hv-hold-btn");
+        var status = document.getElementById("hv-status");
+        var downAt = 0;
+        btn.addEventListener("mousedown", function () {
+          downAt = Date.now();
+          status.textContent = "Holding…";
+        });
+        btn.addEventListener("mouseup", function () {
+          var held = Date.now() - downAt;
+          if (downAt && held >= REQUIRED_HOLD_MS) {
+            var dim = document.getElementById("hv-dimmer");
+            var card = document.getElementById("hv-card");
+            if (dim) dim.parentNode.removeChild(dim);
+            if (card) card.parentNode.removeChild(card);
+            window.__hv_cleared = true;
+            window.__hv_held_ms = held;
+          } else {
+            status.textContent = "Released too early — try again.";
+            window.__hv_early_release_count = (window.__hv_early_release_count || 0) + 1;
+          }
+          downAt = 0;
+        });
+      })();
+    </script>
+  </body>
+</html>

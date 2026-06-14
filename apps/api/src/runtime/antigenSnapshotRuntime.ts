@@ -40,6 +40,7 @@ import WebSocket from "ws";
 import type { HumanVerificationChallengeType } from "@aegis/types";
 
 import { BrowserTimingScope } from "./browserTiming.js";
+import { isHumanVerificationEnabled } from "./humanVerificationState.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -650,8 +651,13 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
  *   txt, clip, attr (string helpers), and the constants OVERLAY_TITLE_MAX,
  *   OVERLAY_WALK_DEPTH, OVERLAY_DRAWER_RE, OVERLAY_DISMISS_RE, OVERLAY_CHAT_RE.
  */
-export function buildOverlaySnippetJs(): string {
+export function buildOverlaySnippetJs(screenHvEnabled: boolean = false): string {
   return `
+    // Screen-level (split-overlay) human-verification gate. Threaded in from the
+    // env flag (ANTIGEN_HUMAN_VERIFICATION) at the snapshot call site; default
+    // false keeps every other caller byte-identical. When false the decoupled
+    // detector below returns null instantly and emits no new overlay members.
+    var SCREEN_HV_ENABLED=${JSON.stringify(!!screenHvEnabled)};
     // ─── Active-overlay / top-layer detection (structural, not keyword) ────
     function cssOf(el){ try{ return window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ return null; } }
     function matchesSafe(el,sel){ try{ return !!(el.matches&&el.matches(sel)); }catch(e){ return false; } }
@@ -674,6 +680,20 @@ export function buildOverlaySnippetJs(): string {
     // challenge sub-type string or null. Scans ONLY value-free text: the
     // container's accessible title, a bounded normalized textContent slice, and
     // button aria-labels. Never reads .value.
+    // Shared sub-type cascade — used by BOTH the per-container scan
+    // (humanVerificationOf) and the screen-level split-overlay scan, so the two
+    // can never drift. Input is value-free, normalized, bounded scan text plus a
+    // checkbox-present boolean. STRONG phrases only (HV_TEXT_RE) — bare
+    // "challenge"/"verify"/"security" never trigger. Returns an enum or null.
+    function hvTypeFromScan(scan,hasCheckbox){
+      if(!HV_TEXT_RE.test(scan)) return null;
+      if(HV_HOLD_RE.test(scan)) return 'press_and_hold';
+      if(hasCheckbox||/i\\s*['\\u2019]?\\s*m\\s+not\\s+a\\s+robot/i.test(scan)) return 'checkbox_human';
+      if(HV_IMG_RE.test(scan)) return 'image_captcha';
+      if(HV_TXT_RE.test(scan)) return 'text_captcha';
+      if(HV_PUZZLE_RE.test(scan)) return 'puzzle_captcha';
+      return 'unknown_human_verification';
+    }
     function humanVerificationOf(container){
       for(var m=0;m<_hvMemoK.length;m++){ if(_hvMemoK[m]===container) return _hvMemoV[m]; }
       var res=null;
@@ -688,17 +708,8 @@ export function buildOverlaySnippetJs(): string {
             for(var i=0;i<bs.length&&i<8;i++){ var bl=attr(bs[i],'aria-label'); if(bl) scan+=' '+String(bl); }
           }
         }catch(e){}
-        if(HV_TEXT_RE.test(scan)){
-          if(HV_HOLD_RE.test(scan)) res='press_and_hold';
-          else{
-            var cb=null; try{ cb=container.querySelector?container.querySelector(HV_CHECKBOX_SEL):null; }catch(e){ cb=null; }
-            if(cb||/i\\s*['\\u2019]?\\s*m\\s+not\\s+a\\s+robot/i.test(scan)) res='checkbox_human';
-            else if(HV_IMG_RE.test(scan)) res='image_captcha';
-            else if(HV_TXT_RE.test(scan)) res='text_captcha';
-            else if(HV_PUZZLE_RE.test(scan)) res='puzzle_captcha';
-            else res='unknown_human_verification';
-          }
-        }
+        var cb=null; try{ cb=container.querySelector?container.querySelector(HV_CHECKBOX_SEL):null; }catch(e){ cb=null; }
+        res=hvTypeFromScan(scan,!!cb);
       }catch(e){ res=null; }
       _hvMemoK.push(container); _hvMemoV.push(res);
       return res;
@@ -743,6 +754,70 @@ export function buildOverlaySnippetJs(): string {
       var w=Math.min(r.width,vw), h=Math.min(r.height,vh);
       if(w<=0||h<=0) return -1;
       return (w*h)/(vw*vh);
+    }
+    // ─── Screen-level human-verification (split overlay) ─────────────────────
+    // PerimeterX/B&BW-style challenges ship as a TEXTLESS full-page dimmer plus a
+    // SEPARATE centered card carrying the strong phrase. Neither container alone
+    // passes the per-container test above (dimmer = blocking but textless; card =
+    // text-positive but not full-coverage / not aria-modal / not role=dialog), so
+    // the structural classifier misses them. This decoupled check fires ONLY when
+    // BOTH (a) a full-page blocking affordance AND (b) a strong human-verification
+    // phrase are present in the viewport — they need NOT share a container.
+    // Gated by SCREEN_HV_ENABLED so flag-off is byte-identical (returns null
+    // instantly). Memoized — runs at most once per snapshot. Bounded scans only;
+    // no matched text / selectors / boxes escape — the function returns an enum.
+    var _scrHvDone=false,_scrHvType=null;
+    function screenHumanVerification(){
+      if(_scrHvDone) return _scrHvType;
+      _scrHvDone=true;
+      if(!SCREEN_HV_ENABLED) return null;
+      // (1) full-page blocking affordance: a fixed/sticky high-z >=0.5-coverage
+      // dimmer/backdrop. Bounded scan of body's top two DOM levels — reuses
+      // fixedCoverage(), the SAME blocking test the structural path uses.
+      var blocker=false;
+      try{
+        var roots=[];
+        if(document.body){
+          var ch=document.body.children;
+          for(var i=0;i<ch.length&&i<80;i++) roots.push(ch[i]);
+        }
+        for(var i=0;i<roots.length&&!blocker;i++){
+          if(fixedCoverage(roots[i])>=0.5){ blocker=true; break; }
+          var gc=roots[i].children;
+          for(var j=0;gc&&j<gc.length&&j<24;j++){ if(fixedCoverage(gc[j])>=0.5){ blocker=true; break; } }
+        }
+      }catch(e){}
+      if(!blocker) return null;
+      // (2) strong human-verification phrase, built value-free and length-capped
+      // from ONLY (a) visible buttons' names + aria-labels and (b) the text of
+      // FOREGROUND positioned (fixed/absolute/sticky) high-z containers (the
+      // card). No unbounded document.body text scan. STRONG phrases only via
+      // hvTypeFromScan → promo/marketing copy can never match.
+      var scan='',hasCheckbox=false;
+      try{
+        var bs=document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]');
+        for(var i=0;i<bs.length&&i<40&&scan.length<1600;i++){
+          var b=bs[i],br=null; try{ br=b.getBoundingClientRect(); }catch(e){}
+          if(!br||!(br.width>0&&br.height>0)) continue;
+          var al=attr(b,'aria-label'); if(al) scan+=' '+String(al);
+          var bt=b.textContent; if(bt) scan+=' '+txt(String(bt)).slice(0,80);
+        }
+      }catch(e){}
+      try{
+        var pos=document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog,div,section,aside,main,form');
+        var scanned=0;
+        for(var i=0;i<pos.length&&scanned<240&&scan.length<3000;i++){
+          var n=pos[i]; var cs=cssOf(n); if(!cs) continue;
+          var p=cs.position||''; if(p!=='fixed'&&p!=='absolute'&&p!=='sticky') continue;
+          var z=parseInt(cs.zIndex,10); if(isNaN(z)) z=0; if(z<10) continue;
+          scanned++;
+          var tt=n.textContent; if(tt) scan+=' '+txt(String(tt)).slice(0,400);
+          if(!hasCheckbox){ try{ if(n.querySelector&&n.querySelector(HV_CHECKBOX_SEL)) hasCheckbox=true; }catch(e){} }
+        }
+      }catch(e){}
+      scan=txt(scan);
+      _scrHvType=hvTypeFromScan(scan,hasCheckbox);
+      return _scrHvType;
     }
     // Accessible title of an overlay container — VALUE-FREE (aria-label /
     // aria-labelledby / inner heading / title attr only; never reads .value).
@@ -840,6 +915,18 @@ export function buildOverlaySnippetJs(): string {
       }
       var inInert=false; try{ inInert=hasInertAncestor(el); }catch(e){ inInert=false; }
       if(!type){
+        // Screen-level human-verification (split overlay): the challenge control
+        // (e.g. the Press & Hold button) has NO overlay ancestor — the dimmer is
+        // a sibling. When the decoupled screen detector is active and THIS element
+        // is the challenge control, emit the single blocking human_verification
+        // member the lifecycle needs to arm. Background refs are then blocked via
+        // the existing blocking_active path (no per-background mutation). Gated by
+        // SCREEN_HV_ENABLED inside screenHumanVerification() — null when flag off.
+        var scrHv=null; try{ scrHv=screenHumanVerification(); }catch(e){ scrHv=null; }
+        if(scrHv){
+          var isCtl=false; try{ isCtl=isHvControl(el,name,scrHv); }catch(e){ isCtl=false; }
+          if(isCtl) return { overlay_type:'dialog', blocking:true, human_verification:true, hv_challenge_type:scrHv, hv_control:true };
+        }
         // No positive overlay membership — emit a background marker ONLY when the
         // element is inert, or aria-hidden background while a REAL modal
         // (aria-modal / native <dialog open>) is open. Both are precise ARIA
@@ -871,6 +958,17 @@ export function buildOverlaySnippetJs(): string {
           ov.human_verification=true;
           ov.hv_challenge_type=hvt;
           try{ if(isHvControl(el,name,hvt)) ov.hv_control=true; }catch(e){}
+        }
+      }
+      // Screen-level augmentation: the element has an overlay ancestor that the
+      // structural pass did NOT classify as human-verification, but a split-overlay
+      // screen challenge is active and THIS element is its control. Mark it as the
+      // blocking HV member. Gated via screenHumanVerification() (null when flag off).
+      if(!ov.human_verification){
+        var scrHv2=null; try{ scrHv2=screenHumanVerification(); }catch(e){ scrHv2=null; }
+        if(scrHv2){
+          var isCtl2=false; try{ isCtl2=isHvControl(el,name,scrHv2); }catch(e){ isCtl2=false; }
+          if(isCtl2){ ov.human_verification=true; ov.hv_challenge_type=scrHv2; ov.hv_control=true; ov.blocking=true; }
         }
       }
       return ov;
@@ -1266,7 +1364,7 @@ export function buildAntigenExtractionExpr(opts: {
       if(raw) ctx.nearby_text=raw;
       return (ctx.label||ctx.section||ctx.nearby_text)?ctx:null;
     }
-    ${buildOverlaySnippetJs()}
+    ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
     var out=[];
     var nodes;
     try{ nodes=document.querySelectorAll(SELECTOR); }catch(e){ return []; }

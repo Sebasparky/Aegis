@@ -38,6 +38,7 @@ import type {
   AccountCreationStepRequest,
   AccountCreationStepKind,
   AccountAccessMethod,
+  HumanVerificationChallengeType,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -51,7 +52,11 @@ import { evaluateActionGate } from "../detection/actionGate.js";
 import { connectAndNavigateWithPointer, connectAndObserve, connectAndClick } from "../runtime/taskBrowserControl.js";
 import { realisticClickByDescription, realisticClickKnownBox, realisticTypeTextViaCDP, realisticTypeKnownBox, setFieldValueKnownBox, scrollKnownBoxIntoView, injectNavigationMediationBannerViaCDP, type ClickVerifyOption } from "../runtime/realisticBrowserActions.js";
 import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
-import { extractAntigenSnapshotBundleViaCDP, type AntigenPageMeta } from "../runtime/antigenSnapshotRuntime.js";
+import {
+  extractAntigenSnapshotBundleViaCDP,
+  detectPageHumanVerificationWallViaCDP,
+  type AntigenPageMeta,
+} from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
@@ -464,6 +469,14 @@ function resolveReadyRuntimeSession(
   if (ready) return { kind: "rebound", session: ready, previous_runtime_id: runtimeId };
   return { kind: "none" };
 }
+
+/**
+ * Page-level human-verification wall probe runs only when a snapshot returned at
+ * most this many candidate elements — the full-page cross-origin-iframe denial
+ * wall shape (zero/near-zero candidates). Keeps the extra CDP probe off normal
+ * pages (which have many candidates) entirely.
+ */
+const PAGE_HV_PROBE_MAX_ELEMENTS = 3;
 
 /**
  * Human Presence Relay pre-action guard. Runs in browser-click/type/set-value/
@@ -5384,19 +5397,36 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // presence), clears the guard, and stamps resumed_at on the first fresh
     // snapshot after completion.
     let hvSnapshotInfo:
-      | { request_id: string; status: string; challenge_type: string; domain: string; expires_at: string; instructions: string; next_action: string }
+      | { request_id: string; status: string; challenge_type: string; domain: string; expires_at: string; instructions: string; next_action: string; page_level?: true }
       | undefined;
+    // Set when the detected challenge is a page-level full-page denial wall whose
+    // control is inside a cross-origin iframe (zero candidate elements). Drives a
+    // synthesized blocking active surface + manual-completion guidance.
+    let pageLevelHv = false;
     if (isHumanVerificationEnabled()) {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
       );
-      if (hvMember) {
+      // Page-level fallback: only when NO per-candidate HV member was found AND
+      // the page is (near-)empty of candidates — the B&BW cross-origin-iframe
+      // wall shape. Best-effort and fail-safe (null on any error). Keeps normal
+      // pages untouched (they have many candidates) and never runs when flag off.
+      const pageWall =
+        !hvMember && elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS
+          ? await detectPageHumanVerificationWallViaCDP({
+              cdpUrl: session.cdp_url,
+              resolvedTarget,
+            })
+          : null;
+
+      if (hvMember || pageWall) {
         let hvDomain = "unknown";
         try {
           if (snapshot.url) hvDomain = new URL(snapshot.url).hostname;
         } catch {
           /* keep "unknown" */
         }
+        const isPageLevel = !hvMember && !!pageWall;
         const hvRequest = createOrReuseHumanVerificationRequest({
           user_id: MOCK_USER_ID,
           delegation_id: delegation.id,
@@ -5404,9 +5434,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           browser_session_id: session.browser_session_id,
           domain: hvDomain,
           page_url: snapshot.url ?? "",
-          challenge_type: hvMember.overlay?.hv_challenge_type ?? "unknown_human_verification",
-          surface_title: hvMember.overlay?.modal_title,
+          challenge_type: hvMember
+            ? hvMember.overlay?.hv_challenge_type ?? "unknown_human_verification"
+            : pageWall!.hv_challenge_type,
+          surface_title: hvMember ? hvMember.overlay?.modal_title : "Access challenge",
+          page_level: isPageLevel,
         });
+        pageLevelHv = hvRequest.page_level === true;
         hvSnapshotInfo = {
           request_id: hvRequest.request_id,
           status: hvRequest.status,
@@ -5415,6 +5449,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           expires_at: hvRequest.expires_at,
           instructions: hvRequest.instructions,
           next_action: humanVerificationAgentNextAction(hvRequest),
+          ...(hvRequest.page_level ? { page_level: true as const } : {}),
         };
       } else {
         const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
@@ -5499,6 +5534,29 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
 
     timing.mark("serialize");
 
+    // Page-level human-verification wall: synthesize a single blocking active
+    // surface so the agent gets a useful blocking surface even though
+    // element_count is 0 and the candidate-based surface builder produced none.
+    // No actions — the control is in a cross-origin iframe; manual completion
+    // only. Emitted under ANTIGEN_HUMAN_VERIFICATION (independent of the
+    // ANTIGEN_ACTIVE_SURFACES flag).
+    const pageLevelSurfaces =
+      pageLevelHv && hvSnapshotInfo
+        ? [
+            {
+              surface_id: "surf_hv_page",
+              surface_type: "dialog" as const,
+              blocking: true,
+              dismissible: false,
+              actions: [],
+              surface_kind: "human_verification" as const,
+              challenge_type: hvSnapshotInfo.challenge_type as HumanVerificationChallengeType,
+              user_presence_required: true as const,
+              page_level: true as const,
+            },
+          ]
+        : [];
+
     const responsePayload = {
       ok: true,
       data: {
@@ -5531,20 +5589,23 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         // Active Surfaces v1 (flag-gated): semantic surface view + recommended
         // safe actions. `likely_blocked_refs` stays internal — elements carry the
         // boolean annotation instead.
-        ...(activeSurfaces
+        ...(activeSurfaces || pageLevelSurfaces.length > 0
           ? {
-              active_surfaces: activeSurfaces.surfaces,
-              recommended_actions: activeSurfaces.recommended_actions,
-              ...(activeSurfaces.recommended_next_step
+              active_surfaces: [...pageLevelSurfaces, ...(activeSurfaces?.surfaces ?? [])],
+              recommended_actions: activeSurfaces?.recommended_actions ?? [],
+              // The page-level HV block below sets the authoritative next step.
+              ...(activeSurfaces?.recommended_next_step && !pageLevelHv
                 ? { recommended_next_step: activeSurfaces.recommended_next_step }
                 : {}),
             }
           : {}),
         // Human Presence Relay (flag-gated): metadata + guidance only — never
-        // selectors, coordinates, or refs of the challenge control.
+        // selectors, coordinates, or refs of the challenge control. `page_level`
+        // marks a cross-origin-iframe wall (manual completion, not live relay).
         ...(hvSnapshotInfo
           ? {
               recommended_next_step: "human_presence_relay_required" as const,
+              ...(pageLevelHv ? { page_level_human_verification: true as const } : {}),
               human_verification: {
                 ...hvSnapshotInfo,
                 user_presence_required: true as const,

@@ -112,6 +112,18 @@ export async function humanVerificationRoutes(server: FastifyInstance): Promise<
       const request = loadRequest(req.params.requestId, reply);
       if (!request) return;
       if (!requireActionable(request, reply)) return;
+      // Page-level walls put the control inside a cross-origin iframe the relay
+      // cannot target — never attempt a live hold; the UI routes these to manual
+      // completion + recheck instead. Defense-in-depth (the UI hides the hold
+      // button for page_level requests).
+      if (request.page_level) {
+        return sendError(
+          reply,
+          409,
+          "MANUAL_COMPLETION_REQUIRED",
+          "This challenge's control is inside a secured frame Aegis can't relay into. Complete it in the agent's browser window, then recheck.",
+        );
+      }
       if (request.challenge_type !== "press_and_hold") {
         return sendError(
           reply,

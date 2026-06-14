@@ -34,6 +34,7 @@ import { chromium } from "playwright";
 import type { HumanVerificationRequest } from "@aegis/types";
 import {
   extractAntigenSnapshotCandidatesViaCDP,
+  detectPageHumanVerificationWallViaCDP,
   type AntigenSnapshotCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
 import {
@@ -54,6 +55,12 @@ const FIXTURE_PROMO = fileURLToPath(new URL("./fixtures/promo-discount-modal.htm
 // screen-level (flag-gated) detector classifies them.
 const FIXTURE_SPLIT_HOLD = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold.html", import.meta.url));
 const FIXTURE_SPLIT_PROMO = fileURLToPath(new URL("./fixtures/split-overlay-promo.html", import.meta.url));
+// Page-level full-page denial wall (B&BW shape): challenge TEXT in the top
+// document, the only control inside a SINGLE cross-origin iframe, zero
+// top-document candidates. Plus two negatives that must NOT classify.
+const FIXTURE_WALL_XORIGIN = fileURLToPath(new URL("./fixtures/denial-wall-cross-origin-iframe.html", import.meta.url));
+const FIXTURE_DENIED_PLAIN = fileURLToPath(new URL("./fixtures/access-denied-plain.html", import.meta.url));
+const FIXTURE_ECOMM_IFRAME = fileURLToPath(new URL("./fixtures/ecommerce-marketing-iframe.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -429,5 +436,53 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     for (const c of cands) {
       expect(c.overlay?.human_verification).toBeUndefined();
     }
+  }, 20_000);
+
+  // ─── Page-level wall (cross-origin iframe) detection ─────────────────────
+  // The control is inside a single cross-origin iframe → ZERO top-document
+  // candidates. The page-level probe is the only path that classifies it.
+  async function resolveTarget(): Promise<{ browserWsUrl: string; pageTarget: { id: string; url: string } }> {
+    const version = (await (await fetch(`${cdpUrl}/json/version`)).json()) as { webSocketDebuggerUrl: string };
+    const list = (await (await fetch(`${cdpUrl}/json/list`)).json()) as Array<{ id: string; type: string; url: string }>;
+    const page = list.find((t) => t.type === "page");
+    if (!page) throw new Error("no page target");
+    return { browserWsUrl: version.webSocketDebuggerUrl, pageTarget: { id: page.id, url: page.url } };
+  }
+
+  async function detectWall() {
+    return detectPageHumanVerificationWallViaCDP({ cdpUrl, resolvedTarget: await resolveTarget() });
+  }
+
+  it("classifies the cross-origin-iframe denial wall as a page-level human-verification surface", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_WALL_XORIGIN);
+    // Zero top-document candidates — the element-based detectors find nothing.
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.filter((c) => c.overlay?.human_verification === true)).toHaveLength(0);
+
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).not.toBeNull();
+    expect(wall!.human_verification).toBe(true);
+    expect(wall!.page_level).toBe(true);
+    expect(wall!.hv_challenge_type).toBe("press_and_hold");
+    expect(wall!.user_presence_required).toBe(true);
+    expect(wall!.blocking).toBe(true);
+  }, 20_000);
+
+  it("flag OFF: the page-level wall is not classified (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_WALL_XORIGIN);
+    const wall = await withHvFlag("false", detectWall);
+    expect(wall).toBeNull();
+  }, 20_000);
+
+  it("does NOT classify a generic 'access denied' page with no human/bot/press-hold language", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_DENIED_PLAIN);
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).toBeNull();
+  }, 20_000);
+
+  it("does NOT classify a normal ecommerce page with a marketing iframe", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_ECOMM_IFRAME);
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).toBeNull();
   }, 20_000);
 });

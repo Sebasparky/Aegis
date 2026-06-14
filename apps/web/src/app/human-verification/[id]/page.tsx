@@ -226,6 +226,32 @@ export default function HumanVerificationPage() {
       );
     }
 
+    // Page-level cross-origin-iframe wall: the control is inside a secured frame
+    // Aegis can't relay into — manual completion + recheck only, never the live
+    // hold button (checked before the press_and_hold branch on purpose).
+    if (request.page_level) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "8px 0" }}>
+          <div style={{ background: "var(--amber-soft)", border: "1px solid var(--amber-ring)", borderRadius: "var(--r-2)", padding: "12px 16px" }}>
+            <p style={{ fontSize: 13, fontWeight: 600, color: "oklch(0.45 0.12 75)", margin: "0 0 4px" }}>Manual verification required</p>
+            <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.55 }}>
+              This page is showing a full-page human-verification wall whose control sits inside a secured
+              frame Aegis can&apos;t relay into. Complete the visible challenge directly in the agent&apos;s
+              browser window, then press &quot;I&apos;ve completed it&quot; — the agent takes a fresh snapshot and resumes.
+            </p>
+          </div>
+          <button
+            className="a-btn a-btn--primary"
+            disabled={!actionable || rechecking}
+            onClick={handleRecheck}
+            style={{ alignSelf: "center" }}
+          >
+            {rechecking ? "Checking…" : "I've completed it"}
+          </button>
+        </div>
+      );
+    }
+
     if (request.challenge_type === "press_and_hold") {
       return (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "12px 0" }}>

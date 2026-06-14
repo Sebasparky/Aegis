@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shop — Candles &amp; Diffusers</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; }
+      header, main { max-width: 880px; margin: 0 auto; padding: 16px; }
+      .grid { display: flex; gap: 16px; flex-wrap: wrap; }
+      iframe { width: 300px; height: 90px; border: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      NEGATIVE fixture: an ordinary ecommerce page with MANY interactive controls
+      and a marketing iframe. No human-verification text and too many controls —
+      must never classify as a human-verification wall.
+    -->
+    <header>
+      <input type="search" placeholder="Search products" />
+      <button>Cart</button>
+      <button>Account</button>
+    </header>
+    <main>
+      <h1>Best Sellers</h1>
+      <div class="grid">
+        <div><a href="/p/mahogany">Mahogany Teakwood</a><button>Add to bag</button></div>
+        <div><a href="/p/eucalyptus">Eucalyptus Spearmint</a><button>Add to bag</button></div>
+        <div><a href="/p/vanilla">Warm Vanilla Sugar</a><button>Add to bag</button></div>
+      </div>
+      <iframe src="about:blank" title="promo"></iframe>
+    </main>
+  </body>
+</html>

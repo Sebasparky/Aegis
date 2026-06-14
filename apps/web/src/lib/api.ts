@@ -797,6 +797,12 @@ export interface HumanVerificationRequestView {
   challenge_type: HumanVerificationChallengeType;
   challenge_label: string;
   relay_capable: boolean;
+  /**
+   * Page-level full-page denial wall whose control is inside a cross-origin
+   * iframe Aegis can't relay into — render the manual-completion + recheck
+   * branch (never the live press-and-hold button).
+   */
+  page_level?: boolean;
   status: HumanVerificationStatus;
   surface_title?: string;
   instructions: string;

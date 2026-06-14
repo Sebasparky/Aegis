@@ -30,6 +30,7 @@ vi.mock("../store/persistence.js", () => ({
 const extractMock = vi.hoisted(() => vi.fn());
 const pageMetaMock = vi.hoisted(() => vi.fn());
 const bundleMock = vi.hoisted(() => vi.fn());
+const pageWallMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
@@ -49,6 +50,7 @@ vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
     extractAntigenSnapshotCandidatesViaCDP: extractMock,
     extractAntigenPageMetaViaCDP: pageMetaMock,
     extractAntigenSnapshotBundleViaCDP: bundleMock,
+    detectPageHumanVerificationWallViaCDP: pageWallMock,
   };
 });
 
@@ -300,7 +302,101 @@ beforeEach(() => {
   liveUrlMock.mockResolvedValue(PAGE_URL);
   resolveTargetMock.mockResolvedValue(null);
   pageMetaMock.mockResolvedValue(undefined);
+  // Default: no page-level wall — only the page-level tests opt in.
+  pageWallMock.mockResolvedValue(null);
   clickKnownBoxMock.mockResolvedValue({ success: true });
+});
+
+describe("page-level wall (cross-origin iframe) → request auto-create", () => {
+  const PAGE_WALL = {
+    human_verification: true as const,
+    hv_challenge_type: "press_and_hold" as const,
+    user_presence_required: true as const,
+    blocking: true as const,
+    page_level: true as const,
+  };
+
+  it("creates a page-level HVR + blocking surface when element_count is 0", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    const data = await takeSnapshot([]); // zero candidates — the B&BW wall shape
+
+    // The page-level probe ran (no per-candidate member, near-empty page).
+    expect(pageWallMock).toHaveBeenCalled();
+    expect(data.element_count).toBe(0);
+    expect(data.page_level_human_verification).toBe(true);
+    expect(data.recommended_next_step).toBe("human_presence_relay_required");
+
+    // A blocking human_verification surface is synthesized despite 0 candidates.
+    const hvSurface = (data.active_surfaces ?? []).find(
+      (s: Record<string, unknown>) => s.surface_kind === "human_verification",
+    );
+    expect(hvSurface).toBeDefined();
+    expect(hvSurface.challenge_type).toBe("press_and_hold");
+    expect(hvSurface.user_presence_required).toBe(true);
+    expect(hvSurface.blocking).toBe(true);
+    expect(hvSurface.page_level).toBe(true);
+    expect(hvSurface.actions).toEqual([]);
+
+    // Agent-facing block flags page_level and never authorizes purchase.
+    expect(data.human_verification.page_level).toBe(true);
+    expect(data.human_verification.purchase_authorized).toBe(false);
+
+    const request = theRequest();
+    expect(request.status).toBe("pending_user");
+    expect(request.page_level).toBe(true);
+    expect(request.challenge_type).toBe("press_and_hold");
+  });
+
+  it("arms the guard: click/type/set-value/scroll are rejected HUMAN_VERIFICATION_REQUIRED", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    await takeSnapshot([]);
+
+    for (const url of [
+      "/api/agent/v1/runtime/browser-click",
+      "/api/agent/v1/runtime/browser-type",
+      "/api/agent/v1/runtime/browser-set-value",
+      "/api/agent/v1/runtime/browser-scroll-to-ref",
+    ]) {
+      const res = await server.inject({
+        method: "POST",
+        url,
+        headers: { authorization: BEARER },
+        // Supply every field each endpoint's schema needs (text/value/ref) so the
+        // 409 comes from the guard, not payload validation.
+        payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", text: "x", value: "x" },
+      });
+      expect(res.statusCode).toBe(409);
+      const body = res.body;
+      expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+      expectNoSecrets(body);
+    }
+  });
+
+  it("the hold-start relay refuses a page-level wall (manual completion only)", async () => {
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    await takeSnapshot([]);
+    const request = theRequest();
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/human-verification-requests/${request.request_id}/hold-start`,
+      headers: { authorization: BEARER },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("MANUAL_COMPLETION_REQUIRED");
+    // The relay's CDP hold executor is never invoked for a page-level wall.
+    expect(startHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("flag OFF: the page-level probe never runs and no HV fields appear", async () => {
+    process.env.ANTIGEN_HUMAN_VERIFICATION = "false";
+    pageWallMock.mockResolvedValue(PAGE_WALL);
+    const data = await takeSnapshot([]);
+    expect(pageWallMock).not.toHaveBeenCalled();
+    expect(data.page_level_human_verification).toBeUndefined();
+    expect(data.human_verification).toBeUndefined();
+    expect(humanVerificationRequests.size).toBe(0);
+  });
 });
 
 describe("snapshot detection → request auto-create", () => {

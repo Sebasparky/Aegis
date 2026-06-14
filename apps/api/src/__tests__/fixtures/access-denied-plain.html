@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Access Denied</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; }
+      main { max-width: 520px; margin: 80px auto; text-align: center; }
+      iframe { width: 300px; height: 120px; border: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      NEGATIVE fixture: a generic access-denied / 403 page. It HAS a cross-origin
+      iframe and (near-)no controls, but NO human/bot/press-hold/captcha language,
+      so the strong-text gate must keep it unclassified. This proves "access
+      denied" alone is never sufficient.
+    -->
+    <main>
+      <h1>403 Forbidden</h1>
+      <p>You do not have permission to access this resource on this server.</p>
+      <iframe sandbox="allow-scripts" src="about:blank" title="frame"></iframe>
+    </main>
+  </body>
+</html>

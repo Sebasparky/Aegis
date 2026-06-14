@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Access to this page has been denied</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #f4f4f4; }
+      main { max-width: 520px; margin: 80px auto; text-align: center; }
+      h1 { font-size: 22px; color: #222; }
+      p { color: #444; }
+      .ref { color: #999; font-size: 12px; margin-top: 24px; }
+      iframe { width: 320px; height: 160px; border: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Bath & Body Works / PerimeterX-style FULL-PAGE denial wall:
+        - all challenge TEXT is in the top document,
+        - the only interactive control lives inside a SINGLE cross-origin iframe
+          (sandboxed without allow-same-origin → opaque origin → contentDocument
+          is inaccessible from the parent),
+        - the top document has ZERO normal interactive controls.
+      The element/candidate-based detectors extract nothing here; only the
+      page-level wall probe classifies it.
+    -->
+    <main>
+      <h1>Access to this page has been denied</h1>
+      <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+      <iframe sandbox="allow-scripts" src="about:blank" title="challenge"></iframe>
+      <p class="ref">Reference ID: 8a3f9c12-aa00-4b6e-9f00-112233445566</p>
+    </main>
+  </body>
+</html>

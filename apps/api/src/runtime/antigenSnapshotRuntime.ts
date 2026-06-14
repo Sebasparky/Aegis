@@ -1564,6 +1564,179 @@ export async function extractAntigenSnapshotCandidatesViaCDP(
   return mapped;
 }
 
+// ─── Page-level human-verification WALL (cross-origin iframe challenges) ──────
+
+/**
+ * Safe page-level human-verification signal. Emitted for full-page denial walls
+ * (e.g. PerimeterX on Bath & Body Works) whose challenge TEXT is in the top
+ * document ("Access to this page has been denied", "Press & Hold to confirm you
+ * are a human") but whose only interactive control sits inside a SINGLE
+ * cross-origin iframe — so ZERO top-document candidates are extracted and every
+ * element/candidate-based detector misses it. Enum/booleans ONLY: never iframe
+ * src, selectors, geometry, boxes, or raw page text. The control is in a
+ * cross-origin iframe the relay cannot target, so this is always a manual
+ * completion (page_level: true).
+ */
+export interface PageHumanVerificationWall {
+  human_verification: true;
+  hv_challenge_type: HumanVerificationChallengeType;
+  user_presence_required: true;
+  blocking: true;
+  page_level: true;
+}
+
+/**
+ * Builds the page-level wall probe IIFE. Reuses the shared overlay snippet
+ * (HV_TEXT_RE / HV_HOLD_RE / txt — single source, zero drift) and adds a
+ * page-level scan. SCREEN_HV_ENABLED is threaded from the env flag, so flag-off
+ * returns null instantly (byte-identical). The function NEVER traverses or reads
+ * the cross-origin iframe: `contentDocument` is only TOUCHED inside try/catch to
+ * learn that it is inaccessible. STRONG HV text is REQUIRED — a generic "access
+ * denied" page with no human/bot/press-hold language never classifies.
+ */
+export function buildPageHumanVerificationWallExpr(): string {
+  return `(function(){
+    var OVERLAY_TITLE_MAX=120;
+    var OVERLAY_WALK_DEPTH=12;
+    var OVERLAY_DRAWER_RE=/(drawer|flyout|off-?canvas|side-?panel|slide-?over|snackbar)/i;
+    var OVERLAY_DISMISS_RE=/\\b(close|dismiss|no thanks|not now|maybe later)\\b/i;
+    var OVERLAY_CHAT_RE=/(chat|messeng|intercom|zendesk|drift|live\\s*help|support\\s*widget|help\\s*widget|chat\\s*widget|launcher)/i;
+    function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
+    function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
+    ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
+    if(!SCREEN_HV_ENABLED) return null;
+    // Bounded, value-free top-document text. STRONG human-verification phrase is
+    // the necessary condition; the denial banner alone is never sufficient.
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    if(!HV_TEXT_RE.test(bodyText)&&!HV_TEXT_RE.test(titleText)) return null;
+    var hasHold=HV_HOLD_RE.test(bodyText)||HV_HOLD_RE.test(titleText);
+    // At least one VISIBLE iframe whose contentDocument is inaccessible
+    // (cross-origin / opaque origin → access throws or is null). We never read it.
+    var hasInaccessibleIframe=false;
+    try{
+      var frames=document.querySelectorAll('iframe');
+      for(var i=0;i<frames.length&&i<20;i++){
+        var fr=frames[i],r=null; try{ r=fr.getBoundingClientRect(); }catch(e){}
+        if(!r||!(r.width>0&&r.height>0)) continue;
+        var accessible=false; try{ accessible=!!fr.contentDocument; }catch(e){ accessible=false; }
+        if(!accessible){ hasInaccessibleIframe=true; break; }
+      }
+    }catch(e){}
+    if(!hasInaccessibleIframe) return null;
+    // Very few/no NORMAL top-document interactive controls (the wall replaces the
+    // real page). Bounded scan, early exit once the low threshold is exceeded.
+    var normalInteractive=0;
+    try{
+      var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
+      for(var j=0;j<ctrls.length&&j<200;j++){
+        var c=ctrls[j],cr=null; try{ cr=c.getBoundingClientRect(); }catch(e){}
+        if(cr&&cr.width>0&&cr.height>0){ normalInteractive++; if(normalInteractive>3) break; }
+      }
+    }catch(e){}
+    if(normalInteractive>3) return null;
+    return { human_verification:true, hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification', user_presence_required:true, blocking:true, page_level:true };
+  })()`;
+}
+
+/**
+ * Connects to the live page over CDP and evaluates the page-level wall probe.
+ * Best-effort and fail-safe: returns null on any transport/parse error or when
+ * no resolved target is available — it must NEVER throw into the snapshot path.
+ * The result carries enum/booleans only; no iframe internals are read.
+ */
+export async function detectPageHumanVerificationWallViaCDP(params: {
+  cdpUrl: string;
+  resolvedTarget?: { browserWsUrl: string; pageTarget: { id: string; url: string } };
+}): Promise<PageHumanVerificationWall | null> {
+  const { resolvedTarget } = params;
+  if (!resolvedTarget) return null;
+  const expr = buildPageHumanVerificationWallExpr();
+
+  let value: unknown;
+  try {
+    value = await new Promise<unknown>((resolve, reject) => {
+      const ws = new WebSocket(resolvedTarget.browserWsUrl);
+      let msgId = 1;
+      let attachId: number;
+      let evalId: number;
+      let settled = false;
+      let sid: string | null = null;
+      const timer = setTimeout(() => fail(new Error("Page-level HV wall probe timed out.")), 6_000);
+      const send = (method: string, p: Record<string, unknown>, s?: string): number => {
+        const id = msgId++;
+        const m: Record<string, unknown> = { id, method, params: p };
+        if (s) m.sessionId = s;
+        ws.send(JSON.stringify(m));
+        return id;
+      };
+      const done = (v: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.close();
+        resolve(v);
+      };
+      const fail = (e: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+        reject(e);
+      };
+      ws.on("open", () => {
+        attachId = send("Target.attachToTarget", { targetId: resolvedTarget.pageTarget.id, flatten: true });
+      });
+      ws.on("error", (e: Error) => fail(e));
+      ws.on("message", (data: Buffer | string) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id as number | undefined;
+        if (id === undefined) return;
+        const result = msg.result as Record<string, unknown> | undefined;
+        if (id === attachId) {
+          if (!result?.sessionId) {
+            fail(new Error("CDP attach failed: no sessionId."));
+            return;
+          }
+          sid = result.sessionId as string;
+          evalId = send("Runtime.evaluate", { expression: expr, returnByValue: true }, sid);
+          return;
+        }
+        if (id === evalId) {
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          done(evalResult?.value);
+        }
+      });
+    });
+  } catch {
+    return null;
+  }
+
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (v.human_verification !== true || v.page_level !== true) return null;
+  // Re-validate the enum server-side; never trust the raw page value blindly.
+  const ct: HumanVerificationChallengeType =
+    v.hv_challenge_type === "press_and_hold" ? "press_and_hold" : "unknown_human_verification";
+  return {
+    human_verification: true,
+    hv_challenge_type: ct,
+    user_presence_required: true,
+    blocking: true,
+    page_level: true,
+  };
+}
+
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
 
 const PAGE_META_HEADING_MAX = 160;

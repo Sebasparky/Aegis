@@ -80,7 +80,13 @@ export const RELAY_CAPABLE_CHALLENGE_TYPES: ReadonlySet<HumanVerificationChallen
 export function buildHumanVerificationInstructions(
   challengeType: HumanVerificationChallengeType,
   domain: string,
+  pageLevel?: boolean,
 ): string {
+  // Page-level walls put the control inside a cross-origin iframe Aegis cannot
+  // relay into — manual completion regardless of the detected sub-type.
+  if (pageLevel) {
+    return `${domain} is showing a full-page human-verification wall whose control is inside a secured frame Aegis can't relay into. Complete the visible challenge directly in the agent's browser window, then mark it done in the Aegis UI — the agent will take a fresh snapshot and resume.`;
+  }
   switch (challengeType) {
     case "press_and_hold":
       return `${domain} is asking for a live human press-and-hold. Open the Aegis UI and press and hold the verification button — Aegis mirrors your live hold into the browser. Releasing early releases in the browser too.`;
@@ -141,6 +147,8 @@ export interface CreateHumanVerificationParams {
   page_url: string;
   challenge_type: HumanVerificationChallengeType;
   surface_title?: string;
+  /** Page-level cross-origin-iframe wall → manual completion only. */
+  page_level?: boolean;
 }
 
 /**
@@ -156,9 +164,18 @@ export function createOrReuseHumanVerificationRequest(
   if (existing && existing.domain === params.domain) {
     if (existing.status === "pending_user") {
       // Refresh classification while the user hasn't engaged yet.
-      if (existing.challenge_type !== params.challenge_type) {
+      if (
+        existing.challenge_type !== params.challenge_type ||
+        (existing.page_level ?? false) !== (params.page_level ?? false)
+      ) {
         existing.challenge_type = params.challenge_type;
-        existing.instructions = buildHumanVerificationInstructions(params.challenge_type, params.domain);
+        if (params.page_level) existing.page_level = true;
+        else delete existing.page_level;
+        existing.instructions = buildHumanVerificationInstructions(
+          params.challenge_type,
+          params.domain,
+          params.page_level,
+        );
       }
       if (params.surface_title) existing.surface_title = params.surface_title;
       existing.page_url = params.page_url;
@@ -190,7 +207,12 @@ export function createOrReuseHumanVerificationRequest(
     challenge_type: params.challenge_type,
     status: "pending_user",
     ...(params.surface_title ? { surface_title: params.surface_title } : {}),
-    instructions: buildHumanVerificationInstructions(params.challenge_type, params.domain),
+    ...(params.page_level ? { page_level: true as const } : {}),
+    instructions: buildHumanVerificationInstructions(
+      params.challenge_type,
+      params.domain,
+      params.page_level,
+    ),
     user_presence_required: true,
     purchase_authorized: false,
     hold_attempt_count: 0,
@@ -352,7 +374,10 @@ export function toHumanVerificationRequestView(request: HumanVerificationRequest
     page_url: request.page_url,
     challenge_type: request.challenge_type,
     challenge_label: challengeTypeLabel(request.challenge_type),
-    relay_capable: RELAY_CAPABLE_CHALLENGE_TYPES.has(request.challenge_type),
+    // A page-level wall's control is inside a cross-origin iframe the relay can't
+    // mirror into — never relay-capable regardless of the detected sub-type.
+    relay_capable: !request.page_level && RELAY_CAPABLE_CHALLENGE_TYPES.has(request.challenge_type),
+    page_level: request.page_level,
     status: request.status,
     surface_title: request.surface_title,
     instructions: request.instructions,

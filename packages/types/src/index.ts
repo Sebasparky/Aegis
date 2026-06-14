@@ -2371,6 +2371,13 @@ export interface HumanVerificationRequest {
   status: HumanVerificationStatus;
   /** Value-free clipped accessible title of the challenge surface. */
   surface_title?: string;
+  /**
+   * Page-level full-page denial wall whose challenge control is inside a
+   * cross-origin iframe Aegis cannot target. Detected with zero top-document
+   * candidate elements; routes to MANUAL completion + recheck (the live
+   * press-and-hold relay can never mirror into a cross-origin control).
+   */
+  page_level?: true;
   instructions: string;
   // Literal true — only live user presence relayed through the Aegis UI can
   // clear the challenge; Antigen never synthesizes or replays the gesture.

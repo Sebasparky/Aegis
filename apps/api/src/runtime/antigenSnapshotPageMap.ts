@@ -789,6 +789,12 @@ export interface ActiveSurface {
   challenge_type?: HumanVerificationChallengeType;
   /** Literal true — only live user presence (Aegis UI relay) can clear this. */
   user_presence_required?: true;
+  /**
+   * Page-level full-page denial wall whose control is in a cross-origin iframe.
+   * Synthesized by the snapshot endpoint when a page-level wall is detected with
+   * zero candidate elements — routes to manual completion, not the live relay.
+   */
+  page_level?: true;
 }
 
 export interface RecommendedSurfaceAction {

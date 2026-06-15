@@ -3896,18 +3896,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
   // no secret resolution, no credential authorization. Caller falls back to
   // @playwright/mcp on any non-2xx response.
 
-  // Resolve whether the dev pointer overlay should be injected for this action.
-  // Tri-state: an explicit ANTIGEN_POINTER_DEBUG_OVERLAY env wins in both
-  // directions; otherwise the overlay follows the headed window (visible session).
-  // This decouples overlay activation from the lone API env var so headed QA shows
-  // the overlay without separately setting it on the API process — mirroring how
-  // headed launch is driven by the session's visible mode.
-  const resolveOverlayEnabled = (s: { mode: "headless" | "visible" }): boolean => {
-    const env = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
-    if (env === "true") return true;
-    if (env === "false") return false;
-    return s.mode === "visible";
-  };
+  // Resolve whether the dev pointer overlay / nav-mediation banner should be injected.
+  // EXPLICIT-OPT-IN only: these write __aegis_pointer_debug_* nodes / a banner into the
+  // live page, so they must NOT appear on normal headed QA runs (Follow-up 1, runtime DOM
+  // footprint audit). Activation requires ANTIGEN_POINTER_DEBUG_OVERLAY=true regardless of
+  // the session's headless/visible mode. The param is kept for call-site compatibility but
+  // is no longer read.
+  const resolveOverlayEnabled = (_s?: { mode: "headless" | "visible" }): boolean =>
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY === "true";
 
   // Clearly low-risk click intents that may receive the single safe verify-retry.
   // Final / sensitive intents are blocked pre-dispatch by the action gate and
@@ -5351,11 +5347,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       updated_at: new Date().toISOString(),
     });
 
-    // Visible-session trust signal: @playwright/mcp owns the navigation and the new
-    // page DOM destroyed any prior overlay, so re-inject a brief "Antigen is
-    // mediating this browser" banner + cursor. Fire-and-forget and fail-open — never
-    // awaited, so a slow/failed banner can never block or fail this response (the
-    // adapter calls this with a short timeout).
+    // Debug-only trust signal (ANTIGEN_POINTER_DEBUG_OVERLAY=true): @playwright/mcp owns
+    // the navigation and the new page DOM destroyed any prior overlay, so re-inject a brief
+    // "Antigen is mediating this browser" banner + cursor. Gated behind the explicit debug
+    // flag so normal headed QA injects no banner. Fire-and-forget and fail-open — never
+    // awaited, so a slow/failed banner can never block or fail this response (the adapter
+    // calls this with a short timeout).
     if (resolveOverlayEnabled(session)) {
       void injectNavigationMediationBannerViaCDP({
         cdpUrl: session.cdp_url,

@@ -23,6 +23,8 @@ vi.mock("../store/persistence.js", () => ({
 // Mock only the realistic click runtime — the snapshot store stays real.
 const clickKnownBoxMock = vi.hoisted(() => vi.fn());
 const clickByDescriptionMock = vi.hoisted(() => vi.fn());
+// Banner injection is mocked so we can assert the explicit-flag gate without real CDP.
+const navBannerMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/realisticBrowserActions.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/realisticBrowserActions.js")>(
     "../runtime/realisticBrowserActions.js",
@@ -31,6 +33,7 @@ vi.mock("../runtime/realisticBrowserActions.js", async () => {
     ...actual,
     realisticClickKnownBox: clickKnownBoxMock,
     realisticClickByDescription: clickByDescriptionMock,
+    injectNavigationMediationBannerViaCDP: navBannerMock,
   };
 });
 
@@ -1209,5 +1212,90 @@ describe("POST /api/agent/v1/runtime/browser-click — post_click_state (general
     expect(clickByDescriptionMock.mock.calls[0][0].verify).toEqual(
       expect.objectContaining({ checkoutTransitionIntent: true, collectSurfaceDetail: true }),
     );
+  });
+});
+
+// Follow-up 1 (runtime DOM footprint audit): pointer debug overlays and the nav-mediation
+// banner are EXPLICIT-OPT-IN only — they must not be injected just because the session is
+// visible/headed. resolveOverlayEnabled now requires ANTIGEN_POINTER_DEBUG_OVERLAY=true.
+// The overlay decision is observable via the debugOverlay arg passed to the (mocked) click
+// runtime; the banner decision is observable via the (mocked) banner injector.
+describe("overlay/banner are explicit-flag-only (Follow-up 1)", () => {
+  const NAV_URL = "/api/agent/v1/runtime/browser-navigation-state";
+
+  beforeEach(() => {
+    navBannerMock.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+  });
+
+  it("visible session + flag unset → debugOverlay:false (no overlay injected)", async () => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    seedSession({ mode: "visible" });
+    seedSnapshot([candidate()]);
+
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({ debugOverlay: false }));
+  });
+
+  it("visible session + flag=true → debugOverlay:true (overlay injected)", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    seedSession({ mode: "visible" });
+    seedSnapshot([candidate()]);
+
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({ debugOverlay: true }));
+  });
+
+  it("headless session + flag unset → debugOverlay:false (default stays off)", async () => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    seedSession({ mode: "headless" });
+    seedSnapshot([candidate()]);
+
+    const res = await server.inject({
+      method: "POST", url: URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(clickKnownBoxMock).toHaveBeenCalledWith(expect.objectContaining({ debugOverlay: false }));
+  });
+
+  it("nav banner: visible session + flag unset → banner NOT injected", async () => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    seedSession({ mode: "visible" });
+
+    const res = await server.inject({
+      method: "POST", url: NAV_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://www.ikea.com/us/en/", action: "navigation_proxy" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(navBannerMock).not.toHaveBeenCalled();
+  });
+
+  it("nav banner: flag=true → banner injected", async () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    seedSession({ mode: "visible" });
+
+    const res = await server.inject({
+      method: "POST", url: NAV_URL, headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://www.ikea.com/us/en/", action: "navigation_proxy" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(navBannerMock).toHaveBeenCalledTimes(1);
   });
 });

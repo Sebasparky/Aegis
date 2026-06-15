@@ -80,10 +80,12 @@ controlled local reasoning.
 
 > Not implemented in this thread. Listed for prioritization only.
 
-- **Follow-up 1 — Gate debug overlays behind an explicit flag.** Make pointer debug overlays
-  and the navigation-mediation banner activate **only** under `ANTIGEN_POINTER_DEBUG_OVERLAY`
-  (or an equivalent explicit flag), not automatically when `session.mode === "visible"`. This
-  removes injected DOM nodes from normal headed QA runs.
+- **Follow-up 1 — Gate debug overlays behind an explicit flag. ✅ Done.** `resolveOverlayEnabled`
+  (`apps/api/src/routes/agent-api.ts`) no longer falls back to `session.mode === "visible"`;
+  pointer debug overlays and the navigation-mediation banner now activate **only** under
+  `ANTIGEN_POINTER_DEBUG_OVERLAY=true`, so normal headed QA runs inject no `__aegis_pointer_debug_*`
+  nodes or banner. Covered by `antigen-browser-click-endpoint.test.ts` (both env directions for the
+  overlay and the banner).
 - **Follow-up 2 — Clean up `data-antigen-fill-id` markers.** After the target profile field is
   resolved, remove `data-antigen-fill-id` from all enumerated candidates (or scope it to the
   resolved element and clear it on completion). Eliminates marker spray across fields the agent

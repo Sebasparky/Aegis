@@ -24,6 +24,7 @@ const ANTIGEN_KEYS = [
   "human_verification",
   "hv_debug",
   "fill_state",
+  "keyevents_full",
   "pointer_timing",
   "browser_trace",
   "timing_debug",
@@ -39,6 +40,7 @@ const MUTATED = [
   "ANTIGEN_ACTIVE_SURFACES",
   "ANTIGEN_SURFACE_RESOLVE",
   "ANTIGEN_FILL_STATE",
+  "ANTIGEN_INPUT_KEYEVENTS_FULL",
   "ANTIGEN_HV_DEBUG",
   "ANTIGEN_POINTER_TIMING",
   "ANTIGEN_BROWSER_HEADLESS",
@@ -106,6 +108,18 @@ describe("GET /api/runtime/status", () => {
     expect(body.antigen.fill_state).toBe(false);
   });
 
+  it("reports keyevents_full=true by default (flag unset)", async () => {
+    delete process.env.ANTIGEN_INPUT_KEYEVENTS_FULL;
+    const body = (await getStatus()).json();
+    expect(body.antigen.keyevents_full).toBe(true);
+  });
+
+  it("reports keyevents_full=false when ANTIGEN_INPUT_KEYEVENTS_FULL is disabled", async () => {
+    process.env.ANTIGEN_INPUT_KEYEVENTS_FULL = "false";
+    const body = (await getStatus()).json();
+    expect(body.antigen.keyevents_full).toBe(false);
+  });
+
   it("non-'true' values resolve to false / realistic default", async () => {
     process.env.ANTIGEN_CLICK_VERIFY = "1";
     delete process.env.ANTIGEN_ACTIVE_SURFACES;
@@ -163,6 +177,14 @@ describe("formatAntigenRuntimeFlagsLine", () => {
     expect(line).toContain("cdp_port_configured=true");
     // The raw CDP URL must never appear in the log line.
     expect(line).not.toContain("http://localhost:9222");
+  });
+
+  it("includes keyevents_full in the startup line, defaulting true and tracking the env flag", () => {
+    delete process.env.ANTIGEN_INPUT_KEYEVENTS_FULL;
+    expect(formatAntigenRuntimeFlagsLine()).toContain("keyevents_full=true");
+    process.env.ANTIGEN_INPUT_KEYEVENTS_FULL = "false";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("keyevents_full=false");
+    delete process.env.ANTIGEN_INPUT_KEYEVENTS_FULL;
   });
 
   it("includes fill_state in the startup line, tracking the env flag", () => {

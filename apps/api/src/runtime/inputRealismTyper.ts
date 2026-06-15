@@ -57,6 +57,46 @@ export function getInputRealismMode(): InputRealismMode {
 }
 
 /**
+ * Reads ANTIGEN_INPUT_KEYEVENTS_FULL env var. Default ON.
+ *   unset / "true" / any unknown                 → true  (rawKeyDown → char → keyUp per char)
+ *   "false" / "0" / "disabled" / "off" / "no"    → false (legacy char-only event)
+ *
+ * When on, realistic typing emits the full browser-like key-event sequence per
+ * character instead of the lone `{type:"char"}` event. Behavior-neutral for form
+ * fields; flag exists so it can be disabled if a site misbehaves.
+ */
+export function getKeyEventsFullEnabled(): boolean {
+  const v = (process.env.ANTIGEN_INPUT_KEYEVENTS_FULL ?? "").toLowerCase();
+  return !(v === "false" || v === "0" || v === "disabled" || v === "off" || v === "no");
+}
+
+/**
+ * Emits one printable character's CDP key events.
+ *
+ * With full key events (default), dispatches rawKeyDown → char → keyUp, mirroring
+ * the proven `dispatchEnterViaCDP` shape: rawKeyDown/keyUp carry `key` (no text);
+ * the `char` event carries `text` and is what fires DOM keypress/input and inserts
+ * the character. Without full key events, only the `char` event is sent — the
+ * original behavior.
+ *
+ * No intra-character sleep is performed: inter-character jitter remains the
+ * caller's spacing, so total typing duration is unchanged. Never logs the char.
+ */
+export function dispatchPrintableCharViaCDP(
+  sendCdp: (method: string, params: Record<string, unknown>) => void,
+  char: string,
+  fullKeyEvents: boolean,
+): void {
+  if (!fullKeyEvents) {
+    sendCdp("Input.dispatchKeyEvent", { type: "char", text: char });
+    return;
+  }
+  sendCdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key: char });
+  sendCdp("Input.dispatchKeyEvent", { type: "char", text: char });
+  sendCdp("Input.dispatchKeyEvent", { type: "keyUp", key: char });
+}
+
+/**
  * Dispatches CDP `Input.dispatchKeyEvent` calls character-by-character with
  * field-kind-aware jitter. Fire-and-forget: each event is sent without waiting
  * for a CDP ack. Value acceptance must be verified by the caller afterward.
@@ -84,6 +124,7 @@ export async function typeCharsViaCDP(
   const random = opts.random ?? Math.random;
   const profile = TYPING_PROFILES[fieldKind];
   const charCountBucket = getCharCountBucket(value.length);
+  const fullKeyEvents = getKeyEventsFullEnabled();
   const startMs = Date.now();
 
   // Brief pause after focus before first keystroke — matches natural human onset.
@@ -91,7 +132,7 @@ export async function typeCharsViaCDP(
 
   for (const char of value) {
     try {
-      sendCdp("Input.dispatchKeyEvent", { type: "char", text: char });
+      dispatchPrintableCharViaCDP(sendCdp, char, fullKeyEvents);
     } catch {
       // Synchronous send failure (e.g., WebSocket closed mid-typing).
       // Return failure so the caller can fall back to direct assignment.

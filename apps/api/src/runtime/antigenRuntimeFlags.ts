@@ -22,6 +22,7 @@ import { isSurfaceResolveEnabled } from "./antigenSurfaceResolution.js";
 import { isLogicalRefRecoveryEnabled } from "./antigenLogicalRecovery.js";
 import { isHumanVerificationEnabled, isHvDebugEnabled } from "./humanVerificationState.js";
 import { isFillStateEnabled } from "./postFillProbe.js";
+import { getKeyEventsFullEnabled } from "./inputRealismTyper.js";
 import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
@@ -39,6 +40,12 @@ export interface AntigenRuntimeStatus {
    */
   hv_debug: boolean;
   fill_state: boolean;
+  /**
+   * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
+   * typing emits the full rawKeyDown → char → keyUp sequence per character instead
+   * of the lone char event. Behavior-neutral for form fields.
+   */
+  keyevents_full: boolean;
   /**
    * Pointer animation timing. "fast" maps to the internal "native" profile
    * (~120ms move, dev/QA); "realistic" is the production-safe default.
@@ -67,6 +74,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     human_verification: isHumanVerificationEnabled(),
     hv_debug: isHvDebugEnabled(),
     fill_state: isFillStateEnabled(),
+    keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
     browser_trace: traceEnabled(),
     timing_debug: timingEnabled(),
@@ -82,7 +90,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
  * One-line sanitized startup log string, e.g.:
  * [AntigenRuntimeFlags] click_verify=true active_surfaces=true surface_resolve=true
  *   logical_recovery=true human_verification=true hv_debug=false fill_state=true
- *   pointer_timing=fast browser_trace=true timing_debug=true
+ *   keyevents_full=true pointer_timing=fast browser_trace=true timing_debug=true
  *   require_antigen_tools=false headless=false cdp_port_configured=true
  */
 export function formatAntigenRuntimeFlagsLine(): string {
@@ -95,6 +103,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `human_verification=${s.human_verification}`,
     `hv_debug=${s.hv_debug}`,
     `fill_state=${s.fill_state}`,
+    `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,
     `browser_trace=${s.browser_trace}`,
     `timing_debug=${s.timing_debug}`,

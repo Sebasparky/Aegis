@@ -252,9 +252,13 @@ describe("profile fill — realistic typing for text fields", () => {
 
     expect(entries[0].status).toBe("filled");
 
-    // Exactly one key event per character — the realistic typing path.
-    expect(methodCalls("Input.dispatchKeyEvent")).toHaveLength(VALUE.length);
-    expect(methodCalls("Input.dispatchKeyEvent").every((m) => m.params?.type === "char")).toBe(true);
+    // Exactly one char event per character — the realistic typing path. Full key
+    // events (default) wrap each char with rawKeyDown/keyUp, so total key events
+    // are 3x the char count.
+    const keyEvents = methodCalls("Input.dispatchKeyEvent");
+    const charKeyEvents = keyEvents.filter((m) => m.params?.type === "char");
+    expect(charKeyEvents).toHaveLength(VALUE.length);
+    expect(keyEvents).toHaveLength(VALUE.length * 3);
 
     // No bulk insert, and no JSON-embedded native-setter fallback expression.
     expect(methodCalls("Input.insertText")).toHaveLength(0);

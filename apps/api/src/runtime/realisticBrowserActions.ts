@@ -44,7 +44,12 @@ import {
   type ClickVerificationContext,
 } from "./antigenClickVerification.js";
 import { timingEnabled } from "./browserTiming.js";
-import { getInputRealismMode, getCharCountBucket } from "./inputRealismTyper.js";
+import {
+  getInputRealismMode,
+  getCharCountBucket,
+  getKeyEventsFullEnabled,
+  dispatchPrintableCharViaCDP,
+} from "./inputRealismTyper.js";
 import { getLoadedPointerTraces } from "./pointerProfileLoader.js";
 import {
   getTaskBrowserSessionPointerState,
@@ -572,12 +577,13 @@ export async function dispatchTextCharsViaCDP(
   opts?: { random?: () => number },
 ): Promise<Pick<RealisticTypeResult, "char_count_bucket" | "duration_ms">> {
   const random = opts?.random ?? Math.random;
+  const fullKeyEvents = getKeyEventsFullEnabled();
   const startMs = Date.now();
 
   await sleep(50); // brief onset pause before first keystroke
 
   for (const char of text) {
-    sendCdp("Input.dispatchKeyEvent", { type: "char", text: char });
+    dispatchPrintableCharViaCDP(sendCdp, char, fullKeyEvents);
     const jitter =
       GENERAL_TYPING_PROFILE.min_ms +
       random() * (GENERAL_TYPING_PROFILE.max_ms - GENERAL_TYPING_PROFILE.min_ms);

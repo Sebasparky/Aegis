@@ -210,11 +210,13 @@ describe("dispatchTextCharsViaCDP — dispatch count", () => {
 
   beforeEach(() => { mockSleep.mockClear(); mockSend.mockClear(); });
 
-  it("dispatches one Input.dispatchKeyEvent per character for 'desk lamp' (9 chars)", async () => {
+  it("dispatches one char event per character for 'desk lamp' (9 chars)", async () => {
     const text = "desk lamp";
     await dispatchTextCharsViaCDP(mockSend, mockSleep, text, { random: () => 0.5 });
-    const keyEvents = mockSend.mock.calls.filter(([m]) => m === "Input.dispatchKeyEvent");
-    expect(keyEvents).toHaveLength(text.length);
+    const charEvents = mockSend.mock.calls.filter(
+      ([m, p]) => m === "Input.dispatchKeyEvent" && (p as { type?: string }).type === "char",
+    );
+    expect(charEvents).toHaveLength(text.length);
   });
 
   it("dispatches zero events for empty string", async () => {
@@ -222,9 +224,25 @@ describe("dispatchTextCharsViaCDP — dispatch count", () => {
     expect(mockSend.mock.calls.filter(([m]) => m === "Input.dispatchKeyEvent")).toHaveLength(0);
   });
 
-  it("each event carries type:char and the matching character", async () => {
+  it("wraps each char with rawKeyDown → char → keyUp by default (full key events on)", async () => {
+    await dispatchTextCharsViaCDP(mockSend, mockSleep, "ab");
+    const types = mockSend.mock.calls
+      .filter(([m]) => m === "Input.dispatchKeyEvent")
+      .map(([, p]) => (p as { type: string }).type);
+    expect(types).toEqual(["rawKeyDown", "char", "keyUp", "rawKeyDown", "char", "keyUp"]);
+
+    const charEvents = mockSend.mock.calls.filter(
+      ([m, p]) => m === "Input.dispatchKeyEvent" && (p as { type?: string }).type === "char",
+    );
+    expect(charEvents[0][1]).toMatchObject({ type: "char", text: "a" });
+    expect(charEvents[1][1]).toMatchObject({ type: "char", text: "b" });
+  });
+
+  it("flag off (ANTIGEN_INPUT_KEYEVENTS_FULL=false) emits char-only events", async () => {
+    vi.stubEnv("ANTIGEN_INPUT_KEYEVENTS_FULL", "false");
     await dispatchTextCharsViaCDP(mockSend, mockSleep, "ab");
     const keyEvents = mockSend.mock.calls.filter(([m]) => m === "Input.dispatchKeyEvent");
+    expect(keyEvents).toHaveLength(2);
     expect(keyEvents[0][1]).toMatchObject({ type: "char", text: "a" });
     expect(keyEvents[1][1]).toMatchObject({ type: "char", text: "b" });
   });
@@ -662,7 +680,7 @@ describe("realisticTypeTextViaCDP — per-character dispatch", () => {
     mockState.nextEvalResponse = true; // simulate focused active element for active-element check
   });
 
-  it("dispatches one Input.dispatchKeyEvent per character of 'desk lamp'", async () => {
+  it("dispatches one char event per character of 'desk lamp' (full key events on by default)", async () => {
     const text = "desk lamp";
     const resultPromise = realisticTypeTextViaCDP({ cdpUrl: "http://localhost:9222", text });
 
@@ -675,10 +693,10 @@ describe("realisticTypeTextViaCDP — per-character dispatch", () => {
       .map((m) => { try { return JSON.parse(m); } catch { return null; } })
       .filter((m): m is { method: string; params: { type: string } } => m?.method === "Input.dispatchKeyEvent");
 
-    expect(keyEvents).toHaveLength(text.length);
-    for (const evt of keyEvents) {
-      expect(evt.params.type).toBe("char");
-    }
+    // Default full key events: rawKeyDown → char → keyUp per character.
+    const charEvents = keyEvents.filter((evt) => evt.params.type === "char");
+    expect(charEvents).toHaveLength(text.length);
+    expect(keyEvents).toHaveLength(text.length * 3);
   });
 
   it("returns char_count_bucket 9-16 for 'desk lamp' (9 chars)", async () => {

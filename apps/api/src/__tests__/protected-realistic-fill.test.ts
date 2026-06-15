@@ -180,9 +180,10 @@ describe("executeProtectedRealisticFill — INPUT realistic path", () => {
     expect(mouse.some((m) => m.params?.type === "mouseReleased")).toBe(true);
 
     // Realistic typing: exactly one char key event per character of the value.
+    // Full key events (default) wrap each char with rawKeyDown/keyUp.
     const keys = methodCalls("Input.dispatchKeyEvent");
-    expect(keys).toHaveLength(CARD.length);
-    for (const k of keys) expect(k.params?.type).toBe("char");
+    expect(keys.filter((k) => k.params?.type === "char")).toHaveLength(CARD.length);
+    expect(keys).toHaveLength(CARD.length * 3);
 
     // NOT the invisible-injection path: no insertText, no native-setter fallback eval.
     expect(methodCalls("Input.insertText")).toHaveLength(0);
@@ -522,7 +523,11 @@ describe("executeProtectedRealisticFill — focus robustness", () => {
     await vi.runAllTimersAsync();
     const result = await p;
     expect(result.success).toBe(true);
-    expect(methodCalls("Input.dispatchKeyEvent")).toHaveLength(CARD.length);
+    // Full key events (default) emit rawKeyDown → char → keyUp per character; the
+    // char events are one-per-character.
+    const keyEvents = methodCalls("Input.dispatchKeyEvent");
+    expect(keyEvents.filter((m) => m.params?.type === "char")).toHaveLength(CARD.length);
+    expect(keyEvents).toHaveLength(CARD.length * 3);
   });
 
   it("setter fallback verifies persistence through the native getter and reports value_not_persisted", async () => {

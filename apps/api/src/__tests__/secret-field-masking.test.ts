@@ -276,18 +276,24 @@ describe("Realistic Fill — happy path sequence", () => {
     expect(boxMsg!.params?.expression as string).not.toContain(secret);
   });
 
-  it("sends Input.dispatchKeyEvent events (one per char) on the happy path", async () => {
+  it("sends Input.dispatchKeyEvent char events (one per char) on the happy path", async () => {
     const value = "PLACEHOLDER";
     await executeSecretInjectionViaCDP(makeInjection("username"), value, "http://localhost:9222");
-    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
-    expect(keyEvents.length).toBe(value.length);
+    // Full key events (default) wrap each char with rawKeyDown/keyUp; the char
+    // events are one-per-character.
+    const charEvents = sentMessages.filter(
+      (m) => m.method === "Input.dispatchKeyEvent" && m.params?.type === "char",
+    );
+    expect(charEvents.length).toBe(value.length);
   });
 
-  it("Input.dispatchKeyEvent events reconstruct the resolved value when concatenated", async () => {
+  it("Input.dispatchKeyEvent char events reconstruct the resolved value when concatenated", async () => {
     const secret = "UNIQUE_SECRET_SENTINEL";
     await executeSecretInjectionViaCDP(makeInjection("username"), secret, "http://localhost:9222");
-    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
-    const reconstructed = keyEvents.map((m) => m.params?.text as string).join("");
+    const charEvents = sentMessages.filter(
+      (m) => m.method === "Input.dispatchKeyEvent" && m.params?.type === "char",
+    );
+    const reconstructed = charEvents.map((m) => m.params?.text as string).join("");
     expect(reconstructed).toBe(secret);
   });
 
@@ -695,8 +701,10 @@ describe("Native pointer focus — box lookup failure fallback", () => {
   it("Input.dispatchKeyEvent events still sent when box lookup fails", async () => {
     await executeSecretInjectionViaCDP(makeInjection("username"), "FALLBACK_SECRET", "http://localhost:9222");
     // Pointer focus is skipped on box lookup failure, but typing realism still fires.
-    const keyEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent");
-    expect(keyEvents.length).toBe("FALLBACK_SECRET".length);
+    const charEvents = sentMessages.filter(
+      (m) => m.method === "Input.dispatchKeyEvent" && m.params?.type === "char",
+    );
+    expect(charEvents.length).toBe("FALLBACK_SECRET".length);
   });
 
   it("result never contains the secret even when pointer path is skipped", async () => {

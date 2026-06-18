@@ -24,6 +24,7 @@ import {
   recheckVisualGestureCapsule,
   recaptureVisualGestureCapsule,
   cancelVisualGestureCapsule,
+  createVisualGestureCapsuleSmoke,
   type VisualGestureCapsuleView,
   type VisualGestureKind,
 } from "@/lib/api";
@@ -32,6 +33,10 @@ import { normalizePointInRect } from "@/lib/normalizePoint";
 const POLL_MS = 2500;
 const PRESS_HOLD_MIN_MS = 300;
 const PRESS_HOLD_MAX_MS = 30000;
+
+// Dev-only affordance gate. Next.js inlines process.env.NODE_ENV in client code;
+// the backend smoke route is itself NODE_ENV-gated, so this only hides the button.
+const IS_DEV = process.env.NODE_ENV !== "production";
 
 type GestureMode = "tap" | "press_hold";
 
@@ -316,17 +321,54 @@ export default function HumanVerificationPage() {
     }
   }
 
+  // Dev-only smoke: create a fake smoke.test capsule + frame and refresh the list,
+  // so the list → screenshot render → cancel flow can be exercised without a live
+  // wall. Gesture/recheck/recapture stay BROWSER_SESSION_UNAVAILABLE (no session).
+  async function handleCreateSmoke() {
+    if (busy) return;
+    setBusy(true);
+    setStatusMsg("Creating smoke request…");
+    try {
+      const res = await createVisualGestureCapsuleSmoke();
+      const list = await listVisualGestureCapsules();
+      setDisabled(Boolean(list.disabled));
+      setCapsules(list.data);
+      setSelectedId(res.data.capsule_id);
+      setStatusMsg("Smoke request created.");
+    } catch (e) {
+      setStatusMsg(
+        errCode(e) === "VISUAL_GESTURE_CAPSULE_DISABLED"
+          ? "Set ANTIGEN_VISUAL_GESTURE_CAPSULE=true on the API to create a smoke request."
+          : "Could not create a smoke request.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-5xl">
-      <div className="mb-5">
-        <h1 className="text-2xl font-semibold text-white">User presence required</h1>
-        <p className="mt-1 max-w-2xl text-sm text-gray-400">
-          A site is asking you to confirm you&apos;re human. Antigen captured a redacted view of the
-          page — tap or press &amp; hold where the site asks you to confirm, and Antigen will relay
-          your action and recheck the page. No passwords, cookies, or browser details are shown or
-          stored here.
-        </p>
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">User presence required</h1>
+          <p className="mt-1 max-w-2xl text-sm text-gray-400">
+            A site is asking you to confirm you&apos;re human. Antigen captured a redacted view of the
+            page — tap or press &amp; hold where the site asks you to confirm, and Antigen will relay
+            your action and recheck the page. No passwords, cookies, or browser details are shown or
+            stored here.
+          </p>
+        </div>
+        {IS_DEV && (
+          <button
+            className={`${btnDefault} shrink-0`}
+            onClick={handleCreateSmoke}
+            disabled={busy}
+            title="Dev only — creates a fake smoke.test request to render the panel"
+          >
+            Create smoke request
+          </button>
+        )}
       </div>
 
       {loadError && (

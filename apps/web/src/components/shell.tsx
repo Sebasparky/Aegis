@@ -30,6 +30,7 @@ const Icons = {
   bell:      (s = 15) => <Ic size={s}><path d="M6 16V11a6 6 0 0112 0v5l1.5 2H4.5L6 16z"/><path d="M10 20a2 2 0 004 0"/></Ic>,
   connect:   (s = 16) => <Ic size={s}><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></Ic>,
   identity:  (s = 16) => <Ic size={s}><circle cx="12" cy="8" r="3.5"/><path d="M5 19c0-3.5 3-6 7-6s7 2.5 7 6"/><path d="M17.5 5.5l1.5 1.5-1.5 1.5"/></Ic>,
+  human:     (s = 16) => <Ic size={s}><circle cx="12" cy="7" r="3"/><path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M9 11.5l2 2 3.5-3.5"/></Ic>,
 };
 
 // ── Nav config ─────────────────────────────────────────────────────────────
@@ -41,6 +42,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/connect-agent",       label: "Connect",    icon: Icons.connect    },
   { href: "/collars",             label: "Collars",    icon: Icons.collars    },
   { href: "/route-run-approvals", label: "Approvals",  icon: Icons.approvals, badge: true },
+  { href: "/human-verification",  label: "Human check", icon: Icons.human     },
   { href: "/passes",              label: "Secrets",    icon: Icons.secrets    },
   { href: "/payment-methods",    label: "Cards",      icon: Icons.cards      },
   { href: "/workspaces",          label: "Workspaces", icon: Icons.workspaces },
@@ -57,6 +59,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/connect-agent":       "Connect Agent",
   "/collars":             "Collars",
   "/route-run-approvals": "Approvals",
+  "/human-verification":  "Human verification",
   "/passes":              "Secrets",
   "/payment-methods":    "Payment Methods",
   "/workspaces":          "Workspaces",

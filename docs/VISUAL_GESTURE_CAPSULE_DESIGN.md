@@ -316,3 +316,27 @@ screenshot is consumed); session/domain/HV-request bound.
 - **Touch vs mouse.** Only mouse events exist today (no `Input.dispatchTouchEvent`).
   v1 relays mouse events; whether some challenges require touch is an open question
   for a later step.
+
+---
+
+## Local smoke test (M2C, dev-only)
+
+Render an active capsule in the `/human-verification` UI **without** a live
+opaque-HV wall, to confirm the list → screenshot render → cancel flow.
+
+1. Start the API with the flag on: `ANTIGEN_VISUAL_GESTURE_CAPSULE=true`, then
+   start the web app. (The smoke route lives under `devRoutes`, registered only
+   when `NODE_ENV !== "production"`, so it is never reachable in production.)
+2. Open the **Human check** sidebar item (`/human-verification`).
+3. Click **Create smoke request** (dev-only button). This calls
+   `POST /api/dev/visual-gesture-capsules/smoke`, which creates a fake
+   `smoke.test` capsule and stores a fake solid-color screenshot frame.
+4. Confirm the capsule lists, the screenshot renders, and **Cancel** resolves it.
+
+**Scope / limits:** the smoke exercises list + screenshot render + cancel only.
+The fake capsule has no live task browser session, so **gesture, recheck, and
+recapture return `BROWSER_SESSION_UNAVAILABLE`** — those paths require a real
+task browser session and are not part of the smoke. The smoke response returns
+only safe capsule-view metadata (no `cdp_url`, `browser_session_id`, viewport
+dims, or coordinates); screenshot bytes remain available only through
+`GET /api/internal/visual-gesture-capsules/:id/screenshot`.

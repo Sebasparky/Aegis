@@ -1567,3 +1567,13 @@ export const cancelVisualGestureCapsule = (capsuleId: string) =>
     `/api/internal/visual-gesture-capsules/${capsuleId}/cancel`,
     { method: "POST", body: JSON.stringify({}) },
   );
+
+// Development-only smoke helper: creates a fake smoke.test capsule + frame so the
+// /human-verification UI can be exercised without a live opaque-HV wall. Backed by
+// the NODE_ENV-gated dev route; requires ANTIGEN_VISUAL_GESTURE_CAPSULE=true on the
+// API. Returns only the safe capsule view.
+export const createVisualGestureCapsuleSmoke = () =>
+  vgcRequest<{ ok: true; data: VisualGestureCapsuleView }>(
+    `/api/dev/visual-gesture-capsules/smoke`,
+    { method: "POST", body: JSON.stringify({}) },
+  );

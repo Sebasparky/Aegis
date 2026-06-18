@@ -114,6 +114,11 @@ import {
   humanVerificationAgentNextAction,
 } from "../lib/humanVerificationLifecycle.js";
 import { toAgentHumanVerificationView } from "./human-verification.js";
+import {
+  isVisualGestureCapsuleEnabled,
+  type SafeVisualGestureCapsuleView,
+} from "../runtime/visualGestureCapsule.js";
+import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef, orderPaymentFillFields, isIframeCapablePaymentField } from "../runtime/paymentCardFill.js";
@@ -513,6 +518,7 @@ function sendHumanVerificationRequired(
   reply: any,
   tool: string,
   request: { request_id: string; status: string; challenge_type: string; domain: string },
+  visualGestureCapsule?: { available: true; capsule: SafeVisualGestureCapsuleView },
 ): void {
   recordActionPreflight(session, tool, "returned_human_verification_required");
   recordBrowserTraceEvent(session.browser_session_id, {
@@ -534,6 +540,11 @@ function sendHumanVerificationRequired(
       user_presence_required: true,
       purchase_authorized: false,
       next_action: humanVerificationAgentNextAction(request as any),
+      // Safe metadata only — present ONLY for opaque/page-level walls when a
+      // Visual Gesture Capsule was minted. Bytes/coords/viewport/cdp/strategy are
+      // never included (the safe view carries none of them). Absent otherwise →
+      // payload byte-identical to the pre-VGC shape.
+      ...(visualGestureCapsule ? { visual_gesture_capsule: visualGestureCapsule } : {}),
     },
   });
 }
@@ -655,7 +666,29 @@ async function rejectStaleRefAsHumanVerification(
     surface_title: "Access challenge",
     page_level: wall.page_level === true,
   });
-  sendHumanVerificationRequired(session, reply, tool, request);
+
+  // Opaque/page-level wall ONLY: the control lives in an inaccessible cross-origin
+  // iframe, so the DOM Human Presence Relay has no `control_box` to target. When
+  // the VGC flag is on, mint a Visual Gesture Capsule + first redacted frame so the
+  // internal UI can drive a screenshot-point relay. Fail-safe: the orchestrator
+  // never throws, and a failed create/capture leaves `vgc` undefined → the
+  // response shape is unchanged from the pre-VGC behavior.
+  let vgc: { available: true; capsule: SafeVisualGestureCapsuleView } | undefined;
+  if (wall.page_level === true && isVisualGestureCapsuleEnabled()) {
+    const created = await createVisualGestureCapsuleForOpaqueHv({
+      humanVerificationRequestId: request.request_id,
+      browserSessionId: session.browser_session_id,
+      domain: hvDomain,
+      cdpUrl: session.cdp_url,
+      pageUrl: session.current_url ?? "",
+      delegationId: delegation.id,
+      userId: MOCK_USER_ID,
+      reason: "opaque_hv_no_control_box",
+    });
+    if (created.ok) vgc = { available: true, capsule: created.capsule };
+  }
+
+  sendHumanVerificationRequired(session, reply, tool, request, vgc);
   return true;
 }
 

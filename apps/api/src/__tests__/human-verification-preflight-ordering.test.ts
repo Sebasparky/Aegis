@@ -61,6 +61,17 @@ vi.mock("../runtime/cdpTargetSelection.js", async () => {
   return { ...actual, resolveSnapshotCdpTarget: resolveTargetMock };
 });
 
+// Mock ONLY the VGC redacted-frame capture helper (the orchestrator's one CDP
+// touch) so the M1H opaque-wall capsule path runs without a real browser. Every
+// other VGC export (store, safe view, flag) stays real.
+const vgcCaptureMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/visualGestureCapsuleCapture.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/visualGestureCapsuleCapture.js")>(
+    "../runtime/visualGestureCapsuleCapture.js",
+  );
+  return { ...actual, captureVisualGestureCapsuleScreenshotFrame: vgcCaptureMock };
+});
+
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
@@ -78,6 +89,11 @@ import {
 } from "../runtime/humanVerificationState.js";
 import { createOrReuseHumanVerificationRequest } from "../lib/humanVerificationLifecycle.js";
 import { getBrowserRunTrace, clearBrowserRunTraces } from "../runtime/browserRunTrace.js";
+import {
+  listActiveVisualGestureCapsules,
+  clearVisualGestureCapsulesForTests,
+  storeVisualGestureCapsuleScreenshotFrame,
+} from "../runtime/visualGestureCapsule.js";
 
 const BEARER = "Bearer tok_hvpre_001";
 const DELEGATION_ID = "del_hvpre_001";
@@ -384,5 +400,164 @@ describe("HV preflight priority ordering — narrow (stale-path) live probe", ()
       "hv_probe_checked",
       "returned_ref_stale",
     ]);
+  });
+});
+
+/**
+ * M1H — Visual Gesture Capsule creation on the opaque/page-level HV-required path.
+ * Reuses the harness above. The VGC redacted-capture helper is mocked (no browser).
+ */
+describe("HV opaque wall → Visual Gesture Capsule (M1H)", () => {
+  const CAPTURE_OK = {
+    ok: true as const,
+    capsule_id: "ignored",
+    screenshot_available: true as const,
+    screenshot_captured_at: new Date().toISOString(),
+    screenshot_expires_at: new Date(Date.now() + 45_000).toISOString(),
+  };
+  const CAPTURE_FAIL = { ok: false as const, reason: "capture_failed" as const };
+
+  /**
+   * Faithful capture mock: the real helper STORES a redacted frame in the M1B
+   * frame store on success, which is what makes the safe view's
+   * `screenshot_available` true. Mirror that here (no real CDP) so the safe view
+   * is exercised end-to-end.
+   */
+  function captureOkStoringFrame() {
+    return vi.fn(async ({ capsuleId }: { capsuleId: string }) => {
+      storeVisualGestureCapsuleScreenshotFrame(capsuleId, {
+        png_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        viewport_css_width: 1280,
+        viewport_css_height: 800,
+      });
+      return CAPTURE_OK;
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    clearVisualGestureCapsulesForTests();
+  });
+
+  it("(1) page_level wall + VGC flag ON + capture ok → 409 with safe visual_gesture_capsule metadata", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.capsule_id).toMatch(/^vgc_/);
+    expect(body.error.visual_gesture_capsule.capsule.status).toBe("awaiting_user_gesture");
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
+    // The capsule was actually minted and is discoverable for internal UI polling.
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+    expect(vgcCaptureMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("(2) page_level wall + VGC flag ON + capture FAILS → 409 still includes capsule, screenshot_available false, no bytes", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockResolvedValueOnce(CAPTURE_FAIL);
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(false);
+    // Capsule kept alive (retryable via /recapture).
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(3) page_level wall + VGC flag OFF → byte-identical: no capsule, no visual_gesture_capsule key", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error).not.toHaveProperty("visual_gesture_capsule");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(4) non-page_level wall does NOT create a capsule even with the VGC flag on", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    // DOM-visible checkbox challenge — relay-targetable, not an opaque wall.
+    hvWallProbeMock.mockResolvedValueOnce({
+      human_verification: true as const,
+      hv_challenge_type: "checkbox_human" as const,
+      user_presence_required: true as const,
+      blocking: true as const,
+      page_level: false as const,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error).not.toHaveProperty("visual_gesture_capsule");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(5) HV-absent path with VGC flag on stays ANTIGEN_REF_STALE and creates no capsule", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValue(null);
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(6) agent-facing 409 body leaks no bytes/coords/viewport/cdp/strategy", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+    const raw = JSON.stringify(res.json());
+
+    for (const forbidden of [
+      "png_base64",
+      "data:image",
+      "viewport_css_width",
+      "viewport_css_height",
+      "cssX",
+      "cssY",
+      '"fx"',
+      '"fy"',
+      "cdp_url",
+      "cdpUrl",
+      "target_id",
+      "expected_url",
+      "control_box",
+      "strategy",
+    ]) {
+      expect(raw).not.toContain(forbidden);
+    }
   });
 });

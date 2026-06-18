@@ -26,6 +26,7 @@ import { getKeyEventsFullEnabled } from "./inputRealismTyper.js";
 import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
+import { isVisualGestureCapsuleEnabled } from "./visualGestureCapsule.js";
 
 export interface AntigenRuntimeStatus {
   click_verify: boolean;
@@ -39,6 +40,12 @@ export interface AntigenRuntimeStatus {
    * challenge text, URLs, selectors, refs, iframe srcs, or HTML are ever logged.
    */
   hv_debug: boolean;
+  /**
+   * Whether ANTIGEN_VISUAL_GESTURE_CAPSULE is on (default off). Gates the
+   * Visual Gesture Capsule path (opaque-wall user-presence relay). Foundation
+   * is byte-identical when off — no capsule created, no capture, no relay.
+   */
+  visual_gesture_capsule: boolean;
   fill_state: boolean;
   /**
    * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
@@ -73,6 +80,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     logical_recovery: isLogicalRefRecoveryEnabled(),
     human_verification: isHumanVerificationEnabled(),
     hv_debug: isHvDebugEnabled(),
+    visual_gesture_capsule: isVisualGestureCapsuleEnabled(),
     fill_state: isFillStateEnabled(),
     keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
@@ -102,6 +110,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `logical_recovery=${s.logical_recovery}`,
     `human_verification=${s.human_verification}`,
     `hv_debug=${s.hv_debug}`,
+    `visual_gesture_capsule=${s.visual_gesture_capsule}`,
     `fill_state=${s.fill_state}`,
     `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,

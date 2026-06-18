@@ -23,6 +23,7 @@ const ANTIGEN_KEYS = [
   "logical_recovery",
   "human_verification",
   "hv_debug",
+  "visual_gesture_capsule",
   "fill_state",
   "keyevents_full",
   "pointer_timing",
@@ -42,6 +43,7 @@ const MUTATED = [
   "ANTIGEN_FILL_STATE",
   "ANTIGEN_INPUT_KEYEVENTS_FULL",
   "ANTIGEN_HV_DEBUG",
+  "ANTIGEN_VISUAL_GESTURE_CAPSULE",
   "ANTIGEN_POINTER_TIMING",
   "ANTIGEN_BROWSER_HEADLESS",
   "AEGIS_PLAYWRIGHT_CDP_URL",
@@ -106,6 +108,18 @@ describe("GET /api/runtime/status", () => {
     delete process.env.ANTIGEN_FILL_STATE;
     const body = (await getStatus()).json();
     expect(body.antigen.fill_state).toBe(false);
+  });
+
+  it("reports visual_gesture_capsule=false by default (flag unset)", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    const body = (await getStatus()).json();
+    expect(body.antigen.visual_gesture_capsule).toBe(false);
+  });
+
+  it("reports visual_gesture_capsule=true when ANTIGEN_VISUAL_GESTURE_CAPSULE is set", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    const body = (await getStatus()).json();
+    expect(body.antigen.visual_gesture_capsule).toBe(true);
   });
 
   it("reports keyevents_full=true by default (flag unset)", async () => {
@@ -192,6 +206,17 @@ describe("formatAntigenRuntimeFlagsLine", () => {
     expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=true");
     delete process.env.ANTIGEN_FILL_STATE;
     expect(formatAntigenRuntimeFlagsLine()).toContain("fill_state=false");
+  });
+
+  it("includes visual_gesture_capsule in the startup line, defaulting false and tracking the env flag", () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    expect(formatAntigenRuntimeFlagsLine()).toContain("visual_gesture_capsule=false");
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("visual_gesture_capsule=true");
+    // Non-'true' values resolve to false, like the other boolean flags.
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "1";
+    expect(formatAntigenRuntimeFlagsLine()).toContain("visual_gesture_capsule=false");
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   });
 
   it("includes hv_debug in the startup line, tracking the env flag (true/false only)", () => {

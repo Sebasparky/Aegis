@@ -39,6 +39,7 @@ import type {
   AccountCreationStepKind,
   AccountAccessMethod,
   HumanVerificationChallengeType,
+  HumanVerificationRequest,
 } from "@aegis/types";
 import {
   createAuthenticatedSession,
@@ -55,9 +56,13 @@ import { isClickVerifyEnabled } from "../runtime/antigenClickVerification.js";
 import {
   extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
+  detectAmbiguousVisualObstructionViaCDP,
+  classifyAmbiguousVisualObstruction,
   collectPageHvWallDebugViaCDP,
   type AntigenPageMeta,
+  type AmbiguousVisualObstructionSignals,
   type HumanVerificationDebug,
+  type PageHumanVerificationWall,
   type PageWallProbeReason,
   type PageWallProbeResult,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -561,16 +566,75 @@ function sendHumanVerificationRequired(
  * result). Returns enum/booleans only — it never reads iframe internals or page
  * content.
  */
-async function detectLiveHumanVerificationWall(session: TaskBrowserSession) {
+async function detectLiveHumanVerificationWall(session: TaskBrowserSession): Promise<{
+  wall: PageHumanVerificationWall | null;
+  resolvedTarget?: { browserWsUrl: string; pageTarget: { id: string; url: string } };
+}> {
   try {
     const resolved = await resolveSnapshotCdpTarget(session.cdp_url);
     const resolvedTarget = resolved
       ? { browserWsUrl: resolved.browserWsUrl, pageTarget: { id: resolved.target.id, url: resolved.target.url } }
       : undefined;
-    if (!resolvedTarget) return null;
-    return await detectPageHumanVerificationWallViaCDP({ cdpUrl: session.cdp_url, resolvedTarget });
+    if (!resolvedTarget) return { wall: null };
+    const wall = await detectPageHumanVerificationWallViaCDP({ cdpUrl: session.cdp_url, resolvedTarget });
+    return { wall, resolvedTarget };
   } catch {
-    return null;
+    return { wall: null };
+  }
+}
+
+/**
+ * Ambiguous visual-obstruction VGC fallback. Shared by the stale-ref action
+ * backstop and the snapshot endpoint. When the VGC flag is on and a live CDP
+ * session exists, classifies coarse value-free obstruction signals and — only on
+ * a concrete static signal — mints a Visual Gesture Capsule (reusing the opaque-HV
+ * orchestrator with a broader `ambiguous_visual_obstruction` reason) plus a safe
+ * HV request whose user-facing copy notes a redacted view was captured. Returns
+ * the HV request + safe capsule view, or undefined when the flag is off, no live
+ * session exists, the signals are not a candidate, or anything fails. Never throws
+ * — a failure degrades to the caller's existing behavior. When VGC is off the
+ * function returns immediately, so behavior is byte-identical.
+ */
+async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
+  session: TaskBrowserSession;
+  delegation: { id: string; agent_name?: string };
+  domain: string;
+  pageUrl: string;
+  signals: AmbiguousVisualObstructionSignals;
+}): Promise<
+  | { request: HumanVerificationRequest; vgc: { available: true; capsule: SafeVisualGestureCapsuleView } }
+  | undefined
+> {
+  if (!isVisualGestureCapsuleEnabled() || !input.session.cdp_url) return undefined;
+  if (!classifyAmbiguousVisualObstruction(input.signals)) return undefined;
+  try {
+    const request = createOrReuseHumanVerificationRequest({
+      user_id: MOCK_USER_ID,
+      delegation_id: input.delegation.id,
+      agent_name: input.delegation.agent_name,
+      browser_session_id: input.session.browser_session_id,
+      domain: input.domain,
+      page_url: input.pageUrl,
+      challenge_type: "unknown_human_verification",
+      // Ambiguous-specific copy lives ONLY in safe user-facing request metadata —
+      // the shared HUMAN_VERIFICATION_REQUIRED top-level message stays byte-identical.
+      surface_title: "User presence may be required. Antigen captured a redacted view for review.",
+      page_level: false,
+    });
+    const created = await createVisualGestureCapsuleForOpaqueHv({
+      humanVerificationRequestId: request.request_id,
+      browserSessionId: input.session.browser_session_id,
+      domain: input.domain,
+      cdpUrl: input.session.cdp_url,
+      pageUrl: input.pageUrl,
+      delegationId: input.delegation.id,
+      userId: MOCK_USER_ID,
+      reason: "ambiguous_visual_obstruction",
+    });
+    if (!created.ok) return undefined;
+    return { request, vgc: { available: true, capsule: created.capsule } };
+  } catch {
+    return undefined;
   }
 }
 
@@ -643,9 +707,48 @@ async function rejectStaleRefAsHumanVerification(
 ): Promise<boolean> {
   if (!isHumanVerificationEnabled()) return false;
 
-  const wall = await detectLiveHumanVerificationWall(session);
+  const { wall, resolvedTarget } = await detectLiveHumanVerificationWall(session);
   recordActionPreflight(session, tool, "hv_probe_checked", { hv_detected: !!wall });
-  if (!wall) return false; // no HV, or probe failed open → fall through to stale
+  if (!wall) {
+    // No structural HV wall. Before surfacing ANTIGEN_REF_STALE, try the ambiguous
+    // visual-obstruction fallback: a live page may be visually blocked by an opaque
+    // overlay/denial wall the DOM/ref pipeline can't expose. Flag-off / no live
+    // session / no concrete signal ⇒ undefined ⇒ unchanged stale behavior.
+    // Wrapped: the probe is fail-safe (returns null on error), but any unexpected
+    // throw must degrade to the original stale response — never 500 the action.
+    if (isVisualGestureCapsuleEnabled() && session.cdp_url) {
+      try {
+        const probe = await detectAmbiguousVisualObstructionViaCDP({
+          cdpUrl: session.cdp_url,
+          resolvedTarget,
+        });
+        if (probe) {
+          let ambiguousDomain = "unknown";
+          try {
+            if (session.current_url) ambiguousDomain = new URL(session.current_url).hostname;
+          } catch {
+            /* keep "unknown" */
+          }
+          // repeated_stale is corroborating-only in the classifier (never fires
+          // alone) — safe to set on this stale-ref branch.
+          const fallback = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+            session,
+            delegation,
+            domain: ambiguousDomain,
+            pageUrl: session.current_url ?? "",
+            signals: { ...probe, repeated_stale: true },
+          });
+          if (fallback) {
+            sendHumanVerificationRequired(session, reply, tool, fallback.request, fallback.vgc);
+            return true;
+          }
+        }
+      } catch {
+        /* fall through to the original ANTIGEN_REF_STALE response */
+      }
+    }
+    return false; // no HV, no ambiguous candidate, or probe failed open → stale
+  }
 
   let hvDomain = "unknown";
   try {
@@ -5581,6 +5684,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     let hvSnapshotInfo:
       | { request_id: string; status: string; challenge_type: string; domain: string; expires_at: string; instructions: string; next_action: string; page_level?: true }
       | undefined;
+    // Safe Visual Gesture Capsule view, set only by the ambiguous visual-obstruction
+    // fallback (VGC flag on + concrete obstruction signal + no structural HV wall).
+    let vgcSnapshotInfo: { available: true; capsule: SafeVisualGestureCapsuleView } | undefined;
     // Set when the detected challenge is a page-level full-page denial wall whose
     // control is inside a cross-origin iframe (zero candidate elements). Drives a
     // synthesized blocking active surface + manual-completion guidance.
@@ -5686,19 +5792,67 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(hvRequest.page_level ? { page_level: true as const } : {}),
         };
       } else {
-        const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
-        if (openRequest) resolveChallengeNoLongerPresent(openRequest);
-        clearActiveHumanVerification(session.browser_session_id);
-        // First fresh snapshot after a completion drives agent-resume audit.
-        for (const r of humanVerificationRequests.values()) {
-          if (
-            r.browser_session_id === session.browser_session_id &&
-            r.status === "completed" &&
-            !r.resumed_at
-          ) {
-            r.resumed_at = new Date().toISOString();
-            humanVerificationRequests.set(r.request_id, r);
-            schedulePersist();
+        // No structural HV wall. Ambiguous visual-obstruction fallback: a live page
+        // may be visually blocked (opaque overlay / denial wall) without the DOM/ref
+        // pipeline exposing a control. Probe only on the same cost discipline as the
+        // wall probe (low element count or the cheap hint) AND only when VGC is on —
+        // clean, element-rich pages pay nothing and behavior is byte-identical when off.
+        let ambiguous:
+          | { request: HumanVerificationRequest; vgc: { available: true; capsule: SafeVisualGestureCapsuleView } }
+          | undefined;
+        if (isVisualGestureCapsuleEnabled() && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS)) {
+          // Fail-safe: a probe/create throw must never fail the snapshot — it
+          // degrades to the existing clear-state path (ambiguous stays undefined).
+          try {
+            const probe = await detectAmbiguousVisualObstructionViaCDP({
+              cdpUrl: session.cdp_url,
+              resolvedTarget,
+            });
+            let ambiguousDomain = "unknown";
+            try {
+              if (snapshot.url) ambiguousDomain = new URL(snapshot.url).hostname;
+            } catch {
+              /* keep "unknown" */
+            }
+            ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+              session,
+              delegation,
+              domain: ambiguousDomain,
+              pageUrl: snapshot.url ?? "",
+              // The authoritative interactive count is the extracted element_count.
+              signals: { ...(probe ?? {}), near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS },
+            });
+          } catch {
+            ambiguous = undefined;
+          }
+        }
+        if (ambiguous) {
+          const r = ambiguous.request;
+          hvSnapshotInfo = {
+            request_id: r.request_id,
+            status: r.status,
+            challenge_type: r.challenge_type,
+            domain: r.domain,
+            expires_at: r.expires_at,
+            instructions: r.instructions,
+            next_action: humanVerificationAgentNextAction(r),
+          };
+          vgcSnapshotInfo = ambiguous.vgc;
+        } else {
+          const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
+          if (openRequest) resolveChallengeNoLongerPresent(openRequest);
+          clearActiveHumanVerification(session.browser_session_id);
+          // First fresh snapshot after a completion drives agent-resume audit.
+          for (const r of humanVerificationRequests.values()) {
+            if (
+              r.browser_session_id === session.browser_session_id &&
+              r.status === "completed" &&
+              !r.resumed_at
+            ) {
+              r.resumed_at = new Date().toISOString();
+              humanVerificationRequests.set(r.request_id, r);
+              schedulePersist();
+            }
           }
         }
       }
@@ -5847,6 +6001,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               },
             }
           : {}),
+        // Visual Gesture Capsule (ambiguous visual-obstruction fallback only):
+        // safe view ONLY — { available, capsule } with no bytes/coords/cdp/geometry.
+        ...(vgcSnapshotInfo ? { visual_gesture_capsule: vgcSnapshotInfo } : {}),
         action_hints: pageMap.action_hints,
         elements: externalElements,
         // Dev-only HV diagnostic — present only when BOTH ANTIGEN_HUMAN_VERIFICATION

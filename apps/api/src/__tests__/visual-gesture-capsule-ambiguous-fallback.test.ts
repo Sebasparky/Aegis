@@ -1,0 +1,632 @@
+/**
+ * Visual Gesture Capsule — ambiguous visual-obstruction fallback.
+ *
+ * Live failure mode (Bath & Body Works): the visible browser showed an opaque
+ * "Press & Hold" / denial wall, but the structural HV wall probe returned null
+ * (the control lived in a cross-origin iframe / the page churned refs), so Antigen
+ * finalized a flat ANTIGEN_REF_STALE / zero-ref / inconclusive stop instead of
+ * escalating to user-presence review.
+ *
+ * This suite covers the conservative fallback that, when VGC is on + a live
+ * session exists + a CONCRETE static obstruction signal is present, mints a
+ * Visual Gesture Capsule and returns safe user-presence metadata — without
+ * requiring wall.page_level === true.
+ *
+ * Two integration points:
+ *  - the stale-ref action backstop (browser-click), and
+ *  - the snapshot endpoint's no-structural-wall branch.
+ *
+ * Plus the pure classifier truth table (the over-fire guard).
+ *
+ * Hermetic: realistic click, both CDP probes, the snapshot bundle, the CDP target
+ * resolver, and the VGC redacted-capture helper are mocked — no real browser.
+ */
+
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
+
+vi.mock("../store/persistence.js", () => ({
+  schedulePersist: vi.fn(),
+  persistStore: vi.fn(),
+  loadStore: vi.fn(),
+  seedDefaultData: vi.fn(),
+  resetStoreForDemo: vi.fn(),
+}));
+
+const clickKnownBoxMock = vi.hoisted(() => vi.fn());
+const clickByDescriptionMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/realisticBrowserActions.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/realisticBrowserActions.js")>(
+    "../runtime/realisticBrowserActions.js",
+  );
+  return { ...actual, realisticClickKnownBox: clickKnownBoxMock, realisticClickByDescription: clickByDescriptionMock };
+});
+
+// Mock the structural wall probe (null by default), the booleans-only ambiguous
+// probe, AND the snapshot bundle — everything else in the module (the REAL
+// classifyAmbiguousVisualObstruction) stays live.
+const hvWallProbeMock = vi.hoisted(() => vi.fn());
+const ambiguousProbeMock = vi.hoisted(() => vi.fn());
+const bundleMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
+    "../runtime/antigenSnapshotRuntime.js",
+  );
+  return {
+    ...actual,
+    detectPageHumanVerificationWallViaCDP: hvWallProbeMock,
+    detectAmbiguousVisualObstructionViaCDP: ambiguousProbeMock,
+    extractAntigenSnapshotBundleViaCDP: bundleMock,
+  };
+});
+
+const resolveTargetMock = vi.hoisted(() => vi.fn());
+const liveUrlMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/cdpTargetSelection.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/cdpTargetSelection.js")>(
+    "../runtime/cdpTargetSelection.js",
+  );
+  return { ...actual, resolveSnapshotCdpTarget: resolveTargetMock, readLiveCdpPageUrl: liveUrlMock };
+});
+
+const vgcCaptureMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/visualGestureCapsuleCapture.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/visualGestureCapsuleCapture.js")>(
+    "../runtime/visualGestureCapsuleCapture.js",
+  );
+  return { ...actual, captureVisualGestureCapsuleScreenshotFrame: vgcCaptureMock };
+});
+
+import Fastify from "fastify";
+import type { FastifyInstance } from "fastify";
+import type { TaskBrowserSession } from "@aegis/types";
+import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
+import { classifyAmbiguousVisualObstruction } from "../runtime/antigenSnapshotRuntime.js";
+import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
+import {
+  createAntigenSnapshotRecord,
+  clearAntigenSnapshotStoreForTests,
+} from "../runtime/antigenSnapshotStore.js";
+import { agentApiRoutes } from "../routes/agent-api.js";
+import { agentDelegations, passes, humanVerificationRequests } from "../store/index.js";
+import { clearAllActiveHumanVerificationForTests } from "../runtime/humanVerificationState.js";
+import {
+  listActiveVisualGestureCapsules,
+  clearVisualGestureCapsulesForTests,
+  storeVisualGestureCapsuleScreenshotFrame,
+} from "../runtime/visualGestureCapsule.js";
+
+const BEARER = "Bearer tok_vgcamb_001";
+const DELEGATION_ID = "del_vgcamb_001";
+const MOCK_USER_ID = "user_001";
+const SESSION_ID = "tbsess_vgcamb_001";
+const CLICK_URL = "/api/agent/v1/runtime/browser-click";
+const SNAPSHOT_URL = "/api/agent/v1/runtime/browser-snapshot";
+const PAGE_URL = "https://www.example-shop.com/p/some-product";
+
+function seedSession(overrides: Partial<TaskBrowserSession> = {}): TaskBrowserSession {
+  const session: TaskBrowserSession = {
+    browser_session_id: SESSION_ID,
+    user_id: MOCK_USER_ID,
+    delegation_id: DELEGATION_ID,
+    status: "ready",
+    cdp_url: "http://localhost:9222",
+    cdp_port: 9222,
+    user_data_dir: "/tmp/aegis-agent-browser-tbsess_vgcamb_001",
+    ephemeral: true,
+    mode: "visible",
+    debug_visible: true,
+    runtime_mode: "local_runtime_endpoint",
+    current_url: PAGE_URL,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+    ...overrides,
+  };
+  taskBrowserSessions.set(session.browser_session_id, session);
+  return session;
+}
+
+function candidate(overrides: Partial<AntigenSnapshotCandidate> = {}): AntigenSnapshotCandidate {
+  return {
+    index: 0,
+    tag: "a",
+    kind: "link",
+    role: "link",
+    name: "Some Product",
+    normalized_name: "some product",
+    id: null,
+    href: null,
+    href_path: "/p/some-product",
+    visible: true,
+    enabled: true,
+    typeable: false,
+    clickable: true,
+    box: { x: 100, y: 200, width: 180, height: 40 },
+    ...overrides,
+  };
+}
+
+function seedSnapshot(candidates: AntigenSnapshotCandidate[]) {
+  return createAntigenSnapshotRecord({
+    browser_session_id: SESSION_ID,
+    browser_runtime_id: SESSION_ID,
+    user_id: MOCK_USER_ID,
+    url: PAGE_URL,
+    title: null,
+    candidates,
+  });
+}
+
+function clickStaleProductRef() {
+  return server.inject({
+    method: "POST",
+    url: CLICK_URL,
+    headers: { authorization: BEARER },
+    payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Some Product" },
+  });
+}
+
+function snapshot() {
+  return server.inject({
+    method: "POST",
+    url: SNAPSHOT_URL,
+    headers: { authorization: BEARER },
+    payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+  });
+}
+
+const PRESS_AND_HOLD_WALL = {
+  human_verification: true as const,
+  hv_challenge_type: "press_and_hold" as const,
+  user_presence_required: true as const,
+  blocking: true as const,
+  page_level: true as const,
+};
+
+const CAPTURE_OK = {
+  ok: true as const,
+  capsule_id: "ignored",
+  screenshot_available: true as const,
+  screenshot_captured_at: new Date().toISOString(),
+  screenshot_expires_at: new Date(Date.now() + 45_000).toISOString(),
+};
+const CAPTURE_FAIL = { ok: false as const, reason: "capture_failed" as const };
+
+/** Faithful capture mock — stores a redacted frame so the safe view's
+ * screenshot_available is exercised end-to-end (mirrors the real helper). */
+function captureOkStoringFrame() {
+  return vi.fn(async ({ capsuleId }: { capsuleId: string }) => {
+    storeVisualGestureCapsuleScreenshotFrame(capsuleId, {
+      png_base64:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      viewport_css_width: 1280,
+      viewport_css_height: 800,
+    });
+    return CAPTURE_OK;
+  });
+}
+
+/** Recursively collect every object key in a JSON value. */
+function collectKeys(value: unknown, acc: Set<string> = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeys(item, acc);
+  } else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      acc.add(k);
+      collectKeys(v, acc);
+    }
+  }
+  return acc;
+}
+
+const FORBIDDEN_KEYS = [
+  "png_base64",
+  "viewport_css_width",
+  "viewport_css_height",
+  "cssX",
+  "cssY",
+  "fx",
+  "fy",
+  "cdp_url",
+  "cdpUrl",
+  "target_id",
+  "targetId",
+  "expected_url",
+  "expectedUrl",
+  "control_box",
+  "strategy",
+  "path",
+  "browser_session_id",
+];
+
+function assertNoLeak(body: unknown) {
+  const keys = collectKeys(body);
+  for (const forbidden of FORBIDDEN_KEYS) {
+    expect(keys.has(forbidden), `unexpected key "${forbidden}" in response`).toBe(false);
+  }
+  const raw = JSON.stringify(body);
+  for (const f of ["data:image", "png_base64", "9222", "devtools"]) {
+    expect(raw, `unexpected substring "${f}"`).not.toContain(f);
+  }
+}
+
+let server: FastifyInstance;
+
+beforeAll(async () => {
+  const expiry = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  passes.set("pass_vgcamb_001", {
+    id: "pass_vgcamb_001",
+    token: "tok_vgcamb_001",
+    user_id: MOCK_USER_ID,
+    agent_name: "TestVgcAmbiguousAgent",
+    status: "active",
+    expires_at: expiry,
+    created_at: new Date().toISOString(),
+  } as any);
+  agentDelegations.set(DELEGATION_ID, {
+    id: DELEGATION_ID,
+    user_id: MOCK_USER_ID,
+    user_aegis_id: "aegisid_test",
+    agent_name: "TestVgcAmbiguousAgent",
+    channel: "api",
+    status: "active",
+    token_id: "pass_vgcamb_001",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+
+  server = Fastify({ logger: false });
+  await server.register(agentApiRoutes);
+  await server.ready();
+});
+
+afterAll(() => {
+  server.close();
+  passes.delete("pass_vgcamb_001");
+  agentDelegations.delete(DELEGATION_ID);
+});
+
+beforeEach(() => {
+  process.env.ANTIGEN_HUMAN_VERIFICATION = "true";
+  taskBrowserSessions.clear();
+  clearAntigenSnapshotStoreForTests();
+  clearAllActiveHumanVerificationForTests();
+  clearVisualGestureCapsulesForTests();
+  humanVerificationRequests.clear();
+  vi.clearAllMocks();
+  resolveTargetMock.mockResolvedValue({
+    browserWsUrl: "ws://localhost:9222/devtools/browser/abc",
+    target: { id: "TARGET_1", url: PAGE_URL },
+  });
+  liveUrlMock.mockResolvedValue(PAGE_URL);
+  hvWallProbeMock.mockResolvedValue(null);
+  ambiguousProbeMock.mockResolvedValue(null);
+  clickKnownBoxMock.mockResolvedValue({ success: false, error: "ANTIGEN_REF_STALE" });
+  bundleMock.mockResolvedValue({ candidates: [], hvWallHint: false });
+});
+
+afterEach(() => {
+  delete process.env.ANTIGEN_HUMAN_VERIFICATION;
+  delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+});
+
+// ── Pure classifier truth table (the over-fire guard) ─────────────────────────
+describe("classifyAmbiguousVisualObstruction — pure verdict", () => {
+  it("returns false on empty / garbage input", () => {
+    expect(classifyAmbiguousVisualObstruction(undefined)).toBe(false);
+    expect(classifyAmbiguousVisualObstruction(null)).toBe(false);
+    expect(classifyAmbiguousVisualObstruction({})).toBe(false);
+  });
+
+  it("denial text alone fires", () => {
+    expect(classifyAmbiguousVisualObstruction({ denial_text_seen: true })).toBe(true);
+  });
+
+  it("near-zero interactive alone does NOT fire", () => {
+    expect(classifyAmbiguousVisualObstruction({ near_zero_interactive: true })).toBe(false);
+  });
+
+  it("near-zero interactive + inaccessible iframe fires", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        near_zero_interactive: true,
+        visible_inaccessible_iframe_seen: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("inaccessible iframe alone does NOT fire", () => {
+    expect(classifyAmbiguousVisualObstruction({ visible_inaccessible_iframe_seen: true })).toBe(false);
+  });
+
+  it("inaccessible iframe + repeated stale fires", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        visible_inaccessible_iframe_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("repeated stale ALONE never fires (the over-fire guard)", () => {
+    expect(classifyAmbiguousVisualObstruction({ repeated_stale: true })).toBe(false);
+  });
+});
+
+// ── Stale-ref action backstop (browser-click) ─────────────────────────────────
+describe("ambiguous fallback — stale-ref action backstop", () => {
+  it("(1) explicit page_level wall still mints a VGC; the ambiguous probe is not consulted", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.capsule_id).toMatch(/^vgc_/);
+    // The structural wall path handled it — the ambiguous probe never ran.
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(2) zero-ref denial state with VGC OFF stays ANTIGEN_REF_STALE, no probe, no capsule", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    seedSession();
+    seedSnapshot([candidate()]);
+    // Even if the page WERE blocked, the disabled feature never probes.
+    ambiguousProbeMock.mockResolvedValue({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(3) denial text + VGC ON mints a VGC and returns HUMAN_VERIFICATION_REQUIRED", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.purchase_authorized).toBe(false);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.status).toBe("awaiting_user_gesture");
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(hvWallProbeMock).toHaveBeenCalledTimes(1); // structural probe ran first and ruled out
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(4) overlay-on-normal-page: refs exist, stale, no page_level — iframe + repeated stale fires a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    // No denial text, page not near-empty — only a visible inaccessible iframe.
+    // The stale-ref branch supplies repeated_stale:true → fires.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(5) repeated stale WITHOUT any static signal does NOT mint a VGC (normal churn)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    // The probe found nothing concrete — page churn / carousel ref invalidation.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(6) DOM-visible control_box relay (non-page_level wall) is unchanged and mints no VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    // A relay-targetable checkbox challenge — truthy wall, not page_level.
+    hvWallProbeMock.mockResolvedValueOnce({
+      human_verification: true as const,
+      hv_challenge_type: "checkbox_human" as const,
+      user_presence_required: true as const,
+      blocking: true as const,
+      page_level: false as const,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error).not.toHaveProperty("visual_gesture_capsule");
+    // Wall was truthy → the !wall ambiguous branch was never entered.
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(7) HV-absent healthy page (successful click) never probes and never mints a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({
+      success: true,
+      pointer_start_source: "session",
+      pointer_path_point_count: 6,
+      pointer_state_persisted: true,
+      current_url: PAGE_URL,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(200);
+    expect(hvWallProbeMock).not.toHaveBeenCalled();
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(8) capture failure preserves the stop response with screenshot_available:false", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: false,
+    });
+    vgcCaptureMock.mockResolvedValueOnce(CAPTURE_FAIL);
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(false);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(9) the 409 body leaks no bytes/coords/viewport/cdp/strategy/session keys", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+    assertNoLeak(res.json());
+  });
+
+  it("a probe transport error on the stale branch fails OPEN to ANTIGEN_REF_STALE", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockRejectedValueOnce(new Error("CDP boom"));
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+});
+
+// ── Snapshot endpoint no-structural-wall branch ───────────────────────────────
+describe("ambiguous fallback — snapshot endpoint", () => {
+  it("(3-snap) zero-ref access-denied + VGC ON surfaces human_verification + visual_gesture_capsule", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Zero extracted candidates → the full-denial shape (<= PAGE_HV_PROBE_MAX).
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.recommended_next_step).toBe("human_presence_relay_required");
+    expect(data.human_verification.user_presence_required).toBe(true);
+    expect(data.human_verification.request_id).toMatch(/^hvr_/);
+    expect(data.visual_gesture_capsule.available).toBe(true);
+    expect(data.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(2-snap) zero-ref denial state with VGC OFF is unchanged — no probe, no vgc field", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    ambiguousProbeMock.mockResolvedValue({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data).not.toHaveProperty("visual_gesture_capsule");
+    expect(data).not.toHaveProperty("human_verification");
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(7-snap) healthy element-rich page never probes and never mints a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Many candidates and no hint → the probe gate is not tripped.
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).not.toHaveProperty("visual_gesture_capsule");
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(9-snap) snapshot response leaks no bytes/coords/viewport/cdp/strategy/session keys", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+    assertNoLeak(res.json());
+  });
+});

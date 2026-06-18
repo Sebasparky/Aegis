@@ -45,11 +45,18 @@ vi.mock("../runtime/realisticBrowserActions.js", async () => {
 // Mock ONLY the live page-level HV probe out of the snapshot runtime module —
 // everything else (overlay classifiers, etc.) stays real.
 const hvWallProbeMock = vi.hoisted(() => vi.fn());
+// Also mock the booleans-only ambiguous visual-obstruction probe so the stale-ref
+// fallback never opens a real CDP WebSocket in these tests. Defaults to null.
+const ambiguousProbeMock = vi.hoisted(() => vi.fn());
 vi.mock("../runtime/antigenSnapshotRuntime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime/antigenSnapshotRuntime.js")>(
     "../runtime/antigenSnapshotRuntime.js",
   );
-  return { ...actual, detectPageHumanVerificationWallViaCDP: hvWallProbeMock };
+  return {
+    ...actual,
+    detectPageHumanVerificationWallViaCDP: hvWallProbeMock,
+    detectAmbiguousVisualObstructionViaCDP: ambiguousProbeMock,
+  };
 });
 
 // Mock the CDP target resolver so the guard's probe always has a "page" to probe.
@@ -225,6 +232,8 @@ beforeEach(() => {
   });
   // Default: NO challenge present (each test overrides as needed).
   hvWallProbeMock.mockResolvedValue(null);
+  // Default: no ambiguous visual-obstruction signals (each test overrides).
+  ambiguousProbeMock.mockResolvedValue(null);
   // Default click result: the product ref is STALE (the wall changed the DOM).
   clickKnownBoxMock.mockResolvedValue({ success: false, error: "ANTIGEN_REF_STALE" });
 });

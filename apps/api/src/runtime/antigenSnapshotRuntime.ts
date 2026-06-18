@@ -1877,6 +1877,197 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
   return classifyPageWallSignals(value, oopifTargetSeen);
 }
 
+// ─── Ambiguous visual-obstruction fallback ────────────────────────────────────
+//
+// A deliberately conservative companion to the structural HV wall probe above.
+// The structural detector returns null when the live page is visually blocked but
+// the DOM/ref pipeline exposes no usable human-verification control (an opaque
+// overlay wall, a denial page whose challenge lives in a cross-origin iframe, or a
+// near-empty page that previously had refs). These are the live failure modes
+// where Antigen would otherwise finalize a flat block / INCONCLUSIVE / stale-ref
+// stop. When a Visual Gesture Capsule can be minted, callers use the signals below
+// to escalate to user-presence review instead.
+//
+// Booleans ONLY — like the wall probe, this NEVER returns iframe internals, src,
+// selectors, geometry, boxes, raw page text, or `.value`.
+
+/**
+ * Pure verdict: are the gathered signals a genuine "ambiguous visual obstruction"
+ * candidate worth a redacted capsule? Conservative by construction — a lone
+ * transient stale ref (`repeated_stale` alone) must NEVER fire. A concrete STATIC
+ * signal is the necessary condition; `repeated_stale` is corroborating-only.
+ *
+ * Firing conditions (any one):
+ *  - `denial_text_seen` — an explicit access-denied / forbidden / blocked page;
+ *  - `near_zero_interactive && visible_inaccessible_iframe_seen` — the full-denial
+ *    wall shape with an opaque cross-origin frame;
+ *  - `visible_inaccessible_iframe_seen && repeated_stale` — an opaque overlay frame
+ *    that is also churning refs / preventing progress.
+ *
+ * Returns false on empty/garbage input.
+ */
+export interface AmbiguousVisualObstructionSignals {
+  /** Forbidden/denial text observed in the title or top-document text. */
+  denial_text_seen?: boolean;
+  /** Near-zero (<=3) visible interactive candidates — the full-denial shape. */
+  near_zero_interactive?: boolean;
+  /** A visible iframe whose contentDocument is inaccessible (cross-origin) was seen. */
+  visible_inaccessible_iframe_seen?: boolean;
+  /** This ref-based action reached a repeated stale / no-progress state. Corroborating only. */
+  repeated_stale?: boolean;
+}
+
+export function classifyAmbiguousVisualObstruction(
+  s: AmbiguousVisualObstructionSignals | null | undefined,
+): boolean {
+  if (!s || typeof s !== "object") return false;
+  const denial = s.denial_text_seen === true;
+  const nearZero = s.near_zero_interactive === true;
+  const iframe = s.visible_inaccessible_iframe_seen === true;
+  return denial || (nearZero && iframe) || (iframe && s.repeated_stale === true);
+}
+
+/** Booleans-only probe result. Never carries text, geometry, src, or iframe internals. */
+export interface AmbiguousVisualObstructionProbe {
+  denial_text_seen: boolean;
+  near_zero_interactive: boolean;
+  visible_inaccessible_iframe_seen: boolean;
+}
+
+/**
+ * Builds the booleans-only ambiguous-obstruction probe IIFE. It reads only
+ * coarse, value-free signals: a denial/forbidden phrase in the title/body, the
+ * count of visible interactive controls (capped early at >3), and whether any
+ * visible iframe's `contentDocument` is inaccessible (touched ONLY in try/catch to
+ * learn it is cross-origin — never traversed or read). No `.value`, no selectors,
+ * no geometry, no iframe src.
+ */
+export function buildAmbiguousVisualObstructionExpr(): string {
+  return `(function(){
+    function txt(s){ return (s==null?'':String(s)).replace(/\\s+/g,' ').trim(); }
+    var DENIAL_RE=/access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied|forbidden|not\\s+authorized|you\\s+(don'?t|do\\s+not)\\s+have\\s+permission|request\\s+(was\\s+)?blocked|reference\\s+id/i;
+    var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
+    var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
+    var denial=DENIAL_RE.test(bodyText)||DENIAL_RE.test(titleText);
+    var interactive=0;
+    try{
+      var ctrls=document.querySelectorAll('button,a[href],input,select,textarea,[role="button"]');
+      for(var j=0;j<ctrls.length&&j<200;j++){
+        var c=ctrls[j],cr=null; try{ cr=c.getBoundingClientRect(); }catch(e){}
+        if(cr&&cr.width>0&&cr.height>0){ interactive++; if(interactive>3) break; }
+      }
+    }catch(e){}
+    var visIframe=false, inaccIframe=false;
+    try{
+      var frames=document.querySelectorAll('iframe');
+      for(var i=0;i<frames.length&&i<20;i++){
+        var fr=frames[i],r=null; try{ r=fr.getBoundingClientRect(); }catch(e){}
+        if(!r||!(r.width>0&&r.height>0)) continue;
+        visIframe=true;
+        var ok=false; try{ ok=!!fr.contentDocument; }catch(e){ ok=false; }
+        if(!ok){ inaccIframe=true; }
+      }
+    }catch(e){}
+    return {
+      denial_text_seen:!!denial,
+      near_zero_interactive: interactive<=3,
+      visible_inaccessible_iframe_seen:!!(visIframe&&inaccIframe)
+    };
+  })()`;
+}
+
+/**
+ * Connects to the live page over CDP and evaluates the booleans-only ambiguous
+ * visual-obstruction probe. Best-effort and fail-safe: returns null on any
+ * transport/parse error or when no resolved target is available — it must NEVER
+ * throw into the action/snapshot path. Mirrors the connect/attach/eval shape of
+ * detectPageHumanVerificationWallViaCDP (without the Target.getTargets step).
+ */
+export async function detectAmbiguousVisualObstructionViaCDP(params: {
+  cdpUrl: string;
+  resolvedTarget?: { browserWsUrl: string; pageTarget: { id: string; url: string } };
+}): Promise<AmbiguousVisualObstructionProbe | null> {
+  const { resolvedTarget } = params;
+  if (!resolvedTarget) return null;
+  const expr = buildAmbiguousVisualObstructionExpr();
+
+  let value: unknown;
+  try {
+    value = await new Promise<unknown>((resolve, reject) => {
+      const ws = new WebSocket(resolvedTarget.browserWsUrl);
+      let msgId = 1;
+      let attachId: number;
+      let evalId: number;
+      let settled = false;
+      let sid: string | null = null;
+      const timer = setTimeout(() => fail(new Error("Ambiguous visual-obstruction probe timed out.")), 6_000);
+      const send = (method: string, p: Record<string, unknown>, s?: string): number => {
+        const id = msgId++;
+        const m: Record<string, unknown> = { id, method, params: p };
+        if (s) m.sessionId = s;
+        ws.send(JSON.stringify(m));
+        return id;
+      };
+      const done = (v: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.close();
+        resolve(v);
+      };
+      const fail = (e: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+        reject(e);
+      };
+      ws.on("open", () => {
+        attachId = send("Target.attachToTarget", { targetId: resolvedTarget.pageTarget.id, flatten: true });
+      });
+      ws.on("error", (e: Error) => fail(e));
+      ws.on("message", (data: Buffer | string) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id as number | undefined;
+        if (id === undefined) return;
+        const result = msg.result as Record<string, unknown> | undefined;
+        if (id === attachId) {
+          if (!result?.sessionId) {
+            fail(new Error("CDP attach failed: no sessionId."));
+            return;
+          }
+          sid = result.sessionId as string;
+          evalId = send("Runtime.evaluate", { expression: expr, returnByValue: true }, sid);
+          return;
+        }
+        if (id === evalId) {
+          const evalResult = result?.result as Record<string, unknown> | undefined;
+          done(evalResult?.value);
+        }
+      });
+    });
+  } catch {
+    return null;
+  }
+
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  return {
+    denial_text_seen: v.denial_text_seen === true,
+    near_zero_interactive: v.near_zero_interactive === true,
+    visible_inaccessible_iframe_seen: v.visible_inaccessible_iframe_seen === true,
+  };
+}
+
 /**
  * Builds the CHEAP page-level human-verification *hint* IIFE evaluated on the
  * already-open snapshot session. It returns `{ hint: boolean }` and is the

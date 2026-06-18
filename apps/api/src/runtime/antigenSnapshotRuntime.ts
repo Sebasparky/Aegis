@@ -2487,6 +2487,27 @@ export interface HumanVerificationDebug {
   overlay_intercept_flags?: PageHvWallDebugSignals["overlay_intercept_flags"];
   oopif_flags?: PageHvWallDebugSignals["oopif_flags"];
   would_classify_oopif?: boolean;
+  // ── Ambiguous visual-obstruction fallback diagnostics (no-structural-wall branch) ──
+  // Populated only when the snapshot found no structural HV wall and the ambiguous
+  // fallback decision was reached. Booleans / enums only — never a capsule id, raw
+  // text, geometry, or iframe internals. `ambiguous_skip_reason: "fired"` denotes a
+  // successful capsule create; the id itself stays only in the safe response payload.
+  ambiguous_fallback_considered?: boolean;
+  ambiguous_skip_reason?:
+    | "vgc_flag_off"
+    | "no_live_session_or_cdp"
+    | "element_count_too_high_and_no_hint"
+    | "probe_returned_null"
+    | "classifier_false"
+    | "helper_failed"
+    | "fired";
+  ambiguous_element_count?: number;
+  ambiguous_hv_wall_hint?: boolean;
+  ambiguous_denial_text_seen?: boolean;
+  ambiguous_near_zero_interactive?: boolean;
+  ambiguous_visible_inaccessible_iframe_seen?: boolean;
+  ambiguous_repeated_stale?: boolean;
+  ambiguous_created_capsule?: boolean;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────

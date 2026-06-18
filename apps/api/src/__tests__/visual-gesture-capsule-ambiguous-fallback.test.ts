@@ -88,7 +88,11 @@ import {
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { agentDelegations, passes, humanVerificationRequests } from "../store/index.js";
-import { clearAllActiveHumanVerificationForTests } from "../runtime/humanVerificationState.js";
+import {
+  clearAllActiveHumanVerificationForTests,
+  recordActionNoProgress,
+  clearAllActionNoProgressForTests,
+} from "../runtime/humanVerificationState.js";
 import {
   listActiveVisualGestureCapsules,
   clearVisualGestureCapsulesForTests,
@@ -290,6 +294,7 @@ beforeEach(() => {
   taskBrowserSessions.clear();
   clearAntigenSnapshotStoreForTests();
   clearAllActiveHumanVerificationForTests();
+  clearAllActionNoProgressForTests();
   clearVisualGestureCapsulesForTests();
   humanVerificationRequests.clear();
   vi.clearAllMocks();
@@ -551,6 +556,74 @@ describe("ambiguous fallback — stale-ref action backstop", () => {
   });
 });
 
+// ── No-progress action backstop (non-stale realization failures) ──────────────
+//
+// The live B&BW regression: the click failed with success=false but did NOT
+// classify as a stale ref — it landed on the generic REALISTIC_CLICK_FAILED
+// branch, which previously returned 422 WITHOUT consulting the HV/ambiguous
+// backstop. These cases prove the backstop now reaches that branch too.
+describe("ambiguous fallback — no-progress (non-stale) action backstop", () => {
+  it("(1) REALISTIC_CLICK_FAILED + inaccessible iframe + VGC ON mints a VGC (the live overlay-over-normal-page shape)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Many refs — a normal underlying page (B&BW had element_count=27).
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    // Click physically fails to realize, but NOT as a stale ref.
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(hvWallProbeMock).toHaveBeenCalledTimes(1); // structural probe ran first and ruled out
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(2) REALISTIC_CLICK_FAILED with NO static signal preserves the original 422 (no fire on click-failure alone)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    // Probe finds nothing concrete — no iframe, no denial. Repeated/no-progress
+    // alone must never fire.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("REALISM_DISABLED is NOT a no-progress code — it never probes (config failure, not a visual block)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISM_DISABLED" });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISM_DISABLED");
+    expect(hvWallProbeMock).not.toHaveBeenCalled();
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+});
+
 // ── Snapshot endpoint no-structural-wall branch ───────────────────────────────
 describe("ambiguous fallback — snapshot endpoint", () => {
   it("(3-snap) zero-ref access-denied + VGC ON surfaces human_verification + visual_gesture_capsule", async () => {
@@ -628,5 +701,81 @@ describe("ambiguous fallback — snapshot endpoint", () => {
 
     const res = await snapshot();
     assertNoLeak(res.json());
+  });
+
+  // ── Part D: high-element probing only on a corroborating no-progress marker ──
+  it("(3-snap-D) many elements, no hint, NO no-progress marker → ambiguous probe is NOT run", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // A concrete signal IS present, but with no corroborating marker the
+    // high-element gate stays closed — a healthy page must pay nothing.
+    ambiguousProbeMock.mockResolvedValue({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).not.toHaveProperty("visual_gesture_capsule");
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(4-snap-D) many elements + recent no-progress marker + inaccessible iframe → probes and mints a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // A prior action failed to realize (overlay over a normal page) — the marker
+    // opens the high-element ambiguous gate the element_count alone would skip.
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // High element_count → near_zero_interactive is false; the marker supplies
+    // repeated_stale → iframe + repeated_stale fires.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.human_verification.user_presence_required).toBe(true);
+    expect(data.visual_gesture_capsule.available).toBe(true);
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(4b-snap-D) marker present but probe finds no static signal → no VGC (repeated/no-progress alone never fires)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).not.toHaveProperty("visual_gesture_capsule");
+    // The gate opened (marker present) so the probe ran, but the classifier held.
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 });

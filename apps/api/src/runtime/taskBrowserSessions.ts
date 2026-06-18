@@ -11,6 +11,7 @@ import { createServer } from "net";
 import type { TaskBrowserSession, TaskBrowserSessionStatus, ActionIntent, RiskState } from "@aegis/types";
 import { newId, MOCK_USER_ID } from "../store/index.js";
 import { clearProtectedIframeRedactions } from "./protectedIframeRedaction.js";
+import { clearActionNoProgress } from "./humanVerificationState.js";
 
 // ─── Chrome binary detection ──────────────────────────────────────────────────
 
@@ -817,6 +818,11 @@ export async function closeTaskBrowserSession(id: string, userId: string): Promi
     session.status = "closed";
     session.closed_at = new Date().toISOString();
     delete session.error;
+
+    // The recent-no-progress marker must not outlive its session — clear it on
+    // teardown so a recycled session id can never inherit a stale signal. TTL is
+    // only a backstop; this explicit clear is the primary guarantee.
+    clearActionNoProgress(id);
 
     if (portBusy) {
       session.cleanup_complete = false;

@@ -110,6 +110,9 @@ import {
   isHvDebugEnabled,
   getActiveHumanVerification,
   clearActiveHumanVerification,
+  recordActionNoProgress,
+  hasRecentActionNoProgress,
+  clearActionNoProgress,
 } from "../runtime/humanVerificationState.js";
 import {
   createOrReuseHumanVerificationRequest,
@@ -645,9 +648,9 @@ async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
  * This guard is the CHEAP, cached-marker half of the invariant: it consults only
  * the in-memory marker armed by a prior snapshot (or by an earlier stale-ref live
  * probe). It runs NO CDP probe, so it adds no latency to the common path. The
- * complementary live probe runs lazily ONLY on the stale-ref branch
- * (rejectStaleRefAsHumanVerification) — together they enforce: a ref-based action
- * may NOT surface ANTIGEN_REF_STALE until human verification has been ruled out.
+ * complementary live probe runs lazily ONLY on a no-progress action-failure branch
+ * (rejectNoProgressActionAsHumanVerification) — together they enforce: a ref-based
+ * action may NOT surface a no-progress 422 until human verification is ruled out.
  * browser-snapshot is deliberately NOT guarded: it is the resume path.
  *
  * Returns true when the request was rejected (409 HUMAN_VERIFICATION_REQUIRED
@@ -688,18 +691,55 @@ function rejectIfHumanVerificationActive(
 }
 
 /**
- * Stale-ref live HV backstop. Called ONLY at the moment a ref-based action is
- * about to return ANTIGEN_REF_STALE. Runs the live page-level probe; if a wall is
- * present it creates/reuses the HV request (which arms the marker so the NEXT
- * action short-circuits in the cheap guard) and sends 409 HUMAN_VERIFICATION_-
- * REQUIRED. Returns true when it sent that 409 (caller must return immediately);
- * false when no HV was detected OR the probe failed open — in which case the
- * caller proceeds with the original ANTIGEN_REF_STALE response.
+ * Ref-based action failure codes that represent a *no-progress* stop: the action
+ * did not realize because the page is stale, navigated, scrolled away, or the
+ * realistic action simply could not land. These are the failures that may be a
+ * visual overlay blocking progress over an otherwise-normal page, so they all run
+ * the live HV / ambiguous-obstruction backstop before surfacing their 422.
  *
- * This placement preserves the invariant (HV is ruled out before any stale ref is
- * surfaced) while keeping the live CDP probe OFF the successful-action path.
+ * Deliberately EXCLUDES config/field-shape failures that are NOT visual blocks:
+ * REALISM_DISABLED (feature off), NOT_FILLABLE / NOT_TYPEABLE (wrong field kind),
+ * and VALUE_MISMATCH (the field WAS reachable but rejected/reformatted the value).
  */
-async function rejectStaleRefAsHumanVerification(
+const NO_PROGRESS_ACTION_FAIL_CODES = new Set<string>([
+  "ANTIGEN_REF_STALE",
+  "ANTIGEN_REF_PAGE_CHANGED",
+  "ANTIGEN_REF_OUT_OF_VIEWPORT",
+  "REALISTIC_CLICK_FAILED",
+  "REALISTIC_TYPE_FAILED",
+  "SET_VALUE_FAILED",
+  "ELEMENT_DETACHED",
+]);
+
+/**
+ * Dev-only HV action-path telemetry (ANTIGEN_HV_DEBUG). Booleans / enums only —
+ * NEVER a capsule id (only the `created_capsule` boolean), cdp_url, target id,
+ * coords, raw text, or iframe src. The whole call is a no-op when the flag is off,
+ * so behavior is byte-identical. Mirrors the `[Scope] key=value` log style.
+ */
+function logHvActionDebug(fields: Record<string, string | number | boolean>): void {
+  if (!isHvDebugEnabled()) return;
+  const parts = Object.entries(fields).map(([k, v]) => `${k}=${v}`);
+  console.log(`[HvDebug] ${parts.join(" ")}`);
+}
+
+/**
+ * No-progress live HV backstop. Called when a ref-based action is about to return
+ * a NO_PROGRESS_ACTION_FAIL_CODES 422 (stale / page-changed / out-of-viewport /
+ * realization failure). Runs the live page-level wall probe; if a structural wall
+ * is present it creates/reuses the HV request (which arms the marker so the NEXT
+ * action short-circuits in the cheap guard) and sends 409 HUMAN_VERIFICATION_-
+ * REQUIRED. If no structural wall is found, it tries the conservative ambiguous
+ * visual-obstruction fallback (a static signal — denial text or an inaccessible
+ * visible iframe — is required; `repeated_stale` is corroborating-only and never
+ * fires alone). Returns true when it sent a 409 (caller must return immediately);
+ * false when no HV/ambiguous block was detected OR a probe failed open — in which
+ * case the caller proceeds with the original 422 response.
+ *
+ * This placement preserves the invariant (HV is ruled out before any no-progress
+ * stop is surfaced) while keeping the live CDP probe OFF the successful path.
+ */
+async function rejectNoProgressActionAsHumanVerification(
   session: TaskBrowserSession,
   reply: any,
   tool: string,
@@ -730,7 +770,8 @@ async function rejectStaleRefAsHumanVerification(
             /* keep "unknown" */
           }
           // repeated_stale is corroborating-only in the classifier (never fires
-          // alone) — safe to set on this stale-ref branch.
+          // alone) — safe to set on this action-failure branch. A concrete STATIC
+          // signal (denial text or an inaccessible visible iframe) is still required.
           const fallback = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
             session,
             delegation,
@@ -738,17 +779,54 @@ async function rejectStaleRefAsHumanVerification(
             pageUrl: session.current_url ?? "",
             signals: { ...probe, repeated_stale: true },
           });
+          logHvActionDebug({
+            scope: "no_progress_backstop",
+            tool,
+            structural_wall_seen: false,
+            ambiguous_considered: true,
+            denial_text_seen: probe.denial_text_seen,
+            near_zero_interactive: probe.near_zero_interactive,
+            visible_inaccessible_iframe_seen: probe.visible_inaccessible_iframe_seen,
+            repeated_stale: true,
+            created_capsule: !!fallback,
+          });
           if (fallback) {
             sendHumanVerificationRequired(session, reply, tool, fallback.request, fallback.vgc);
             return true;
           }
+        } else {
+          logHvActionDebug({
+            scope: "no_progress_backstop",
+            tool,
+            structural_wall_seen: false,
+            ambiguous_considered: true,
+            probe_returned_null: true,
+            created_capsule: false,
+          });
         }
       } catch {
-        /* fall through to the original ANTIGEN_REF_STALE response */
+        /* fall through to the original 422 response */
       }
+    } else {
+      logHvActionDebug({
+        scope: "no_progress_backstop",
+        tool,
+        structural_wall_seen: false,
+        ambiguous_considered: false,
+        skip_reason: !isVisualGestureCapsuleEnabled() ? "vgc_flag_off" : "no_live_session_or_cdp",
+        created_capsule: false,
+      });
     }
-    return false; // no HV, no ambiguous candidate, or probe failed open → stale
+    return false; // no HV, no ambiguous candidate, or probe failed open → original 422
   }
+
+  logHvActionDebug({
+    scope: "no_progress_backstop",
+    tool,
+    structural_wall_seen: true,
+    ambiguous_considered: false,
+    created_capsule: false,
+  });
 
   let hvDomain = "unknown";
   try {
@@ -4430,6 +4508,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
         });
         const ttlFailField = ttlFail ? { ttl_recovery_state: ttlFail } : {};
+        // No-progress HV backstop. Any ref-based failure that represents a stop with
+        // NO progress (stale / page-changed / out-of-viewport / realization failure)
+        // may be a visual overlay blocking an otherwise-normal page — the live B&BW
+        // "Press & Hold" wall lands here as REALISTIC_CLICK_FAILED, not stale. Rule
+        // out HV (and the conservative ambiguous-obstruction fallback) before any of
+        // the specific 422 returns below. If it fires it sends 409 and we return;
+        // otherwise we arm a recent-no-progress marker so the NEXT antigen_snapshot
+        // can re-probe even on a high-element page. HV-flag-gated → byte-identical off.
+        if (NO_PROGRESS_ACTION_FAIL_CODES.has(failCode)) {
+          if (await rejectNoProgressActionAsHumanVerification(session, reply, "browser_click", delegation)) return;
+          if (isHumanVerificationEnabled()) recordActionNoProgress(session.browser_session_id);
+        }
         if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot.", ...ttlFailField } });
         }
@@ -4439,10 +4529,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         if (refResult.error === "ANTIGEN_REF_STALE") {
           // Surface-aware stale message: a gone surface is useful signal (the
           // panel/dialog closed) — tell the agent that instead of a generic stale.
-          // Invariant backstop: before surfacing ANTIGEN_REF_STALE, run the live
-          // page-level HV probe. A challenge raised after the last snapshot (the
-          // live B&BW case) is detected here and returns 409 instead of stale.
-          if (await rejectStaleRefAsHumanVerification(session, reply, "browser_click", delegation)) return;
+          // HV was already ruled out by the no-progress backstop above.
           const staleMessage =
             surfaceState === "failed_surface_gone"
               ? "The active surface (panel/dialog) this ref belonged to is no longer present — it likely closed. Take a fresh antigen_snapshot and act on the current page state."
@@ -5093,6 +5180,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
         });
         const ttlFailField = ttlFail ? { ttl_recovery_state: ttlFail } : {};
+        // No-progress HV backstop (see browser-click): rule out HV + ambiguous
+        // visual obstruction for any no-progress failure before surfacing the 422,
+        // then arm the recent-no-progress marker for the next snapshot.
+        if (NO_PROGRESS_ACTION_FAIL_CODES.has(failCode)) {
+          if (await rejectNoProgressActionAsHumanVerification(session, reply, "browser_type", delegation)) return;
+          if (isHumanVerificationEnabled()) recordActionNoProgress(session.browser_session_id);
+        }
         if (refResult.error === "ANTIGEN_REF_PAGE_CHANGED") {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_PAGE_CHANGED", message: "The page changed since this snapshot. Take a fresh antigen_snapshot.", ...ttlFailField } });
         }
@@ -5100,9 +5194,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_OUT_OF_VIEWPORT", message: "Antigen ref is outside the current viewport. Scroll the target into view, take a new antigen_snapshot, and retry.", ...ttlFailField } });
         }
         if (refResult.error === "ANTIGEN_REF_STALE") {
-          // Invariant backstop: rule out human verification via the live probe
-          // before surfacing a stale ref (challenge raised after last snapshot).
-          if (await rejectStaleRefAsHumanVerification(session, reply, "browser_type", delegation)) return;
+          // HV was already ruled out by the no-progress backstop above.
           recordActionPreflight(session, "browser_type", "returned_ref_stale");
           return reply.status(422).send({ ok: false, error: { code: "ANTIGEN_REF_STALE", message: "Antigen ref is stale. Take a new antigen_snapshot and retry.", ...ttlFailField } });
         }
@@ -5367,11 +5459,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         error_code: failCode,
         ...(ttlFail ? { ttl_recovery_state: ttlFail } : {}),
       });
-      // Invariant backstop: before surfacing ANTIGEN_REF_STALE, run the live
-      // page-level HV probe (challenge raised after the last snapshot).
-      if (failCode === "ANTIGEN_REF_STALE") {
-        if (await rejectStaleRefAsHumanVerification(session, reply, "browser_set_value", delegation)) return;
-        recordActionPreflight(session, "browser_set_value", "returned_ref_stale");
+      // No-progress HV backstop (see browser-click): rule out HV + ambiguous visual
+      // obstruction for any no-progress failure before surfacing the 422, then arm
+      // the recent-no-progress marker for the next snapshot. NOT_FILLABLE and
+      // VALUE_MISMATCH are excluded (the field was reachable — not a visual block).
+      if (NO_PROGRESS_ACTION_FAIL_CODES.has(failCode)) {
+        if (await rejectNoProgressActionAsHumanVerification(session, reply, "browser_set_value", delegation)) return;
+        if (isHumanVerificationEnabled()) recordActionNoProgress(session.browser_session_id);
+        if (failCode === "ANTIGEN_REF_STALE") {
+          recordActionPreflight(session, "browser_set_value", "returned_ref_stale");
+        }
       }
       const messages: Record<string, string> = {
         ANTIGEN_REF_PAGE_CHANGED: "The page changed since this snapshot. Take a fresh antigen_snapshot.",
@@ -5794,37 +5891,79 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       } else {
         // No structural HV wall. Ambiguous visual-obstruction fallback: a live page
         // may be visually blocked (opaque overlay / denial wall) without the DOM/ref
-        // pipeline exposing a control. Probe only on the same cost discipline as the
-        // wall probe (low element count or the cheap hint) AND only when VGC is on —
-        // clean, element-rich pages pay nothing and behavior is byte-identical when off.
+        // pipeline exposing a control. Probe on the same cost discipline as the wall
+        // probe (low element count or the cheap hint) — clean, element-rich pages pay
+        // nothing and behavior is byte-identical when off. Part D: ALSO probe a
+        // high-element page when a recent no-progress marker is set (a prior action
+        // failed to realize, likely behind a visual overlay), which is the overlay-
+        // over-normal-page shape element_count alone would otherwise skip.
         let ambiguous:
           | { request: HumanVerificationRequest; vgc: { available: true; capsule: SafeVisualGestureCapsuleView } }
           | undefined;
-        if (isVisualGestureCapsuleEnabled() && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS)) {
+        const noProgressSignal = hasRecentActionNoProgress(session.browser_session_id);
+        const ambiguousGateOpen =
+          isVisualGestureCapsuleEnabled() &&
+          (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || noProgressSignal);
+        let ambiguousProbe: Awaited<ReturnType<typeof detectAmbiguousVisualObstructionViaCDP>> = null;
+        let ambiguousSkipReason: HumanVerificationDebug["ambiguous_skip_reason"];
+        if (ambiguousGateOpen) {
           // Fail-safe: a probe/create throw must never fail the snapshot — it
           // degrades to the existing clear-state path (ambiguous stays undefined).
           try {
-            const probe = await detectAmbiguousVisualObstructionViaCDP({
+            ambiguousProbe = await detectAmbiguousVisualObstructionViaCDP({
               cdpUrl: session.cdp_url,
               resolvedTarget,
             });
-            let ambiguousDomain = "unknown";
-            try {
-              if (snapshot.url) ambiguousDomain = new URL(snapshot.url).hostname;
-            } catch {
-              /* keep "unknown" */
+            if (ambiguousProbe) {
+              let ambiguousDomain = "unknown";
+              try {
+                if (snapshot.url) ambiguousDomain = new URL(snapshot.url).hostname;
+              } catch {
+                /* keep "unknown" */
+              }
+              ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+                session,
+                delegation,
+                domain: ambiguousDomain,
+                pageUrl: snapshot.url ?? "",
+                // The authoritative interactive count is the extracted element_count.
+                // repeated_stale is corroborating-only (never fires alone): set it
+                // ONLY when a recent no-progress marker corroborates a high-element
+                // overlay — the low-element path stays byte-identical.
+                signals: {
+                  ...ambiguousProbe,
+                  near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
+                  ...(noProgressSignal ? { repeated_stale: true } : {}),
+                },
+              });
+              ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
+            } else {
+              ambiguousSkipReason = "probe_returned_null";
             }
-            ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
-              session,
-              delegation,
-              domain: ambiguousDomain,
-              pageUrl: snapshot.url ?? "",
-              // The authoritative interactive count is the extracted element_count.
-              signals: { ...(probe ?? {}), near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS },
-            });
           } catch {
             ambiguous = undefined;
+            ambiguousSkipReason = "helper_failed";
           }
+        } else {
+          ambiguousSkipReason = !isVisualGestureCapsuleEnabled()
+            ? "vgc_flag_off"
+            : "element_count_too_high_and_no_hint";
+        }
+        // Dev-only ambiguous-fallback telemetry — only when hvDebug was built (i.e.
+        // ANTIGEN_HV_DEBUG on). Booleans / enums only; never a capsule id.
+        if (hvDebug) {
+          hvDebug.ambiguous_fallback_considered = ambiguousGateOpen;
+          hvDebug.ambiguous_skip_reason = ambiguousSkipReason;
+          hvDebug.ambiguous_element_count = elements.length;
+          hvDebug.ambiguous_hv_wall_hint = !!hvWallHint;
+          hvDebug.ambiguous_repeated_stale = noProgressSignal;
+          if (ambiguousProbe) {
+            hvDebug.ambiguous_denial_text_seen = ambiguousProbe.denial_text_seen;
+            hvDebug.ambiguous_near_zero_interactive = ambiguousProbe.near_zero_interactive;
+            hvDebug.ambiguous_visible_inaccessible_iframe_seen =
+              ambiguousProbe.visible_inaccessible_iframe_seen;
+          }
+          hvDebug.ambiguous_created_capsule = !!ambiguous;
         }
         if (ambiguous) {
           const r = ambiguous.request;
@@ -5838,10 +5977,16 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             next_action: humanVerificationAgentNextAction(r),
           };
           vgcSnapshotInfo = ambiguous.vgc;
+          // HV is now active for this session — the no-progress marker has served
+          // its purpose and must not linger to re-probe later snapshots.
+          clearActionNoProgress(session.browser_session_id);
         } else {
           const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
           if (openRequest) resolveChallengeNoLongerPresent(openRequest);
           clearActiveHumanVerification(session.browser_session_id);
+          // Clear state: the page is no longer blocked, so drop the no-progress
+          // marker too (it must not survive into a healthy resumed session).
+          clearActionNoProgress(session.browser_session_id);
           // First fresh snapshot after a completion drives agent-resume audit.
           for (const r of humanVerificationRequests.values()) {
             if (

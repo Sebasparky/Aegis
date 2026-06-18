@@ -53,3 +53,45 @@ export function clearActiveHumanVerification(browserSessionId: string): void {
 export function clearAllActiveHumanVerificationForTests(): void {
   activeHumanVerification.clear();
 }
+
+// ─── Recent action no-progress marker ────────────────────────────────────────
+//
+// A short-lived, per-session marker set when a ref-based action (click/type/
+// set-value) fails to realize progress (stale / page-changed / out-of-viewport /
+// generic realization failure) AND the live HV backstop did NOT already mint a
+// capsule. It lets the NEXT antigen_snapshot run the ambiguous visual-obstruction
+// probe even on a high-element page — the live overlay-over-normal-page shape
+// where a healthy element_count would otherwise skip the probe.
+//
+// Memory-only and TTL-bounded (default 30s) as a backstop; it is also cleared
+// explicitly on snapshot resolution and on session teardown so it never outlives
+// the situation that armed it. Never carries text, geometry, or refs.
+
+const DEFAULT_NO_PROGRESS_TTL_MS = 30_000;
+
+const recentActionNoProgress = new Map<string, { detected_at: number }>();
+
+export function recordActionNoProgress(browserSessionId: string): void {
+  recentActionNoProgress.set(browserSessionId, { detected_at: Date.now() });
+}
+
+export function hasRecentActionNoProgress(
+  browserSessionId: string,
+  withinMs: number = DEFAULT_NO_PROGRESS_TTL_MS,
+): boolean {
+  const marker = recentActionNoProgress.get(browserSessionId);
+  if (!marker) return false;
+  if (Date.now() - marker.detected_at > withinMs) {
+    recentActionNoProgress.delete(browserSessionId);
+    return false;
+  }
+  return true;
+}
+
+export function clearActionNoProgress(browserSessionId: string): void {
+  recentActionNoProgress.delete(browserSessionId);
+}
+
+export function clearAllActionNoProgressForTests(): void {
+  recentActionNoProgress.clear();
+}

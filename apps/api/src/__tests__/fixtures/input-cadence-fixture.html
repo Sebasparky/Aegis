@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Antigen Input / Cadence Measurement Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .row { margin: 12px 0; }
+    label { display: inline-block; width: 140px; }
+    button { padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <h1>Input cadence fixture</h1>
+  <!--
+    Controlled measurement page. An inline recorder timestamps the browser-visible
+    events emitted by Antigen's real CDP runtime (mouse + keyboard). It records ONLY
+    event types, keys, and performance.now() timestamps — never input values — so it
+    stays consistent with the codebase's "structure, not values" posture and never
+    needs to surface what was typed.
+  -->
+  <form id="cadence-form" onsubmit="return false">
+    <div class="row">
+      <label for="cadence-input">Free text</label>
+      <input id="cadence-input" name="freeText" type="text" autocomplete="off" value="" />
+    </div>
+    <div class="row">
+      <button id="cadence-button-a" type="button">Action A</button>
+      <span id="cadence-count-a">0</span>
+    </div>
+    <div class="row">
+      <button id="cadence-button-b" type="button">Action B</button>
+      <span id="cadence-count-b">0</span>
+    </div>
+  </form>
+
+  <script>
+    (function () {
+      var input = document.getElementById("cadence-input");
+
+      // The recorded event log. Each array holds plain objects with a high-res
+      // performance.now() timestamp `t`. No element values are ever read.
+      var store = {
+        markT: 0,
+        marks: {},
+        mousemove: [],
+        mousedown: [],
+        mouseup: [],
+        click: [],
+        keydown: [],
+        beforeinput: [],
+        input: [],
+        keyup: [],
+      };
+
+      function reset() {
+        store.markT = performance.now();
+        store.marks = {};
+        store.mousemove.length = 0;
+        store.mousedown.length = 0;
+        store.mouseup.length = 0;
+        store.click.length = 0;
+        store.keydown.length = 0;
+        store.beforeinput.length = 0;
+        store.input.length = 0;
+        store.keyup.length = 0;
+        return true;
+      }
+
+      function mark(label) {
+        store.marks[String(label)] = performance.now();
+        return store.marks[String(label)];
+      }
+
+      function get() {
+        // Returned over CDP via Runtime.evaluate(returnByValue:true). Shallow copy
+        // of the arrays so the harness sees a stable snapshot.
+        return {
+          markT: store.markT,
+          marks: store.marks,
+          mousemove: store.mousemove.slice(),
+          mousedown: store.mousedown.slice(),
+          mouseup: store.mouseup.slice(),
+          click: store.click.slice(),
+          keydown: store.keydown.slice(),
+          beforeinput: store.beforeinput.slice(),
+          input: store.input.slice(),
+          keyup: store.keyup.slice(),
+        };
+      }
+
+      // Mouse events on the document so we catch the whole pointer path, not just
+      // events that land on a single element.
+      document.addEventListener("mousemove", function () {
+        store.mousemove.push({ t: performance.now() });
+      }, true);
+      document.addEventListener("mousedown", function (e) {
+        store.mousedown.push({ t: performance.now(), target: targetId(e) });
+      }, true);
+      document.addEventListener("mouseup", function (e) {
+        store.mouseup.push({ t: performance.now(), target: targetId(e) });
+      }, true);
+      document.addEventListener("click", function (e) {
+        store.click.push({ t: performance.now(), target: targetId(e) });
+      }, true);
+
+      // Keyboard + input events on the text field. `key` is the structural key
+      // identity (e.g. "h", " ") — this is the typed character by nature, but the
+      // recorder exists to measure cadence; the harness only reads counts/timestamps.
+      input.addEventListener("keydown", function (e) {
+        store.keydown.push({ t: performance.now(), key: e.key });
+      });
+      input.addEventListener("beforeinput", function (e) {
+        store.beforeinput.push({ t: performance.now(), inputType: e.inputType });
+      });
+      input.addEventListener("input", function (e) {
+        store.input.push({ t: performance.now(), inputType: e.inputType });
+      });
+      input.addEventListener("keyup", function (e) {
+        store.keyup.push({ t: performance.now(), key: e.key });
+      });
+
+      function targetId(e) {
+        var el = e.target;
+        return el && el.id ? el.id : (el && el.tagName ? el.tagName.toLowerCase() : "");
+      }
+
+      // Simple click counters so a click has a verifiable page effect (mirrors the
+      // latency fixture); not used by the cadence math.
+      var na = 0, nb = 0;
+      document.getElementById("cadence-button-a").addEventListener("click", function () {
+        na += 1;
+        document.getElementById("cadence-count-a").textContent = String(na);
+      });
+      document.getElementById("cadence-button-b").addEventListener("click", function () {
+        nb += 1;
+        document.getElementById("cadence-count-b").textContent = String(nb);
+      });
+
+      window.__antigenCadence = { reset: reset, mark: mark, get: get };
+      reset();
+    })();
+  </script>
+</body>
+</html>

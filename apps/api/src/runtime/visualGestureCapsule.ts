@@ -50,6 +50,16 @@ export type VisualGestureCapsuleStatus =
 /** Capsule TTL aligns with the HV TTL (~3 min), per design §9. */
 export const VISUAL_GESTURE_CAPSULE_TTL_MS = HUMAN_VERIFICATION_TTL_MS;
 
+/**
+ * Per-screenshot freshness window (design §9). A static screenshot of a LIVE
+ * wall goes stale fast (the bar fills, the wall re-renders, or it disappears),
+ * so the held frame gets a short TTL independent of — and always shorter-capped
+ * by — the capsule TTL. No shorter constant existed, so this is a dedicated one.
+ * Each frame's `expires_at` is `min(now + this, capsule.expires_at)` so a frame
+ * can never outlive its capsule.
+ */
+export const VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS = 45_000;
+
 /** Max gesture attempts per handoff before manual fallback (design §8). */
 export const MAX_GESTURE_ATTEMPTS = 2;
 
@@ -94,8 +104,10 @@ export interface VisualGestureCapsule {
   /** Capture metadata only — read at capture time via window.innerWidth/Height. */
   viewport_css_width?: number;
   viewport_css_height?: number;
-  /** Capture metadata only — no bytes stored in M1A. */
+  /** Capture metadata only — set when a screenshot frame is stored (M1B). */
   screenshot_captured_at?: string;
+  /** Capture metadata only — frame freshness deadline (M1B); never bytes. */
+  screenshot_expires_at?: string;
   /** Live presence is required and recorded; literal true. */
   user_presence_required: true;
   /** Live presence never authorizes a purchase; literal false. */
@@ -113,6 +125,158 @@ export interface VisualGestureCapsule {
 // Memory-only store. Key: capsule_id. Never persisted, never logged, never in
 // any agent-facing response. Lazy-expired at read time.
 const visualGestureCapsules = new Map<string, VisualGestureCapsule>();
+
+// ─── Screenshot frame store (M1B) ────────────────────────────────────────────
+//
+// One redacted viewport screenshot frame per capsule. SEPARATE from the capsule
+// record (the record never holds bytes). Memory-only, never persisted, never
+// logged, never in `getSafeVisualGestureCapsuleView` or any agent-facing
+// response — mirrors the discipline of challengeInjection.ts `challengeCodes`.
+// Deleted on recapture (before replacement), clear, terminal transition
+// (cleared/cancelled/failed/expired), frame-TTL expiry, and test clear.
+//
+// M1B is storage/metadata only: bytes enter via `storeVisualGestureCapsuleScreenshotFrame`
+// with a caller-supplied frame. Actual CDP `Page.captureScreenshot` capture
+// (reusing screenshotRedaction.ts) is deferred to M1C — no CDP wiring here.
+
+/** One held, redacted viewport screenshot frame. Internal/user-facing only. */
+export interface VisualGestureCapsuleScreenshotFrame {
+  capsule_id: string;
+  /** Redacted PNG bytes (base64). NEVER returned to the agent or in safe views. */
+  png_base64: string;
+  mime_type: "image/png";
+  viewport_css_width: number;
+  viewport_css_height: number;
+  captured_at: string;
+  expires_at: string;
+}
+
+// Key: capsule_id. One frame per capsule, so storing replaces (no append).
+const visualGestureCapsuleScreenshotFrames = new Map<
+  string,
+  VisualGestureCapsuleScreenshotFrame
+>();
+
+/**
+ * Drop a capsule's frame AND clear the frame-derived capture metadata on the
+ * record, so `screenshot_available` can never report stale truthiness. Internal;
+ * reused by clear/recapture/terminal-transition/expiry.
+ */
+function purgeVisualGestureCapsuleFrame(capsuleId: string): void {
+  visualGestureCapsuleScreenshotFrames.delete(capsuleId);
+  const capsule = visualGestureCapsules.get(capsuleId);
+  if (capsule) {
+    delete capsule.screenshot_captured_at;
+    delete capsule.screenshot_expires_at;
+  }
+}
+
+/**
+ * Lazy frame expiry: delete any frame past its own (shorter) freshness window
+ * and clear its capture metadata. Called by frame read paths so callers never
+ * observe a live-but-stale frame even if capsule expiry hasn't run.
+ */
+function expireVisualGestureCapsuleScreenshotFrames(nowMs: number = Date.now()): void {
+  for (const frame of [...visualGestureCapsuleScreenshotFrames.values()]) {
+    if (new Date(frame.expires_at).getTime() <= nowMs) {
+      purgeVisualGestureCapsuleFrame(frame.capsule_id);
+    }
+  }
+}
+
+export interface StoreVisualGestureCapsuleScreenshotFrameInput {
+  /** Redacted PNG bytes (base64). */
+  png_base64: string;
+  viewport_css_width: number;
+  viewport_css_height: number;
+}
+
+export type StoreVisualGestureCapsuleScreenshotFrameResult =
+  | { ok: true; frame: VisualGestureCapsuleScreenshotFrame }
+  | { ok: false; reason: "flag_disabled" | "not_found" | "terminal" | "invalid_input" };
+
+/**
+ * Store (or replace) the single screenshot frame for a capsule. This is the
+ * guarded entry point future wiring (M1C) calls after capture, so it is gated on
+ * the flag: when off it refuses (`flag_disabled`) and stores NO bytes. The
+ * frame's `expires_at` is `min(now + FRAME_TTL, capsule.expires_at)`; capsule
+ * metadata (viewport dims + screenshot timestamps) is updated, but the record
+ * never receives the bytes.
+ */
+export function storeVisualGestureCapsuleScreenshotFrame(
+  capsuleId: string,
+  frameInput: StoreVisualGestureCapsuleScreenshotFrameInput,
+): StoreVisualGestureCapsuleScreenshotFrameResult {
+  if (!isVisualGestureCapsuleEnabled()) return { ok: false, reason: "flag_disabled" };
+
+  const capsule = getVisualGestureCapsule(capsuleId);
+  if (!capsule) return { ok: false, reason: "not_found" };
+  if (isTerminalVisualGestureStatus(capsule.status)) return { ok: false, reason: "terminal" };
+
+  const { png_base64, viewport_css_width, viewport_css_height } = frameInput;
+  if (
+    typeof png_base64 !== "string" ||
+    png_base64.length === 0 ||
+    !Number.isFinite(viewport_css_width) ||
+    viewport_css_width <= 0 ||
+    !Number.isFinite(viewport_css_height) ||
+    viewport_css_height <= 0
+  ) {
+    return { ok: false, reason: "invalid_input" };
+  }
+
+  // Recapture discipline: drop any existing frame before storing the new one.
+  purgeVisualGestureCapsuleFrame(capsuleId);
+
+  const now = Date.now();
+  const expiresMs = Math.min(
+    now + VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS,
+    new Date(capsule.expires_at).getTime(),
+  );
+  const frame: VisualGestureCapsuleScreenshotFrame = {
+    capsule_id: capsuleId,
+    png_base64,
+    mime_type: "image/png",
+    viewport_css_width,
+    viewport_css_height,
+    captured_at: new Date(now).toISOString(),
+    expires_at: new Date(expiresMs).toISOString(),
+  };
+  visualGestureCapsuleScreenshotFrames.set(capsuleId, frame);
+
+  // Capsule metadata only — NEVER bytes.
+  capsule.viewport_css_width = viewport_css_width;
+  capsule.viewport_css_height = viewport_css_height;
+  capsule.screenshot_captured_at = frame.captured_at;
+  capsule.screenshot_expires_at = frame.expires_at;
+
+  return { ok: true, frame };
+}
+
+/** Internal/user-facing frame read. Runs lazy frame expiry; never agent-facing. */
+export function getVisualGestureCapsuleScreenshotFrame(
+  capsuleId: string,
+): VisualGestureCapsuleScreenshotFrame | undefined {
+  expireVisualGestureCapsuleScreenshotFrames();
+  return visualGestureCapsuleScreenshotFrames.get(capsuleId);
+}
+
+/** Drop a capsule's frame + capture metadata. Idempotent. */
+export function clearVisualGestureCapsuleScreenshotFrame(capsuleId: string): void {
+  purgeVisualGestureCapsuleFrame(capsuleId);
+}
+
+/**
+ * Replace the held frame: clear the old one first (no append), then store. For
+ * now this is a replace-store helper — actual CDP capture is deferred to M1C.
+ */
+export function recaptureVisualGestureCapsuleScreenshotFrame(
+  capsuleId: string,
+  frameInput: StoreVisualGestureCapsuleScreenshotFrameInput,
+): StoreVisualGestureCapsuleScreenshotFrameResult {
+  clearVisualGestureCapsuleScreenshotFrame(capsuleId);
+  return storeVisualGestureCapsuleScreenshotFrame(capsuleId, frameInput);
+}
 
 export interface CreateVisualGestureCapsuleInput {
   human_verification_request_id: string;
@@ -159,17 +323,24 @@ export function createVisualGestureCapsule(
 }
 
 /**
- * Lazy expiry: mark any non-terminal capsule past its TTL as `expired`. Called
- * by every read path so callers never observe a live-but-stale capsule. (No
- * screenshot bytes to delete in M1A; the byte purge hooks here in M1B.)
+ * Lazy expiry: mark any non-terminal capsule past its TTL as `expired`, and
+ * purge screenshot frames — both for newly/already terminal capsules and for any
+ * frame past its own (shorter) freshness window. Called by every read path so
+ * callers never observe a live-but-stale capsule or frame.
  */
 export function expireVisualGestureCapsules(nowMs: number = Date.now()): void {
   for (const capsule of visualGestureCapsules.values()) {
-    if (isTerminalVisualGestureStatus(capsule.status)) continue;
-    if (new Date(capsule.expires_at).getTime() <= nowMs) {
-      capsule.status = "expired";
+    if (!isTerminalVisualGestureStatus(capsule.status)) {
+      if (new Date(capsule.expires_at).getTime() <= nowMs) {
+        capsule.status = "expired";
+      }
+    }
+    if (isTerminalVisualGestureStatus(capsule.status)) {
+      purgeVisualGestureCapsuleFrame(capsule.capsule_id);
     }
   }
+  // Frames can expire before their capsule (shorter TTL) — drop those too.
+  expireVisualGestureCapsuleScreenshotFrames(nowMs);
 }
 
 export function getVisualGestureCapsule(capsuleId: string): VisualGestureCapsule | undefined {
@@ -210,6 +381,8 @@ export function transitionVisualGestureCapsule(
   if (isTerminalVisualGestureStatus(capsule.status)) return { ok: false, reason: "terminal" };
 
   capsule.status = nextStatus;
+  // Entering any terminal state consumes/invalidates the held screenshot frame.
+  if (isTerminalVisualGestureStatus(nextStatus)) purgeVisualGestureCapsuleFrame(capsuleId);
   if (patch?.error !== undefined) capsule.error = patch.error;
   if (patch?.viewport_css_width !== undefined) capsule.viewport_css_width = patch.viewport_css_width;
   if (patch?.viewport_css_height !== undefined) {
@@ -263,6 +436,12 @@ export interface SafeVisualGestureCapsuleView {
   domain: string;
   page_url?: string;
   expires_at: string;
+  /** Whether a live (non-expired) screenshot frame is held. Bytes never exposed. */
+  screenshot_available: boolean;
+  /** Present only when a live frame exists — capture metadata, never bytes. */
+  screenshot_captured_at?: string;
+  /** Present only when a live frame exists — freshness deadline, never bytes. */
+  screenshot_expires_at?: string;
   user_presence_required: true;
   raw_gesture_revealed_to_agent: false;
   screenshot_revealed_to_agent: false;
@@ -272,6 +451,10 @@ export interface SafeVisualGestureCapsuleView {
 export function getSafeVisualGestureCapsuleView(
   capsule: VisualGestureCapsule,
 ): SafeVisualGestureCapsuleView {
+  // Derive availability from the live frame store (runs lazy frame expiry +
+  // metadata purge), so a frame that expired before its capsule can never leak a
+  // stale `screenshot_available: true` or stale timestamps. Bytes are never read.
+  const frame = getVisualGestureCapsuleScreenshotFrame(capsule.capsule_id);
   return {
     capsule_id: capsule.capsule_id,
     status: capsule.status,
@@ -281,6 +464,13 @@ export function getSafeVisualGestureCapsuleView(
     domain: capsule.domain,
     ...(capsule.page_url ? { page_url: capsule.page_url } : {}),
     expires_at: capsule.expires_at,
+    screenshot_available: !!frame,
+    ...(frame
+      ? {
+          screenshot_captured_at: frame.captured_at,
+          screenshot_expires_at: frame.expires_at,
+        }
+      : {}),
     user_presence_required: true,
     raw_gesture_revealed_to_agent: false,
     screenshot_revealed_to_agent: false,
@@ -333,7 +523,8 @@ export function mapNormalizedImagePointToViewport(
   return { cssX: fx * viewportCssWidth, cssY: fy * viewportCssHeight };
 }
 
-/** Test-only: drop all capsules between cases. */
+/** Test-only: drop all capsules AND screenshot frames between cases. */
 export function clearVisualGestureCapsulesForTests(): void {
   visualGestureCapsules.clear();
+  visualGestureCapsuleScreenshotFrames.clear();
 }

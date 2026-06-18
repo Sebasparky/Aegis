@@ -355,6 +355,23 @@ export function listActiveVisualGestureCapsules(): VisualGestureCapsule[] {
   );
 }
 
+/**
+ * Active (non-terminal) capsule for a task browser session, if any — most recently
+ * created when several exist. Runs lazy expiry (a TTL-expired capsule is never
+ * returned). Used by the agent-facing runtime guard to fail closed with
+ * HUMAN_VERIFICATION_REQUIRED before any generic snapshot/action/navigation result.
+ */
+export function getActiveVisualGestureCapsuleForBrowserSession(
+  browserSessionId: string,
+): VisualGestureCapsule | undefined {
+  const active = listActiveVisualGestureCapsules().filter(
+    (c) => c.browser_session_id === browserSessionId,
+  );
+  if (active.length === 0) return undefined;
+  active.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return active[0];
+}
+
 export interface TransitionResult {
   ok: boolean;
   /** Present on success. */

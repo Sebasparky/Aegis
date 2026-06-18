@@ -124,6 +124,8 @@ import {
 import { toAgentHumanVerificationView } from "./human-verification.js";
 import {
   isVisualGestureCapsuleEnabled,
+  getActiveVisualGestureCapsuleForBrowserSession,
+  getSafeVisualGestureCapsuleView,
   type SafeVisualGestureCapsuleView,
 } from "../runtime/visualGestureCapsule.js";
 import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
@@ -642,6 +644,48 @@ async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
 }
 
 /**
+ * Active Visual Gesture Capsule guard. When the VGC flag is on and the session has
+ * an active (non-terminal) capsule, fails closed with the canonical
+ * HUMAN_VERIFICATION_REQUIRED 409 + safe capsule view BEFORE any generic
+ * snapshot/action/navigation-state result. This is the authority that keeps a
+ * later zero-element / access-denied / stale-ref / 422 pass from masking a gesture
+ * the user still has pending in the Aegis UI. The capsule's lifecycle stays driven
+ * by the internal UI gesture/recheck routes + TTL expiry — this guard never mutates
+ * it. Returns true when it sent the response. Byte-identical when the flag is off
+ * (helper short-circuits). Never leaks bytes/coords/cdp/session ids — the shared
+ * sendHumanVerificationRequired + getSafeVisualGestureCapsuleView enforce that.
+ */
+function rejectIfVisualGestureCapsuleActive(
+  session: TaskBrowserSession,
+  reply: any,
+  tool: string,
+): boolean {
+  if (!isVisualGestureCapsuleEnabled()) return false;
+  const capsule = getActiveVisualGestureCapsuleForBrowserSession(session.browser_session_id);
+  if (!capsule) return false;
+  const safe = getSafeVisualGestureCapsuleView(capsule);
+  // Prefer the linked HV request's live status/type; synthesize a minimal
+  // pending_user request when it was GC'd so the stop signal is never lost
+  // (humanVerificationAgentNextAction reads only status + request_id).
+  const linked = humanVerificationRequests.get(capsule.human_verification_request_id);
+  const request = linked
+    ? {
+        request_id: linked.request_id,
+        status: linked.status,
+        challenge_type: linked.challenge_type,
+        domain: linked.domain,
+      }
+    : {
+        request_id: capsule.human_verification_request_id,
+        status: "pending_user",
+        challenge_type: "unknown_human_verification",
+        domain: capsule.domain,
+      };
+  sendHumanVerificationRequired(session, reply, tool, request, { available: true, capsule: safe });
+  return true;
+}
+
+/**
  * Human Presence Relay pre-action guard. Runs in browser-click/type/set-value/
  * scroll IMMEDIATELY after session resolution and BEFORE any ref resolution.
  *
@@ -662,6 +706,10 @@ function rejectIfHumanVerificationActive(
   reply: any,
   tool: string,
 ): boolean {
+  // An active Visual Gesture Capsule is authoritative — a gesture is pending in the
+  // Aegis UI; fail closed before the cheap HV-marker path and regardless of the HV
+  // flag (the VGC flag is independent of ANTIGEN_HUMAN_VERIFICATION).
+  if (rejectIfVisualGestureCapsuleActive(session, reply, tool)) return true;
   if (!isHumanVerificationEnabled()) return false;
 
   recordActionPreflight(session, tool, "action_started");
@@ -5593,6 +5641,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       }).catch(() => {});
     }
 
+    // Internal bookkeeping above (current_url, pointer state, mediation banner) has
+    // run and is preserved. But if a Visual Gesture Capsule is pending for this
+    // session, the agent-facing response must NOT look like a normal navigation-state
+    // success — fail closed with HUMAN_VERIFICATION_REQUIRED instead.
+    if (rejectIfVisualGestureCapsuleActive(session, reply, "browser_navigation_state")) return;
+
     return reply.send({
       ok: true,
       data: {
@@ -5673,6 +5727,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           ` -> browser_runtime_id=${session.browser_session_id} delegation_id=${delegation.id}`,
       );
     }
+
+    // An active Visual Gesture Capsule means a user gesture is pending in the Aegis
+    // UI. Fail closed BEFORE extraction so a transient zero-element / access-denied
+    // re-extract (and the clear-state branch it would otherwise hit) can't mask the
+    // pending challenge as a normal snapshot. The capsule clears via the internal UI
+    // gesture/recheck routes + TTL expiry, after which this snapshot resumes normally.
+    if (rejectIfVisualGestureCapsuleActive(session, reply, "antigen_snapshot")) return;
 
     const timing = new BrowserTimingScope("antigen_snapshot");
 

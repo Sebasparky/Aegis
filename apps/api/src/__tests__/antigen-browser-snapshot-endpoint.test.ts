@@ -8,7 +8,7 @@
  * - the snapshot STORE is real, so we can assert internal boxes are stored.
  */
 
-import { vi, describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 
 vi.mock("../store/persistence.js", () => ({
   schedulePersist: vi.fn(),
@@ -72,6 +72,11 @@ import {
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { agentDelegations, passes } from "../store/index.js";
+import {
+  createVisualGestureCapsule,
+  markGestureCapsuleCleared,
+  clearVisualGestureCapsulesForTests,
+} from "../runtime/visualGestureCapsule.js";
 
 const BEARER = "Bearer tok_snap_001";
 const DELEGATION_ID = "del_snap_001";
@@ -987,5 +992,114 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
       expect(dbg.page_wall_probe_result).toBe("null");
       expect(dbg.page_wall_probe_error_code).toBe("cdp_connect_failed");
     });
+  });
+});
+
+// ─── Active Visual Gesture Capsule guard ─────────────────────────────────────
+// Once a VGC is pending for the session, browser-snapshot must fail closed with
+// HUMAN_VERIFICATION_REQUIRED + safe capsule metadata BEFORE returning a normal
+// (possibly zero-element / access-denied) snapshot — and resume normally once the
+// capsule goes terminal.
+describe("POST /api/agent/v1/runtime/browser-snapshot — active VGC guard", () => {
+  const prevFlag = process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    clearVisualGestureCapsulesForTests();
+  });
+
+  afterEach(() => {
+    clearVisualGestureCapsulesForTests();
+    if (prevFlag === undefined) delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    else process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = prevFlag;
+  });
+
+  it("returns 409 HUMAN_VERIFICATION_REQUIRED + safe capsule view when a VGC is pending", async () => {
+    seedSession();
+    createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_snap_vgc_001",
+      browser_session_id: SESSION_ID,
+      domain: "www.bathandbodyworks.com",
+      page_url: "https://www.bathandbodyworks.com/checkout",
+    });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.purchase_authorized).toBe(false);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    const capsule = body.error.visual_gesture_capsule.capsule;
+    expect(capsule.capsule_id).toMatch(/^vgc_/);
+    expect(capsule.status).toBe("awaiting_user_gesture");
+    expect(capsule.user_presence_required).toBe(true);
+    expect(capsule.raw_gesture_revealed_to_agent).toBe(false);
+    expect(capsule.screenshot_revealed_to_agent).toBe(false);
+    // NOT a normal snapshot.
+    expect(body.data).toBeUndefined();
+  });
+
+  it("never leaks bytes/coords/cdp/session internals in the VGC stop response", async () => {
+    seedSession();
+    createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_snap_vgc_002",
+      browser_session_id: SESSION_ID,
+      domain: "www.bathandbodyworks.com",
+    });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of [
+      "png_base64", "\"box\"", "\"x\":", "\"y\":", "cdp_url", "user_data_dir",
+      "browser_session_id", "9222", "target_id", "secret_ref",
+    ]) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
+  it("resumes the normal snapshot once the capsule is terminal (cleared)", async () => {
+    seedSession();
+    const capsule = createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_snap_vgc_003",
+      browser_session_id: SESSION_ID,
+      domain: "www.bathandbodyworks.com",
+    });
+    markGestureCapsuleCleared(capsule.capsule_id);
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.element_count).toBe(3);
+  });
+
+  it("does NOT guard a capsule belonging to a different session", async () => {
+    seedSession();
+    createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_snap_vgc_004",
+      browser_session_id: "tbsess_other_999",
+      domain: "www.bathandbodyworks.com",
+    });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.element_count).toBe(3);
   });
 });

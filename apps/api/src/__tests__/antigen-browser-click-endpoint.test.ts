@@ -59,6 +59,10 @@ import {
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
 import { agentDelegations, passes } from "../store/index.js";
+import {
+  createVisualGestureCapsule,
+  clearVisualGestureCapsulesForTests,
+} from "../runtime/visualGestureCapsule.js";
 
 const BEARER = "Bearer tok_click_001";
 const DELEGATION_ID = "del_click_001";
@@ -1297,5 +1301,71 @@ describe("overlay/banner are explicit-flag-only (Follow-up 1)", () => {
 
     expect(res.statusCode).toBe(200);
     expect(navBannerMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Active Visual Gesture Capsule guard (action + navigation-state) ──────────
+// A pending VGC must fail closed BEFORE ref resolution (click) and BEFORE the
+// navigation-state success response — while preserving nav-state bookkeeping.
+describe("active VGC guard on browser-click / browser-navigation-state", () => {
+  const NAV_URL = "/api/agent/v1/runtime/browser-navigation-state";
+  const prevFlag = process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    clearVisualGestureCapsulesForTests();
+  });
+
+  afterEach(() => {
+    clearVisualGestureCapsulesForTests();
+    if (prevFlag === undefined) delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    else process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = prevFlag;
+  });
+
+  it("browser-click fails closed with HUMAN_VERIFICATION_REQUIRED before resolving the ref", async () => {
+    seedSession();
+    seedSnapshot([candidate({ name: "Ok", box: { x: 1, y: 2, width: 3, height: 4 } })]);
+    createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_click_vgc_001",
+      browser_session_id: SESSION_ID,
+      domain: "www.bathandbodyworks.com",
+    });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Ok" },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
+    // The ref was never resolved → the realistic click runtime was never invoked.
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expect(clickByDescriptionMock).not.toHaveBeenCalled();
+  });
+
+  it("browser-navigation-state fails closed but preserves internal bookkeeping (current_url)", async () => {
+    seedSession();
+    createVisualGestureCapsule({
+      human_verification_request_id: "hvreq_nav_vgc_001",
+      browser_session_id: SESSION_ID,
+      domain: "www.bathandbodyworks.com",
+    });
+
+    const res = await server.inject({
+      method: "POST", url: NAV_URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, url: "https://www.bathandbodyworks.com/checkout", action: "navigation_proxy" },
+    });
+
+    // Agent-facing response is the stop signal, not a normal nav-state success.
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().data).toBeUndefined();
+    // Internal bookkeeping still ran before the fail-closed return.
+    expect(taskBrowserSessions.get(SESSION_ID)?.current_url).toBe(
+      "https://www.bathandbodyworks.com/checkout",
+    );
   });
 });

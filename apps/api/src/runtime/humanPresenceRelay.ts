@@ -148,7 +148,10 @@ export interface CdpPageClient {
   close(): void;
 }
 
-async function openCdpPageClient(params: {
+// Exported additively so the Visual Gesture Capsule point-explicit relay
+// (visualGestureCapsuleRelay.ts) can reuse this CDP page-client opener instead
+// of duplicating the WebSocket/Target.attach plumbing. No behavior change.
+export async function openCdpPageClient(params: {
   cdpUrl: string;
   domain?: string;
   preferredUrl?: string;

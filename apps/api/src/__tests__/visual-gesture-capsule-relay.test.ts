@@ -30,6 +30,21 @@ const PNG = "iVBORw0KGgoREDACTED==";
 const VW = 1280;
 const VH = 800;
 
+// Viewport / coordinate magnitudes that must never surface as real numeric
+// fields in a relay result or safe view. Checked as parsed numbers (not raw
+// string substrings) so capsule IDs or ISO timestamps that happen to contain
+// these digits can't cause a false failure.
+const FORBIDDEN_NUMERIC_VALUES = [1280, 800, 640, 400];
+
+/** Recursively collect every numeric value in a JSON-ish object/array tree. */
+function collectNumbers(value: unknown, out: number[] = []): number[] {
+  if (typeof value === "number") out.push(value);
+  else if (Array.isArray(value)) value.forEach((v) => collectNumbers(v, out));
+  else if (value && typeof value === "object")
+    Object.values(value).forEach((v) => collectNumbers(v, out));
+  return out;
+}
+
 interface FakePointerRelay extends VisualGesturePointerRelay {
   tapCalls: Array<{ cdpUrl: string; targetId?: string; x: number; y: number }>;
   holdCalls: Array<{ cdpUrl: string; targetId?: string; x: number; y: number; durationMs: number }>;
@@ -341,6 +356,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       status: "checking",
       gesture_relayed: true,
     });
+    // Semantic field-name / token guard (raw string).
     const raw = JSON.stringify(res);
     for (const banned of [
       "png_base64",
@@ -350,13 +366,17 @@ describe("relayVisualGestureCapsuleGesture", () => {
       "cssX",
       "cssY",
       "duration",
-      "1280",
-      "800",
-      "640",
-      "400",
       "path",
+      "strategy",
+      "viewport_css_width",
+      "viewport_css_height",
     ]) {
       expect(raw).not.toContain(banned);
+    }
+    // Numeric coordinate/viewport guard (parsed values, not substrings).
+    const numbers = collectNumbers(res);
+    for (const n of FORBIDDEN_NUMERIC_VALUES) {
+      expect(numbers).not.toContain(n);
     }
   });
 
@@ -372,6 +392,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
     });
 
     const view = getSafeVisualGestureCapsuleView(getVisualGestureCapsule(capsule.capsule_id)!);
+    // Semantic field-name / token guard (raw string).
     const raw = JSON.stringify(view);
     for (const banned of [
       "viewport_css_width",
@@ -381,12 +402,13 @@ describe("relayVisualGestureCapsuleGesture", () => {
       "gesture_trace",
       "png_base64",
       PNG,
-      "1280",
-      "800",
-      "640",
-      "400",
     ]) {
       expect(raw).not.toContain(banned);
+    }
+    // Numeric coordinate/viewport guard (parsed values, not substrings).
+    const numbers = collectNumbers(view);
+    for (const n of FORBIDDEN_NUMERIC_VALUES) {
+      expect(numbers).not.toContain(n);
     }
   });
 

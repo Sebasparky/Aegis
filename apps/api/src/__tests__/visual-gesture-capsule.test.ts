@@ -22,6 +22,11 @@ import {
   VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS,
   MAX_GESTURE_ATTEMPTS,
 } from "../runtime/visualGestureCapsule.js";
+import {
+  captureVisualGestureCapsuleScreenshotFrame,
+  type VgcCaptureFn,
+  type VgcReadViewportFn,
+} from "../runtime/visualGestureCapsuleCapture.js";
 
 const BASE = {
   human_verification_request_id: "hvr_test_001",
@@ -498,5 +503,268 @@ describe("screenshot frame store (M1B)", () => {
     expect(res.reason).toBe("flag_disabled");
     expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
     expect(getVisualGestureCapsule(c.capsule_id)?.screenshot_captured_at).toBeUndefined();
+  });
+});
+
+describe("capture helper (M1C)", () => {
+  const CDP = { capsuleId: "", cdpUrl: "http://127.0.0.1:9222" };
+  const CAPTURED_BYTES = "iVBOR_CAPTURED==";
+
+  let captureCalls: number;
+  let viewportCalls: number;
+  let fakeCapture: VgcCaptureFn;
+  let fakeViewport: VgcReadViewportFn;
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    captureCalls = 0;
+    viewportCalls = 0;
+    fakeCapture = async () => {
+      captureCalls += 1;
+      return { ok: true, png_base64: CAPTURED_BYTES };
+    };
+    fakeViewport = async () => {
+      viewportCalls += 1;
+      return { width: 1280, height: 800 };
+    };
+  });
+
+  it("flag off -> flag_disabled and never calls capture/readViewport", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    const c = createVisualGestureCapsule(BASE);
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toBe("flag_disabled");
+    expect(captureCalls).toBe(0);
+    expect(viewportCalls).toBe(0);
+    // Re-enable so getVisualGestureCapsuleScreenshotFrame reads are normal.
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+  });
+
+  it("missing capsule -> not_found, capture not called", async () => {
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: "vgc_missing",
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toBe("not_found");
+    expect(captureCalls).toBe(0);
+  });
+
+  it("terminal capsule -> terminal, capture not called", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    markGestureCapsuleCleared(c.capsule_id);
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toBe("terminal");
+    expect(captureCalls).toBe(0);
+  });
+
+  it("success stores a redacted frame in the M1B store", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(true);
+    expect(captureCalls).toBe(1);
+    expect(viewportCalls).toBe(1);
+    const frame = getVisualGestureCapsuleScreenshotFrame(c.capsule_id);
+    expect(frame?.png_base64).toBe(CAPTURED_BYTES);
+    expect(frame?.viewport_css_width).toBe(1280);
+    expect(frame?.viewport_css_height).toBe(800);
+  });
+
+  it("success updates safe-view metadata and leaks no bytes/dims/coords", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("expected ok");
+    expect(res.screenshot_available).toBe(true);
+    expect(res.screenshot_captured_at).toBeTruthy();
+    expect(res.screenshot_expires_at).toBeTruthy();
+
+    const view = getSafeVisualGestureCapsuleView(getVisualGestureCapsule(c.capsule_id)!);
+    expect(view.screenshot_available).toBe(true);
+    expect(view.screenshot_captured_at).toBeTruthy();
+    expect(view.screenshot_expires_at).toBeTruthy();
+
+    // Neither the helper result nor the safe view may carry bytes/dims/coords.
+    for (const raw of [JSON.stringify(res), JSON.stringify(view)]) {
+      for (const banned of [
+        CAPTURED_BYTES,
+        "png_base64",
+        "base64",
+        "data:image",
+        "viewport_css_width",
+        "viewport_css_height",
+        "1280",
+        "800",
+        "cssX",
+        "cssY",
+      ]) {
+        expect(raw).not.toContain(banned);
+      }
+    }
+  });
+
+  it("capture failure -> capture_failed, nothing stored, viewport not read", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    const failingCapture: VgcCaptureFn = async () => {
+      captureCalls += 1;
+      return { ok: false, error: "SCREENSHOT_REDACTION_FAILED" };
+    };
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: failingCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toBe("capture_failed");
+    expect(viewportCalls).toBe(0);
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+  });
+
+  it("redaction mismatch -> redaction_failed, nothing stored (fail-closed)", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    const mismatchCapture: VgcCaptureFn = async () => ({
+      ok: false,
+      redaction_mismatch: true,
+      error: "SCREENSHOT_REDACTION_FAILED",
+    });
+    const res = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: mismatchCapture,
+      readViewport: fakeViewport,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toBe("redaction_failed");
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+  });
+
+  it("invalid viewport -> invalid_viewport, nothing stored", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    const nullViewport: VgcReadViewportFn = async () => null;
+    const nullRes = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: nullViewport,
+    });
+    expect(nullRes.ok).toBe(false);
+    if (nullRes.ok) throw new Error("expected refusal");
+    expect(nullRes.reason).toBe("invalid_viewport");
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+
+    const zeroViewport: VgcReadViewportFn = async () => ({ width: 0, height: 800 });
+    const zeroRes = await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: zeroViewport,
+    });
+    expect(zeroRes.ok).toBe(false);
+    if (zeroRes.ok) throw new Error("expected refusal");
+    expect(zeroRes.reason).toBe("invalid_viewport");
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+  });
+
+  it("recapture replaces the held frame (no append)", async () => {
+    const c = createVisualGestureCapsule(BASE);
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    const secondCapture: VgcCaptureFn = async () => ({ ok: true, png_base64: "iVBOR_SECOND==" });
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: secondCapture,
+      readViewport: fakeViewport,
+    });
+    const frame = getVisualGestureCapsuleScreenshotFrame(c.capsule_id);
+    expect(frame?.png_base64).toBe("iVBOR_SECOND==");
+  });
+
+  it("captured frame still expires on its own short TTL", async () => {
+    vi.useFakeTimers();
+    const c = createVisualGestureCapsule(BASE);
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: c.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    vi.advanceTimersByTime(VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS + 1_000);
+    expect(getVisualGestureCapsuleScreenshotFrame(c.capsule_id)).toBeUndefined();
+    const view = getSafeVisualGestureCapsuleView(getVisualGestureCapsule(c.capsule_id)!);
+    expect(view.screenshot_available).toBe(false);
+  });
+
+  it("cancel / clear / expire each purge a captured frame", async () => {
+    // cancel
+    const a = createVisualGestureCapsule(BASE);
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: a.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    cancelVisualGestureCapsule(a.capsule_id);
+    expect(getVisualGestureCapsuleScreenshotFrame(a.capsule_id)).toBeUndefined();
+
+    // clear (cleared)
+    const b = createVisualGestureCapsule(BASE);
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: b.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    markGestureCapsuleCleared(b.capsule_id);
+    expect(getVisualGestureCapsuleScreenshotFrame(b.capsule_id)).toBeUndefined();
+
+    // capsule-TTL expiry
+    vi.useFakeTimers();
+    const d = createVisualGestureCapsule(BASE);
+    await captureVisualGestureCapsuleScreenshotFrame({
+      ...CDP,
+      capsuleId: d.capsule_id,
+      capture: fakeCapture,
+      readViewport: fakeViewport,
+    });
+    vi.advanceTimersByTime(VISUAL_GESTURE_CAPSULE_TTL_MS + 1_000);
+    expireVisualGestureCapsules();
+    expect(getVisualGestureCapsule(d.capsule_id)?.status).toBe("expired");
+    expect(getVisualGestureCapsuleScreenshotFrame(d.capsule_id)).toBeUndefined();
   });
 });

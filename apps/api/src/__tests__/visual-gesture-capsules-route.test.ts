@@ -53,6 +53,9 @@ vi.mock("../runtime/visualGestureCapsuleRecheck.js", () => ({
 }));
 import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
 import { visualGestureCapsuleRoutes } from "../routes/visual-gesture-capsules.js";
+// taskBrowserSessions is NOT mocked: M2B derives a capsule's cdp_url from this
+// real map via getTaskBrowserSessionCdpUrl, so tests register/clear entries here.
+import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
 const mockedCapture = vi.mocked(captureVisualGestureCapsuleScreenshotFrame);
 const mockedRelay = vi.mocked(relayVisualGestureCapsuleGesture);
@@ -81,6 +84,7 @@ afterAll(async () => {
 
 afterEach(() => {
   clearVisualGestureCapsulesForTests();
+  taskBrowserSessions.delete(BASE.browser_session_id);
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   mockedCapture.mockReset();
   mockedRelay.mockReset();
@@ -90,6 +94,16 @@ afterEach(() => {
 
 function enable() {
   process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+}
+
+// cdp_url the server should derive when a tracked browser session exists for the
+// capsule's browser_session_id. The UI never sends this; M2B resolves it server-side.
+const DERIVED_CDP_URL = "http://localhost:9242";
+
+/** Register a tracked browser session so the capsule's cdp_url is derivable. */
+function registerSessionForCapsule(cdpUrl: string = DERIVED_CDP_URL) {
+  // Only `.cdp_url` is read by getTaskBrowserSessionCdpUrl; the rest is irrelevant.
+  taskBrowserSessions.set(BASE.browser_session_id, { cdp_url: cdpUrl } as any);
 }
 
 /** Seed an active capsule (flag must be enabled for the frame store to accept). */
@@ -295,16 +309,16 @@ describe("POST /:id/recapture", () => {
     });
   });
 
-  it("requires cdp_url", async () => {
+  it("no cdp_url and no derivable session → 409 BROWSER_SESSION_UNAVAILABLE", async () => {
     enable();
-    const capsule = seedCapsule();
+    const capsule = seedCapsule(); // no tracked browser session registered
     const res = await server.inject({
       method: "POST",
       url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recapture`,
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("BROWSER_SESSION_UNAVAILABLE");
     expect(mockedCapture).not.toHaveBeenCalled();
   });
 
@@ -357,17 +371,17 @@ describe("POST /:id/recheck (M1G)", () => {
     expect(mockedRecheck).not.toHaveBeenCalled();
   });
 
-  it("missing cdp_url → 400 VALIDATION_ERROR, helper not called", async () => {
+  it("no cdp_url and no derivable session → 409 BROWSER_SESSION_UNAVAILABLE, helper not called", async () => {
     enable();
-    const capsule = seedCapsule();
+    const capsule = seedCapsule(); // no tracked browser session registered
 
     const res = await server.inject({
       method: "POST",
       url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("BROWSER_SESSION_UNAVAILABLE");
     expect(mockedRecheck).not.toHaveBeenCalled();
   });
 
@@ -649,17 +663,17 @@ describe("POST /:id/gesture", () => {
     expect(mockedRelay).not.toHaveBeenCalled();
   });
 
-  it("missing cdp_url → 400 VALIDATION_ERROR, relay not called", async () => {
+  it("no cdp_url and no derivable session → 409 BROWSER_SESSION_UNAVAILABLE, relay not called", async () => {
     enable();
-    const capsule = seedCapsuleWithFrame();
+    const capsule = seedCapsuleWithFrame(); // no tracked browser session registered
 
     const res = await server.inject({
       method: "POST",
       url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
       payload: { gesture: TAP },
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("BROWSER_SESSION_UNAVAILABLE");
     expect(mockedRelay).not.toHaveBeenCalled();
   });
 
@@ -877,5 +891,149 @@ describe("POST /:id/gesture", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("STORE_OR_STATE_FAILED");
+  });
+});
+
+// ─── M2B: server-derived cdp_url ──────────────────────────────────────────────
+//
+// The UI never holds a cdp_url. When the request body omits it, the route derives
+// it server-side from the capsule's authoritative browser_session_id via the
+// tracked browser session. The derived value drives the relay/recheck/capture
+// helpers but must NEVER appear in any response body. An explicit body.cdp_url
+// stays supported (backward-compatible for existing internal callers/tests).
+describe("M2B: server-derived cdp_url (UI sends no cdp_url)", () => {
+  const TAP = { kind: "tap" as const, fx: 0.5, fy: 0.5 };
+
+  it("gesture: derives cdp_url from the capsule's browser session; never echoed", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    registerSessionForCapsule();
+    mockedRelay.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      status: "checking",
+      gesture_relayed: true,
+    });
+
+    // UI-style body: gesture only, NO cdp_url / target_id.
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { gesture: TAP },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().gesture_relayed).toBe(true);
+
+    // The relay seam received the server-derived cdp_url.
+    expect(mockedRelay).toHaveBeenCalledTimes(1);
+    expect(mockedRelay).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: DERIVED_CDP_URL,
+      targetId: undefined,
+      gesture: TAP,
+    });
+    // The derived cdp_url must never be reflected back to the UI.
+    expect(res.body).not.toContain(DERIVED_CDP_URL);
+    expect(res.body).not.toContain("cdp_url");
+    expect(res.body).not.toContain(BASE.browser_session_id);
+    expect(res.body).not.toContain("browser_session_id");
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("recheck: derives cdp_url from the capsule's browser session; never echoed", async () => {
+    enable();
+    const capsule = seedCapsule();
+    registerSessionForCapsule();
+    mockedRecheck.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      outcome: "cleared",
+      status: "cleared",
+      attempt_count: 0,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: {}, // UI sends no cdp_url
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().recheck).toBe("cleared");
+
+    expect(mockedRecheck).toHaveBeenCalledTimes(1);
+    expect(mockedRecheck).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: DERIVED_CDP_URL,
+      targetId: undefined,
+      expectedUrl: undefined,
+    });
+    expect(res.body).not.toContain(DERIVED_CDP_URL);
+    expect(res.body).not.toContain("cdp_url");
+    expect(res.body).not.toContain(BASE.browser_session_id);
+    expect(res.body).not.toContain("browser_session_id");
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("recapture: derives cdp_url from the capsule's browser session; never echoed", async () => {
+    enable();
+    const capsule = seedCapsule();
+    registerSessionForCapsule();
+    mockedCapture.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      screenshot_available: true,
+      screenshot_captured_at: "2026-06-18T00:00:00.000Z",
+      screenshot_expires_at: "2026-06-18T00:00:45.000Z",
+    } satisfies CaptureVisualGestureCapsuleScreenshotFrameResult);
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recapture`,
+      payload: {}, // UI sends no cdp_url
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().screenshot_available).toBe(true);
+
+    expect(mockedCapture).toHaveBeenCalledTimes(1);
+    expect(mockedCapture).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: DERIVED_CDP_URL,
+      targetId: undefined,
+      expectedUrl: undefined,
+    });
+    expect(res.body).not.toContain(DERIVED_CDP_URL);
+    expect(res.body).not.toContain("cdp_url");
+    expect(res.body).not.toContain(BASE.browser_session_id);
+    expect(res.body).not.toContain("browser_session_id");
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("backward-compatible: an explicit body.cdp_url wins over the derived session value", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    registerSessionForCapsule(); // session present, but the body value must win
+    mockedRelay.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      status: "checking",
+      gesture_relayed: true,
+    });
+
+    const EXPLICIT = "http://localhost:9222";
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: EXPLICIT, gesture: TAP },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockedRelay).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: EXPLICIT,
+      targetId: undefined,
+      gesture: TAP,
+    });
+    // Neither the explicit nor the derived cdp_url is reflected back.
+    expect(res.body).not.toContain(EXPLICIT);
+    expect(res.body).not.toContain(DERIVED_CDP_URL);
   });
 });

@@ -1429,3 +1429,141 @@ export const submitStepEmail = (
     `/api/internal/account-creation-step-requests/${stepRequestId}/submit-email`,
     { method: "POST", body: JSON.stringify(body) },
   );
+
+// ─── Visual Gesture Capsules (internal user-presence loop) ────────────────────
+//
+// Thin client for the internal VGC endpoints that drive the opaque-HV-wall
+// user-presence loop. The UI never holds a cdp_url — the server derives the
+// browser CDP context from the capsule (M2B), so all request bodies here are
+// cdp_url-free. Screenshot bytes flow ONLY through getVisualGestureCapsuleScreenshot
+// and are used solely as an <img> src; never logged, never sent to /gesture or
+// /recheck. No cdp_url / target_id / browser_session_id is ever sent or surfaced.
+
+export type VisualGestureKind = "tap" | "press_hold";
+
+export type VisualGestureCapsuleStatus =
+  | "awaiting_user_gesture"
+  | "relaying"
+  | "checking"
+  | "cleared"
+  | "rejected_retryable"
+  | "manual_fallback"
+  | "expired"
+  | "failed"
+  | "cancelled";
+
+/** Safe capsule view — mirrors the backend SafeVisualGestureCapsuleView. No
+ *  cdp_url / browser_session_id / target_id fields exist on this shape. */
+export interface VisualGestureCapsuleView {
+  capsule_id: string;
+  status: VisualGestureCapsuleStatus;
+  supported_gestures: VisualGestureKind[];
+  attempt_count: number;
+  max_attempts: number;
+  domain: string;
+  page_url?: string;
+  expires_at: string;
+  screenshot_available: boolean;
+  screenshot_captured_at?: string;
+  screenshot_expires_at?: string;
+  user_presence_required: true;
+  raw_gesture_revealed_to_agent: false;
+  screenshot_revealed_to_agent: false;
+  purchase_authorized: false;
+}
+
+export interface VisualGestureCapsuleScreenshot {
+  mime_type: "image/png";
+  png_base64: string;
+  captured_at: string;
+  expires_at: string;
+}
+
+export interface VisualGestureGesturePayload {
+  kind: VisualGestureKind;
+  fx: number;
+  fy: number;
+  duration_ms?: number;
+}
+
+export interface VisualGestureGestureResult {
+  gesture_relayed: true;
+  status: VisualGestureCapsuleStatus;
+  data: VisualGestureCapsuleView;
+}
+
+export type VisualGestureRecheckOutcome = "cleared" | "still_present" | "unknown";
+
+export interface VisualGestureRecheckResult {
+  recheck: VisualGestureRecheckOutcome;
+  status: VisualGestureCapsuleStatus;
+  attempt_count: number;
+  data: VisualGestureCapsuleView;
+}
+
+export interface VisualGestureRecaptureResult {
+  screenshot_available: boolean;
+  screenshot_captured_at?: string;
+  screenshot_expires_at?: string;
+}
+
+export interface VisualGestureCancelResult {
+  cancelled: boolean;
+  data: VisualGestureCapsuleView;
+}
+
+/** Raw VGC request: these endpoints return trust-relevant fields at the TOP level
+ *  (not under `data`), so we read the parsed envelope directly. Throws a clean
+ *  Error carrying the backend error.code so the UI can branch (e.g. MANUAL_FALLBACK,
+ *  SCREENSHOT_FRAME_UNAVAILABLE, BROWSER_SESSION_UNAVAILABLE). */
+async function vgcRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { "Content-Type": "application/json", ...init?.headers },
+    ...init,
+  });
+  const json = await res.json();
+  if (!json.ok) {
+    const err = new Error(json.error?.message ?? "Visual gesture capsule request failed");
+    (err as Error & { code?: string }).code = json.error?.code;
+    throw err;
+  }
+  return json as T;
+}
+
+export const listVisualGestureCapsules = () =>
+  vgcRequest<{ ok: true; data: VisualGestureCapsuleView[]; disabled?: boolean }>(
+    `/api/internal/visual-gesture-capsules`,
+  );
+
+export const getVisualGestureCapsuleScreenshot = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureCapsuleScreenshot>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/screenshot`,
+  );
+
+// cdp_url-free body: only the normalized gesture leaves the client.
+export const submitVisualGestureCapsuleGesture = (
+  capsuleId: string,
+  gesture: VisualGestureGesturePayload,
+) =>
+  vgcRequest<{ ok: true } & VisualGestureGestureResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/gesture`,
+    { method: "POST", body: JSON.stringify({ gesture }) },
+  );
+
+export const recheckVisualGestureCapsule = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureRecheckResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/recheck`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const recaptureVisualGestureCapsule = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureRecaptureResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/recapture`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const cancelVisualGestureCapsule = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureCancelResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );

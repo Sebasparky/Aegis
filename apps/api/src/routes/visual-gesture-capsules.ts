@@ -33,6 +33,20 @@ import {
 import { captureVisualGestureCapsuleScreenshotFrame } from "../runtime/visualGestureCapsuleCapture.js";
 import { relayVisualGestureCapsuleGesture } from "../runtime/visualGestureCapsuleRelay.js";
 import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
+import { getTaskBrowserSessionCdpUrl } from "../runtime/taskBrowserSessions.js";
+
+// Resolve the CDP base for a capsule's gesture/recheck/recapture call. The UI
+// never holds a cdp_url; the server derives it from the capsule's authoritative
+// browser_session_id link (M2B). An explicit body.cdp_url stays supported for
+// backward-compatible internal callers/tests. The resolved value is used only to
+// drive the relay/recheck/capture helpers — it is NEVER echoed in any response.
+function resolveCapsuleCdpUrl(
+  bodyCdpUrl: unknown,
+  browserSessionId: string,
+): string | undefined {
+  if (typeof bodyCdpUrl === "string" && bodyCdpUrl.length > 0) return bodyCdpUrl;
+  return getTaskBrowserSessionCdpUrl(browserSessionId);
+}
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
@@ -133,9 +147,16 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
     if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
 
     const body = req.body ?? {};
-    const cdpUrl = body.cdp_url;
+    // cdp_url is server-derived from the capsule's browser session when the UI
+    // omits it (M2B); an explicit body value stays supported. Never echoed back.
+    const cdpUrl = resolveCapsuleCdpUrl(body.cdp_url, capsule.browser_session_id);
     if (typeof cdpUrl !== "string" || cdpUrl.length === 0) {
-      return sendError(reply, 400, "VALIDATION_ERROR", "cdp_url is required.");
+      return sendError(
+        reply,
+        409,
+        "BROWSER_SESSION_UNAVAILABLE",
+        "No live browser session is available for this capsule.",
+      );
     }
     const targetId = typeof body.target_id === "string" ? body.target_id : undefined;
     const expectedUrl = typeof body.expected_url === "string" ? body.expected_url : undefined;
@@ -184,10 +205,21 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
       return sendError(reply, 400, "VALIDATION_ERROR", "Capsule id is required.");
     }
 
+    // Fetch the capsule up front so cdp_url can be derived from its browser
+    // session when the UI omits it. The recheck helper re-resolves the capsule
+    // (with lazy expiry) and owns the terminal/invalid-state decisions.
+    const capsule = getVisualGestureCapsule(id);
+    if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
     const body = req.body ?? {};
-    const cdpUrl = body.cdp_url;
+    const cdpUrl = resolveCapsuleCdpUrl(body.cdp_url, capsule.browser_session_id);
     if (typeof cdpUrl !== "string" || cdpUrl.length === 0) {
-      return sendError(reply, 400, "VALIDATION_ERROR", "cdp_url is required.");
+      return sendError(
+        reply,
+        409,
+        "BROWSER_SESSION_UNAVAILABLE",
+        "No live browser session is available for this capsule.",
+      );
     }
     const targetId = typeof body.target_id === "string" ? body.target_id : undefined;
     const expectedUrl = typeof body.expected_url === "string" ? body.expected_url : undefined;
@@ -266,10 +298,21 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
       return sendError(reply, 400, "VALIDATION_ERROR", "Capsule id is required.");
     }
 
+    // Fetch the capsule up front so cdp_url can be derived from its browser
+    // session when the UI omits it. The relay seam re-resolves the capsule (with
+    // lazy expiry) and owns the terminal / manual_fallback / dispatch decisions.
+    const capsule = getVisualGestureCapsule(id);
+    if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
     const body = req.body ?? {};
-    const cdpUrl = body.cdp_url;
+    const cdpUrl = resolveCapsuleCdpUrl(body.cdp_url, capsule.browser_session_id);
     if (typeof cdpUrl !== "string" || cdpUrl.length === 0) {
-      return sendError(reply, 400, "VALIDATION_ERROR", "cdp_url is required.");
+      return sendError(
+        reply,
+        409,
+        "BROWSER_SESSION_UNAVAILABLE",
+        "No live browser session is available for this capsule.",
+      );
     }
     const targetId = typeof body.target_id === "string" ? body.target_id : undefined;
 

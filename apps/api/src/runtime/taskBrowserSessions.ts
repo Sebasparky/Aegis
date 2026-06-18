@@ -628,6 +628,18 @@ export function getTaskBrowserSession(
   return session;
 }
 
+/**
+ * Internal-only: resolve the live CDP base URL for a browser session id, with no
+ * user_id ownership gate. Mirrors the raw-map lookup challengeInjection.ts uses to
+ * derive a session's cdp_url from a stored browser_session_id link. Callers (e.g.
+ * the Visual Gesture Capsule routes) own the linkage record authoritatively and
+ * use this to keep cdp_url server-side — the return value must NEVER be echoed to
+ * an agent, UI, or any response body.
+ */
+export function getTaskBrowserSessionCdpUrl(browserSessionId: string): string | undefined {
+  return taskBrowserSessions.get(browserSessionId)?.cdp_url;
+}
+
 /** Records the URL most recently navigated to in this session. Used by CDP injection to select
  *  the active page target rather than falling back to an arbitrary or stale target. */
 export function setTaskBrowserSessionCurrentUrl(id: string, currentUrl: string): void {

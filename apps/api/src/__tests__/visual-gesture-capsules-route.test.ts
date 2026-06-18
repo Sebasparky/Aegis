@@ -36,9 +36,18 @@ vi.mock("../runtime/visualGestureCapsuleCapture.js", () => ({
   captureVisualGestureCapsuleScreenshotFrame: vi.fn(),
 }));
 import { captureVisualGestureCapsuleScreenshotFrame } from "../runtime/visualGestureCapsuleCapture.js";
+
+// Module-mock the M1E relay seam: seams can't be injected over HTTP, so the
+// route's relayVisualGestureCapsuleGesture is replaced wholesale. No real
+// CDP/pointer dispatch ever runs in these tests.
+vi.mock("../runtime/visualGestureCapsuleRelay.js", () => ({
+  relayVisualGestureCapsuleGesture: vi.fn(),
+}));
+import { relayVisualGestureCapsuleGesture } from "../runtime/visualGestureCapsuleRelay.js";
 import { visualGestureCapsuleRoutes } from "../routes/visual-gesture-capsules.js";
 
 const mockedCapture = vi.mocked(captureVisualGestureCapsuleScreenshotFrame);
+const mockedRelay = vi.mocked(relayVisualGestureCapsuleGesture);
 
 const BASE = {
   human_verification_request_id: "hvr_route_001",
@@ -65,6 +74,7 @@ afterEach(() => {
   clearVisualGestureCapsulesForTests();
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   mockedCapture.mockReset();
+  mockedRelay.mockReset();
   vi.useRealTimers();
 });
 
@@ -381,5 +391,256 @@ describe("POST /:id/cancel", () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("NOT_FOUND");
+  });
+});
+
+describe("POST /:id/gesture", () => {
+  const TAP = { kind: "tap" as const, fx: 0.5, fy: 0.5 };
+  const PRESS_HOLD = { kind: "press_hold" as const, fx: 0.5, fy: 0.5, duration_ms: 1200 };
+
+  it("flag disabled → 404 disabled, relay not called", async () => {
+    // Seed while enabled, then disable so a record exists but the flag is off.
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", gesture: TAP },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("VISUAL_GESTURE_CAPSULE_DISABLED");
+    expect(mockedRelay).not.toHaveBeenCalled();
+  });
+
+  it("missing cdp_url → 400 VALIDATION_ERROR, relay not called", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { gesture: TAP },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(mockedRelay).not.toHaveBeenCalled();
+  });
+
+  it("malformed gesture → 400 VALIDATION_ERROR, relay not called", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+
+    // Missing kind/fx/fy and a non-object gesture both reject at the route.
+    for (const bad of [
+      { cdp_url: "http://localhost:9222", gesture: { kind: "tap" } },
+      { cdp_url: "http://localhost:9222", gesture: { fx: 0.5, fy: 0.5 } },
+      { cdp_url: "http://localhost:9222", gesture: "not-an-object" },
+      { cdp_url: "http://localhost:9222" },
+    ]) {
+      const res = await server.inject({
+        method: "POST",
+        url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+        payload: bad as any,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    }
+    expect(mockedRelay).not.toHaveBeenCalled();
+  });
+
+  it("tap success → relay called with args; safe metadata only", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    mockedRelay.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      status: "checking",
+      gesture_relayed: true,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", target_id: "T1", gesture: TAP },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.gesture_relayed).toBe(true);
+    expect(body.status).toBe("checking");
+    // data is a safe view, not the raw capsule.
+    expect(body.data.capsule_id).toBe(capsule.capsule_id);
+    expect(body.data.raw_gesture_revealed_to_agent).toBe(false);
+    expect(body.data.screenshot_revealed_to_agent).toBe(false);
+    assertNoByteOrGeometryLeak(res.body);
+
+    expect(mockedRelay).toHaveBeenCalledTimes(1);
+    expect(mockedRelay).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: "http://localhost:9222",
+      targetId: "T1",
+      gesture: TAP,
+    });
+  });
+
+  it("press_hold success → relay gets duration_ms but response omits it", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    mockedRelay.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      status: "checking",
+      gesture_relayed: true,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", gesture: PRESS_HOLD },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().gesture_relayed).toBe(true);
+    // Relay receives the duration-bearing gesture (no target_id → undefined).
+    expect(mockedRelay).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: "http://localhost:9222",
+      targetId: undefined,
+      gesture: PRESS_HOLD,
+    });
+    // But the response must not echo the duration.
+    expect(res.body).not.toContain("duration_ms");
+    expect(res.body).not.toContain("1200");
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("maps each relay refusal reason to a safe status/code", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    const cases: Array<[string, number, string]> = [
+      ["not_found", 404, "NOT_FOUND"],
+      ["terminal", 409, "TERMINAL"],
+      ["manual_fallback", 409, "MANUAL_FALLBACK"],
+      ["invalid_gesture", 400, "INVALID_GESTURE"],
+      ["invalid_coordinates", 400, "INVALID_COORDINATES"],
+      ["screenshot_frame_unavailable", 409, "SCREENSHOT_FRAME_UNAVAILABLE"],
+      ["pointer_dispatch_failed", 502, "POINTER_DISPATCH_FAILED"],
+      ["store_or_state_failed", 409, "STORE_OR_STATE_FAILED"],
+    ];
+    for (const [reason, status, code] of cases) {
+      mockedRelay.mockResolvedValueOnce({ ok: false, reason: reason as any });
+      const res = await server.inject({
+        method: "POST",
+        url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+        payload: { cdp_url: "http://localhost:9222", gesture: TAP },
+      });
+      expect(res.statusCode).toBe(status);
+      const body = res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe(code);
+      assertNoByteOrGeometryLeak(res.body);
+    }
+  });
+
+  it("does not echo browser/pointer internals on failure", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    mockedRelay.mockResolvedValue({ ok: false, reason: "pointer_dispatch_failed" });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", target_id: "T1", gesture: TAP },
+    });
+    expect(res.statusCode).toBe(502);
+    // Neither the cdp_url nor target_id supplied in the request is reflected back.
+    expect(res.body).not.toContain("http://localhost:9222");
+    expect(res.body).not.toContain("T1");
+  });
+
+  it("non-leakage guard across JSON and raw body", async () => {
+    enable();
+    // Seed the frame with the example viewport dims (640x400) so the dimension
+    // checks below are meaningful — they must never surface in the response.
+    const capsule = createVisualGestureCapsule(BASE);
+    const stored = storeVisualGestureCapsuleScreenshotFrame(capsule.capsule_id, {
+      png_base64: PNG,
+      viewport_css_width: 640,
+      viewport_css_height: 400,
+    });
+    expect(stored.ok).toBe(true);
+
+    mockedRelay.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      status: "checking",
+      gesture_relayed: true,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", target_id: "T1", gesture: PRESS_HOLD },
+    });
+
+    // String field-name / strategy tokens: check both parsed JSON and raw body.
+    // (Bare numeric dims are checked separately via numeric values to avoid
+    // false positives from ISO-timestamp millisecond digits.)
+    const forbiddenStrings = [
+      "png_base64",
+      "fx",
+      "fy",
+      "cssX",
+      "cssY",
+      "duration_ms",
+      "cdp_url",
+      "target_id",
+      "viewport_css_width",
+      "viewport_css_height",
+      "path",
+      "strategy",
+    ];
+    const serialized = JSON.stringify(res.json());
+    for (const token of forbiddenStrings) {
+      expect(serialized).not.toContain(token);
+      expect(res.body).not.toContain(token);
+    }
+
+    // Viewport dimensions (640, 400) must not appear as numeric values anywhere
+    // in the response — robust against timestamp/id substring collisions.
+    const numbers: number[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === "number") numbers.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(res.json());
+    expect(numbers).not.toContain(640);
+    expect(numbers).not.toContain(400);
+  });
+
+  it("post-relay capsule vanish → safe 409 STORE_OR_STATE_FAILED", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    // Relay reports success, but the capsule is gone by the time we re-fetch.
+    mockedRelay.mockImplementation(async () => {
+      cancelVisualGestureCapsule(capsule.capsule_id);
+      clearVisualGestureCapsulesForTests();
+      return {
+        ok: true,
+        capsule_id: capsule.capsule_id,
+        status: "checking",
+        gesture_relayed: true,
+      };
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/gesture`,
+      payload: { cdp_url: "http://localhost:9222", gesture: TAP },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("STORE_OR_STATE_FAILED");
   });
 });

@@ -31,10 +31,27 @@ import {
   cancelVisualGestureCapsule,
 } from "../runtime/visualGestureCapsule.js";
 import { captureVisualGestureCapsuleScreenshotFrame } from "../runtime/visualGestureCapsuleCapture.js";
+import { relayVisualGestureCapsuleGesture } from "../runtime/visualGestureCapsuleRelay.js";
 
 function sendError(reply: any, status: number, code: string, message: string) {
   return reply.status(status).send({ ok: false, error: { code, message } });
 }
+
+// Map each relay refusal reason to a safe HTTP status + stable error code. The
+// reason code is the ONLY relay detail surfaced — never the underlying pointer /
+// browser error, cdp_url, target_id, coordinates, duration, or screenshot bytes.
+// Unknown reasons fall back to a conservative 409 STORE_OR_STATE_FAILED.
+const GESTURE_RELAY_ERROR_MAP: Record<string, { status: number; code: string }> = {
+  flag_disabled: { status: 404, code: "VISUAL_GESTURE_CAPSULE_DISABLED" },
+  not_found: { status: 404, code: "NOT_FOUND" },
+  terminal: { status: 409, code: "TERMINAL" },
+  manual_fallback: { status: 409, code: "MANUAL_FALLBACK" },
+  invalid_gesture: { status: 400, code: "INVALID_GESTURE" },
+  invalid_coordinates: { status: 400, code: "INVALID_COORDINATES" },
+  screenshot_frame_unavailable: { status: 409, code: "SCREENSHOT_FRAME_UNAVAILABLE" },
+  pointer_dispatch_failed: { status: 502, code: "POINTER_DISPATCH_FAILED" },
+  store_or_state_failed: { status: 409, code: "STORE_OR_STATE_FAILED" },
+};
 
 /** Non-list flag-off response: treat the feature as non-existent (structured 404). */
 function sendDisabled(reply: any) {
@@ -176,4 +193,78 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
       });
     },
   );
+
+  // Submit a user-provided gesture (tap or bounded press-hold) for a capsule. The
+  // route performs only shallow body validation and delegates ALL geometry, point
+  // mapping, and pointer dispatch to the M1E relay seam — it does NOT expose the
+  // pointerRelay injection seam over HTTP. The response carries safe metadata only:
+  // never png_base64, fx/fy, cssX/cssY, duration_ms, cdp_url, target_id, viewport
+  // dimensions, path points, or gesture strategy. Strictly internal — NOT exposed
+  // on any agent-facing surface (/api/agent/v1).
+  server.post<{
+    Params: { id: string };
+    Body: { cdp_url?: unknown; target_id?: unknown; gesture?: unknown };
+  }>("/api/internal/visual-gesture-capsules/:id/gesture", async (req, reply) => {
+    // Flag gate FIRST — return before reading the body or calling the relay seam.
+    if (!isVisualGestureCapsuleEnabled()) return sendDisabled(reply);
+
+    const id = req.params.id;
+    if (typeof id !== "string" || id.length === 0) {
+      return sendError(reply, 400, "VALIDATION_ERROR", "Capsule id is required.");
+    }
+
+    const body = req.body ?? {};
+    const cdpUrl = body.cdp_url;
+    if (typeof cdpUrl !== "string" || cdpUrl.length === 0) {
+      return sendError(reply, 400, "VALIDATION_ERROR", "cdp_url is required.");
+    }
+    const targetId = typeof body.target_id === "string" ? body.target_id : undefined;
+
+    // Shallow gesture shape check — presence of kind/fx/fy only. Deep validation
+    // (range of fx/fy, press-hold duration bounds) is the relay helper's job and
+    // surfaces as invalid_gesture / invalid_coordinates below.
+    const gesture = body.gesture as
+      | { kind?: unknown; fx?: unknown; fy?: unknown }
+      | null
+      | undefined;
+    if (
+      !gesture ||
+      typeof gesture !== "object" ||
+      (gesture.kind !== "tap" && gesture.kind !== "press_hold") ||
+      typeof gesture.fx !== "number" ||
+      typeof gesture.fy !== "number"
+    ) {
+      return sendError(reply, 400, "VALIDATION_ERROR", "A valid gesture is required.");
+    }
+
+    const result = await relayVisualGestureCapsuleGesture({
+      capsuleId: id,
+      cdpUrl,
+      targetId,
+      gesture: gesture as any,
+    });
+
+    if (!result.ok) {
+      const mapped =
+        GESTURE_RELAY_ERROR_MAP[result.reason] ??
+        { status: 409, code: "STORE_OR_STATE_FAILED" };
+      // Generic message only — no relay/pointer/browser internals are echoed.
+      return sendError(reply, mapped.status, mapped.code, "Gesture relay failed.");
+    }
+
+    // Dispatch landed. Re-fetch for the safe view; a post-relay race that purged
+    // the capsule is reported as a safe 409 rather than a 500.
+    const current = getVisualGestureCapsule(id);
+    if (!current) {
+      return sendError(reply, 409, "STORE_OR_STATE_FAILED", "Gesture relay failed.");
+    }
+
+    // Top-level status comes from the relay result; data is the safe view.
+    return reply.send({
+      ok: true,
+      gesture_relayed: true,
+      status: result.status,
+      data: getSafeVisualGestureCapsuleView(current),
+    });
+  });
 }

@@ -44,10 +44,19 @@ vi.mock("../runtime/visualGestureCapsuleRelay.js", () => ({
   relayVisualGestureCapsuleGesture: vi.fn(),
 }));
 import { relayVisualGestureCapsuleGesture } from "../runtime/visualGestureCapsuleRelay.js";
+
+// Module-mock the M1G recheck helper: seams can't be injected over HTTP, so the
+// route's recheckVisualGestureCapsule is replaced wholesale. No real CDP / probe
+// ever runs in these tests.
+vi.mock("../runtime/visualGestureCapsuleRecheck.js", () => ({
+  recheckVisualGestureCapsule: vi.fn(),
+}));
+import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
 import { visualGestureCapsuleRoutes } from "../routes/visual-gesture-capsules.js";
 
 const mockedCapture = vi.mocked(captureVisualGestureCapsuleScreenshotFrame);
 const mockedRelay = vi.mocked(relayVisualGestureCapsuleGesture);
+const mockedRecheck = vi.mocked(recheckVisualGestureCapsule);
 
 const BASE = {
   human_verification_request_id: "hvr_route_001",
@@ -75,6 +84,7 @@ afterEach(() => {
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   mockedCapture.mockReset();
   mockedRelay.mockReset();
+  mockedRecheck.mockReset();
   vi.useRealTimers();
 });
 
@@ -330,31 +340,256 @@ describe("POST /:id/recapture", () => {
   });
 });
 
-describe("POST /:id/recheck (stub)", () => {
-  it("does not falsely mark the capsule cleared", async () => {
+describe("POST /:id/recheck (M1G)", () => {
+  it("flag disabled → 404 disabled, helper not called", async () => {
+    // Seed while enabled, then disable so a record exists but the flag is off.
+    enable();
+    const capsule = seedCapsule();
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("VISUAL_GESTURE_CAPSULE_DISABLED");
+    expect(mockedRecheck).not.toHaveBeenCalled();
+  });
+
+  it("missing cdp_url → 400 VALIDATION_ERROR, helper not called", async () => {
     enable();
     const capsule = seedCapsule();
 
     const res = await server.inject({
       method: "POST",
       url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(mockedRecheck).not.toHaveBeenCalled();
+  });
+
+  it("success cleared → safe shape; no leaked cdp_url/target_id/expected_url", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedRecheck.mockImplementation(async () => {
+      // Drive the real store so the re-fetched safe view reflects the clear.
+      const { markGestureCapsuleCleared } = await import("../runtime/visualGestureCapsule.js");
+      markGestureCapsuleCleared(capsule.capsule_id);
+      return {
+        ok: true,
+        capsule_id: capsule.capsule_id,
+        outcome: "cleared",
+        status: "cleared",
+        attempt_count: 0,
+      };
+    });
+
+    // Distinctive sentinels that cannot collide with ISO timestamps, ids, or the
+    // capsule's own page_url (which is legitimately echoed in the safe view).
+    const TARGET_SENTINEL = "tgtSENTINELxq";
+    const EXPECTED_URL_SENTINEL = "https://probe.invalid/sentinel";
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222", target_id: TARGET_SENTINEL, expected_url: EXPECTED_URL_SENTINEL },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
-    expect(body.recheck).toBe("unwired");
-    expect(body.status).toBe("awaiting_user_gesture");
-    expect(body.data.status).not.toBe("cleared");
-    // The stored record must not have transitioned either.
-    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("awaiting_user_gesture");
+    expect(body.recheck).toBe("cleared");
+    expect(body.status).toBe("cleared");
+    expect(body.attempt_count).toBe(0);
+    expect(body.data.status).toBe("cleared");
+    expect(body.data.raw_gesture_revealed_to_agent).toBe(false);
+    expect(body.data.screenshot_revealed_to_agent).toBe(false);
+
+    // The request's connection inputs must never be reflected back.
+    expect(res.body).not.toContain("http://localhost:9222");
+    expect(res.body).not.toContain(TARGET_SENTINEL);
+    expect(res.body).not.toContain(EXPECTED_URL_SENTINEL);
+    assertNoByteOrGeometryLeak(res.body);
+
+    expect(mockedRecheck).toHaveBeenCalledTimes(1);
+    expect(mockedRecheck).toHaveBeenCalledWith({
+      capsuleId: capsule.capsule_id,
+      cdpUrl: "http://localhost:9222",
+      targetId: TARGET_SENTINEL,
+      expectedUrl: EXPECTED_URL_SENTINEL,
+    });
+  });
+
+  it("success still_present → returns attempt_count/status, safe view only", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedRecheck.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      outcome: "still_present",
+      status: "rejected_retryable",
+      attempt_count: 1,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.recheck).toBe("still_present");
+    expect(body.status).toBe("rejected_retryable");
+    expect(body.attempt_count).toBe(1);
+    expect(body.data.capsule_id).toBe(capsule.capsule_id);
     assertNoByteOrGeometryLeak(res.body);
   });
 
-  it("returns NOT_FOUND for an unknown capsule id", async () => {
+  it("success unknown → safe response, no attempt burn implied", async () => {
     enable();
+    const capsule = seedCapsule();
+    mockedRecheck.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      outcome: "unknown",
+      status: "checking",
+      attempt_count: 0,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.recheck).toBe("unknown");
+    expect(body.status).toBe("checking");
+    expect(body.attempt_count).toBe(0);
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("maps each recheck refusal reason to a safe status/code", async () => {
+    enable();
+    const capsule = seedCapsule();
+    const cases: Array<[string, number, string]> = [
+      ["flag_disabled", 404, "VISUAL_GESTURE_CAPSULE_DISABLED"],
+      ["not_found", 404, "NOT_FOUND"],
+      ["terminal", 409, "TERMINAL"],
+      ["invalid_state", 409, "INVALID_STATE"],
+      ["probe_failed", 502, "PROBE_FAILED"],
+      ["state_update_failed", 409, "STATE_UPDATE_FAILED"],
+    ];
+    for (const [reason, status, code] of cases) {
+      mockedRecheck.mockResolvedValueOnce({ ok: false, reason: reason as any });
+      const res = await server.inject({
+        method: "POST",
+        url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+        payload: { cdp_url: "http://localhost:9222" },
+      });
+      expect(res.statusCode).toBe(status);
+      const body = res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe(code);
+      assertNoByteOrGeometryLeak(res.body);
+    }
+  });
+
+  it("non-leakage guard across JSON and raw body", async () => {
+    enable();
+    const capsule = createVisualGestureCapsule(BASE);
+    const stored = storeVisualGestureCapsuleScreenshotFrame(capsule.capsule_id, {
+      png_base64: PNG,
+      viewport_css_width: 640,
+      viewport_css_height: 400,
+    });
+    expect(stored.ok).toBe(true);
+
+    mockedRecheck.mockResolvedValue({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      outcome: "still_present",
+      status: "rejected_retryable",
+      attempt_count: 1,
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222", target_id: "tgtSENTINELxq", expected_url: "https://probe.invalid/sentinel" },
+    });
+
+    const forbiddenStrings = [
+      "png_base64",
+      "fx",
+      "fy",
+      "cssX",
+      "cssY",
+      "duration_ms",
+      "cdp_url",
+      "target_id",
+      "expected_url",
+      "viewport_css_width",
+      "viewport_css_height",
+      "path",
+      "strategy",
+      "postMessage",
+      "perimeterx",
+      "control_box",
+    ];
+    const serialized = JSON.stringify(res.json());
+    for (const token of forbiddenStrings) {
+      expect(serialized).not.toContain(token);
+      expect(res.body).not.toContain(token);
+    }
+    // The supplied connection inputs must not be echoed.
+    expect(res.body).not.toContain("http://localhost:9222");
+    expect(res.body).not.toContain("tgtSENTINELxq");
+    expect(res.body).not.toContain("https://probe.invalid/sentinel");
+
+    // Viewport dimensions (640, 400) must not appear as numeric values anywhere.
+    const numbers: number[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === "number") numbers.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(res.json());
+    expect(numbers).not.toContain(640);
+    expect(numbers).not.toContain(400);
+  });
+
+  it("post-recheck capsule vanish → safe 409 STATE_UPDATE_FAILED", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedRecheck.mockImplementation(async () => {
+      clearVisualGestureCapsulesForTests();
+      return {
+        ok: true,
+        capsule_id: capsule.capsule_id,
+        outcome: "unknown",
+        status: "checking",
+        attempt_count: 0,
+      };
+    });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/recheck`,
+      payload: { cdp_url: "http://localhost:9222" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("STATE_UPDATE_FAILED");
+  });
+
+  it("returns NOT_FOUND when the helper reports not_found", async () => {
+    enable();
+    mockedRecheck.mockResolvedValue({ ok: false, reason: "not_found" });
     const res = await server.inject({
       method: "POST",
       url: "/api/internal/visual-gesture-capsules/vgc_nope/recheck",
+      payload: { cdp_url: "http://localhost:9222" },
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("NOT_FOUND");

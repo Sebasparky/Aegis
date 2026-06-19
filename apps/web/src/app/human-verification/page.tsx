@@ -89,7 +89,10 @@ export default function HumanVerificationPage() {
   const [screenshotDataUrl, setScreenshotDataUrl] = useState<string | null>(null);
   const [screenshotMissing, setScreenshotMissing] = useState(false);
 
-  const [mode, setMode] = useState<GestureMode>("tap");
+  // Default to press-and-hold: opaque HV walls (PerimeterX-style) are press-and-hold
+  // challenges, so a normal press in the UI should relay a real hold, not a tap. The
+  // tap toggle stays available for the rarer tap/checkbox challenges.
+  const [mode, setMode] = useState<GestureMode>("press_hold");
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);

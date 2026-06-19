@@ -31,6 +31,20 @@ export function isHvDebugEnabled(): boolean {
   return process.env.ANTIGEN_HV_DEBUG === "true";
 }
 
+/**
+ * Safe HV debug logger. No-op unless ANTIGEN_HV_DEBUG is set, so call sites are
+ * byte-identical when the flag is off. Callers MUST pass only safe scalars
+ * (booleans, enums, coarse buckets, ids that are already non-sensitive) — never
+ * raw coordinates, durations, page text, cdp_url, or secret material. Mirrors the
+ * `logHvActionDebug` discipline in agent-api.ts so the two surfaces stay aligned.
+ */
+export function logHvDebug(fields: Record<string, string | number | boolean>): void {
+  if (!isHvDebugEnabled()) return;
+  const parts = Object.entries(fields).map(([k, v]) => `${k}=${v}`);
+  // eslint-disable-next-line no-console
+  console.log(`[HvDebug] ${parts.join(" ")}`);
+}
+
 const activeHumanVerification = new Map<string, ActiveHumanVerificationMarker>();
 
 export function setActiveHumanVerification(

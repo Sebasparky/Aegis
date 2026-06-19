@@ -34,6 +34,8 @@ import {
   type VisualGestureCapsuleStatus,
 } from "./visualGestureCapsule.js";
 import { openCdpPageClient, buildHumanVerificationProbeExpr } from "./humanPresenceRelay.js";
+import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
+import { logHvDebug } from "./humanVerificationState.js";
 
 /**
  * Injectable presence probe seam. Production default lives below; tests inject a
@@ -43,9 +45,42 @@ import { openCdpPageClient, buildHumanVerificationProbeExpr } from "./humanPrese
  */
 export interface VisualGestureCapsulePresenceProbe {
   (args: { cdpUrl: string; targetId?: string; expectedUrl?: string }): Promise<
-    | { ok: true; presence: "present" | "absent" | "unknown"; reason?: string }
+    | {
+        ok: true;
+        presence: "present" | "absent" | "unknown";
+        reason?: string;
+        /**
+         * Coarse per-detector booleans for SAFE debug telemetry only (consumed by
+         * logHvDebug, never placed in the HTTP response). Geometry/text internals
+         * are reduced to a single boolean inside the probe adapter — no rects,
+         * coordinates, page text, or provider data ever ride along.
+         */
+        hv_present?: boolean;
+        geo_present?: boolean;
+      }
     | { ok: false; reason?: string }
   >;
+}
+
+/**
+ * Pure union decision: combine the structural-HV verdict and the geometry-
+ * obstruction verdict into a single presence classification. Either detector
+ * reporting `present` wins (fail-closed — the wall is still up). `absent` only
+ * when BOTH parsed and BOTH report absent. When neither verdict is a usable
+ * boolean the result is `unknown` (no clear, no attempt burn).
+ *
+ * This is the fix for the false-clear bug: a capsule minted by the geometry
+ * detector (large centered overlay / scrim / pointer interceptor) must NOT be
+ * cleared just because the structural/text HV probe — which never matched this
+ * opaque wall — reports absent. Exported for direct unit testing.
+ */
+export function combineRecheckPresence(
+  hvPresent: boolean | undefined,
+  geoPresent: boolean | undefined,
+): "present" | "absent" | "unknown" {
+  if (hvPresent === true || geoPresent === true) return "present";
+  if (hvPresent === false || geoPresent === false) return "absent";
+  return "unknown";
 }
 
 export type RecheckVisualGestureCapsuleResult =
@@ -84,26 +119,67 @@ const RECHECK_ALLOWED_STATES: ReadonlySet<VisualGestureCapsuleStatus> = new Set(
 ]);
 
 /**
- * Default production probe — a thin, fail-safe adapter over the existing
- * page-level HV detection. Reuses openCdpPageClient + buildHumanVerificationProbeExpr
- * (the same pair the Human Presence Relay probe uses) and consumes ONLY the
- * boolean `present`. The probe IIFE result's geometry (control_box, vw/vh) is
- * never read here, so it cannot escape into the recheck result.
+ * Reduce the geometry-obstruction probe's STATIC signals to a single boolean.
+ * `repeated_stale` is deliberately NOT consulted: it is a per-action runtime
+ * signal (corroboration at MINT time), not a page-state signal. At recheck the
+ * only question is "is an obstruction still painted on the page", so any one
+ * static obstruction signal counts as present. Returns undefined when the probe
+ * shape is unusable (so the union can fall back to the HV verdict / unknown).
+ */
+export function geometryObstructionPresent(raw: unknown): boolean | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const v = raw as Record<string, unknown>;
+  const keys = [
+    "large_centered_overlay_seen",
+    "viewport_scrim_seen",
+    "pointer_interceptor_seen",
+    "denial_text_seen",
+    "visible_inaccessible_iframe_seen",
+  ] as const;
+  // Require at least one recognizable boolean field before trusting the verdict.
+  if (!keys.some((k) => typeof v[k] === "boolean")) return undefined;
+  return keys.some((k) => v[k] === true);
+}
+
+/**
+ * Default production probe — a thin, fail-safe adapter that unions the existing
+ * page-level structural-HV detection with the geometry-obstruction detection on
+ * a SINGLE opened CDP client. Reuses openCdpPageClient +
+ * buildHumanVerificationProbeExpr (the same pair the Human Presence Relay probe
+ * uses) AND buildAmbiguousVisualObstructionExpr (the geometry detector that mints
+ * ambiguous-block capsules). Both IIFEs reduce geometry to booleans inside the
+ * page, so control_box / rects / vw/vh / page text never escape into the result.
  *
- * Mapping:
- *   present === true   → "present"
- *   present === false  → "absent"
- *   shape unparseable  → "unknown" (cannot safely decide; no attempt burn)
- *   connect/eval error → { ok: false } (→ probe_failed; no attempt burn)
+ * Mapping (see combineRecheckPresence):
+ *   either detector present → "present"  (fail-closed; wall still up)
+ *   both parsed + both absent → "absent" (genuinely unblocked → clear)
+ *   neither usable          → "unknown"  (no clear, no attempt burn)
+ *   connect/eval error      → { ok: false } (→ probe_failed; no attempt burn)
  */
 const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl, expectedUrl }) => {
   const opened = await openCdpPageClient({ cdpUrl, preferredUrl: expectedUrl });
   if (!opened.ok) return { ok: false, reason: "probe_connect_failed" };
   try {
-    const raw = await opened.client.evaluate(buildHumanVerificationProbeExpr());
-    const present = (raw as { present?: unknown } | null | undefined)?.present;
-    if (typeof present !== "boolean") return { ok: true, presence: "unknown" };
-    return { ok: true, presence: present ? "present" : "absent" };
+    const hvRaw = await opened.client.evaluate(buildHumanVerificationProbeExpr());
+    const hvPresentVal = (hvRaw as { present?: unknown } | null | undefined)?.present;
+    const hvPresent = typeof hvPresentVal === "boolean" ? hvPresentVal : undefined;
+
+    // Geometry detector is best-effort: a failure here must not block a valid HV
+    // verdict, so a throw degrades the geometry side to undefined (not probe_failed).
+    let geoPresent: boolean | undefined;
+    try {
+      const geoRaw = await opened.client.evaluate(buildAmbiguousVisualObstructionExpr());
+      geoPresent = geometryObstructionPresent(geoRaw);
+    } catch {
+      geoPresent = undefined;
+    }
+
+    return {
+      ok: true,
+      presence: combineRecheckPresence(hvPresent, geoPresent),
+      ...(hvPresent !== undefined ? { hv_present: hvPresent } : {}),
+      ...(geoPresent !== undefined ? { geo_present: geoPresent } : {}),
+    };
   } catch {
     return { ok: false, reason: "probe_eval_failed" };
   } finally {
@@ -141,7 +217,24 @@ export async function recheckVisualGestureCapsule(args: {
   });
 
   // Probe could not run — leave attempts and status untouched.
-  if (!result.ok) return { ok: false, reason: "probe_failed" };
+  if (!result.ok) {
+    logHvDebug({ scope: "vgc_recheck", recheck_outcome: "probe_failed" });
+    return { ok: false, reason: "probe_failed" };
+  }
+
+  // Safe debug: coarse per-detector booleans + outcome enum only. No-op when
+  // ANTIGEN_HV_DEBUG is off; never carries coords, durations, or page bytes.
+  logHvDebug({
+    scope: "vgc_recheck",
+    ...(result.hv_present !== undefined ? { probe_hv_present: result.hv_present } : {}),
+    ...(result.geo_present !== undefined ? { probe_geo_present: result.geo_present } : {}),
+    recheck_outcome:
+      result.presence === "absent"
+        ? "cleared"
+        : result.presence === "present"
+          ? "still_present"
+          : "unknown",
+  });
 
   if (result.presence === "absent") {
     const cleared = markGestureCapsuleCleared(args.capsuleId);

@@ -33,9 +33,23 @@ import {
   type CdpPageClient,
 } from "./humanPresenceRelay.js";
 import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
+import { logHvDebug } from "./humanVerificationState.js";
 
 /** Reject press-holds shorter than this — too brief to be a real human hold. */
 export const HOLD_MIN_DURATION_MS = 300;
+
+/**
+ * Coarse hold-duration bucket for SAFE debug telemetry. Maps a raw duration (ms)
+ * to one of four buckets so the actual hold time is never logged. Taps and any
+ * sub-250ms input fall in the lowest bucket. Pure + exported for unit testing.
+ */
+export function holdDurationBucket(ms: number | undefined): "<250ms" | "250-999ms" | "1-3s" | "3s+" {
+  const d = typeof ms === "number" && Number.isFinite(ms) ? ms : 0;
+  if (d < 250) return "<250ms";
+  if (d < 1000) return "250-999ms";
+  if (d < 3000) return "1-3s";
+  return "3s+";
+}
 // Upper bound reuses the existing Human Presence Relay ceiling (30_000ms).
 
 /** V1 supports only tap and press_hold. Everything else is rejected. */
@@ -294,6 +308,14 @@ export async function relayVisualGestureCapsuleGesture(args: {
       height: frame.viewport_css_height,
     })
   ) {
+    logHvDebug({
+      scope: "vgc_gesture",
+      gesture_kind: args.gesture.kind,
+      hold_duration_bucket: holdDurationBucket(
+        args.gesture.kind === "press_hold" ? args.gesture.duration_ms : undefined,
+      ),
+      relay_result: "viewport_drifted",
+    });
     return { ok: false, reason: "viewport_drifted" };
   }
 
@@ -327,13 +349,28 @@ export async function relayVisualGestureCapsuleGesture(args: {
       ? await relay.tapAtPoint(pointerArgs)
       : await relay.pressHoldAtPoint({ ...pointerArgs, durationMs: args.gesture.duration_ms });
 
+  // Coarse, value-free debug base: gesture kind + duration bucket only. Reused by
+  // the failed/dispatched logs below. No-op unless ANTIGEN_HV_DEBUG is set.
+  const gestureDebugBase = {
+    scope: "vgc_gesture",
+    gesture_kind: args.gesture.kind,
+    hold_duration_bucket: holdDurationBucket(
+      args.gesture.kind === "press_hold" ? args.gesture.duration_ms : undefined,
+    ),
+  } as const;
+
   // Failure surfaces a reason only — never the coords, duration, or path. No
   // attempt is burned merely because dispatch failed to land.
-  if (!dispatched.ok) return { ok: false, reason: "pointer_dispatch_failed" };
+  if (!dispatched.ok) {
+    logHvDebug({ ...gestureDebugBase, relay_result: "failed" });
+    return { ok: false, reason: "pointer_dispatch_failed" };
+  }
 
   // 9. Dispatch landed: move to "checking" (recheck slice decides cleared/retry).
   const transitioned = transitionVisualGestureCapsule(args.capsuleId, "checking");
   if (!transitioned.ok) return { ok: false, reason: "store_or_state_failed" };
+
+  logHvDebug({ ...gestureDebugBase, relay_result: "dispatched" });
 
   return {
     ok: true,

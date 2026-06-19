@@ -25,6 +25,8 @@ import {
 } from "../runtime/visualGestureCapsule.js";
 import {
   recheckVisualGestureCapsule,
+  combineRecheckPresence,
+  geometryObstructionPresent,
   type VisualGestureCapsulePresenceProbe,
 } from "../runtime/visualGestureCapsuleRecheck.js";
 
@@ -211,6 +213,25 @@ describe("recheckVisualGestureCapsule", () => {
     expect(probe.mock).toHaveBeenCalledTimes(1);
   });
 
+  it("geometry wall still present (structural absent) → still_present, NOT cleared", async () => {
+    // Regression for the false-clear bug: a capsule minted by the GEOMETRY detector
+    // must not be cleared just because the structural/text HV probe reports absent.
+    // The default probe unions both detectors; here the union resolves to present.
+    enable();
+    const capsule = seedCheckingCapsule();
+
+    const probe = probeReturning({
+      ok: true,
+      presence: "present",
+      hv_present: false,
+      geo_present: true,
+    });
+    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "still_present", status: "rejected_retryable" });
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
+  });
+
   it("result contains no screenshot bytes, coordinates, durations, or provider details", async () => {
     enable();
     const capsule = seedCheckingCapsule();
@@ -243,5 +264,66 @@ describe("recheckVisualGestureCapsule", () => {
     ]) {
       expect(serialized).not.toContain(token);
     }
+  });
+});
+
+describe("combineRecheckPresence (union decision)", () => {
+  it("either detector present → present (fail-closed)", () => {
+    expect(combineRecheckPresence(true, false)).toBe("present");
+    expect(combineRecheckPresence(false, true)).toBe("present");
+    expect(combineRecheckPresence(true, true)).toBe("present");
+    expect(combineRecheckPresence(true, undefined)).toBe("present");
+    expect(combineRecheckPresence(undefined, true)).toBe("present");
+  });
+
+  it("both parsed and both absent → absent (genuinely unblocked)", () => {
+    expect(combineRecheckPresence(false, false)).toBe("absent");
+  });
+
+  it("one absent, the other unusable → absent (a usable absent verdict still clears)", () => {
+    expect(combineRecheckPresence(false, undefined)).toBe("absent");
+    expect(combineRecheckPresence(undefined, false)).toBe("absent");
+  });
+
+  it("neither usable → unknown (no clear, no burn)", () => {
+    expect(combineRecheckPresence(undefined, undefined)).toBe("unknown");
+  });
+});
+
+describe("geometryObstructionPresent (static-signal reduction)", () => {
+  it("any static obstruction signal → true", () => {
+    expect(geometryObstructionPresent({ large_centered_overlay_seen: true })).toBe(true);
+    expect(geometryObstructionPresent({ viewport_scrim_seen: true })).toBe(true);
+    expect(geometryObstructionPresent({ pointer_interceptor_seen: true })).toBe(true);
+    expect(geometryObstructionPresent({ denial_text_seen: true })).toBe(true);
+    expect(geometryObstructionPresent({ visible_inaccessible_iframe_seen: true })).toBe(true);
+  });
+
+  it("all static signals false → false", () => {
+    expect(
+      geometryObstructionPresent({
+        large_centered_overlay_seen: false,
+        viewport_scrim_seen: false,
+        pointer_interceptor_seen: false,
+        denial_text_seen: false,
+        visible_inaccessible_iframe_seen: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("repeated_stale is ignored — it is a runtime signal, not a page-state signal", () => {
+    // repeated_stale alone (no static obstruction field) is not a usable verdict.
+    expect(geometryObstructionPresent({ repeated_stale: true })).toBeUndefined();
+    // repeated_stale must not flip an otherwise-absent page to present.
+    expect(
+      geometryObstructionPresent({ large_centered_overlay_seen: false, repeated_stale: true }),
+    ).toBe(false);
+  });
+
+  it("unparseable / no recognizable boolean field → undefined", () => {
+    expect(geometryObstructionPresent(null)).toBeUndefined();
+    expect(geometryObstructionPresent("nope")).toBeUndefined();
+    expect(geometryObstructionPresent({})).toBeUndefined();
+    expect(geometryObstructionPresent({ large_centered_overlay_seen: "yes" })).toBeUndefined();
   });
 });

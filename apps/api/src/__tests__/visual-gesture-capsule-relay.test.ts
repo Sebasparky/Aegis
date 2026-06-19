@@ -13,6 +13,7 @@ import {
 import {
   relayVisualGestureCapsuleGesture,
   validateVisualGesturePayload,
+  holdDurationBucket,
   HOLD_MIN_DURATION_MS,
   type VisualGesturePointerRelay,
   type VisualGestureRelayGesture,
@@ -143,6 +144,28 @@ describe("validateVisualGesturePayload", () => {
         duration_ms: HOLD_MAX_DURATION_MS + 1,
       }),
     ).toEqual({ ok: false, reason: "invalid_gesture" });
+  });
+});
+
+describe("holdDurationBucket", () => {
+  it("maps durations to coarse buckets (never the raw ms)", () => {
+    expect(holdDurationBucket(undefined)).toBe("<250ms"); // tap / no duration
+    expect(holdDurationBucket(0)).toBe("<250ms");
+    expect(holdDurationBucket(60)).toBe("<250ms"); // TAP_DWELL_MS
+    expect(holdDurationBucket(249)).toBe("<250ms");
+    expect(holdDurationBucket(250)).toBe("250-999ms");
+    expect(holdDurationBucket(500)).toBe("250-999ms");
+    expect(holdDurationBucket(999)).toBe("250-999ms");
+    expect(holdDurationBucket(1000)).toBe("1-3s");
+    expect(holdDurationBucket(1500)).toBe("1-3s");
+    expect(holdDurationBucket(2999)).toBe("1-3s");
+    expect(holdDurationBucket(3000)).toBe("3s+");
+    expect(holdDurationBucket(5000)).toBe("3s+");
+  });
+
+  it("non-finite input is treated as the lowest bucket", () => {
+    expect(holdDurationBucket(Number.NaN)).toBe("<250ms");
+    expect(holdDurationBucket(Number.POSITIVE_INFINITY)).toBe("<250ms");
   });
 });
 

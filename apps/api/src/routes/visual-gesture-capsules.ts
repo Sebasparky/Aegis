@@ -33,6 +33,11 @@ import {
 import { captureVisualGestureCapsuleScreenshotFrame } from "../runtime/visualGestureCapsuleCapture.js";
 import { relayVisualGestureCapsuleGesture } from "../runtime/visualGestureCapsuleRelay.js";
 import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
+import {
+  startVgcHoldSession,
+  heartbeatVgcHoldSession,
+  endVgcHoldSession,
+} from "../runtime/visualGestureCapsuleHold.js";
 import { getTaskBrowserSessionCdpUrl } from "../runtime/taskBrowserSessions.js";
 
 // Resolve the CDP base for a capsule's gesture/recheck/recapture call. The UI
@@ -74,6 +79,25 @@ const GESTURE_RELAY_ERROR_MAP: Record<string, { status: number; code: string }> 
   layout_drifted: { status: 409, code: "FRAME_STALE_RECAPTURE_REQUIRED" },
   pointer_dispatch_failed: { status: 502, code: "POINTER_DISPATCH_FAILED" },
   store_or_state_failed: { status: 409, code: "STORE_OR_STATE_FAILED" },
+};
+
+// Map each live-hold (hold-start) refusal reason to a safe HTTP status + stable
+// error code. Reuses the gesture-relay codes where the meaning is identical
+// (drift, manual fallback, missing frame). The reason code is the ONLY hold
+// detail surfaced — never the mapped point, cdp_url, target_id, or browser error.
+const GESTURE_HOLD_ERROR_MAP: Record<string, { status: number; code: string }> = {
+  flag_disabled: { status: 404, code: "VISUAL_GESTURE_CAPSULE_DISABLED" },
+  not_found: { status: 404, code: "NOT_FOUND" },
+  terminal: { status: 409, code: "TERMINAL" },
+  manual_fallback: { status: 409, code: "MANUAL_FALLBACK" },
+  invalid_coordinates: { status: 400, code: "INVALID_COORDINATES" },
+  screenshot_frame_unavailable: { status: 409, code: "SCREENSHOT_FRAME_UNAVAILABLE" },
+  viewport_drifted: { status: 409, code: "VIEWPORT_DRIFTED" },
+  scroll_drifted: { status: 409, code: "FRAME_STALE_RECAPTURE_REQUIRED" },
+  layout_drifted: { status: 409, code: "FRAME_STALE_RECAPTURE_REQUIRED" },
+  hold_already_active: { status: 409, code: "HOLD_ALREADY_ACTIVE" },
+  cdp_failed: { status: 502, code: "CDP_FAILED" },
+  pointer_dispatch_failed: { status: 502, code: "POINTER_DISPATCH_FAILED" },
 };
 
 // Map each recheck refusal reason to a safe HTTP status + stable error code. As
@@ -371,4 +395,109 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
       data: getSafeVisualGestureCapsuleView(current),
     });
   });
+
+  // ── Live guided press-and-hold (hold-start → heartbeat → hold-end) ──────────
+  //
+  // The point-anchored counterpart to the DOM Human Presence Relay's live hold.
+  // For a press-and-hold wall the UI presses on the screenshot target and the
+  // browser mouse stays down ONLY while heartbeats arrive — no recorded duration
+  // is ever replayed (that is the single-shot /gesture path, kept for taps). All
+  // geometry/point mapping lives in the relay module; these routes never echo
+  // fx/fy, the mapped point, cdp_url, target_id, browser internals, or bytes.
+  // Strictly internal — NOT exposed on any agent-facing surface (/api/agent/v1).
+
+  // Begin a live hold at a normalized screenshot point (fx, fy ∈ [0,1]).
+  server.post<{
+    Params: { id: string };
+    Body: { cdp_url?: unknown; target_id?: unknown; fx?: unknown; fy?: unknown };
+  }>("/api/internal/visual-gesture-capsules/:id/hold-start", async (req, reply) => {
+    if (!isVisualGestureCapsuleEnabled()) return sendDisabled(reply);
+
+    const id = req.params.id;
+    if (typeof id !== "string" || id.length === 0) {
+      return sendError(reply, 400, "VALIDATION_ERROR", "Capsule id is required.");
+    }
+
+    const capsule = getVisualGestureCapsule(id);
+    if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
+    const body = req.body ?? {};
+    const cdpUrl = resolveCapsuleCdpUrl(body.cdp_url, capsule.browser_session_id);
+    if (typeof cdpUrl !== "string" || cdpUrl.length === 0) {
+      return sendError(
+        reply,
+        409,
+        "BROWSER_SESSION_UNAVAILABLE",
+        "No live browser session is available for this capsule.",
+      );
+    }
+    const targetId = typeof body.target_id === "string" ? body.target_id : undefined;
+
+    // Shallow shape check — fx/fy must be present numbers. Range validation and
+    // point mapping are the hold module's job (surfacing invalid_coordinates).
+    if (typeof body.fx !== "number" || typeof body.fy !== "number") {
+      return sendError(reply, 400, "VALIDATION_ERROR", "A valid press point (fx, fy) is required.");
+    }
+
+    const result = await startVgcHoldSession({
+      capsuleId: id,
+      cdpUrl,
+      targetId,
+      fx: body.fx,
+      fy: body.fy,
+    });
+
+    if (!result.ok) {
+      const mapped =
+        GESTURE_HOLD_ERROR_MAP[result.reason] ?? { status: 409, code: "STORE_OR_STATE_FAILED" };
+      return sendError(reply, mapped.status, mapped.code, "Could not start the live hold.");
+    }
+
+    const current = getVisualGestureCapsule(id) ?? capsule;
+    return reply.send({
+      ok: true,
+      hold_state: result.hold_state,
+      data: getSafeVisualGestureCapsuleView(current),
+    });
+  });
+
+  // Live heartbeat — re-arms the fail-closed timer. Empty body.
+  server.post<{ Params: { id: string } }>(
+    "/api/internal/visual-gesture-capsules/:id/heartbeat",
+    async (req, reply) => {
+      if (!isVisualGestureCapsuleEnabled()) return sendDisabled(reply);
+
+      const capsule = getVisualGestureCapsule(req.params.id);
+      if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
+      const result = heartbeatVgcHoldSession(req.params.id);
+      if (result.hold_state === "no_hold") {
+        return sendError(reply, 409, "NO_ACTIVE_HOLD", "No live hold is active for this capsule.");
+      }
+      return reply.send({ ok: true, hold_state: result.hold_state });
+    },
+  );
+
+  // Release the live hold + run the definitive post-release recheck. Empty body.
+  server.post<{ Params: { id: string } }>(
+    "/api/internal/visual-gesture-capsules/:id/hold-end",
+    async (req, reply) => {
+      if (!isVisualGestureCapsuleEnabled()) return sendDisabled(reply);
+
+      const capsule = getVisualGestureCapsule(req.params.id);
+      if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
+      const result = await endVgcHoldSession(req.params.id);
+      if (result.hold_state === "no_hold") {
+        return sendError(reply, 409, "NO_ACTIVE_HOLD", "No live hold is active for this capsule.");
+      }
+
+      const current = getVisualGestureCapsule(req.params.id) ?? capsule;
+      return reply.send({
+        ok: true,
+        hold_state: result.hold_state,
+        data: getSafeVisualGestureCapsuleView(current),
+      });
+    },
+  );
 }

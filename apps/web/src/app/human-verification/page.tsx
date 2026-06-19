@@ -25,14 +25,19 @@ import {
   recaptureVisualGestureCapsule,
   cancelVisualGestureCapsule,
   createVisualGestureCapsuleSmoke,
+  startVisualGestureCapsuleHold,
+  sendVisualGestureCapsuleHeartbeat,
+  endVisualGestureCapsuleHold,
   type VisualGestureCapsuleView,
   type VisualGestureKind,
 } from "@/lib/api";
 import { normalizePointInRect } from "@/lib/normalizePoint";
 
 const POLL_MS = 2500;
-const PRESS_HOLD_MIN_MS = 300;
-const PRESS_HOLD_MAX_MS = 30000;
+// Live press-and-hold cadence (mirrors components/press-and-hold.tsx): a 300ms
+// heartbeat keeps the browser mouse-down alive; a 100ms tick drives the timer.
+const HEARTBEAT_INTERVAL_MS = 300;
+const ELAPSED_TICK_MS = 100;
 
 // Dev-only affordance gate. Next.js inlines process.env.NODE_ENV in client code;
 // the backend smoke route is itself NODE_ENV-gated, so this only hides the button.
@@ -98,7 +103,19 @@ export default function HumanVerificationPage() {
   const [hint, setHint] = useState<string | null>(null);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const pressStartRef = useRef<{ t: number; fx: number; fy: number } | null>(null);
+
+  // ── Live press-and-hold state ───────────────────────────────────────────────
+  // The browser mouse stays down only while we keep sending heartbeats; on
+  // release (or a fail-closed / cleared signal) we end the hold and recheck.
+  const [holding, setHolding] = useState(false);
+  const [holdElapsedMs, setHoldElapsedMs] = useState(0);
+  const holdingRef = useRef(false); // pauses the capsule-list poll while holding
+  const endingRef = useRef(false); // idempotency guard for finalizeHold
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const holdStartMsRef = useRef(0);
+  const pointerIdRef = useRef<number | null>(null);
+  const captureElRef = useRef<Element | null>(null);
 
   // Dev-only diagnostic: the last interpreted normalized point we sent, rendered
   // as a marker over the screenshot so we can visually confirm the click landed
@@ -112,6 +129,9 @@ export default function HumanVerificationPage() {
   useEffect(() => {
     let active = true;
     async function poll() {
+      // Pause polling while a live hold is in progress — the list churning would
+      // drop the selected capsule mid-hold and race the heartbeat loop.
+      if (holdingRef.current) return;
       try {
         const res = await listVisualGestureCapsules();
         if (!active) return;
@@ -267,32 +287,176 @@ export default function HumanVerificationPage() {
     void sendGesture(selected.capsule_id, "tap", pt.fx, pt.fy);
   }
 
-  function handlePointerDown(e: React.PointerEvent) {
-    if (mode !== "press_hold" || !selected || busy || !isActionable(selected.status)) return;
+  // Stop the heartbeat + elapsed-timer intervals (idempotent).
+  const stopHoldTimers = useCallback(() => {
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (elapsedTimerRef.current) {
+      clearInterval(elapsedTimerRef.current);
+      elapsedTimerRef.current = null;
+    }
+  }, []);
+
+  // End the live hold: release the browser mouse (via hold-end) and surface the
+  // definitive recheck outcome. Idempotent — the user's release, a fail-closed /
+  // cleared heartbeat, or unmount all funnel here exactly once.
+  const finalizeHold = useCallback(
+    async (capsuleId: string) => {
+      if (endingRef.current) return;
+      endingRef.current = true;
+      stopHoldTimers();
+      holdingRef.current = false;
+      setHolding(false);
+      const el = captureElRef.current;
+      if (el && pointerIdRef.current !== null) {
+        try {
+          el.releasePointerCapture(pointerIdRef.current);
+        } catch {
+          /* pointer may already be released */
+        }
+      }
+      pointerIdRef.current = null;
+      captureElRef.current = null;
+      setBusy(true);
+      try {
+        const res = await endVisualGestureCapsuleHold(capsuleId);
+        if (res.data.status === "manual_fallback") {
+          setStatusMsg("Please complete this in the visible browser.");
+          setHint(null);
+        } else if (res.hold_state === "cleared") {
+          setStatusMsg("Cleared — presence confirmed. The agent can resume.");
+          setHint(null);
+        } else if (res.hold_state === "too_short") {
+          setStatusMsg("That was too short — hold until Antigen says verification cleared.");
+          setHint(null);
+        } else if (res.hold_state === "still_present") {
+          setStatusMsg(
+            `Still present — keep holding until it clears, or try again. (attempt ${res.data.attempt_count}/${res.data.max_attempts})`,
+          );
+          setHint("The frame may have changed — recapture to see the current view.");
+          await loadScreenshot(capsuleId);
+        } else {
+          setStatusMsg("Could not confirm yet. Hold again or recapture.");
+          setHint(null);
+        }
+      } catch (e) {
+        const code = errCode(e);
+        // NO_ACTIVE_HOLD: the hold already ended (e.g. an earlier finalize) — leave
+        // any prior status message in place rather than overwriting it.
+        if (code !== "NO_ACTIVE_HOLD") {
+          setStatusMsg("Could not finish the hold. Try again or recapture.");
+        }
+      } finally {
+        setBusy(false);
+        endingRef.current = false;
+      }
+    },
+    [loadScreenshot, stopHoldTimers],
+  );
+
+  // Heartbeat tick: keep the browser mouse-down alive. A `cleared` /
+  // `released_fail_closed` signal ends the hold and runs the recheck.
+  const heartbeatTick = useCallback(
+    async (capsuleId: string) => {
+      if (!holdingRef.current) return;
+      try {
+        const res = await sendVisualGestureCapsuleHeartbeat(capsuleId);
+        if (!holdingRef.current) return;
+        if (res.hold_state === "cleared") {
+          setStatusMsg("Verification cleared — finishing up…");
+          void finalizeHold(capsuleId);
+        } else if (res.hold_state === "released_fail_closed") {
+          // The browser hold dropped (heartbeat gap or the 12s ceiling). End and
+          // recheck — the wall may still have cleared during the hold.
+          void finalizeHold(capsuleId);
+        }
+      } catch {
+        // A transient heartbeat failure shouldn't kill the hold; the next tick
+        // retries. Sustained silence is handled server-side (fail-closed release).
+      }
+    },
+    [finalizeHold],
+  );
+
+  function handlePressHoldDown(e: React.PointerEvent) {
+    if (mode !== "press_hold" || !selected || busy || holdingRef.current || !isActionable(selected.status)) {
+      return;
+    }
     const pt = pointFromEvent(e.clientX, e.clientY);
     if (!pt) {
       setHint("That point is outside the image. Press inside the screenshot.");
-      pressStartRef.current = null;
       return;
     }
-    pressStartRef.current = { t: Date.now(), fx: pt.fx, fy: pt.fy };
-    setHint("Holding… release to send.");
+    if (IS_DEV) setMarkerPoint({ fx: pt.fx, fy: pt.fy });
+
+    const capsuleId = selected.capsule_id;
+    // Capture the pointer so release/leave outside the image still ends the hold.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      pointerIdRef.current = e.pointerId;
+      captureElRef.current = e.currentTarget;
+    } catch {
+      /* capture is best-effort */
+    }
+
+    setStatusMsg("Starting hold…");
+    setHint(null);
+    void (async () => {
+      try {
+        const res = await startVisualGestureCapsuleHold(capsuleId, { fx: pt.fx, fy: pt.fy });
+        if (res.hold_state === "challenge_gone") {
+          setStatusMsg("The challenge already cleared. The agent can resume.");
+          return;
+        }
+        // Holding: arm heartbeat + elapsed timer.
+        holdingRef.current = true;
+        endingRef.current = false;
+        setHolding(true);
+        holdStartMsRef.current = Date.now();
+        setHoldElapsedMs(0);
+        setStatusMsg(null);
+        setHint("Keep holding until Antigen says verification cleared.");
+        heartbeatTimerRef.current = setInterval(() => void heartbeatTick(capsuleId), HEARTBEAT_INTERVAL_MS);
+        elapsedTimerRef.current = setInterval(
+          () => setHoldElapsedMs(Date.now() - holdStartMsRef.current),
+          ELAPSED_TICK_MS,
+        );
+      } catch (err) {
+        const code = errCode(err);
+        if (code === "MANUAL_FALLBACK") {
+          setStatusMsg("Please complete this in the visible browser.");
+        } else if (code === "SCREENSHOT_FRAME_UNAVAILABLE") {
+          setStatusMsg("The screenshot expired before the hold started. Recapture and try again.");
+          setScreenshotMissing(true);
+          setScreenshotDataUrl(null);
+        } else if (code === "BROWSER_SESSION_UNAVAILABLE") {
+          setStatusMsg("No live browser session is available for this request.");
+        } else if (code === "FRAME_STALE_RECAPTURE_REQUIRED" || code === "VIEWPORT_DRIFTED") {
+          setStatusMsg("Frame changed — recapture and try again.");
+          setHint("The page moved since this view was captured. Recapture to see the current layout.");
+        } else if (code === "INVALID_COORDINATES") {
+          setStatusMsg("That press point was rejected. Try pressing inside the highlighted area.");
+        } else {
+          setStatusMsg("Could not start the hold. Try again or recapture.");
+        }
+      }
+    })();
   }
 
-  function handlePointerUp() {
-    if (mode !== "press_hold" || !selected) return;
-    const start = pressStartRef.current;
-    pressStartRef.current = null;
-    if (!start) return;
-    const raw = Date.now() - start.t;
-    if (raw < PRESS_HOLD_MIN_MS) {
-      setHint(`Hold a little longer (at least ${PRESS_HOLD_MIN_MS}ms).`);
-      return;
-    }
-    const durationMs = Math.min(raw, PRESS_HOLD_MAX_MS);
-    if (IS_DEV) setMarkerPoint({ fx: start.fx, fy: start.fy });
-    void sendGesture(selected.capsule_id, "press_hold", start.fx, start.fy, durationMs);
+  function handlePressHoldEnd() {
+    if (mode !== "press_hold" || !holdingRef.current || !selected) return;
+    void finalizeHold(selected.capsule_id);
   }
+
+  // Stop timers + release any live hold on unmount or when the selection changes.
+  useEffect(() => {
+    return () => {
+      stopHoldTimers();
+      holdingRef.current = false;
+    };
+  }, [selectedId, stopHoldTimers]);
 
   // ── Button actions ──────────────────────────────────────────────────────────
   async function handleRecapture() {
@@ -507,11 +671,10 @@ export default function HumanVerificationPage() {
                         : "cursor-not-allowed"
                     }`}
                     onClick={handleTapClick}
-                    onPointerDown={handlePointerDown}
-                    onPointerUp={handlePointerUp}
-                    onPointerLeave={() => {
-                      pressStartRef.current = null;
-                    }}
+                    onPointerDown={handlePressHoldDown}
+                    onPointerUp={handlePressHoldEnd}
+                    onPointerCancel={handlePressHoldEnd}
+                    onPointerLeave={handlePressHoldEnd}
                   />
                   {/* Dev-only diagnostic marker at the interpreted point. Positioned
                       by percentage against the container content box (= the image
@@ -541,6 +704,17 @@ export default function HumanVerificationPage() {
                   <button className={btnDefault} onClick={handleRecapture} disabled={busy}>
                     Recapture
                   </button>
+                </div>
+              )}
+
+              {/* Live hold timer — visible while the browser mouse is held down. */}
+              {holding && (
+                <div className="mt-3 flex items-center gap-2 rounded-md border border-indigo-700 bg-indigo-950/40 px-3 py-2 text-sm text-indigo-200">
+                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+                  <span>
+                    Holding {(holdElapsedMs / 1000).toFixed(1)}s — keep holding until Antigen says
+                    verification cleared.
+                  </span>
                 </div>
               )}
 

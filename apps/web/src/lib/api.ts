@@ -1568,6 +1568,53 @@ export const cancelVisualGestureCapsule = (capsuleId: string) =>
     { method: "POST", body: JSON.stringify({}) },
   );
 
+// ─── Live guided press-and-hold (hold-start → heartbeat → hold-end) ───────────
+//
+// The live counterpart to submitVisualGestureCapsuleGesture's single-shot
+// press_hold: the browser mouse stays down ONLY while heartbeats keep arriving,
+// so the hold is genuine continuous presence — never a recorded duration replayed
+// after release. Only the normalized press point (fx, fy) leaves the client at
+// hold-start; heartbeat and hold-end carry no geometry. Taps still use /gesture.
+
+/** hold-start: holding (mouse down) or challenge_gone (wall already cleared). */
+export interface VisualGestureHoldStartResult {
+  hold_state: "holding" | "challenge_gone";
+  data: VisualGestureCapsuleView;
+}
+
+/** heartbeat: holding while live, or a terminal hold signal. */
+export interface VisualGestureHeartbeatResult {
+  hold_state: "holding" | "released_fail_closed" | "cleared";
+}
+
+/** hold-end: the post-release recheck outcome (or too_short under the min hold). */
+export interface VisualGestureHoldEndResult {
+  hold_state: "cleared" | "still_present" | "unknown" | "too_short";
+  data: VisualGestureCapsuleView;
+}
+
+// cdp_url-free body: only the normalized press point leaves the client.
+export const startVisualGestureCapsuleHold = (
+  capsuleId: string,
+  point: { fx: number; fy: number },
+) =>
+  vgcRequest<{ ok: true } & VisualGestureHoldStartResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/hold-start`,
+    { method: "POST", body: JSON.stringify(point) },
+  );
+
+export const sendVisualGestureCapsuleHeartbeat = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureHeartbeatResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/heartbeat`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
+export const endVisualGestureCapsuleHold = (capsuleId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureHoldEndResult>(
+    `/api/internal/visual-gesture-capsules/${capsuleId}/hold-end`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
 // Development-only smoke helper: creates a fake smoke.test capsule + frame so the
 // /human-verification UI can be exercised without a live opaque-HV wall. Backed by
 // the NODE_ENV-gated dev route; requires ANTIGEN_VISUAL_GESTURE_CAPSULE=true on the

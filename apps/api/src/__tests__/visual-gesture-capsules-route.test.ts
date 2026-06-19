@@ -52,6 +52,20 @@ vi.mock("../runtime/visualGestureCapsuleRecheck.js", () => ({
   recheckVisualGestureCapsule: vi.fn(),
 }));
 import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
+
+// Module-mock the live-hold module: the routes only wire HTTP → these functions,
+// so the state machine (covered by visual-gesture-capsule-hold.test.ts) is faked
+// wholesale. No real CDP / pointer dispatch / timers ever run in these tests.
+vi.mock("../runtime/visualGestureCapsuleHold.js", () => ({
+  startVgcHoldSession: vi.fn(),
+  heartbeatVgcHoldSession: vi.fn(),
+  endVgcHoldSession: vi.fn(),
+}));
+import {
+  startVgcHoldSession,
+  heartbeatVgcHoldSession,
+  endVgcHoldSession,
+} from "../runtime/visualGestureCapsuleHold.js";
 import { visualGestureCapsuleRoutes } from "../routes/visual-gesture-capsules.js";
 // taskBrowserSessions is NOT mocked: M2B derives a capsule's cdp_url from this
 // real map via getTaskBrowserSessionCdpUrl, so tests register/clear entries here.
@@ -60,6 +74,9 @@ import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 const mockedCapture = vi.mocked(captureVisualGestureCapsuleScreenshotFrame);
 const mockedRelay = vi.mocked(relayVisualGestureCapsuleGesture);
 const mockedRecheck = vi.mocked(recheckVisualGestureCapsule);
+const mockedHoldStart = vi.mocked(startVgcHoldSession);
+const mockedHeartbeat = vi.mocked(heartbeatVgcHoldSession);
+const mockedHoldEnd = vi.mocked(endVgcHoldSession);
 
 const BASE = {
   human_verification_request_id: "hvr_route_001",
@@ -89,6 +106,9 @@ afterEach(() => {
   mockedCapture.mockReset();
   mockedRelay.mockReset();
   mockedRecheck.mockReset();
+  mockedHoldStart.mockReset();
+  mockedHeartbeat.mockReset();
+  mockedHoldEnd.mockReset();
   vi.useRealTimers();
 });
 
@@ -1035,5 +1055,144 @@ describe("M2B: server-derived cdp_url (UI sends no cdp_url)", () => {
     // Neither the explicit nor the derived cdp_url is reflected back.
     expect(res.body).not.toContain(EXPLICIT);
     expect(res.body).not.toContain(DERIVED_CDP_URL);
+  });
+});
+
+// ─── Live guided press-and-hold endpoints (hold-start / heartbeat / hold-end) ────
+
+describe("POST /:id/hold-start", () => {
+  it("flag off → structured 404 disabled; the hold module is never called", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame();
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-start`,
+      payload: { fx: 0.5, fy: 0.5 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("VISUAL_GESTURE_CAPSULE_DISABLED");
+    expect(mockedHoldStart).not.toHaveBeenCalled();
+  });
+
+  it("no live browser session → 409 BROWSER_SESSION_UNAVAILABLE; module not called", async () => {
+    enable();
+    const capsule = seedCapsuleWithFrame(); // no taskBrowserSessions entry registered
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-start`,
+      payload: { fx: 0.5, fy: 0.5 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("BROWSER_SESSION_UNAVAILABLE");
+    expect(mockedHoldStart).not.toHaveBeenCalled();
+  });
+
+  it("missing fx/fy → 400 VALIDATION_ERROR; module not called", async () => {
+    enable();
+    registerSessionForCapsule();
+    const capsule = seedCapsuleWithFrame();
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-start`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(mockedHoldStart).not.toHaveBeenCalled();
+  });
+
+  it("holding → 200 with hold_state + safe view; derives cdp_url, leaks nothing", async () => {
+    enable();
+    registerSessionForCapsule();
+    const capsule = seedCapsuleWithFrame();
+    mockedHoldStart.mockResolvedValue({ ok: true, hold_state: "holding" });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-start`,
+      payload: { fx: 0.5, fy: 0.5 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.hold_state).toBe("holding");
+    expect(body.data.capsule_id).toBe(capsule.capsule_id);
+    // The server derives the cdp_url from the capsule's session and forwards it.
+    expect(mockedHoldStart).toHaveBeenCalledWith(
+      expect.objectContaining({ capsuleId: capsule.capsule_id, cdpUrl: DERIVED_CDP_URL, fx: 0.5, fy: 0.5 }),
+    );
+    expect(res.body).not.toContain(DERIVED_CDP_URL);
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("relay refusal reason maps to a safe status + code (drift → 409 VIEWPORT_DRIFTED)", async () => {
+    enable();
+    registerSessionForCapsule();
+    const capsule = seedCapsuleWithFrame();
+    mockedHoldStart.mockResolvedValue({ ok: false, reason: "viewport_drifted" });
+
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-start`,
+      payload: { fx: 0.5, fy: 0.5 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("VIEWPORT_DRIFTED");
+  });
+});
+
+describe("POST /:id/heartbeat", () => {
+  it("holding → 200 hold_state holding", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedHeartbeat.mockReturnValue({ hold_state: "holding" });
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/heartbeat`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().hold_state).toBe("holding");
+  });
+
+  it("no active hold → 409 NO_ACTIVE_HOLD", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedHeartbeat.mockReturnValue({ hold_state: "no_hold" });
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/heartbeat`,
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("NO_ACTIVE_HOLD");
+  });
+});
+
+describe("POST /:id/hold-end", () => {
+  it("cleared → 200 with hold_state + safe view", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedHoldEnd.mockResolvedValue({ ok: true, hold_state: "cleared" });
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-end`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.hold_state).toBe("cleared");
+    expect(body.data.capsule_id).toBe(capsule.capsule_id);
+    assertNoByteOrGeometryLeak(res.body);
+  });
+
+  it("no active hold → 409 NO_ACTIVE_HOLD", async () => {
+    enable();
+    const capsule = seedCapsule();
+    mockedHoldEnd.mockResolvedValue({ ok: true, hold_state: "no_hold" });
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/hold-end`,
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("NO_ACTIVE_HOLD");
   });
 });

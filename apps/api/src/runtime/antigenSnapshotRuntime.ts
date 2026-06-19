@@ -1903,6 +1903,18 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
  *    wall shape with an opaque cross-origin frame;
  *  - `visible_inaccessible_iframe_seen && repeated_stale` — an opaque overlay frame
  *    that is also churning refs / preventing progress.
+ *  - `large_centered_overlay_seen && repeated_stale` — a centered top-layer overlay
+ *    box covering the page (e.g. a same-page press-and-hold modal whose text is NOT
+ *    in the accessible DOM) while progress is blocked.
+ *  - `viewport_scrim_seen && repeated_stale` — a full-viewport backdrop/scrim while
+ *    progress is blocked.
+ *  - `pointer_interceptor_seen && repeated_stale` — the viewport-center point that
+ *    should hit page content is intercepted by an overlay while progress is blocked.
+ *
+ * `top_layer_dialog_seen` is captured as a diagnostic only — NOT an independent fire
+ * condition (a `:modal` dialog is frequently a legit product modal; it would
+ * over-fire). The geometry signals each require `repeated_stale` corroboration, the
+ * same discipline as `visible_inaccessible_iframe_seen`.
  *
  * Returns false on empty/garbage input.
  */
@@ -1913,6 +1925,14 @@ export interface AmbiguousVisualObstructionSignals {
   near_zero_interactive?: boolean;
   /** A visible iframe whose contentDocument is inaccessible (cross-origin) was seen. */
   visible_inaccessible_iframe_seen?: boolean;
+  /** A large, centered, top-layer overlay box covering a big fraction of the viewport. */
+  large_centered_overlay_seen?: boolean;
+  /** A full-viewport fixed/absolute backdrop/scrim anchored near the origin. */
+  viewport_scrim_seen?: boolean;
+  /** The viewport-center (and sampled grid) point is intercepted by an overlay. */
+  pointer_interceptor_seen?: boolean;
+  /** A true top-layer modal (`:modal`) dialog/popover is present. Diagnostic only. */
+  top_layer_dialog_seen?: boolean;
   /** This ref-based action reached a repeated stale / no-progress state. Corroborating only. */
   repeated_stale?: boolean;
 }
@@ -1924,7 +1944,15 @@ export function classifyAmbiguousVisualObstruction(
   const denial = s.denial_text_seen === true;
   const nearZero = s.near_zero_interactive === true;
   const iframe = s.visible_inaccessible_iframe_seen === true;
-  return denial || (nearZero && iframe) || (iframe && s.repeated_stale === true);
+  const stale = s.repeated_stale === true;
+  return (
+    denial ||
+    (nearZero && iframe) ||
+    (iframe && stale) ||
+    (s.large_centered_overlay_seen === true && stale) ||
+    (s.viewport_scrim_seen === true && stale) ||
+    (s.pointer_interceptor_seen === true && stale)
+  );
 }
 
 /** Booleans-only probe result. Never carries text, geometry, src, or iframe internals. */
@@ -1932,15 +1960,22 @@ export interface AmbiguousVisualObstructionProbe {
   denial_text_seen: boolean;
   near_zero_interactive: boolean;
   visible_inaccessible_iframe_seen: boolean;
+  large_centered_overlay_seen: boolean;
+  viewport_scrim_seen: boolean;
+  pointer_interceptor_seen: boolean;
+  top_layer_dialog_seen: boolean;
 }
 
 /**
  * Builds the booleans-only ambiguous-obstruction probe IIFE. It reads only
  * coarse, value-free signals: a denial/forbidden phrase in the title/body, the
- * count of visible interactive controls (capped early at >3), and whether any
+ * count of visible interactive controls (capped early at >3), whether any
  * visible iframe's `contentDocument` is inaccessible (touched ONLY in try/catch to
- * learn it is cross-origin — never traversed or read). No `.value`, no selectors,
- * no geometry, no iframe src.
+ * learn it is cross-origin — never traversed or read), and coarse LAYOUT-GEOMETRY
+ * signals (a large centered top-layer overlay, a full-viewport scrim, a
+ * center-point pointer interceptor, and a `:modal` top-layer dialog). Geometry is
+ * reduced to booleans inside the page — no rects, coordinates, selectors, `.value`,
+ * raw text, or iframe src ever leave the page.
  */
 export function buildAmbiguousVisualObstructionExpr(): string {
   return `(function(){
@@ -1968,10 +2003,68 @@ export function buildAmbiguousVisualObstructionExpr(): string {
         if(!ok){ inaccIframe=true; }
       }
     }catch(e){}
+    // ── Coarse layout-geometry obstruction signals (booleans only) ──
+    var vpW=0,vpH=0;
+    try{ vpW=window.innerWidth||document.documentElement.clientWidth||0; vpH=window.innerHeight||document.documentElement.clientHeight||0; }catch(e){}
+    var vpArea=vpW*vpH;
+    function vis(el){ try{ var s=getComputedStyle(el); if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')===0) return false; }catch(e){ return false; } return true; }
+    function coverage(r){ if(!vpArea||!r) return 0; var w=Math.max(0,Math.min(r.right,vpW)-Math.max(r.left,0)); var h=Math.max(0,Math.min(r.bottom,vpH)-Math.max(r.top,0)); return (w*h)/vpArea; }
+    var largeCentered=false, scrim=false, topLayer=false;
+    try{
+      var nodes=document.querySelectorAll('div,section,dialog,[role="dialog"],[role="alertdialog"],[aria-modal],[class*="overlay"],[class*="modal"],[class*="backdrop"],[class*="scrim"]');
+      for(var k=0;k<nodes.length&&k<300;k++){
+        var n=nodes[k];
+        if(!vis(n)) continue;
+        var st2=null; try{ st2=getComputedStyle(n); }catch(e){ continue; }
+        var pos=st2.position;
+        if(pos!=='fixed'&&pos!=='absolute'&&pos!=='sticky') continue;
+        var rect=null; try{ rect=n.getBoundingClientRect(); }catch(e){ continue; }
+        if(!rect||!(rect.width>0&&rect.height>0)) continue;
+        var cov=coverage(rect);
+        var zi=parseInt(st2.zIndex,10); var hasZ=!isNaN(zi)&&zi>=1;
+        if((pos==='fixed'||pos==='absolute')&&cov>=0.85&&rect.top<=4&&rect.left<=4){ scrim=true; }
+        if((pos==='fixed'||pos==='absolute')&&(hasZ||pos==='fixed')&&cov>=0.40&&rect.height<vpH){
+          var cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
+          if(cx>=0.25*vpW&&cx<=0.75*vpW&&cy>=0.2*vpH&&cy<=0.8*vpH){ largeCentered=true; }
+        }
+        try{ if(n.matches&&n.matches(':modal')) topLayer=true; }catch(e){}
+      }
+    }catch(e){}
+    var interceptHits=0, sampleCount=0;
+    try{
+      var pts=[[vpW*0.5,vpH*0.5],[vpW*0.3,vpH*0.35],[vpW*0.7,vpH*0.35],[vpW*0.3,vpH*0.65],[vpW*0.7,vpH*0.65]];
+      for(var p=0;p<pts.length;p++){
+        var px=pts[p][0], py=pts[p][1];
+        if(!(px>0&&py>0)) continue;
+        sampleCount++;
+        var hit=null; try{ hit=document.elementFromPoint(px,py); }catch(e){ hit=null; }
+        var node2=hit, depth=0, intercepted=false;
+        while(node2&&depth<12){
+          var s3=null; try{ s3=getComputedStyle(node2); }catch(e){ s3=null; }
+          if(s3){
+            var p3=s3.position;
+            if(p3==='fixed'||p3==='absolute'){
+              var zr=parseInt(s3.zIndex,10); var hz=!isNaN(zr)&&zr>=1;
+              if(hz||p3==='fixed'){
+                var rr=null; try{ rr=node2.getBoundingClientRect(); }catch(e){ rr=null; }
+                if(rr&&coverage(rr)>=0.40){ intercepted=true; break; }
+              }
+            }
+          }
+          node2=node2.parentElement; depth++;
+        }
+        if(intercepted) interceptHits++;
+      }
+    }catch(e){}
+    var pointerIntercept=sampleCount>0&&interceptHits*2>sampleCount;
     return {
       denial_text_seen:!!denial,
       near_zero_interactive: interactive<=3,
-      visible_inaccessible_iframe_seen:!!(visIframe&&inaccIframe)
+      visible_inaccessible_iframe_seen:!!(visIframe&&inaccIframe),
+      large_centered_overlay_seen:!!largeCentered,
+      viewport_scrim_seen:!!scrim,
+      pointer_interceptor_seen:!!pointerIntercept,
+      top_layer_dialog_seen:!!topLayer
     };
   })()`;
 }
@@ -2065,6 +2158,10 @@ export async function detectAmbiguousVisualObstructionViaCDP(params: {
     denial_text_seen: v.denial_text_seen === true,
     near_zero_interactive: v.near_zero_interactive === true,
     visible_inaccessible_iframe_seen: v.visible_inaccessible_iframe_seen === true,
+    large_centered_overlay_seen: v.large_centered_overlay_seen === true,
+    viewport_scrim_seen: v.viewport_scrim_seen === true,
+    pointer_interceptor_seen: v.pointer_interceptor_seen === true,
+    top_layer_dialog_seen: v.top_layer_dialog_seen === true,
   };
 }
 
@@ -2506,6 +2603,10 @@ export interface HumanVerificationDebug {
   ambiguous_denial_text_seen?: boolean;
   ambiguous_near_zero_interactive?: boolean;
   ambiguous_visible_inaccessible_iframe_seen?: boolean;
+  ambiguous_large_centered_overlay_seen?: boolean;
+  ambiguous_viewport_scrim_seen?: boolean;
+  ambiguous_pointer_interceptor_seen?: boolean;
+  ambiguous_top_layer_dialog_seen?: boolean;
   ambiguous_repeated_stale?: boolean;
   ambiguous_created_capsule?: boolean;
 }

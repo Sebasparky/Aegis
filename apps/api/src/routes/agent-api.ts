@@ -835,6 +835,10 @@ async function rejectNoProgressActionAsHumanVerification(
             denial_text_seen: probe.denial_text_seen,
             near_zero_interactive: probe.near_zero_interactive,
             visible_inaccessible_iframe_seen: probe.visible_inaccessible_iframe_seen,
+            large_centered_overlay_seen: probe.large_centered_overlay_seen,
+            viewport_scrim_seen: probe.viewport_scrim_seen,
+            pointer_interceptor_seen: probe.pointer_interceptor_seen,
+            top_layer_dialog_seen: probe.top_layer_dialog_seen,
             repeated_stale: true,
             created_capsule: !!fallback,
           });
@@ -6023,6 +6027,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             hvDebug.ambiguous_near_zero_interactive = ambiguousProbe.near_zero_interactive;
             hvDebug.ambiguous_visible_inaccessible_iframe_seen =
               ambiguousProbe.visible_inaccessible_iframe_seen;
+            hvDebug.ambiguous_large_centered_overlay_seen =
+              ambiguousProbe.large_centered_overlay_seen;
+            hvDebug.ambiguous_viewport_scrim_seen = ambiguousProbe.viewport_scrim_seen;
+            hvDebug.ambiguous_pointer_interceptor_seen = ambiguousProbe.pointer_interceptor_seen;
+            hvDebug.ambiguous_top_layer_dialog_seen = ambiguousProbe.top_layer_dialog_seen;
           }
           hvDebug.ambiguous_created_capsule = !!ambiguous;
         }

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Outdoor Gear</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* Full-viewport fixed scrim anchored at the origin → viewport_scrim_seen.
+         No human-verification or denial text anywhere on the page; this is a
+         DOM-TEXTLESS obstruction detectable only by geometry. */
+      #scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        background: rgba(0, 0, 0, 0.55);
+      }
+      /* Large centered fixed card covering ~42% of the viewport (0.7vw * 0.6vh),
+         not top-anchored → large_centered_overlay_seen. It sits above the scrim
+         and intercepts the center + sampled grid points → pointer_interceptor_seen. */
+      #card {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 9001;
+        width: 70vw;
+        height: 60vh;
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        text-align: center;
+      }
+      #card h2 { font-size: 22px; margin: 0 0 8px; }
+      #card p { color: #444; margin: 6px 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Geometry-only obstruction shape (the live B&BW regression class): a blocking
+      overlay is up over a fully-present, element-rich page, but the overlay text is
+      NOT in the accessible DOM. There is NO human-verification language, NO denial
+      language, and NO iframe — so the text/iframe ambiguous signals are all false.
+      Only the coarse layout-geometry signals (large_centered_overlay_seen,
+      viewport_scrim_seen, pointer_interceptor_seen) detect it.
+    -->
+
+    <!-- ── Preserved, element-rich background (well over 3 interactive controls) ── -->
+    <header>
+      <a href="/">Home</a>
+      <a href="/account">Account</a>
+      <a href="/cart">Cart</a>
+      <input type="search" name="q" placeholder="Search gear" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/tents">Tents</a>
+      <a href="/packs">Packs</a>
+      <a href="/footwear">Footwear</a>
+      <a href="/apparel">Apparel</a>
+      <a href="/climb">Climbing</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>Backpacking</h1>
+      <div class="cats">
+        <a href="/sleeping">Sleeping Bags</a>
+        <a href="/stoves">Stoves</a>
+        <a href="/filters">Water Filters</a>
+        <a href="/poles">Trekking Poles</a>
+      </div>
+      <div class="grid">
+        <div class="card"><a href="/p/1">Summit Tent</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/2">Alpine Pack</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/3">Trail Stove</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/4">Down Quilt</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/5">Carbon Poles</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/6">River Filter</a><button type="button">Add to cart</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+
+    <!-- ── DOM-textless blocking overlay (neutral copy, no HV/denial language) ── -->
+    <div id="scrim"></div>
+    <div id="card" role="presentation">
+      <h2>Just a moment…</h2>
+      <p>We're getting things ready for you.</p>
+    </div>
+  </body>
+</html>

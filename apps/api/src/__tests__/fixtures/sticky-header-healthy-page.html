@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bookstore</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* A normal FIXED top banner: anchored at the top, small height. It is NOT a
+         centered overlay (not centered), NOT a scrim (covers far less than 85% of
+         the viewport), and does NOT intercept the page center (the sampled probe
+         points sit well below it) — so every geometry obstruction signal stays
+         false. This is the healthy-page control. */
+      #topbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 56px;
+        z-index: 50;
+        background: #0a5;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        padding: 0 20px;
+      }
+      #topbar a { color: #fff; margin-right: 16px; }
+      main { padding-top: 76px; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Healthy, element-rich page with a conventional fixed/sticky top banner and no
+      blocking overlay. The geometry obstruction probe must return all-false for the
+      four geometry signals (large_centered_overlay_seen, viewport_scrim_seen,
+      pointer_interceptor_seen, top_layer_dialog_seen) — a fixed header is the most
+      common false-positive risk and must be excluded by the thresholds.
+    -->
+
+    <div id="topbar">
+      <a href="/">Pages &amp; Co.</a>
+      <a href="/new">New</a>
+      <a href="/account">Account</a>
+      <a href="/cart">Cart</a>
+    </div>
+
+    <header>
+      <input type="search" name="q" placeholder="Search titles" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/fiction">Fiction</a>
+      <a href="/nonfiction">Non-fiction</a>
+      <a href="/kids">Kids</a>
+      <a href="/poetry">Poetry</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>New Arrivals</h1>
+      <div class="cats">
+        <a href="/mystery">Mystery</a>
+        <a href="/scifi">Sci-Fi</a>
+        <a href="/history">History</a>
+        <a href="/cooking">Cooking</a>
+      </div>
+      <div class="grid">
+        <div class="card"><a href="/b/1">The Long Trail</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/b/2">Quiet Harbor</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/b/3">North Star</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/b/4">Paper Lanterns</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/b/5">Field Notes</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/b/6">Open Road</a><button type="button">Add to cart</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+  </body>
+</html>

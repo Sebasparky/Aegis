@@ -355,6 +355,49 @@ describe("classifyAmbiguousVisualObstruction — pure verdict", () => {
   it("repeated stale ALONE never fires (the over-fire guard)", () => {
     expect(classifyAmbiguousVisualObstruction({ repeated_stale: true })).toBe(false);
   });
+
+  // ── Geometry signals (the B&BW DOM-textless overlay shape) ──
+  it("large centered overlay + repeated stale fires", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        large_centered_overlay_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("viewport scrim + repeated stale fires", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        viewport_scrim_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("pointer interceptor + repeated stale fires", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        pointer_interceptor_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("each geometry signal WITHOUT repeated stale does NOT fire (corroborator discipline)", () => {
+    expect(classifyAmbiguousVisualObstruction({ large_centered_overlay_seen: true })).toBe(false);
+    expect(classifyAmbiguousVisualObstruction({ viewport_scrim_seen: true })).toBe(false);
+    expect(classifyAmbiguousVisualObstruction({ pointer_interceptor_seen: true })).toBe(false);
+  });
+
+  it("top-layer dialog is diagnostic-only — never fires even with repeated stale", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        top_layer_dialog_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(false);
+  });
 });
 
 // ── Stale-ref action backstop (browser-click) ─────────────────────────────────
@@ -606,6 +649,106 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
     expect(vgcCaptureMock).not.toHaveBeenCalled();
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(3) REALISTIC_CLICK_FAILED + large centered overlay (DOM-textless) + VGC ON mints a VGC (live B&BW shape)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Many refs still extractable — the modal text is NOT in the accessible DOM, so
+    // denial_text/iframe/near_zero are all false; only the geometry overlay signal fires.
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.purchase_authorized).toBe(false);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(hvWallProbeMock).toHaveBeenCalledTimes(1); // structural probe ran first and ruled out
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(4) viewport scrim alone (no overlay/iframe/denial) + click no-progress mints a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: true,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(5) top-layer dialog ONLY (legit modal, no overlay/scrim/interceptor) does NOT mint a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    // A :modal dialog is present but it is NOT classified as a blocking overlay — a
+    // legit product modal. top_layer_dialog_seen is diagnostic-only and never fires alone.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: true,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(6) geometry-fired 409 body leaks no bytes/coords/viewport/cdp/strategy/session keys", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+    assertNoLeak(res.json());
   });
 
   it("REALISM_DISABLED is NOT a no-progress code — it never probes (config failure, not a visual block)", async () => {

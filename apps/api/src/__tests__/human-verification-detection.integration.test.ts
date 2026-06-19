@@ -37,6 +37,7 @@ import {
   extractAntigenSnapshotCandidatesViaCDP,
   extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
+  detectAmbiguousVisualObstructionViaCDP,
   collectPageHvWallDebugViaCDP,
   type AntigenSnapshotCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -73,6 +74,12 @@ const FIXTURE_OVERLAY_WALL = fileURLToPath(new URL("./fixtures/overlay-wall-pres
 // text-INDEPENDENT OOPIF path (inaccessible iframe + OOPIF child target +
 // blocking overlay) classifies it.
 const FIXTURE_OOPIF_NO_TEXT = fileURLToPath(new URL("./fixtures/oopif-overlay-no-text-wall.html", import.meta.url));
+// Geometry-only ambiguous obstruction: a DOM-TEXTLESS blocking overlay (centered
+// card + full-viewport scrim) over an element-rich page — no HV text, no denial
+// text, no iframe. Only the coarse layout-geometry signals detect it. Plus a
+// healthy control page whose fixed top banner must trip NO geometry signal.
+const FIXTURE_CENTERED_OVERLAY = fileURLToPath(new URL("./fixtures/centered-overlay-over-normal-page.html", import.meta.url));
+const FIXTURE_STICKY_HEADER = fileURLToPath(new URL("./fixtures/sticky-header-healthy-page.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -635,5 +642,64 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     if (dbg.result === "error") throw new Error("expected signals");
     expect(dbg.signals.top_doc_text_flags.hv_text_seen).toBe(false);
     expect(dbg.signals.would_classify).toBe(false);
+  }, 20_000);
+
+  // ─── Geometry-based ambiguous visual obstruction (DOM-textless overlay) ────
+  // The live B&BW shape where the press-and-hold modal renders VISUALLY but its
+  // text is NOT in the accessible DOM. The raw probe is not flag-gated (its caller
+  // gates on the VGC flag), so it is driven directly here. Every returned field is
+  // a boolean — no rects, coordinates, selectors, or text.
+  const AMBIGUOUS_KEYS = [
+    "denial_text_seen",
+    "large_centered_overlay_seen",
+    "near_zero_interactive",
+    "pointer_interceptor_seen",
+    "top_layer_dialog_seen",
+    "viewport_scrim_seen",
+    "visible_inaccessible_iframe_seen",
+  ];
+
+  async function detectAmbiguous() {
+    return detectAmbiguousVisualObstructionViaCDP({ cdpUrl, resolvedTarget: await resolveTarget() });
+  }
+
+  it("detects a centered overlay + scrim over a normal page via geometry signals (no HV/denial text, no iframe)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_CENTERED_OVERLAY);
+    const probe = await detectAmbiguous();
+    expect(probe).not.toBeNull();
+
+    // Geometry obstruction signals fire from layout alone…
+    expect(probe!.large_centered_overlay_seen).toBe(true);
+    expect(probe!.viewport_scrim_seen).toBe(true);
+    expect(probe!.pointer_interceptor_seen).toBe(true);
+    // …with NO text/iframe signal (the overlay copy is intentionally neutral, and
+    // the page is element-rich, so the legacy ambiguous signals all stay false).
+    expect(probe!.denial_text_seen).toBe(false);
+    expect(probe!.visible_inaccessible_iframe_seen).toBe(false);
+    expect(probe!.near_zero_interactive).toBe(false);
+
+    // Result is booleans ONLY — never raw geometry, selectors, text, or coordinates.
+    expect(Object.keys(probe!).sort()).toEqual(AMBIGUOUS_KEYS);
+    for (const v of Object.values(probe!)) expect(typeof v).toBe("boolean");
+  }, 20_000);
+
+  it("returns all-false geometry obstruction signals for a healthy page with only a fixed top banner", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_STICKY_HEADER);
+    const probe = await detectAmbiguous();
+    expect(probe).not.toBeNull();
+
+    // A fixed/sticky header is the classic false-positive — every geometry signal
+    // must stay false (top-anchored, low coverage, never intercepts the center).
+    expect(probe!.large_centered_overlay_seen).toBe(false);
+    expect(probe!.viewport_scrim_seen).toBe(false);
+    expect(probe!.pointer_interceptor_seen).toBe(false);
+    expect(probe!.top_layer_dialog_seen).toBe(false);
+    // And no text/iframe obstruction either.
+    expect(probe!.denial_text_seen).toBe(false);
+    expect(probe!.visible_inaccessible_iframe_seen).toBe(false);
+    expect(probe!.near_zero_interactive).toBe(false);
+
+    expect(Object.keys(probe!).sort()).toEqual(AMBIGUOUS_KEYS);
+    for (const v of Object.values(probe!)) expect(typeof v).toBe("boolean");
   }, 20_000);
 });

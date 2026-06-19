@@ -30,6 +30,11 @@ const PNG = "iVBORw0KGgoREDACTED==";
 const VW = 1280;
 const VH = 800;
 
+// Dispatch-reaching tests inject a live-viewport reader that matches the captured
+// frame, so the viewport-drift guard passes and the test stays focused on mapping
+// / dispatch. (Drift behavior itself is covered in the hardening suite.)
+const matchingViewport = async () => ({ width: VW, height: VH });
+
 // Viewport / coordinate magnitudes that must never surface as real numeric
 // fields in a relay result or safe view. Checked as parsed numbers (not raw
 // string substrings) so capsule IDs or ISO timestamps that happen to contain
@@ -226,6 +231,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       targetId: "TARGET_A",
       gesture: { kind: "tap", fx: 0.5, fy: 0.5 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     expect(res.ok).toBe(true);
@@ -248,6 +254,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       cdpUrl: "http://localhost:9222",
       gesture: { kind: "press_hold", fx: 0.25, fy: 0.75, duration_ms: 1500 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     expect(res.ok).toBe(true);
@@ -326,6 +333,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       cdpUrl: "http://localhost:9222",
       gesture: { kind: "tap", fx: 0.5, fy: 0.5 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     expect(res).toEqual({ ok: false, reason: "pointer_dispatch_failed" });
@@ -348,6 +356,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       cdpUrl: "http://localhost:9222",
       gesture: { kind: "press_hold", fx: 0.5, fy: 0.5, duration_ms: 1000 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     expect(res).toEqual({
@@ -389,6 +398,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       cdpUrl: "http://localhost:9222",
       gesture: { kind: "tap", fx: 0.5, fy: 0.5 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     const view = getSafeVisualGestureCapsuleView(getVisualGestureCapsule(capsule.capsule_id)!);
@@ -421,6 +431,7 @@ describe("relayVisualGestureCapsuleGesture", () => {
       cdpUrl: "http://localhost:9222",
       gesture: { kind: "tap", fx: 0.5, fy: 0.5 },
       pointerRelay: relay,
+      readLiveViewport: matchingViewport,
     });
 
     expect(res.ok).toBe(true);

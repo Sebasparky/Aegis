@@ -1,0 +1,69 @@
+<!doctype html>
+<!--
+  Visual Gesture Capsule fixture — TAP-clears human-verification interstitial.
+
+  Unlike press-and-hold-modal.html (which requires a >= 600ms held pointer), this
+  wall clears on a SINGLE click/tap of the confirm button: pointerdown +
+  pointerup at the same spot with no hold requirement. Used to prove that a `tap`
+  gesture clears a tap wall, while a `tap` does NOT satisfy a press-hold wall —
+  i.e. the two gesture kinds are not interchangeable.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Confirm to continue</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .hv-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(20, 20, 20, 0.55);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .hv-modal {
+        background: #fff; border-radius: 10px; padding: 32px 40px;
+        width: 360px; text-align: center;
+      }
+      #hv-tap-btn {
+        margin-top: 18px; padding: 12px 40px; font-size: 15px;
+        border: 1px solid #2f6fde; border-radius: 22px;
+        background: #fff; color: #2f6fde; cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart">Cart</a>
+      <button id="add-to-bag">Add to bag</button>
+    </header>
+    <main>
+      <h1>Seasonal Event</h1>
+      <p>Lowest price of the season.</p>
+      <a href="/sale">Shop now</a>
+    </main>
+
+    <div class="hv-backdrop" id="hv-backdrop" role="dialog" aria-modal="true" aria-label="Before we continue">
+      <div class="hv-modal">
+        <h2>Before we continue...</h2>
+        <p>Tap to confirm you are a human (and not a bot).</p>
+        <button id="hv-tap-btn" type="button">Confirm</button>
+        <p id="hv-status" style="font-size: 12px; color: #888;">Reference ID 56789efgh</p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var btn = document.getElementById("hv-tap-btn");
+        // A single click (pointerdown+pointerup) clears it — no hold needed.
+        btn.addEventListener("click", function () {
+          var bd = document.getElementById("hv-backdrop");
+          if (bd && bd.parentNode) bd.parentNode.removeChild(bd);
+          window.__hv_cleared = true;
+        });
+      })();
+    </script>
+  </body>
+</html>

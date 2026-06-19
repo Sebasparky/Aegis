@@ -28,12 +28,11 @@ import {
   type VisualGestureCapsuleStatus,
 } from "./visualGestureCapsule.js";
 import {
-  pressAtPoint,
-  releaseAtPoint,
-  clickAtPoint,
-  resolvePointerTimingMode,
-} from "./nativePointerRuntime.js";
-import { HOLD_MAX_DURATION_MS, openCdpPageClient } from "./humanPresenceRelay.js";
+  HOLD_MAX_DURATION_MS,
+  openCdpPageClient,
+  type CdpPageClient,
+} from "./humanPresenceRelay.js";
+import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
 
 /** Reject press-holds shorter than this — too brief to be a real human hold. */
 export const HOLD_MIN_DURATION_MS = 300;
@@ -82,6 +81,7 @@ export type VisualGestureRelayResult =
         | "invalid_gesture"
         | "invalid_coordinates"
         | "screenshot_frame_unavailable"
+        | "viewport_drifted"
         | "pointer_dispatch_failed"
         | "store_or_state_failed";
     };
@@ -120,24 +120,103 @@ export function validateVisualGesturePayload(
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Tap dwell between press and release (ms) — long enough to register a click. */
+export const TAP_DWELL_MS = 60;
+
 /**
- * Production default relay: opens a CDP page client and dispatches through the
- * native pointer primitives. Not unit-tested in this slice (tests inject a
- * fake). targetId is accepted for forward-compat; the default resolves the
- * active page via openCdpPageClient's best-target selection (precise targetId
- * attach lands in a later slice).
+ * Viewport-drift tolerance. The mapped point is only trustworthy while the live
+ * viewport still matches the captured frame: drifted if the live/captured delta
+ * on either axis exceeds max(ABS_PX, REL * capturedDim). A few px of rounding is
+ * tolerated; a real scroll/resize is not.
+ */
+export const VIEWPORT_DRIFT_ABS_PX = 2;
+export const VIEWPORT_DRIFT_REL = 0.02;
+
+function axisDrifted(live: number, captured: number): boolean {
+  return Math.abs(live - captured) > Math.max(VIEWPORT_DRIFT_ABS_PX, VIEWPORT_DRIFT_REL * captured);
+}
+
+/**
+ * True when the live viewport has drifted from the captured frame beyond
+ * tolerance on either axis. Exported for direct unit testing. Takes only sizes,
+ * returns only a boolean — never surfaces the dims or the delta.
+ */
+export function isViewportDrifted(
+  live: { width: number; height: number },
+  captured: { width: number; height: number },
+): boolean {
+  return axisDrifted(live.width, captured.width) || axisDrifted(live.height, captured.height);
+}
+
+/**
+ * Dispatch a single faithful pointer gesture through an ALREADY-OPEN CDP page
+ * client, awaiting every `Input.dispatchMouseEvent` so the browser acknowledges
+ * each event. Critically, the final `mouseReleased` is AWAITED — its ack is the
+ * flush that the old fire-and-forget `send()` + immediate `close()` path dropped
+ * (the pointerup never reached the page, so the wall never cleared).
+ *
+ * Movement is a SINGLE deterministic move to the mapped point (arms hover /
+ * pointerenter on widgets that require it) — no path, jitter, easing, or
+ * randomization. The caller owns client lifecycle; this never closes the client,
+ * so the caller can close only AFTER this resolves (i.e. after the release ack).
+ *
+ * Fail-closed: if the press landed but the hold/release threw, a best-effort
+ * release is still attempted so the button is never left stuck down.
+ */
+export async function dispatchVisualGesturePointerViaClient(
+  client: Pick<CdpPageClient, "call">,
+  args: { kind: "tap" | "press_hold"; x: number; y: number; durationMs?: number },
+  sleepFn: (ms: number) => Promise<void> = sleep,
+): Promise<{ ok: true } | { ok: false; error?: string }> {
+  const { kind, x, y } = args;
+  const mouse = (type: "mouseMoved" | "mousePressed" | "mouseReleased") =>
+    client.call("Input.dispatchMouseEvent", {
+      type,
+      x,
+      y,
+      button: type === "mouseMoved" ? "none" : "left",
+      clickCount: type === "mouseMoved" ? 0 : 1,
+    });
+  let pressed = false;
+  let released = false;
+  try {
+    // 1. Single deterministic move to the target point.
+    await mouse("mouseMoved");
+    // 2. Press and hold the button down.
+    await mouse("mousePressed");
+    pressed = true;
+    // 3. Hold for the user's hold duration (press_hold) or a short tap dwell.
+    await sleepFn(kind === "press_hold" ? (args.durationMs ?? 0) : TAP_DWELL_MS);
+    // 4. Release — AWAITED. This ack flushes the input pipeline before any close.
+    await mouse("mouseReleased");
+    released = true;
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    // Fail-closed: never leave the button stuck down if the hold/release threw.
+    if (pressed && !released) {
+      try {
+        await mouse("mouseReleased");
+      } catch {
+        /* best-effort release */
+      }
+    }
+  }
+}
+
+/**
+ * Production default relay: opens a CDP page client, dispatches the fully-awaited
+ * gesture, and closes the client ONLY AFTER dispatch (incl. the awaited release)
+ * resolves. targetId is accepted for forward-compat; the default resolves the
+ * active page via openCdpPageClient's best-target selection.
  */
 export const defaultVisualGesturePointerRelay: VisualGesturePointerRelay = {
   async tapAtPoint({ cdpUrl, x, y }) {
     const opened = await openCdpPageClient({ cdpUrl });
     if (!opened.ok) return { ok: false, error: opened.error };
-    const sendCdp = (method: string, params: Record<string, unknown>): void =>
-      opened.client.send(method, params);
     try {
-      await clickAtPoint(sendCdp, { x, y }, resolvePointerTimingMode(), sleep);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return await dispatchVisualGesturePointerViaClient(opened.client, { kind: "tap", x, y });
     } finally {
       opened.client.close();
     }
@@ -145,26 +224,14 @@ export const defaultVisualGesturePointerRelay: VisualGesturePointerRelay = {
   async pressHoldAtPoint({ cdpUrl, x, y, durationMs }) {
     const opened = await openCdpPageClient({ cdpUrl });
     if (!opened.ok) return { ok: false, error: opened.error };
-    const sendCdp = (method: string, params: Record<string, unknown>): void =>
-      opened.client.send(method, params);
-    let pressed = false;
     try {
-      await pressAtPoint(sendCdp, { x, y }, resolvePointerTimingMode(), sleep);
-      pressed = true;
-      await sleep(durationMs);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return await dispatchVisualGesturePointerViaClient(opened.client, {
+        kind: "press_hold",
+        x,
+        y,
+        durationMs,
+      });
     } finally {
-      // Fail-closed: always attempt to release if the press landed, even if the
-      // hold threw partway through.
-      if (pressed) {
-        try {
-          releaseAtPoint(sendCdp, { x, y });
-        } catch {
-          /* best-effort release */
-        }
-      }
       opened.client.close();
     }
   },
@@ -185,6 +252,8 @@ export async function relayVisualGestureCapsuleGesture(args: {
   targetId?: string;
   gesture: VisualGestureRelayGesture;
   pointerRelay?: VisualGesturePointerRelay;
+  /** Injectable live-viewport reader for the drift guard; defaults to a CDP read. */
+  readLiveViewport?: VgcReadViewportFn;
 }): Promise<VisualGestureRelayResult> {
   // 1. Flag gate FIRST — never read the capsule/frame or dispatch when off.
   if (!isVisualGestureCapsuleEnabled()) return { ok: false, reason: "flag_disabled" };
@@ -206,6 +275,27 @@ export async function relayVisualGestureCapsuleGesture(args: {
   //    frame store guarantees viewport dims > 0 for any present frame.
   const frame = getVisualGestureCapsuleScreenshotFrame(args.capsuleId);
   if (!frame) return { ok: false, reason: "screenshot_frame_unavailable" };
+
+  // 6b. Viewport-drift guard. The point is only trustworthy while the live
+  //     viewport still matches the captured frame: if it cannot be read or has
+  //     drifted beyond tolerance, the screenshot is stale and the mapped point
+  //     would miss. Refuse WITHOUT dispatching and WITHOUT burning an attempt —
+  //     the capsule stays active so the UI recaptures or falls back to manual.
+  //     SAFE: never surfaces live/captured dims, the delta, coords, or fx/fy.
+  const readLiveViewport = args.readLiveViewport ?? defaultVgcReadViewport;
+  const liveViewport = await readLiveViewport({
+    cdpUrl: args.cdpUrl,
+    ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
+  });
+  if (
+    !liveViewport ||
+    isViewportDrifted(liveViewport, {
+      width: frame.viewport_css_width,
+      height: frame.viewport_css_height,
+    })
+  ) {
+    return { ok: false, reason: "viewport_drifted" };
+  }
 
   // 7. Map the normalized point to CSS viewport coords. mapNormalized... throws
   //    RangeError on bad input; step 5 already validated, this is belt-and-suspenders.

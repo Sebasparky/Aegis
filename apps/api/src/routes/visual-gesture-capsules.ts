@@ -64,6 +64,9 @@ const GESTURE_RELAY_ERROR_MAP: Record<string, { status: number; code: string }> 
   invalid_gesture: { status: 400, code: "INVALID_GESTURE" },
   invalid_coordinates: { status: 400, code: "INVALID_COORDINATES" },
   screenshot_frame_unavailable: { status: 409, code: "SCREENSHOT_FRAME_UNAVAILABLE" },
+  // Stale/mismatched viewport — the mapped point can't be trusted. 409 so the UI
+  // recaptures or falls back to manual. The code carries no dims/coords/deltas.
+  viewport_drifted: { status: 409, code: "VIEWPORT_DRIFTED" },
   pointer_dispatch_failed: { status: 502, code: "POINTER_DISPATCH_FAILED" },
   store_or_state_failed: { status: 409, code: "STORE_OR_STATE_FAILED" },
 };

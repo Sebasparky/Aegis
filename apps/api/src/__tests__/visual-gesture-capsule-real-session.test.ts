@@ -37,7 +37,7 @@
  *     npx vitest run visual-gesture-capsule-real-session
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -56,6 +56,7 @@ import { detectPageHumanVerificationWallViaCDP } from "../runtime/antigenSnapsho
 import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
 import {
   getVisualGestureCapsule,
+  getActiveVisualGestureCapsuleForBrowserSession,
   clearVisualGestureCapsulesForTests,
 } from "../runtime/visualGestureCapsule.js";
 
@@ -72,6 +73,9 @@ const FIXTURE_WALL = fileURLToPath(
 const FIXTURE_MODAL = fileURLToPath(
   new URL("./fixtures/press-and-hold-modal.html", import.meta.url),
 );
+// Tap-clears control: clears on a single click of #hv-tap-btn (no hold). Proves a
+// `tap` gesture clears a tap wall while a `tap` does NOT satisfy a press-hold wall.
+const FIXTURE_TAP = fileURLToPath(new URL("./fixtures/tap-wall.html", import.meta.url));
 
 const SESSION_ID = "tbsess_vgc_realsession_m2d";
 
@@ -372,6 +376,117 @@ describe.skipIf(!EXE || !GATE_ON)("VGC — real browser session fixture (M2D)", 
     server.inject({ method: "POST", url: `${ROOT}/${id}/recheck`, payload: {} });
   const postRecapture = (id: string) =>
     server.inject({ method: "POST", url: `${ROOT}/${id}/recapture`, payload: {} });
+
+  // Capsules are session-bound; clear between tests so each mints its own and the
+  // active-for-session guard never sees a leftover from a prior test.
+  afterEach(() => {
+    clearVisualGestureCapsulesForTests();
+  });
+
+  // Normalized center fraction of an element — exactly what a user pointing at the
+  // control in the redacted screenshot would produce. Test-side only (the relay
+  // never receives a fraction the agent could see).
+  async function buttonFraction(elementId: string): Promise<{ fx: number; fy: number }> {
+    const out = (await withPageSession(CDP_URL, async ({ evaluate }) =>
+      evaluate(
+        `(function(){var e=document.getElementById(${JSON.stringify(elementId)});` +
+          `var r=e.getBoundingClientRect();` +
+          `return {fx:(r.left+r.width/2)/window.innerWidth, fy:(r.top+r.height/2)/window.innerHeight};})()`,
+      ),
+    )) as { fx: number; fy: number };
+    return out;
+  }
+
+  async function readClearedFlag(): Promise<boolean> {
+    const v = await withPageSession(CDP_URL, async ({ evaluate }) =>
+      evaluate(`(function(){return window.__hv_cleared===true;})()`),
+    );
+    return v === true;
+  }
+
+  async function mintCapsule(pageUrl: string): Promise<string> {
+    const created = await createVisualGestureCapsuleForOpaqueHv({
+      humanVerificationRequestId: `hvr_${Date.now()}`,
+      browserSessionId: SESSION_ID,
+      domain: "localhost",
+      cdpUrl: CDP_URL,
+      pageUrl,
+      userId: "user_001",
+      delegationId: "del_vgc_realsession_m2d",
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error("capsule creation failed");
+    expect(created.screenshot_available).toBe(true);
+    return created.capsule.capsule_id;
+  }
+
+  it("a real user press-hold clears a real press-hold wall, recheck goes terminal, agent resumes", async () => {
+    await gotoFixture(CDP_URL, FIXTURE_MODAL);
+    const capsuleId = await mintCapsule(`file://${FIXTURE_MODAL}`);
+    const { fx, fy } = await buttonFraction("hv-hold-btn");
+
+    // 800ms hold clears the fixture's >=600ms threshold. Backend derives cdp_url.
+    const res = await postGesture(capsuleId, { kind: "press_hold", fx, fy, duration_ms: 800 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().gesture_relayed).toBe(true);
+    assertNoLeak(res.json(), res.body);
+
+    // The REAL pointerup landed: the fixture cleared itself.
+    expect(await readClearedFlag()).toBe(true);
+
+    // Recheck → REAL probe → wall absent → terminal cleared.
+    const recheck = await postRecheck(capsuleId);
+    expect(recheck.statusCode).toBe(200);
+    expect(recheck.json().recheck).toBe("cleared");
+    expect(recheck.json().status).toBe("cleared");
+    assertNoLeak(recheck.json(), recheck.body);
+
+    // Agent-resume precondition: no active capsule for the session (the guard that
+    // returns 409 HUMAN_VERIFICATION_REQUIRED now finds nothing → next snapshot 200).
+    expect(getActiveVisualGestureCapsuleForBrowserSession(SESSION_ID)).toBeUndefined();
+    const list = (await listCapsules()).json();
+    expect(list.data.find((c: any) => c.capsule_id === capsuleId)).toBeUndefined();
+  }, 40_000);
+
+  it("a too-short hold does NOT clear the wall; capsule stays active and the agent stays blocked", async () => {
+    await gotoFixture(CDP_URL, FIXTURE_MODAL);
+    const capsuleId = await mintCapsule(`file://${FIXTURE_MODAL}`);
+    const { fx, fy } = await buttonFraction("hv-hold-btn");
+
+    // 350ms >= HOLD_MIN (300) but < the fixture's 600ms requirement.
+    const res = await postGesture(capsuleId, { kind: "press_hold", fx, fy, duration_ms: 350 });
+    expect(res.statusCode).toBe(200);
+    expect(await readClearedFlag()).toBe(false);
+
+    const recheck = await postRecheck(capsuleId);
+    expect(recheck.statusCode).toBe(200);
+    expect(recheck.json().recheck).toBe("still_present");
+    assertNoLeak(recheck.json(), recheck.body);
+
+    // Still active → the agent stays blocked.
+    expect(getActiveVisualGestureCapsuleForBrowserSession(SESSION_ID)?.capsule_id).toBe(capsuleId);
+  }, 40_000);
+
+  it("tap clears a tap wall, but a tap does NOT clear a press-hold wall", async () => {
+    // Tap clears the tap fixture.
+    await gotoFixture(CDP_URL, FIXTURE_TAP);
+    const tapCapsule = await mintCapsule(`file://${FIXTURE_TAP}`);
+    const tapBtn = await buttonFraction("hv-tap-btn");
+    const tapRes = await postGesture(tapCapsule, { kind: "tap", fx: tapBtn.fx, fy: tapBtn.fy });
+    expect(tapRes.statusCode).toBe(200);
+    expect(await readClearedFlag()).toBe(true);
+    expect((await postRecheck(tapCapsule)).json().recheck).toBe("cleared");
+    clearVisualGestureCapsulesForTests();
+
+    // The same tap does NOT satisfy a press-hold wall.
+    await gotoFixture(CDP_URL, FIXTURE_MODAL);
+    const holdCapsule = await mintCapsule(`file://${FIXTURE_MODAL}`);
+    const holdBtn = await buttonFraction("hv-hold-btn");
+    const holdRes = await postGesture(holdCapsule, { kind: "tap", fx: holdBtn.fx, fy: holdBtn.fy });
+    expect(holdRes.statusCode).toBe(200);
+    expect(await readClearedFlag()).toBe(false);
+    expect((await postRecheck(holdCapsule)).json().recheck).toBe("still_present");
+  }, 60_000);
 
   it("the real page-level HV detector classifies the controlled cross-origin-iframe wall", async () => {
     await gotoFixture(CDP_URL, FIXTURE_WALL);

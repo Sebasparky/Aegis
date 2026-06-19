@@ -366,6 +366,13 @@ export default function HumanVerificationPage() {
       setHint(null);
       try {
         const res = await endVisualGestureCapsuleHold(capsuleId);
+        // Refresh the selected capsule with the post-recheck server view so the next
+        // hold's countdown uses the updated recommended_hold_ms (5s → 10s → 15s) tied
+        // to the incremented attempt_count — not the stale local value. Polling is
+        // paused during a hold, so without this the countdown would show 5s again.
+        setCapsules((prev) =>
+          prev.map((c) => (c.capsule_id === capsuleId ? res.data : c)),
+        );
         if (res.data.status === "manual_fallback") {
           // Both guided attempts used and the wall is still up — hand off.
           setStatusMsg("Please complete this in the visible browser.");

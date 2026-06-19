@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bath &amp; Body — Home</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* A large, centered, FIXED marketing hero / sale carousel. This is the live
+         B&BW homepage false-positive geometry: it is large_centered_overlay_seen
+         (fixed, ~42% coverage = 0.7vw * 0.6vh, height < viewport, centered) AND it
+         occludes the sampled center points → pointer_interceptor_seen. Crucially
+         there is NO dimmer/backdrop scrim and it is NOT a :modal — a benign hero
+         never blocks the page, it is just a big promo panel. It must NOT mint a VGC. */
+      #hero {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 50;
+        width: 70vw;
+        height: 60vh;
+        background: linear-gradient(135deg, #ffe1ec, #ffd0a6);
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        text-align: center;
+      }
+      #hero h2 { font-size: 28px; margin: 0 0 8px; }
+      #hero a.cta { margin-top: 12px; padding: 10px 18px; background: #c2185b; color: #fff; border-radius: 6px; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <!--
+      A normal, fully-interactive homepage (well over 3 controls) with a large fixed
+      marketing hero/sale carousel over it. No human-verification language, no denial
+      language, no iframe, and NO dimmer/backdrop scrim. The geometry signals
+      large_centered_overlay_seen and pointer_interceptor_seen fire from the hero's
+      layout alone — exactly like a real centered-card wall — so the classifier must
+      rely on the absent scrim/iframe markers and NOT mint.
+    -->
+    <header>
+      <a href="/">Home</a>
+      <a href="/account">Account</a>
+      <a href="/cart">Cart</a>
+      <input type="search" name="q" placeholder="Search products" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/body-care">Body Care</a>
+      <a href="/candles">Candles</a>
+      <a href="/soaps">Hand Soaps</a>
+      <a href="/fragrance">Fragrance</a>
+      <a href="/gifts">Gifts</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>Welcome</h1>
+      <div class="cats">
+        <a href="/new">New Arrivals</a>
+        <a href="/best">Best Sellers</a>
+        <a href="/minis">Travel Size</a>
+        <a href="/sets">Gift Sets</a>
+      </div>
+      <div class="grid">
+        <div class="card"><a href="/p/1">Vanilla Candle</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/2">Lavender Soap</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/3">Citrus Lotion</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/4">Mist Spray</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/5">Shower Gel</a><button type="button">Add to cart</button></div>
+        <div class="card"><a href="/p/6">Wallflowers</a><button type="button">Add to cart</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+
+    <!-- ── Benign large fixed marketing hero (no scrim, not a :modal) ── -->
+    <div id="hero" role="presentation">
+      <h2>Semi-Annual Sale</h2>
+      <p>Up to 75% off — everything must go.</p>
+      <a class="cta" href="/sale">Shop the Sale</a>
+    </div>
+  </body>
+</html>

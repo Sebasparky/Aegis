@@ -358,16 +358,12 @@ describe("classifyAmbiguousVisualObstruction — pure verdict", () => {
   });
 
   // ── Geometry signals (the B&BW DOM-textless overlay shape) ──
-  it("large centered overlay + repeated stale fires", () => {
-    expect(
-      classifyAmbiguousVisualObstruction({
-        large_centered_overlay_seen: true,
-        repeated_stale: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("viewport scrim + repeated stale fires", () => {
+  // The discriminator is the obstructive dimmer/backdrop (viewport_scrim_seen) or an
+  // opaque cross-origin frame (visible_inaccessible_iframe_seen). A large centered
+  // overlay / pointer interceptor is produced just as readily by a benign marketing
+  // hero, so neither fires on its own — only WITH a scrim/iframe shape (which already
+  // carries its own fire path).
+  it("viewport scrim + repeated stale fires (the real dimmer/backdrop)", () => {
     expect(
       classifyAmbiguousVisualObstruction({
         viewport_scrim_seen: true,
@@ -376,18 +372,45 @@ describe("classifyAmbiguousVisualObstruction — pure verdict", () => {
     ).toBe(true);
   });
 
-  it("pointer interceptor + repeated stale fires", () => {
+  it("large centered overlay + repeated stale alone does NOT fire (a benign marketing hero)", () => {
     expect(
       classifyAmbiguousVisualObstruction({
-        pointer_interceptor_seen: true,
+        large_centered_overlay_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(false);
+    // …but the SAME overlay over a dimmer/backdrop fires via the scrim marker.
+    expect(
+      classifyAmbiguousVisualObstruction({
+        large_centered_overlay_seen: true,
+        viewport_scrim_seen: true,
         repeated_stale: true,
       }),
     ).toBe(true);
   });
 
-  it("each geometry signal WITHOUT repeated stale does NOT fire (corroborator discipline)", () => {
-    expect(classifyAmbiguousVisualObstruction({ large_centered_overlay_seen: true })).toBe(false);
+  it("pointer interceptor + repeated stale alone does NOT fire (a hero occludes the center too)", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({
+        pointer_interceptor_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(false);
+    // …but with an opaque cross-origin frame it fires via the iframe marker.
+    expect(
+      classifyAmbiguousVisualObstruction({
+        pointer_interceptor_seen: true,
+        visible_inaccessible_iframe_seen: true,
+        repeated_stale: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("the obstruction markers WITHOUT repeated stale do NOT fire (corroborator discipline)", () => {
     expect(classifyAmbiguousVisualObstruction({ viewport_scrim_seen: true })).toBe(false);
+    expect(classifyAmbiguousVisualObstruction({ visible_inaccessible_iframe_seen: true })).toBe(false);
+    // …and the benign geometry signals never fire regardless of repeated_stale.
+    expect(classifyAmbiguousVisualObstruction({ large_centered_overlay_seen: true })).toBe(false);
     expect(classifyAmbiguousVisualObstruction({ pointer_interceptor_seen: true })).toBe(false);
   });
 
@@ -652,11 +675,13 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
-  it("(3) REALISTIC_CLICK_FAILED + large centered overlay (DOM-textless) + VGC ON mints a VGC (live B&BW shape)", async () => {
+  it("(3) REALISTIC_CLICK_FAILED + large centered overlay WITH a dimmer/scrim (DOM-textless) + VGC ON mints a VGC (live B&BW shape)", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
     // Many refs still extractable — the modal text is NOT in the accessible DOM, so
-    // denial_text/iframe/near_zero are all false; only the geometry overlay signal fires.
+    // denial_text/iframe/near_zero are all false. The real B&BW press-and-hold wall is
+    // a centered overlay OVER A FULL-VIEWPORT DIMMER, so viewport_scrim_seen is the
+    // obstructive corroborator that distinguishes it from a benign marketing hero.
     seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
     clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
     ambiguousProbeMock.mockResolvedValueOnce({
@@ -664,7 +689,7 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
       near_zero_interactive: false,
       visible_inaccessible_iframe_seen: false,
       large_centered_overlay_seen: true,
-      viewport_scrim_seen: false,
+      viewport_scrim_seen: true,
       pointer_interceptor_seen: false,
       top_layer_dialog_seen: false,
     });
@@ -681,6 +706,61 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
     expect(hvWallProbeMock).toHaveBeenCalledTimes(1); // structural probe ran first and ruled out
     expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(3b) REALISTIC_CLICK_FAILED + benign marketing hero (large centered overlay, NO scrim/iframe/top-layer/broad-occlusion) does NOT mint a VGC", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // The B&BW homepage/search false-positive: a normal hero / sale carousel is large,
+    // centered, and fixed/absolute, so large_centered_overlay_seen fires — but there is
+    // NO obstructive corroborator (no dimmer, no opaque iframe, not a :modal, and after
+    // the probe tightening it no longer trips broad pointer occlusion). It must surface
+    // the original 422, never mint a VGC.
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(3c) REALISTIC_CLICK_FAILED + large overlay + broad pointer occlusion but NO scrim/iframe does NOT mint (geometry alone can't tell a hero from a wall)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // A large centered overlay that also intercepts the sampled points is exactly the
+    // shape a benign marketing hero produces, so geometry alone (no dimmer/backdrop,
+    // no opaque iframe) must NOT mint — it surfaces the original 422. Real walls of
+    // this class also paint a scrim/iframe (see case 3) and are still caught there.
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
   it("(4) viewport scrim alone (no overlay/iframe/denial) + click no-progress mints a VGC", async () => {
@@ -1020,11 +1100,10 @@ describe("ambiguous fallback — snapshot endpoint", () => {
 // Detection behavior is unchanged — these assert ONLY the added telemetry and that
 // it is absent / byte-identical when the flag is off, with no raw leaks.
 describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
-  // The exact suspected false-positive shape: high-element page + a lingering
-  // no-progress marker (synthetic repeated_stale) + weak geometry (lone
-  // pointer_interceptor). The telemetry must name it: ambiguous_fired,
-  // repeated_stale_source=no_progress_marker, geometry_strength=weak.
-  it("attributes the ambiguous weak-geometry mint (the /cart shape) when the flag is on", async () => {
+  // A real obstruction shape: high-element page + a lingering no-progress marker
+  // (synthetic repeated_stale) + a dimmer/backdrop scrim. The telemetry must name it:
+  // ambiguous_fired, repeated_stale_source=no_progress_marker, geometry_strength=strong.
+  it("attributes a real scrim-backed ambiguous mint when the flag is on", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     process.env.ANTIGEN_HV_DEBUG = "true";
     seedSession();
@@ -1033,14 +1112,14 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
       hvWallHint: false,
     });
-    // Lone pointer_interceptor (a sticky header on an otherwise-healthy page) — the
-    // weak shape. It only fires because the marker synthesizes repeated_stale.
+    // A full-viewport dimmer/backdrop over a preserved page — the obstruction marker
+    // that distinguishes a real wall from a benign hero. Fires via the scrim path.
     ambiguousProbeMock.mockResolvedValueOnce({
       denial_text_seen: false,
       near_zero_interactive: false,
       visible_inaccessible_iframe_seen: false,
-      large_centered_overlay_seen: false,
-      viewport_scrim_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
       pointer_interceptor_seen: true,
       top_layer_dialog_seen: false,
     });
@@ -1060,14 +1139,43 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       created_capsule: true,
       no_progress_signal: true,
       repeated_stale_source: "no_progress_marker",
-      geometry_strength: "weak",
-      pointer_interceptor_seen: true,
+      geometry_strength: "strong",
+      viewport_scrim_seen: true,
       denial_text_seen: false,
       visible_inaccessible_iframe_seen: false,
     });
     // Bucket, never a raw count.
     expect(dbg.element_count_bucket).toBe("4-20");
     expect(dbg).not.toHaveProperty("element_count");
+  });
+
+  it("the lone-pointer /cart false positive is now FIXED — high-element page + no-progress marker + lone pointer interceptor returns 200, no capsule", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // The suspected false-positive shape: a lone pointer interceptor (a sticky header /
+    // marketing hero on an otherwise-healthy page). With no scrim/iframe marker it must
+    // no longer mint — the snapshot proceeds normally.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
   it("attributes the structural page-level wall mint", async () => {
@@ -1145,8 +1253,8 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       denial_text_seen: false,
       near_zero_interactive: false,
       visible_inaccessible_iframe_seen: false,
-      large_centered_overlay_seen: false,
-      viewport_scrim_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
       pointer_interceptor_seen: true,
       top_layer_dialog_seen: false,
     });

@@ -89,9 +89,65 @@ export interface VisualGestureCapsulePresenceProbe {
          * interactive). Booleans only — no rects, coordinates, or page text.
          */
         geo_strength?: "none" | "weak" | "strong";
+        /**
+         * Per-signal geometry booleans for SAFE debug telemetry only (logHvDebug,
+         * never the HTTP response). Booleans only — the page IIFE reduces all
+         * geometry/text to booleans, so no rects, coordinates, page text, iframe
+         * src, or provider data ever ride along. Lets `geo_strength=strong` be
+         * attributed to the exact signal that produced it.
+         */
+        geo_signals?: {
+          denial_text_seen: boolean;
+          near_zero_interactive: boolean;
+          visible_inaccessible_iframe_seen: boolean;
+          large_centered_overlay_seen: boolean;
+          viewport_scrim_seen: boolean;
+          pointer_interceptor_seen: boolean;
+          top_layer_dialog_seen: boolean;
+        };
       }
     | { ok: false; reason?: string }
   >;
+}
+
+/**
+ * Reduce the raw geometry probe object to the SAFE per-signal boolean set for debug
+ * telemetry. Every field is coerced to a literal boolean (`=== true`), so an unusable
+ * shape degrades to all-false rather than leaking anything. Returns undefined when no
+ * recognizable boolean field is present (so the caller omits geo_signals entirely).
+ */
+function extractGeoSignals(raw: unknown):
+  | {
+      denial_text_seen: boolean;
+      near_zero_interactive: boolean;
+      visible_inaccessible_iframe_seen: boolean;
+      large_centered_overlay_seen: boolean;
+      viewport_scrim_seen: boolean;
+      pointer_interceptor_seen: boolean;
+      top_layer_dialog_seen: boolean;
+    }
+  | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const v = raw as Record<string, unknown>;
+  const keys = [
+    "denial_text_seen",
+    "near_zero_interactive",
+    "visible_inaccessible_iframe_seen",
+    "large_centered_overlay_seen",
+    "viewport_scrim_seen",
+    "pointer_interceptor_seen",
+    "top_layer_dialog_seen",
+  ] as const;
+  if (!keys.some((k) => typeof v[k] === "boolean")) return undefined;
+  return {
+    denial_text_seen: v["denial_text_seen"] === true,
+    near_zero_interactive: v["near_zero_interactive"] === true,
+    visible_inaccessible_iframe_seen: v["visible_inaccessible_iframe_seen"] === true,
+    large_centered_overlay_seen: v["large_centered_overlay_seen"] === true,
+    viewport_scrim_seen: v["viewport_scrim_seen"] === true,
+    pointer_interceptor_seen: v["pointer_interceptor_seen"] === true,
+    top_layer_dialog_seen: v["top_layer_dialog_seen"] === true,
+  };
 }
 
 /**
@@ -161,16 +217,27 @@ const RECHECK_ALLOWED_STATES: ReadonlySet<VisualGestureCapsuleStatus> = new Set(
 export function geometryObstructionPresent(raw: unknown): boolean | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const v = raw as Record<string, unknown>;
-  const keys = [
-    "large_centered_overlay_seen",
+  // `large_centered_overlay_seen` and `pointer_interceptor_seen` are deliberately
+  // excluded from the present-signal set: a benign marketing hero / sale carousel is
+  // large+centered+fixed and occludes the sampled center points, so it trips BOTH
+  // exactly like a real card wall. Only an obstructive dimmer/backdrop or opaque
+  // iframe genuinely distinguishes a wall, so a lone large overlay / pointer
+  // interceptor must NOT report "present" at recheck (that kept benign-hero capsules
+  // alive). They are kept in `recognizedKeys` so a probe shape that includes them is
+  // still trusted (and resolves to absent), not treated as unparseable.
+  const presentKeys = [
     "viewport_scrim_seen",
-    "pointer_interceptor_seen",
     "denial_text_seen",
     "visible_inaccessible_iframe_seen",
   ] as const;
+  const recognizedKeys = [
+    ...presentKeys,
+    "pointer_interceptor_seen",
+    "large_centered_overlay_seen",
+  ] as const;
   // Require at least one recognizable boolean field before trusting the verdict.
-  if (!keys.some((k) => typeof v[k] === "boolean")) return undefined;
-  return keys.some((k) => v[k] === true);
+  if (!recognizedKeys.some((k) => typeof v[k] === "boolean")) return undefined;
+  return presentKeys.some((k) => v[k] === true);
 }
 
 /**
@@ -178,15 +245,21 @@ export function geometryObstructionPresent(raw: unknown): boolean | undefined {
  * weak, ambiguous obstruction is handled differently from a real wall.
  *
  * STRONG (a genuine wall — keep `still_present`): an explicit denial page
- * (`denial_text_seen`), a full-viewport scrim (`viewport_scrim_seen`), a
- * centered top-layer overlay / modal / card (`large_centered_overlay_seen`), a
- * visible inaccessible cross-origin iframe (`visible_inaccessible_iframe_seen`),
- * or a near-zero-interactive page (`near_zero_interactive`).
+ * (`denial_text_seen`), a full-viewport scrim/backdrop (`viewport_scrim_seen`), a
+ * visible inaccessible cross-origin iframe (`visible_inaccessible_iframe_seen`), or a
+ * near-zero-interactive page (`near_zero_interactive`). These are the markers a benign
+ * page does NOT produce.
  *
- * WEAK (ambiguous — a healthy interactive page can produce this): ONLY a
- * `pointer_interceptor_seen` with NONE of the strong signals. A fixed header /
- * sticky bar on an otherwise-interactive page can intercept sampled points, so
- * this alone must not keep a capsule pending once the page has settled.
+ * NOT strong → "none" (clear-eligible): `large_centered_overlay_seen` and/or
+ * `pointer_interceptor_seen` with NONE of the strong markers. A normal marketing hero
+ * / sale carousel is large, centered, and fixed/absolute and occludes the sampled
+ * center points, so it trips BOTH of these geometry signals exactly like a real
+ * centered-card wall — they cannot tell a benign hero apart from a wall, and the live
+ * B&BW homepage false positive proved a lone large overlay + pointer interceptor must
+ * NOT keep a benign capsule alive at recheck. A real wall always ALSO paints a scrim /
+ * iframe / denial / near-zero-interactive marker, which keeps it strong. (The "weak"
+ * verdict is retained in the type and consumed by `classifyReleasePresence` for
+ * injected/legacy probes, but this reducer no longer produces it.)
  *
  * `repeated_stale` is deliberately NOT consulted (a runtime signal, not a
  * page-state signal — same as geometryObstructionPresent). Returns undefined
@@ -200,15 +273,20 @@ export function geometryObstructionStrength(
   const strongKeys = [
     "denial_text_seen",
     "viewport_scrim_seen",
-    "large_centered_overlay_seen",
     "visible_inaccessible_iframe_seen",
     "near_zero_interactive",
   ] as const;
-  const allKeys = [...strongKeys, "pointer_interceptor_seen"] as const;
+  // `large_centered_overlay_seen` and `pointer_interceptor_seen` are recognized (so a
+  // probe that surfaces only them is trusted and resolves to "none") but are NOT strong
+  // and no longer downgrade to "weak" — see the doc comment above.
+  const allKeys = [
+    ...strongKeys,
+    "pointer_interceptor_seen",
+    "large_centered_overlay_seen",
+  ] as const;
   // Require at least one recognizable boolean field before trusting the verdict.
   if (!allKeys.some((k) => typeof v[k] === "boolean")) return undefined;
   if (strongKeys.some((k) => v[k] === true)) return "strong";
-  if (v["pointer_interceptor_seen"] === true) return "weak";
   return "none";
 }
 
@@ -269,13 +347,16 @@ const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl,
     // verdict, so a throw degrades the geometry side to undefined (not probe_failed).
     let geoPresent: boolean | undefined;
     let geoStrength: "none" | "weak" | "strong" | undefined;
+    let geoSignals: ReturnType<typeof extractGeoSignals>;
     try {
       const geoRaw = await opened.client.evaluate(buildAmbiguousVisualObstructionExpr());
       geoPresent = geometryObstructionPresent(geoRaw);
       geoStrength = geometryObstructionStrength(geoRaw);
+      geoSignals = extractGeoSignals(geoRaw);
     } catch {
       geoPresent = undefined;
       geoStrength = undefined;
+      geoSignals = undefined;
     }
 
     return {
@@ -284,6 +365,7 @@ const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl,
       ...(hvPresent !== undefined ? { hv_present: hvPresent } : {}),
       ...(geoPresent !== undefined ? { geo_present: geoPresent } : {}),
       ...(geoStrength !== undefined ? { geo_strength: geoStrength } : {}),
+      ...(geoSignals !== undefined ? { geo_signals: geoSignals } : {}),
     };
   } catch {
     return { ok: false, reason: "probe_eval_failed" };
@@ -396,12 +478,37 @@ export async function recheckVisualGestureCapsule(args: {
 
   // Safe debug: coarse per-detector booleans + strength + outcome enum only.
   // No-op when ANTIGEN_HV_DEBUG is off; never carries coords, durations, bytes.
+  // Coarse attribution for why geo_strength landed where it did — booleans only.
+  const geoSig = last.ok ? last.geo_signals : undefined;
+  // Why the capsule resolved as it did, so a false `still_present` is attributable.
+  const recheckReason =
+    decision === "absent"
+      ? "healthy_cleared"
+      : decision === "present"
+        ? last.ok && last.hv_present === true
+          ? "hv_present"
+          : "strong_geometry"
+        : decision === "inconclusive"
+          ? "weak_unresolved"
+          : "probe_unreadable";
   logHvDebug({
     scope: "vgc_recheck",
     ...(last.ok && last.hv_present !== undefined ? { probe_hv_present: last.hv_present } : {}),
     ...(last.ok && last.geo_present !== undefined ? { probe_geo_present: last.geo_present } : {}),
     ...(last.ok && last.geo_strength !== undefined ? { geo_strength: last.geo_strength } : {}),
+    ...(geoSig
+      ? {
+          denial_text_seen: geoSig.denial_text_seen,
+          near_zero_interactive: geoSig.near_zero_interactive,
+          visible_inaccessible_iframe_seen: geoSig.visible_inaccessible_iframe_seen,
+          large_centered_overlay_seen: geoSig.large_centered_overlay_seen,
+          viewport_scrim_seen: geoSig.viewport_scrim_seen,
+          pointer_interceptor_seen: geoSig.pointer_interceptor_seen,
+          top_layer_dialog_seen: geoSig.top_layer_dialog_seen,
+        }
+      : {}),
     retry_used: retryUsed,
+    recheck_reason: recheckReason,
     recheck_outcome:
       decision === "absent"
         ? "cleared"

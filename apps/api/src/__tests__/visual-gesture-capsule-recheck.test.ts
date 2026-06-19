@@ -250,6 +250,62 @@ describe("recheckVisualGestureCapsule", () => {
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
   });
 
+  it("benign large-centered hero only (no scrim/iframe/broad-occlusion) → cleared, NOT kept alive", async () => {
+    // The B&BW homepage recheck false-positive: after the (no-longer-minted) capsule
+    // is rechecked, a lingering marketing hero reduces to geo_strength "none" and the
+    // structural HV probe is absent — a CONFIDENT healthy reading from BOTH detectors
+    // must clear the capsule, never keep burning attempts toward manual_fallback.
+    enable();
+    const capsule = seedCheckingCapsule();
+
+    const probe = probeReturning({
+      ok: true,
+      presence: "absent",
+      hv_present: false,
+      geo_present: false,
+      geo_strength: "none",
+      geo_signals: {
+        denial_text_seen: false,
+        near_zero_interactive: false,
+        visible_inaccessible_iframe_seen: false,
+        large_centered_overlay_seen: true,
+        viewport_scrim_seen: false,
+        pointer_interceptor_seen: false,
+        top_layer_dialog_seen: false,
+      },
+    });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "cleared", status: "cleared" });
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("cleared");
+  });
+
+  it("real wall: large-centered overlay WITH a scrim (strong geometry, HV absent) → still_present, NOT cleared", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+
+    const probe = probeReturning({
+      ok: true,
+      presence: "present",
+      hv_present: false,
+      geo_present: true,
+      geo_strength: "strong",
+      geo_signals: {
+        denial_text_seen: false,
+        near_zero_interactive: false,
+        visible_inaccessible_iframe_seen: false,
+        large_centered_overlay_seen: true,
+        viewport_scrim_seen: true,
+        pointer_interceptor_seen: true,
+        top_layer_dialog_seen: false,
+      },
+    });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "still_present", status: "rejected_retryable" });
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
+  });
+
   it("result contains no screenshot bytes, coordinates, durations, or provider details", async () => {
     enable();
     const capsule = seedCheckingCapsule();
@@ -443,16 +499,28 @@ describe("geometryObstructionStrength (signal-strength reduction)", () => {
   it("any strong signal → strong", () => {
     expect(geometryObstructionStrength({ denial_text_seen: true })).toBe("strong");
     expect(geometryObstructionStrength({ viewport_scrim_seen: true })).toBe("strong");
-    expect(geometryObstructionStrength({ large_centered_overlay_seen: true })).toBe("strong");
     expect(geometryObstructionStrength({ visible_inaccessible_iframe_seen: true })).toBe("strong");
     expect(geometryObstructionStrength({ near_zero_interactive: true })).toBe("strong");
   });
 
-  it("pointer interceptor alone → weak", () => {
-    expect(geometryObstructionStrength({ pointer_interceptor_seen: true })).toBe("weak");
-    // ...but a strong signal alongside it dominates.
+  it("lone large overlay and/or pointer interceptor are NOT strong → none (a benign marketing hero must not keep a capsule alive)", () => {
+    // The B&BW homepage false-positive: a large centered fixed/absolute hero occludes
+    // the sampled center points, so it trips BOTH geometry signals just like a real
+    // card wall. With no scrim/iframe/denial/near-zero marker, both must resolve to a
+    // clear-eligible "none" — recognized (so the shape is trusted) but never an
+    // obstruction on their own at recheck.
+    expect(geometryObstructionStrength({ large_centered_overlay_seen: true })).toBe("none");
+    expect(geometryObstructionStrength({ pointer_interceptor_seen: true })).toBe("none");
     expect(
-      geometryObstructionStrength({ pointer_interceptor_seen: true, large_centered_overlay_seen: true }),
+      geometryObstructionStrength({
+        large_centered_overlay_seen: true,
+        pointer_interceptor_seen: true,
+      }),
+    ).toBe("none");
+    // A real wall always ALSO paints a scrim / iframe / near-zero marker, which keeps
+    // it strong even when a centered overlay / pointer interceptor is present.
+    expect(
+      geometryObstructionStrength({ large_centered_overlay_seen: true, viewport_scrim_seen: true }),
     ).toBe("strong");
     expect(
       geometryObstructionStrength({ pointer_interceptor_seen: true, near_zero_interactive: true }),
@@ -537,11 +605,16 @@ describe("combineRecheckPresence (union decision)", () => {
 
 describe("geometryObstructionPresent (static-signal reduction)", () => {
   it("any static obstruction signal → true", () => {
-    expect(geometryObstructionPresent({ large_centered_overlay_seen: true })).toBe(true);
     expect(geometryObstructionPresent({ viewport_scrim_seen: true })).toBe(true);
-    expect(geometryObstructionPresent({ pointer_interceptor_seen: true })).toBe(true);
     expect(geometryObstructionPresent({ denial_text_seen: true })).toBe(true);
     expect(geometryObstructionPresent({ visible_inaccessible_iframe_seen: true })).toBe(true);
+  });
+
+  it("a lone large centered overlay or pointer interceptor is recognized but NOT present (a benign hero is not an obstruction)", () => {
+    // Trusted shape (both are recognized keys, so not undefined) but excluded from the
+    // present-signal set — a marketing hero trips both yet must not report present.
+    expect(geometryObstructionPresent({ large_centered_overlay_seen: true })).toBe(false);
+    expect(geometryObstructionPresent({ pointer_interceptor_seen: true })).toBe(false);
   });
 
   it("all static signals false → false", () => {

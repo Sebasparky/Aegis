@@ -38,6 +38,7 @@ import {
   extractAntigenSnapshotBundleViaCDP,
   detectPageHumanVerificationWallViaCDP,
   detectAmbiguousVisualObstructionViaCDP,
+  classifyAmbiguousVisualObstruction,
   collectPageHvWallDebugViaCDP,
   type AntigenSnapshotCandidate,
 } from "../runtime/antigenSnapshotRuntime.js";
@@ -80,6 +81,7 @@ const FIXTURE_OOPIF_NO_TEXT = fileURLToPath(new URL("./fixtures/oopif-overlay-no
 // healthy control page whose fixed top banner must trip NO geometry signal.
 const FIXTURE_CENTERED_OVERLAY = fileURLToPath(new URL("./fixtures/centered-overlay-over-normal-page.html", import.meta.url));
 const FIXTURE_STICKY_HEADER = fileURLToPath(new URL("./fixtures/sticky-header-healthy-page.html", import.meta.url));
+const FIXTURE_HOMEPAGE_HERO = fileURLToPath(new URL("./fixtures/homepage-hero-no-scrim.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -701,5 +703,41 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
 
     expect(Object.keys(probe!).sort()).toEqual(AMBIGUOUS_KEYS);
     for (const v of Object.values(probe!)) expect(typeof v).toBe("boolean");
+  }, 20_000);
+
+  it("a benign large fixed marketing hero (no scrim/iframe) trips the geometry signals but does NOT classify as an obstruction", async () => {
+    // The live B&BW homepage/search false positive: a large, centered, FIXED hero
+    // occludes the sampled center points, so it trips large_centered_overlay_seen and
+    // pointer_interceptor_seen exactly like a real card wall — but there is NO dimmer
+    // scrim and NO opaque iframe, so the classifier must NOT fire.
+    await gotoFixture(cdpUrl, FIXTURE_HOMEPAGE_HERO);
+    const probe = await detectAmbiguous();
+    expect(probe).not.toBeNull();
+
+    // Geometry fires from the hero's layout…
+    expect(probe!.large_centered_overlay_seen).toBe(true);
+    expect(probe!.pointer_interceptor_seen).toBe(true);
+    // …but the obstruction markers that distinguish a real wall are all absent.
+    expect(probe!.viewport_scrim_seen).toBe(false);
+    expect(probe!.visible_inaccessible_iframe_seen).toBe(false);
+    expect(probe!.denial_text_seen).toBe(false);
+    expect(probe!.near_zero_interactive).toBe(false);
+    expect(probe!.top_layer_dialog_seen).toBe(false);
+
+    // Classifier must NOT fire even with the action no-progress corroborator set.
+    expect(classifyAmbiguousVisualObstruction({ ...probe!, repeated_stale: true })).toBe(false);
+
+    expect(Object.keys(probe!).sort()).toEqual(AMBIGUOUS_KEYS);
+    for (const v of Object.values(probe!)) expect(typeof v).toBe("boolean");
+  }, 20_000);
+
+  it("a real centered overlay WITH a scrim DOES classify as an obstruction (regression guard for the discriminator)", async () => {
+    // Counterpart to the benign-hero case: the same large centered overlay shape, but
+    // OVER A FULL-VIEWPORT DIMMER, must still classify as a wall via the scrim marker.
+    await gotoFixture(cdpUrl, FIXTURE_CENTERED_OVERLAY);
+    const probe = await detectAmbiguous();
+    expect(probe).not.toBeNull();
+    expect(probe!.viewport_scrim_seen).toBe(true);
+    expect(classifyAmbiguousVisualObstruction({ ...probe!, repeated_stale: true })).toBe(true);
   }, 20_000);
 });

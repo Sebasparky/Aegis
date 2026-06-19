@@ -1903,18 +1903,20 @@ export async function detectPageHumanVerificationWallViaCDP(params: {
  *    wall shape with an opaque cross-origin frame;
  *  - `visible_inaccessible_iframe_seen && repeated_stale` — an opaque overlay frame
  *    that is also churning refs / preventing progress.
- *  - `large_centered_overlay_seen && repeated_stale` — a centered top-layer overlay
- *    box covering the page (e.g. a same-page press-and-hold modal whose text is NOT
- *    in the accessible DOM) while progress is blocked.
- *  - `viewport_scrim_seen && repeated_stale` — a full-viewport backdrop/scrim while
- *    progress is blocked.
- *  - `pointer_interceptor_seen && repeated_stale` — the viewport-center point that
- *    should hit page content is intercepted by an overlay while progress is blocked.
+ *  - `viewport_scrim_seen && repeated_stale` — a full-viewport backdrop/scrim (a real
+ *    obstructive dimmer, e.g. the B&BW press-and-hold wall) while progress is blocked.
  *
- * `top_layer_dialog_seen` is captured as a diagnostic only — NOT an independent fire
- * condition (a `:modal` dialog is frequently a legit product modal; it would
- * over-fire). The geometry signals each require `repeated_stale` corroboration, the
- * same discipline as `visible_inaccessible_iframe_seen`.
+ * `large_centered_overlay_seen` and `pointer_interceptor_seen` are intentionally NOT
+ * standalone fire conditions. A normal marketing hero / sale carousel is large,
+ * centered, and fixed/absolute, and it occludes the sampled center points — so it
+ * trips BOTH geometry signals exactly like a real centered-card wall (this was the
+ * live B&BW homepage/search false positive). The ONLY robust distinguisher is a
+ * dimmer/backdrop (`viewport_scrim_seen`) or an opaque cross-origin frame
+ * (`visible_inaccessible_iframe_seen`); a hero has neither, and those two markers
+ * already carry their own `&& repeated_stale` fire paths. `top_layer_dialog_seen` is
+ * captured as a diagnostic only — a `:modal` is frequently a legit product modal and
+ * must never mint. The fire markers each require `repeated_stale` corroboration (a
+ * concrete static signal is necessary; `repeated_stale` never fires alone).
  *
  * Returns false on empty/garbage input.
  */
@@ -1944,14 +1946,23 @@ export function classifyAmbiguousVisualObstruction(
   const denial = s.denial_text_seen === true;
   const nearZero = s.near_zero_interactive === true;
   const iframe = s.visible_inaccessible_iframe_seen === true;
+  const scrim = s.viewport_scrim_seen === true;
   const stale = s.repeated_stale === true;
+  // `large_centered_overlay_seen` and `pointer_interceptor_seen` are deliberately NOT
+  // standalone fire conditions. A normal marketing hero / sale carousel is large,
+  // centered, and fixed/absolute, and it occludes the sampled center points — so it
+  // trips BOTH geometry signals exactly like a real centered-card wall. The ONLY
+  // robust distinguisher is an obstructive dimmer/backdrop (`viewport_scrim_seen`) or
+  // an opaque cross-origin challenge frame (`visible_inaccessible_iframe_seen`); a
+  // hero has neither. These two markers carry their own fire paths below, so a large
+  // overlay / pointer interceptor only ever rides ALONG with a scrim/iframe shape and
+  // never mints on its own. (`top_layer_dialog_seen` stays diagnostic-only: a `:modal`
+  // is frequently a legit product modal and must not mint.)
   return (
     denial ||
     (nearZero && iframe) ||
     (iframe && stale) ||
-    (s.large_centered_overlay_seen === true && stale) ||
-    (s.viewport_scrim_seen === true && stale) ||
-    (s.pointer_interceptor_seen === true && stale)
+    (scrim && stale)
   );
 }
 

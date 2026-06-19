@@ -290,6 +290,42 @@ function renderPointerDebugPath(
   sendCdp("Runtime.evaluate", { expression });
 }
 
+/**
+ * Dev-only: place the pointer debug marker at a stationary VGC live-hold point.
+ *
+ * The VGC hold path (visualGestureCapsuleHold.ts) dispatches Input.dispatchMouseEvent
+ * directly via its CDP client and never goes through clickBoxWithPointer, so the normal
+ * overlay renderer is bypassed. This helper bridges that gap for headed QA.
+ *
+ * - Flag-gated by ANTIGEN_POINTER_DEBUG_OVERLAY: a strict no-op with ZERO CDP traffic
+ *   when off (the env check returns before any client.call), so the hold path is
+ *   byte-identical when the flag is unset.
+ * - Performs NO pointer dispatch — only Runtime.evaluate injection — so a broken or slow
+ *   overlay can never block mousePressed / mouseReleased or alter hold timing.
+ * - Fire-and-forget / fail-open: client.call is not awaited and its rejection is swallowed.
+ * - The banner text is a fixed display label; the coordinates are used only inside the
+ *   in-page CSS update and are never returned to any caller or logged.
+ *
+ * Callers MUST invoke this AFTER mousePressed has succeeded.
+ */
+export function renderVgcHoldOverlay(
+  client: { call: (method: string, params: Record<string, unknown>) => Promise<unknown> },
+  x: number,
+  y: number,
+): void {
+  if (process.env.ANTIGEN_POINTER_DEBUG_OVERLAY !== "true") return;
+  const sendCdp = (method: string, params: Record<string, unknown>): void => {
+    try {
+      void client.call(method, params).catch(() => {});
+    } catch {
+      /* fail-open: overlay never affects the hold */
+    }
+  };
+  ensurePointerDebugOverlay(sendCdp);
+  injectPointerDebugBanner(sendCdp, "Antigen holding (visual gesture)");
+  updatePointerDebugOverlay(sendCdp, x, y, "pressed");
+}
+
 export function makePointerRuntimeState(overrides?: Partial<PointerRuntimeState>): PointerRuntimeState {
   return {
     current_x: 0,

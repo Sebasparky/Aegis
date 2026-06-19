@@ -63,6 +63,7 @@ import {
 import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
 import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
 import { logHvDebug } from "./humanVerificationState.js";
+import { renderVgcHoldOverlay } from "./nativePointerRuntime.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -432,6 +433,13 @@ export async function startVgcHoldSession(args: {
   }, Math.max(HOLD_MIN_DURATION_MS, VGC_IN_HOLD_PROBE_INTERVAL_MS));
 
   logHvDebug({ scope: "vgc_hold", hold_event: "hold_started", target_point_bucket: targetBucket, screenshot_scale_bucket: scaleBucket });
+
+  // Dev-only headed-QA aid: place the pointer debug marker at the hold point. Strict
+  // no-op (zero CDP traffic) unless ANTIGEN_POINTER_DEBUG_OVERLAY=true. Injection only —
+  // no pointer dispatch — and invoked AFTER the press succeeded, so it can never block or
+  // delay the press/release or alter hold timing. Fire-and-forget / fail-open.
+  renderVgcHoldOverlay(client, point.x, point.y);
+
   return { ok: true, hold_state: "holding" };
 }
 

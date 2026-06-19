@@ -16,6 +16,7 @@ import {
   clickPointWithPointer,
   makePointerRuntimeState,
   resolvePointerTimingMode,
+  renderVgcHoldOverlay,
 } from "../runtime/nativePointerRuntime.js";
 import type { ElementBox, TimedPoint } from "../runtime/nativePointerRuntime.js";
 import {
@@ -800,5 +801,50 @@ describe("generatePointerPath with real loaded profile", () => {
       { templateTraces: traces, purpose: "button_click" },
     );
     expect(generator).toBe("template_trace");
+  });
+});
+
+// ─── renderVgcHoldOverlay (dev-only VGC hold marker) ──────────────────────────
+
+describe("renderVgcHoldOverlay", () => {
+  const ORIGINAL_FLAG = process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    else process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = ORIGINAL_FLAG;
+  });
+
+  it("makes ZERO CDP calls when the flag is unset (byte-identical off)", () => {
+    delete process.env.ANTIGEN_POINTER_DEBUG_OVERLAY;
+    const call = vi.fn().mockResolvedValue(undefined);
+    renderVgcHoldOverlay({ call }, 123, 456);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("makes ZERO CDP calls when the flag is any value other than 'true'", () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "1";
+    const call = vi.fn().mockResolvedValue(undefined);
+    renderVgcHoldOverlay({ call }, 10, 20);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("injects via Runtime.evaluate only — never dispatches a pointer event — when enabled", () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    const call = vi.fn().mockResolvedValue(undefined);
+    renderVgcHoldOverlay({ call }, 321, 654);
+
+    const methods = call.mock.calls.map(([m]) => m);
+    expect(methods.length).toBeGreaterThan(0);
+    expect(methods.every((m) => m === "Runtime.evaluate")).toBe(true);
+    // The hold path owns mousePressed/mouseReleased — the overlay must never touch input.
+    expect(methods).not.toContain("Input.dispatchMouseEvent");
+  });
+
+  it("is fail-open: a rejected/throwing CDP client never throws to the caller", () => {
+    process.env.ANTIGEN_POINTER_DEBUG_OVERLAY = "true";
+    const rejecting = vi.fn().mockRejectedValue(new Error("connection gone"));
+    expect(() => renderVgcHoldOverlay({ call: rejecting }, 1, 2)).not.toThrow();
+    const throwing = vi.fn().mockImplementation(() => { throw new Error("sync throw"); });
+    expect(() => renderVgcHoldOverlay({ call: throwing }, 1, 2)).not.toThrow();
   });
 });

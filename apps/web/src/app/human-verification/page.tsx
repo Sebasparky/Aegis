@@ -116,6 +116,10 @@ export default function HumanVerificationPage() {
   const holdStartMsRef = useRef(0);
   const pointerIdRef = useRef<number | null>(null);
   const captureElRef = useRef<Element | null>(null);
+  // The capsule whose live hold is currently active, so a capsule switch /
+  // unmount / cancel can explicitly release the browser mouse rather than waiting
+  // for the server's 1.2s fail-closed backstop.
+  const heldCapsuleIdRef = useRef<string | null>(null);
 
   // Dev-only diagnostic: the last interpreted normalized point we sent, rendered
   // as a marker over the screenshot so we can visually confirm the click landed
@@ -299,6 +303,23 @@ export default function HumanVerificationPage() {
     }
   }, []);
 
+  // Explicitly release an active live hold without awaiting or touching the
+  // outcome — used on capsule switch / unmount / route cleanup, where we cannot
+  // safely run the full finalizeHold (it updates component state). Fire-and-forget
+  // + idempotent: a hold already released through the server's fail-closed backstop
+  // simply returns NO_ACTIVE_HOLD, which we swallow so no error surfaces.
+  const bestEffortReleaseHold = useCallback(() => {
+    const capsuleId = heldCapsuleIdRef.current;
+    if (!capsuleId) return;
+    heldCapsuleIdRef.current = null;
+    holdingRef.current = false;
+    endingRef.current = true; // block any in-flight finalizeHold from racing
+    stopHoldTimers();
+    setHolding(false);
+    setHoldElapsedMs(0);
+    void endVisualGestureCapsuleHold(capsuleId).catch(() => {});
+  }, [stopHoldTimers]);
+
   // End the live hold: release the browser mouse (via hold-end) and surface the
   // definitive recheck outcome. Idempotent — the user's release, a fail-closed /
   // cleared heartbeat, or unmount all funnel here exactly once.
@@ -308,6 +329,7 @@ export default function HumanVerificationPage() {
       endingRef.current = true;
       stopHoldTimers();
       holdingRef.current = false;
+      heldCapsuleIdRef.current = null;
       setHolding(false);
       const el = captureElRef.current;
       if (el && pointerIdRef.current !== null) {
@@ -412,6 +434,7 @@ export default function HumanVerificationPage() {
         }
         // Holding: arm heartbeat + elapsed timer.
         holdingRef.current = true;
+        heldCapsuleIdRef.current = capsuleId;
         endingRef.current = false;
         setHolding(true);
         holdStartMsRef.current = Date.now();
@@ -450,13 +473,13 @@ export default function HumanVerificationPage() {
     void finalizeHold(selected.capsule_id);
   }
 
-  // Stop timers + release any live hold on unmount or when the selection changes.
+  // Explicitly release any live hold when the selection changes or the page
+  // unmounts — the cleanup runs on both. No-op when nothing is being held.
   useEffect(() => {
     return () => {
-      stopHoldTimers();
-      holdingRef.current = false;
+      bestEffortReleaseHold();
     };
-  }, [selectedId, stopHoldTimers]);
+  }, [selectedId, bestEffortReleaseHold]);
 
   // ── Button actions ──────────────────────────────────────────────────────────
   async function handleRecapture() {
@@ -495,6 +518,13 @@ export default function HumanVerificationPage() {
 
   async function handleCancel() {
     if (!selected || busy) return;
+    // Tear down the live hold UI loop; the backend cancel releases the browser
+    // mouse server-side (cancelVgcHoldSession) — no reliance on fail-closed.
+    stopHoldTimers();
+    holdingRef.current = false;
+    heldCapsuleIdRef.current = null;
+    endingRef.current = false;
+    setHolding(false);
     setBusy(true);
     setStatusMsg("Cancelling…");
     try {

@@ -37,6 +37,7 @@ import {
   startVgcHoldSession,
   heartbeatVgcHoldSession,
   endVgcHoldSession,
+  cancelVgcHoldSession,
 } from "../runtime/visualGestureCapsuleHold.js";
 import { getTaskBrowserSessionCdpUrl } from "../runtime/taskBrowserSessions.js";
 
@@ -297,6 +298,11 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
 
       const capsule = getVisualGestureCapsule(req.params.id);
       if (!capsule) return sendError(reply, 404, "NOT_FOUND", "Visual gesture capsule not found.");
+
+      // Release any live hold FIRST so the browser mouse never lingers down until
+      // the 1.2s fail-closed timer — the UI cancels a hold this way rather than
+      // relying on fail-closed. Best-effort + idempotent (no-op without a session).
+      await cancelVgcHoldSession(req.params.id);
 
       const result = cancelVisualGestureCapsule(req.params.id);
       // Already-terminal capsules return their current safe view (idempotent from

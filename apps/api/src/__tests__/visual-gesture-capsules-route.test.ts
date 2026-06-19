@@ -60,11 +60,13 @@ vi.mock("../runtime/visualGestureCapsuleHold.js", () => ({
   startVgcHoldSession: vi.fn(),
   heartbeatVgcHoldSession: vi.fn(),
   endVgcHoldSession: vi.fn(),
+  cancelVgcHoldSession: vi.fn(async () => {}),
 }));
 import {
   startVgcHoldSession,
   heartbeatVgcHoldSession,
   endVgcHoldSession,
+  cancelVgcHoldSession,
 } from "../runtime/visualGestureCapsuleHold.js";
 import { visualGestureCapsuleRoutes } from "../routes/visual-gesture-capsules.js";
 // taskBrowserSessions is NOT mocked: M2B derives a capsule's cdp_url from this
@@ -77,6 +79,7 @@ const mockedRecheck = vi.mocked(recheckVisualGestureCapsule);
 const mockedHoldStart = vi.mocked(startVgcHoldSession);
 const mockedHeartbeat = vi.mocked(heartbeatVgcHoldSession);
 const mockedHoldEnd = vi.mocked(endVgcHoldSession);
+const mockedHoldCancel = vi.mocked(cancelVgcHoldSession);
 
 const BASE = {
   human_verification_request_id: "hvr_route_001",
@@ -109,6 +112,8 @@ afterEach(() => {
   mockedHoldStart.mockReset();
   mockedHeartbeat.mockReset();
   mockedHoldEnd.mockReset();
+  mockedHoldCancel.mockReset();
+  mockedHoldCancel.mockResolvedValue(undefined);
   vi.useRealTimers();
 });
 
@@ -1194,5 +1199,21 @@ describe("POST /:id/hold-end", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("NO_ACTIVE_HOLD");
+  });
+});
+
+describe("POST /:id/cancel releases any live hold", () => {
+  it("cancels the live hold session (releasing the mouse) before cancelling the capsule", async () => {
+    enable();
+    const capsule = seedCapsule();
+    const res = await server.inject({
+      method: "POST",
+      url: `/api/internal/visual-gesture-capsules/${capsule.capsule_id}/cancel`,
+    });
+    expect(res.statusCode).toBe(200);
+    // The route releases the browser mouse explicitly rather than relying on the
+    // 1.2s fail-closed backstop. Idempotent: the hold module no-ops without a session.
+    expect(mockedHoldCancel).toHaveBeenCalledWith(capsule.capsule_id);
+    expect(res.json().cancelled).toBe(true);
   });
 });

@@ -755,6 +755,96 @@ export function buildOverlaySnippetJs(screenHvEnabled: boolean = false): string 
       if(w<=0||h<=0) return -1;
       return (w*h)/(vw*vh);
     }
+    // ─── Shared screen-level HV text/affordance scan (zero-drift) ────────────
+    // Bounded, value-free harvest shared by screenHumanVerification() (the
+    // authority enum) AND the page-level wall-hint telemetry, so the verdict and
+    // the granular booleans can never drift. Harvests ONLY: visible button
+    // names/aria-labels and the text of FOREGROUND positioned
+    // (fixed/absolute/sticky) ON-SCREEN containers + open/top-layer <dialog>s.
+    // Deliberately NO z-index gate — real challenge cards are frequently z:auto /
+    // top-layer <dialog> / shadow-root web components, and the press-hold control
+    // is often a bare <div>, not a <button>; a size+viewport guard keeps tiny
+    // positioned chrome out instead. Pierces ONE level of OPEN shadow DOM (closed
+    // roots stay unreachable). The blocker/scrim AND-gate and STRONG-phrase regex
+    // are unchanged, so widening WHICH text is read cannot relax the verdict.
+    // Returns { scan, hasCheckbox, modalSeen }; nothing else escapes the page.
+    function _scrVisible(el){
+      var r; try{ r=el.getBoundingClientRect(); }catch(e){ return null; }
+      if(!r||!(r.width>0&&r.height>0)) return null;
+      return r;
+    }
+    function _scrOnScreen(r){
+      var vw=window.innerWidth||0, vh=window.innerHeight||0;
+      if(vw<=0||vh<=0) return false;
+      return !(r.bottom<=0||r.right<=0||r.top>=vh||r.left>=vw);
+    }
+    var _scrShadowRoots;
+    function _scrHosts(){
+      if(_scrShadowRoots!==undefined) return _scrShadowRoots;
+      var hosts=[document];
+      try{
+        var all=document.querySelectorAll('*');
+        for(var i=0,c=0;i<all.length&&i<4000&&c<40;i++){
+          var sr=null; try{ sr=all[i].shadowRoot; }catch(e){ sr=null; }
+          if(sr){ hosts.push(sr); c++; }
+        }
+      }catch(e){}
+      _scrShadowRoots=hosts;
+      return hosts;
+    }
+    var _scrScanDone=false,_scrScan=null;
+    function collectScreenHvScan(){
+      if(_scrScanDone) return _scrScan;
+      _scrScanDone=true;
+      var scan='',hasCheckbox=false,modalSeen=false;
+      var hosts=_scrHosts();
+      // (a) visible buttons (top document + open shadow roots). No z gate; the
+      // button name itself ("Press & Hold") is value-free.
+      try{
+        var bsel='button,[role="button"],input[type="button"],input[type="submit"]';
+        for(var hi=0;hi<hosts.length&&scan.length<1600;hi++){
+          var bs=null; try{ bs=hosts[hi].querySelectorAll(bsel); }catch(e){ bs=null; }
+          if(!bs) continue;
+          for(var i=0;i<bs.length&&i<40&&scan.length<1600;i++){
+            var b=bs[i]; if(!_scrVisible(b)) continue;
+            var al=attr(b,'aria-label'); if(al) scan+=' '+String(al);
+            var bt=b.textContent; if(bt) scan+=' '+txt(String(bt)).slice(0,80);
+          }
+        }
+      }catch(e){}
+      // (b) foreground positioned on-screen containers + open/top-layer dialogs.
+      try{
+        var psel='[role="dialog"],[role="alertdialog"],dialog,div,section,aside,main,form';
+        var scanned=0;
+        for(var hj=0;hj<hosts.length&&scanned<240&&scan.length<3000;hj++){
+          var pos=null; try{ pos=hosts[hj].querySelectorAll(psel); }catch(e){ pos=null; }
+          if(!pos) continue;
+          for(var k=0;k<pos.length&&scanned<240&&scan.length<3000;k++){
+            var n=pos[k], keep=false;
+            var isDlg=false;
+            try{ isDlg=(n.tagName||'').toLowerCase()==='dialog'&&((n.open===true)||attr(n,'open')!=null||(n.matches&&n.matches(':modal'))); }catch(e){ isDlg=false; }
+            if(isDlg){ keep=true; }
+            else{
+              var cs=cssOf(n);
+              if(cs){
+                var p=cs.position||'';
+                if(p==='fixed'||p==='absolute'||p==='sticky'){
+                  var r=_scrVisible(n);
+                  if(r&&r.width>=120&&r.height>=40&&_scrOnScreen(r)) keep=true;
+                }
+              }
+            }
+            if(!keep) continue;
+            scanned++; modalSeen=true;
+            var tt=n.textContent; if(tt) scan+=' '+txt(String(tt)).slice(0,400);
+            if(!hasCheckbox){ try{ if(n.querySelector&&n.querySelector(HV_CHECKBOX_SEL)) hasCheckbox=true; }catch(e){} }
+          }
+        }
+      }catch(e){}
+      scan=txt(scan);
+      _scrScan={ scan:scan, hasCheckbox:hasCheckbox, modalSeen:modalSeen };
+      return _scrScan;
+    }
     // ─── Screen-level human-verification (split overlay) ─────────────────────
     // PerimeterX/B&BW-style challenges ship as a TEXTLESS full-page dimmer plus a
     // SEPARATE centered card carrying the strong phrase. Neither container alone
@@ -788,35 +878,12 @@ export function buildOverlaySnippetJs(screenHvEnabled: boolean = false): string 
         }
       }catch(e){}
       if(!blocker) return null;
-      // (2) strong human-verification phrase, built value-free and length-capped
-      // from ONLY (a) visible buttons' names + aria-labels and (b) the text of
-      // FOREGROUND positioned (fixed/absolute/sticky) high-z containers (the
-      // card). No unbounded document.body text scan. STRONG phrases only via
-      // hvTypeFromScan → promo/marketing copy can never match.
-      var scan='',hasCheckbox=false;
-      try{
-        var bs=document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]');
-        for(var i=0;i<bs.length&&i<40&&scan.length<1600;i++){
-          var b=bs[i],br=null; try{ br=b.getBoundingClientRect(); }catch(e){}
-          if(!br||!(br.width>0&&br.height>0)) continue;
-          var al=attr(b,'aria-label'); if(al) scan+=' '+String(al);
-          var bt=b.textContent; if(bt) scan+=' '+txt(String(bt)).slice(0,80);
-        }
-      }catch(e){}
-      try{
-        var pos=document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog,div,section,aside,main,form');
-        var scanned=0;
-        for(var i=0;i<pos.length&&scanned<240&&scan.length<3000;i++){
-          var n=pos[i]; var cs=cssOf(n); if(!cs) continue;
-          var p=cs.position||''; if(p!=='fixed'&&p!=='absolute'&&p!=='sticky') continue;
-          var z=parseInt(cs.zIndex,10); if(isNaN(z)) z=0; if(z<10) continue;
-          scanned++;
-          var tt=n.textContent; if(tt) scan+=' '+txt(String(tt)).slice(0,400);
-          if(!hasCheckbox){ try{ if(n.querySelector&&n.querySelector(HV_CHECKBOX_SEL)) hasCheckbox=true; }catch(e){} }
-        }
-      }catch(e){}
-      scan=txt(scan);
-      _scrHvType=hvTypeFromScan(scan,hasCheckbox);
+      // (2) strong human-verification phrase via the shared, value-free scan
+      // (visible button names + foreground positioned/dialog card text, one
+      // level of open shadow DOM). STRONG phrases only via hvTypeFromScan →
+      // promo/marketing copy can never match.
+      var sc=collectScreenHvScan();
+      _scrHvType=hvTypeFromScan(sc.scan,sc.hasCheckbox);
       return _scrHvType;
     }
     // Accessible title of an overlay container — VALUE-FREE (aria-label /
@@ -2234,33 +2301,13 @@ export function buildPageHvWallHintExpr(): string {
           }
         }
       }catch(e){}
-      // Foreground positioned high-z card + bounded, value-free phrase scan
-      // (visible button names/aria-labels + positioned container text). No
-      // unbounded body scan; nothing escapes — only the regex verdicts below.
-      var hscan='';
-      try{
-        var hbs=document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]');
-        for(var bi=0;bi<hbs.length&&bi<40&&hscan.length<1600;bi++){
-          var hb=hbs[bi],hbr=null; try{ hbr=hb.getBoundingClientRect(); }catch(e){}
-          if(!hbr||!(hbr.width>0&&hbr.height>0)) continue;
-          var hal=attr(hb,'aria-label'); if(hal) hscan+=' '+String(hal);
-          var hbt=hb.textContent; if(hbt) hscan+=' '+txt(String(hbt)).slice(0,80);
-        }
-      }catch(e){}
-      try{
-        var hpos=document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog,div,section,aside,main,form');
-        var hscanned=0;
-        for(var pi=0;pi<hpos.length&&hscanned<240&&hscan.length<3000;pi++){
-          var hn=hpos[pi]; var hcs=cssOf(hn); if(!hcs) continue;
-          var hp=hcs.position||''; if(hp!=='fixed'&&hp!=='absolute'&&hp!=='sticky') continue;
-          var hz=parseInt(hcs.zIndex,10); if(isNaN(hz)) hz=0; if(hz<10) continue;
-          hscanned++; centeredModalSeen=true;
-          var htt=hn.textContent; if(htt) hscan+=' '+txt(String(htt)).slice(0,400);
-        }
-      }catch(e){}
-      hscan=txt(hscan);
-      hvPhraseSeen=HV_TEXT_RE.test(hscan);
-      pressHoldSeen=HV_HOLD_RE.test(hscan);
+      // Foreground card text + visible button names via the SAME shared scan the
+      // authority screenHumanVerification() uses (zero drift). No unbounded body
+      // scan; nothing escapes — only the regex verdicts below.
+      var hsc=collectScreenHvScan();
+      centeredModalSeen=hsc.modalSeen;
+      hvPhraseSeen=HV_TEXT_RE.test(hsc.scan);
+      pressHoldSeen=HV_HOLD_RE.test(hsc.scan);
       // top-layer / native modal dialog present.
       try{
         var hdlgs=document.querySelectorAll('dialog');
@@ -2706,6 +2753,19 @@ export interface HumanVerificationDebug {
   screen_hv_phrase_seen?: boolean;
   screen_hv_top_layer_dialog_seen?: boolean;
   screen_hv_created_capsule?: boolean;
+  // Earliest failed screen-HV gate when it did NOT mint (attribution enum). Set
+  // on both the console `snapshot_hv_gate` line and this response-body object so
+  // the two surfaces agree. Value-free.
+  screen_hv_failure_reason?:
+    | "disabled"
+    | "no_scrim"
+    | "no_hv_phrase"
+    | "no_foreground_container"
+    | "no_press_hold_affordance"
+    | "sanitization_dropped"
+    | "not_plumbed"
+    | "unknown"
+    | "none";
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────

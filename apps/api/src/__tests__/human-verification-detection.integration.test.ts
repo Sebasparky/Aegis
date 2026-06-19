@@ -89,6 +89,14 @@ const FIXTURE_HOMEPAGE_HERO = fileURLToPath(new URL("./fixtures/homepage-hero-no
 // Plus a high-element benign-hero page (no scrim / no HV phrase) that must NOT.
 const FIXTURE_SCREEN_HV_PRODUCT = fileURLToPath(new URL("./fixtures/screen-hv-wall-over-product-page.html", import.meta.url));
 const FIXTURE_SCREEN_HV_BENIGN = fileURLToPath(new URL("./fixtures/screen-hv-benign-hero-product-page.html", import.meta.url));
+// Split-overlay "Press & Hold" walls whose card the OLD scanner could not read:
+//   - …-zauto: the card has NO explicit z-index (relies on DOM order) — the old
+//     `z-index >= 10` text gate skipped it.
+//   - …-shadow: the card text/control live inside an OPEN shadow root (a bare
+//     <div> control) — querySelectorAll never pierced it.
+// Both have a detected scrim + centered modal; only the widened scan reads them.
+const FIXTURE_SPLIT_HOLD_ZAUTO = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold-zauto.html", import.meta.url));
+const FIXTURE_SPLIT_HOLD_SHADOW = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold-shadow.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -609,6 +617,43 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     expect(sv!.viewport_scrim_seen).toBe(true);
     expect(sv!.hv_phrase_seen).toBe(true);
     expect(sv!.press_hold_affordance_seen).toBe(true);
+  }, 20_000);
+
+  it("emits a screen-HV verdict when the challenge card has NO z-index (relies on DOM order)", async () => {
+    // The card paints above the dimmer purely by source order; the old
+    // `z-index >= 10` text gate skipped it, so the scrim + centered modal were
+    // detected but hv_phrase_seen stayed false. The widened scan now reads it.
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD_ZAUTO);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(true);
+    expect(sv!.challenge_type).toBe("press_and_hold");
+    expect(sv!.viewport_scrim_seen).toBe(true);
+    expect(sv!.centered_modal_seen).toBe(true);
+    expect(sv!.hv_phrase_seen).toBe(true);
+    expect(sv!.press_hold_affordance_seen).toBe(true);
+  }, 20_000);
+
+  it("emits a screen-HV verdict when the challenge card lives in an OPEN shadow root (bare-div control)", async () => {
+    // The card text + control are inside a shadow root that document-scoped
+    // querySelectorAll never pierced; the one-level shadow-host enumeration in
+    // the widened scan now harvests the strong phrase.
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD_SHADOW);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(true);
+    expect(sv!.challenge_type).toBe("press_and_hold");
+    expect(sv!.viewport_scrim_seen).toBe(true);
+    expect(sv!.centered_modal_seen).toBe(true);
+    expect(sv!.hv_phrase_seen).toBe(true);
+    expect(sv!.press_hold_affordance_seen).toBe(true);
+  }, 20_000);
+
+  it("flag OFF: the z-auto and shadow-DOM screen-HV walls emit no verdict (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD_ZAUTO);
+    expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
+    await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD_SHADOW);
+    expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
   }, 20_000);
 
   it("does NOT emit a screen-HV wall verdict on a high-element benign marketing hero (no scrim / no HV phrase)", async () => {

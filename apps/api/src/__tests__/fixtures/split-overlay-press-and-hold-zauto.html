@@ -1,0 +1,69 @@
+<!doctype html>
+<!--
+  Screen-level (split-overlay) human-verification fixture — z-index:auto variant.
+
+  Identical SHAPE to split-overlay-press-and-hold.html (textless full-page dimmer
+  + a SEPARATE text-bearing foreground card), but the challenge card carries NO
+  explicit z-index: it relies on DOM order (it is the LAST positioned sibling) to
+  paint above the dimmer — exactly the real Bath & Body Works / PerimeterX shape.
+
+  The OLD phrase scanner required position + `z-index >= 10` and so SKIPPED this
+  card's text entirely (parseInt('auto') -> NaN -> 0 -> z<10), leaving
+  hv_phrase_seen=false even though the scrim AND the centered card were detected.
+  The widened scan (position + on-screen size guard, no z gate) now reads it.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Wallflowers &amp; Diffusers</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .grid { display: flex; gap: 16px; padding: 24px; }
+      .card { width: 180px; }
+      /* Full-page dimmer — blocking (high z, >=0.5 coverage), textless, no ARIA. */
+      #hv-dimmer {
+        position: fixed; inset: 0; z-index: 9998;
+        background: rgba(20, 20, 20, 0.45);
+      }
+      /* Challenge card — positioned + on-screen, but NO z-index (z:auto). It
+         paints above the dimmer purely because it is later in the source. */
+      #hv-card {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        /* deliberately NO z-index */
+        width: 360px; padding: 32px 40px;
+        background: #fff; border-radius: 10px; text-align: center;
+      }
+      #hv-hold-btn {
+        margin-top: 18px; padding: 12px 40px; font-size: 15px;
+        border: 1px solid #2f6fde; border-radius: 22px;
+        background: #fff; color: #2f6fde; cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart">Cart</a>
+    </header>
+    <main>
+      <h1>Wallflowers &amp; Diffusers</h1>
+      <div class="grid">
+        <div class="card"><a href="/p/mahogany">Mahogany Teakwood Intense</a></div>
+        <div class="card"><a href="/p/champagne">Champagne Toast</a></div>
+        <div class="card"><a href="/p/clean-house">Clean House Vibes</a></div>
+      </div>
+    </main>
+
+    <!-- Textless dimmer (z:9998) + text-bearing foreground card (z:auto). -->
+    <div id="hv-dimmer"></div>
+    <div id="hv-card">
+      <h2>Before we continue...</h2>
+      <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+      <button id="hv-hold-btn" type="button">Press &amp; Hold</button>
+      <p id="hv-status" style="font-size: 12px; color: #888;">Reference ID 77d28970-677f-11f1-a659</p>
+    </div>
+  </body>
+</html>

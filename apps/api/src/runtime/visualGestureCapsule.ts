@@ -147,6 +147,19 @@ export interface VisualGestureCapsuleScreenshotFrame {
   mime_type: "image/png";
   viewport_css_width: number;
   viewport_css_height: number;
+  /**
+   * Capture-time document scroll offset + layout extent (documentElement
+   * scrollWidth/scrollHeight). Capture metadata ONLY — used by the relay's
+   * frame-staleness guard to refuse dispatch when the page scrolled or reflowed
+   * after capture (a static screenshot would otherwise map a point onto a moved
+   * target). NEVER returned to the agent, in safe views, or in debug logs (only
+   * a coarse `stale_kind` enum derived from them ever surfaces). Optional so a
+   * legacy frame without them falls back to size-only drift checking.
+   */
+  scroll_x?: number;
+  scroll_y?: number;
+  layout_w?: number;
+  layout_h?: number;
   captured_at: string;
   expires_at: string;
 }
@@ -189,6 +202,15 @@ export interface StoreVisualGestureCapsuleScreenshotFrameInput {
   png_base64: string;
   viewport_css_width: number;
   viewport_css_height: number;
+  /**
+   * Optional capture-time scroll offset + layout extent. Capture metadata only;
+   * see `VisualGestureCapsuleScreenshotFrame`. Stored verbatim when finite, else
+   * dropped (the frame falls back to size-only staleness checking).
+   */
+  scroll_x?: number;
+  scroll_y?: number;
+  layout_w?: number;
+  layout_h?: number;
 }
 
 export type StoreVisualGestureCapsuleScreenshotFrameResult =
@@ -225,6 +247,22 @@ export function storeVisualGestureCapsuleScreenshotFrame(
     return { ok: false, reason: "invalid_input" };
   }
 
+  // Optional capture-time scroll/layout metadata: keep only finite values (scroll
+  // offsets may legitimately be 0; layout extents must be > 0). Anything else is
+  // dropped so the frame transparently falls back to size-only staleness checking.
+  const finiteOrUndefined = (n: unknown): number | undefined =>
+    typeof n === "number" && Number.isFinite(n) ? n : undefined;
+  const scrollX = finiteOrUndefined(frameInput.scroll_x);
+  const scrollY = finiteOrUndefined(frameInput.scroll_y);
+  const layoutW =
+    typeof frameInput.layout_w === "number" && frameInput.layout_w > 0
+      ? frameInput.layout_w
+      : undefined;
+  const layoutH =
+    typeof frameInput.layout_h === "number" && frameInput.layout_h > 0
+      ? frameInput.layout_h
+      : undefined;
+
   // Recapture discipline: drop any existing frame before storing the new one.
   purgeVisualGestureCapsuleFrame(capsuleId);
 
@@ -239,6 +277,10 @@ export function storeVisualGestureCapsuleScreenshotFrame(
     mime_type: "image/png",
     viewport_css_width,
     viewport_css_height,
+    ...(scrollX !== undefined ? { scroll_x: scrollX } : {}),
+    ...(scrollY !== undefined ? { scroll_y: scrollY } : {}),
+    ...(layoutW !== undefined ? { layout_w: layoutW } : {}),
+    ...(layoutH !== undefined ? { layout_h: layoutH } : {}),
     captured_at: new Date(now).toISOString(),
     expires_at: new Date(expiresMs).toISOString(),
   };

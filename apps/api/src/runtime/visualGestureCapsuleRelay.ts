@@ -52,6 +52,81 @@ export function holdDurationBucket(ms: number | undefined): "<250ms" | "250-999m
 }
 // Upper bound reuses the existing Human Presence Relay ceiling (30_000ms).
 
+export type TargetPointBucket = "center" | "upper" | "lower" | "left" | "right" | "edge";
+
+/**
+ * Coarse region bucket for SAFE debug telemetry — maps a normalized point to one
+ * of six regions so the actual fx/fy are never logged. `edge` wins when either
+ * axis is within EDGE of a border (an unusually peripheral tap); otherwise the
+ * axis with the larger deviation from center decides the cardinal region, and
+ * `center` is reported when both axes are within BAND of 0.5. Pure + exported for
+ * unit testing. Out-of-range / non-finite input falls back to `edge`.
+ */
+export function targetPointBucket(fx: number, fy: number): TargetPointBucket {
+  const BAND = 0.15; // within ±0.15 of 0.5 on both axes => "center"
+  const EDGE = 0.05; // within 0.05 of 0 or 1 on either axis => "edge"
+  if (!Number.isFinite(fx) || !Number.isFinite(fy) || fx < 0 || fx > 1 || fy < 0 || fy > 1) {
+    return "edge";
+  }
+  if (fx <= EDGE || fx >= 1 - EDGE || fy <= EDGE || fy >= 1 - EDGE) return "edge";
+  const dx = fx - 0.5;
+  const dy = fy - 0.5;
+  if (Math.abs(dx) <= BAND && Math.abs(dy) <= BAND) return "center";
+  if (Math.abs(dx) >= Math.abs(dy)) return dx < 0 ? "left" : "right";
+  return dy < 0 ? "upper" : "lower";
+}
+
+export type ScreenshotScaleBucket = "1x" | "downscaled" | "upscaled" | "unknown";
+
+/**
+ * Coarse capture-scale bucket for SAFE debug telemetry. The PNG's physical width
+ * over the CSS viewport width approximates the capture devicePixelRatio: ~1 is a
+ * standard display (`1x`), >1 a HiDPI/retina capture (`upscaled`), <1 a
+ * downscaled capture (`downscaled`). Exposes only the bucket — never the PNG
+ * width, viewport width, or ratio. Pure + exported for unit testing.
+ */
+export function screenshotScaleBucket(
+  pngWidthPx: number | undefined,
+  viewportCssWidth: number | undefined,
+): ScreenshotScaleBucket {
+  if (
+    typeof pngWidthPx !== "number" ||
+    !Number.isFinite(pngWidthPx) ||
+    pngWidthPx <= 0 ||
+    typeof viewportCssWidth !== "number" ||
+    !Number.isFinite(viewportCssWidth) ||
+    viewportCssWidth <= 0
+  ) {
+    return "unknown";
+  }
+  const ratio = pngWidthPx / viewportCssWidth;
+  if (ratio >= 0.95 && ratio <= 1.05) return "1x";
+  return ratio > 1 ? "upscaled" : "downscaled";
+}
+
+/**
+ * Minimal PNG width reader: parse the IHDR width (bytes 16-19, big-endian) from
+ * the first few base64-decoded header bytes. NO full decode, NO pixel access —
+ * dimensions only, used solely to derive the coarse `screenshotScaleBucket`.
+ * Returns undefined on any malformed/short input.
+ */
+export function readPngWidthPx(base64: string | undefined): number | undefined {
+  if (typeof base64 !== "string" || base64.length === 0) return undefined;
+  try {
+    // 24 header bytes (8 sig + 8 IHDR chunk header + 4 width + 4 height) live in
+    // the first ~32 base64 chars; decode just those.
+    const head = Buffer.from(base64.slice(0, 64), "base64");
+    if (head.length < 24) return undefined;
+    // PNG signature check (first 8 bytes) keeps a non-PNG blob from being misread.
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    for (let i = 0; i < 8; i++) if (head[i] !== SIG[i]) return undefined;
+    const width = head.readUInt32BE(16);
+    return Number.isFinite(width) && width > 0 ? width : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** V1 supports only tap and press_hold. Everything else is rejected. */
 export type VisualGestureRelayGesture =
   | { kind: "tap"; fx: number; fy: number }
@@ -96,6 +171,8 @@ export type VisualGestureRelayResult =
         | "invalid_coordinates"
         | "screenshot_frame_unavailable"
         | "viewport_drifted"
+        | "scroll_drifted"
+        | "layout_drifted"
         | "pointer_dispatch_failed"
         | "store_or_state_failed";
     };
@@ -146,8 +223,29 @@ export const TAP_DWELL_MS = 60;
 export const VIEWPORT_DRIFT_ABS_PX = 2;
 export const VIEWPORT_DRIFT_REL = 0.02;
 
+/**
+ * Scroll-drift tolerance. A static screenshot maps a point in *viewport* space;
+ * if the page scrolled after capture, the mapped point lands on whatever moved
+ * into that viewport position (e.g. inside the modal but off the button). Scroll
+ * offset has no captured magnitude to scale against, so this is an absolute-px
+ * tolerance — a few px of sub-pixel rounding is tolerated, a real scroll is not.
+ */
+export const SCROLL_DRIFT_ABS_PX = 4;
+
+/**
+ * Layout-extent drift tolerance. A material change in documentElement
+ * scrollWidth/scrollHeight means the page reflowed (content expanded/collapsed,
+ * a modal opened/closed) — the screenshot no longer describes the live layout.
+ */
+export const LAYOUT_DRIFT_ABS_PX = 4;
+export const LAYOUT_DRIFT_REL = 0.02;
+
 function axisDrifted(live: number, captured: number): boolean {
   return Math.abs(live - captured) > Math.max(VIEWPORT_DRIFT_ABS_PX, VIEWPORT_DRIFT_REL * captured);
+}
+
+function layoutAxisDrifted(live: number, captured: number): boolean {
+  return Math.abs(live - captured) > Math.max(LAYOUT_DRIFT_ABS_PX, LAYOUT_DRIFT_REL * captured);
 }
 
 /**
@@ -160,6 +258,63 @@ export function isViewportDrifted(
   captured: { width: number; height: number },
 ): boolean {
   return axisDrifted(live.width, captured.width) || axisDrifted(live.height, captured.height);
+}
+
+/** The kind of staleness that makes a captured frame's mapped point untrustworthy. */
+export type FrameStaleKind = "viewport" | "scroll" | "layout";
+
+export type FrameStaleResult = { stale: true; kind: FrameStaleKind } | { stale: false };
+
+/**
+ * Decide whether a captured screenshot frame is too stale to dispatch a mapped
+ * point against. Checks, in order: viewport-size drift (point scaling wrong),
+ * scroll drift (viewport-space point now maps onto moved content), then layout
+ * drift (page reflowed). Scroll/layout are checked only when BOTH the live read
+ * and the captured frame carry the value — a legacy frame without them falls back
+ * to size-only checking, so this is a pure superset of `isViewportDrifted`.
+ *
+ * SAFE: takes only structural geometry, returns only a boolean + coarse kind enum
+ * — never the live/captured values or the delta.
+ */
+export function isFrameStale(
+  live: {
+    width: number;
+    height: number;
+    scrollX?: number;
+    scrollY?: number;
+    layoutW?: number;
+    layoutH?: number;
+  },
+  captured: {
+    width: number;
+    height: number;
+    scroll_x?: number;
+    scroll_y?: number;
+    layout_w?: number;
+    layout_h?: number;
+  },
+): FrameStaleResult {
+  if (isViewportDrifted(live, captured)) return { stale: true, kind: "viewport" };
+
+  const scrollDrifted = (l?: number, c?: number): boolean =>
+    typeof l === "number" && typeof c === "number" && Math.abs(l - c) > SCROLL_DRIFT_ABS_PX;
+  if (
+    scrollDrifted(live.scrollX, captured.scroll_x) ||
+    scrollDrifted(live.scrollY, captured.scroll_y)
+  ) {
+    return { stale: true, kind: "scroll" };
+  }
+
+  const layoutDrifted = (l?: number, c?: number): boolean =>
+    typeof l === "number" && typeof c === "number" && layoutAxisDrifted(l, c);
+  if (
+    layoutDrifted(live.layoutW, captured.layout_w) ||
+    layoutDrifted(live.layoutH, captured.layout_h)
+  ) {
+    return { stale: true, kind: "layout" };
+  }
+
+  return { stale: false };
 }
 
 /**
@@ -290,33 +445,62 @@ export async function relayVisualGestureCapsuleGesture(args: {
   const frame = getVisualGestureCapsuleScreenshotFrame(args.capsuleId);
   if (!frame) return { ok: false, reason: "screenshot_frame_unavailable" };
 
-  // 6b. Viewport-drift guard. The point is only trustworthy while the live
-  //     viewport still matches the captured frame: if it cannot be read or has
-  //     drifted beyond tolerance, the screenshot is stale and the mapped point
-  //     would miss. Refuse WITHOUT dispatching and WITHOUT burning an attempt —
-  //     the capsule stays active so the UI recaptures or falls back to manual.
-  //     SAFE: never surfaces live/captured dims, the delta, coords, or fx/fy.
+  // Coarse, value-free debug base: gesture kind + duration bucket, plus the
+  // mapping-diagnostic buckets (frame contract, region of the point, capture
+  // scale). Reused by the stale/failed/dispatched logs below. Every field is a
+  // constant or a coarse enum/bucket — never fx/fy, coords, dims, or the PNG
+  // width. No-op unless ANTIGEN_HV_DEBUG is set.
+  const gestureDebugBase = {
+    scope: "vgc_gesture",
+    gesture_kind: args.gesture.kind,
+    hold_duration_bucket: holdDurationBucket(
+      args.gesture.kind === "press_hold" ? args.gesture.duration_ms : undefined,
+    ),
+    coordinate_frame: "normalized",
+    target_point_bucket: targetPointBucket(args.gesture.fx, args.gesture.fy),
+    screenshot_scale_bucket: screenshotScaleBucket(
+      readPngWidthPx(frame.png_base64),
+      frame.viewport_css_width,
+    ),
+  } as const;
+
+  // 6b. Frame-staleness guard. The mapped point is only trustworthy while the live
+  //     page still matches the captured frame: if the viewport can't be read, or
+  //     the viewport SIZE, document SCROLL, or LAYOUT extent drifted beyond
+  //     tolerance, the screenshot is stale and the mapped point would miss (e.g.
+  //     land inside a modal but off the moved button). Refuse WITHOUT dispatching
+  //     and WITHOUT burning an attempt — the capsule stays active so the UI
+  //     recaptures (and the agent keeps seeing HUMAN_VERIFICATION_REQUIRED).
+  //     SAFE: never surfaces live/captured dims, scroll, layout, the delta, coords,
+  //     or fx/fy — only the coarse `stale_kind` enum.
   const readLiveViewport = args.readLiveViewport ?? defaultVgcReadViewport;
   const liveViewport = await readLiveViewport({
     cdpUrl: args.cdpUrl,
     ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
   });
-  if (
-    !liveViewport ||
-    isViewportDrifted(liveViewport, {
-      width: frame.viewport_css_width,
-      height: frame.viewport_css_height,
-    })
-  ) {
-    logHvDebug({
-      scope: "vgc_gesture",
-      gesture_kind: args.gesture.kind,
-      hold_duration_bucket: holdDurationBucket(
-        args.gesture.kind === "press_hold" ? args.gesture.duration_ms : undefined,
-      ),
-      relay_result: "viewport_drifted",
-    });
+  if (!liveViewport) {
+    logHvDebug({ ...gestureDebugBase, relay_result: "frame_stale", stale_kind: "viewport" });
     return { ok: false, reason: "viewport_drifted" };
+  }
+  const stale = isFrameStale(liveViewport, {
+    width: frame.viewport_css_width,
+    height: frame.viewport_css_height,
+    scroll_x: frame.scroll_x,
+    scroll_y: frame.scroll_y,
+    layout_w: frame.layout_w,
+    layout_h: frame.layout_h,
+  });
+  if (stale.stale) {
+    logHvDebug({ ...gestureDebugBase, relay_result: "frame_stale", stale_kind: stale.kind });
+    return {
+      ok: false,
+      reason:
+        stale.kind === "viewport"
+          ? "viewport_drifted"
+          : stale.kind === "scroll"
+            ? "scroll_drifted"
+            : "layout_drifted",
+    };
   }
 
   // 7. Map the normalized point to CSS viewport coords. mapNormalized... throws
@@ -348,16 +532,6 @@ export async function relayVisualGestureCapsuleGesture(args: {
     args.gesture.kind === "tap"
       ? await relay.tapAtPoint(pointerArgs)
       : await relay.pressHoldAtPoint({ ...pointerArgs, durationMs: args.gesture.duration_ms });
-
-  // Coarse, value-free debug base: gesture kind + duration bucket only. Reused by
-  // the failed/dispatched logs below. No-op unless ANTIGEN_HV_DEBUG is set.
-  const gestureDebugBase = {
-    scope: "vgc_gesture",
-    gesture_kind: args.gesture.kind,
-    hold_duration_bucket: holdDurationBucket(
-      args.gesture.kind === "press_hold" ? args.gesture.duration_ms : undefined,
-    ),
-  } as const;
 
   // Failure surfaces a reason only — never the coords, duration, or path. No
   // attempt is burned merely because dispatch failed to land.

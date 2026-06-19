@@ -100,6 +100,12 @@ export default function HumanVerificationPage() {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const pressStartRef = useRef<{ t: number; fx: number; fy: number } | null>(null);
 
+  // Dev-only diagnostic: the last interpreted normalized point we sent, rendered
+  // as a marker over the screenshot so we can visually confirm the click landed
+  // where the user intended. UI-only — this is the SAME fx/fy already sent in the
+  // gesture body; it is never sent anywhere extra and is gated behind IS_DEV.
+  const [markerPoint, setMarkerPoint] = useState<{ fx: number; fy: number } | null>(null);
+
   const selected = capsules.find((c) => c.capsule_id === selectedId) ?? null;
 
   // ── Poll active capsules ────────────────────────────────────────────────────
@@ -133,6 +139,12 @@ export default function HumanVerificationPage() {
       setSelectedId(capsules[0].capsule_id);
     }
   }, [capsules, selectedId]);
+
+  // Drop the diagnostic marker whenever the selected capsule changes — it only
+  // describes the current capsule's last gesture.
+  useEffect(() => {
+    setMarkerPoint(null);
+  }, [selectedId]);
 
   // ── Screenshot fetch (bytes used only as <img> src) ─────────────────────────
   const loadScreenshot = useCallback(async (capsuleId: string) => {
@@ -219,6 +231,11 @@ export default function HumanVerificationPage() {
           setScreenshotDataUrl(null);
         } else if (code === "BROWSER_SESSION_UNAVAILABLE") {
           setStatusMsg("No live browser session is available for this request.");
+        } else if (code === "FRAME_STALE_RECAPTURE_REQUIRED" || code === "VIEWPORT_DRIFTED") {
+          // The page scrolled/resized/reflowed after capture, so the screenshot no
+          // longer matches the live layout and the gesture was NOT dispatched.
+          setStatusMsg("Frame changed — recapture and try again.");
+          setHint("The page moved since this view was captured. Recapture to see the current layout.");
         } else if (code === "INVALID_COORDINATES" || code === "INVALID_GESTURE") {
           setStatusMsg("That gesture was rejected. Try tapping inside the highlighted area.");
         } else {
@@ -246,6 +263,7 @@ export default function HumanVerificationPage() {
       setHint("That point is outside the image. Tap inside the screenshot.");
       return;
     }
+    if (IS_DEV) setMarkerPoint({ fx: pt.fx, fy: pt.fy });
     void sendGesture(selected.capsule_id, "tap", pt.fx, pt.fy);
   }
 
@@ -272,6 +290,7 @@ export default function HumanVerificationPage() {
       return;
     }
     const durationMs = Math.min(raw, PRESS_HOLD_MAX_MS);
+    if (IS_DEV) setMarkerPoint({ fx: start.fx, fy: start.fy });
     void sendGesture(selected.capsule_id, "press_hold", start.fx, start.fy, durationMs);
   }
 
@@ -280,6 +299,7 @@ export default function HumanVerificationPage() {
     if (!selected || busy) return;
     setBusy(true);
     setHint(null);
+    setMarkerPoint(null);
     setStatusMsg("Recapturing the current view…");
     try {
       await recaptureVisualGestureCapsule(selected.capsule_id);
@@ -317,6 +337,7 @@ export default function HumanVerificationPage() {
       await cancelVisualGestureCapsule(selected.capsule_id);
       setStatusMsg("Cancelled.");
       setScreenshotDataUrl(null);
+      setMarkerPoint(null);
     } catch {
       setStatusMsg("Could not cancel this request.");
     } finally {
@@ -492,6 +513,25 @@ export default function HumanVerificationPage() {
                       pressStartRef.current = null;
                     }}
                   />
+                  {/* Dev-only diagnostic marker at the interpreted point. Positioned
+                      by percentage against the container content box (= the image
+                      box), so it lands exactly where the gesture was sent. UI-only;
+                      never sent to the agent or any endpoint. */}
+                  {IS_DEV && markerPoint && (
+                    <div
+                      className="pointer-events-none absolute z-10"
+                      style={{
+                        left: `${markerPoint.fx * 100}%`,
+                        top: `${markerPoint.fy * 100}%`,
+                        transform: "translate(-50%, -50%)",
+                      }}
+                    >
+                      <div className="h-4 w-4 rounded-full border-2 border-fuchsia-400 bg-fuchsia-500/30 shadow-[0_0_0_1px_rgba(0,0,0,0.6)]" />
+                      <span className="absolute left-1/2 top-full mt-0.5 -translate-x-1/2 whitespace-nowrap rounded bg-black/70 px-1 py-0.5 text-[9px] font-medium text-fuchsia-200">
+                        interpreted point (dev)
+                      </span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-gray-700 bg-gray-950 px-4 py-10 text-center">

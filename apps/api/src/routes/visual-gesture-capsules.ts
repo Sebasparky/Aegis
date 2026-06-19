@@ -67,6 +67,11 @@ const GESTURE_RELAY_ERROR_MAP: Record<string, { status: number; code: string }> 
   // Stale/mismatched viewport — the mapped point can't be trusted. 409 so the UI
   // recaptures or falls back to manual. The code carries no dims/coords/deltas.
   viewport_drifted: { status: 409, code: "VIEWPORT_DRIFTED" },
+  // Page scrolled or reflowed after capture — the static screenshot no longer
+  // describes the live layout, so the mapped point would miss. Same 409 recapture
+  // signal; the unified code carries no scroll/layout values or deltas.
+  scroll_drifted: { status: 409, code: "FRAME_STALE_RECAPTURE_REQUIRED" },
+  layout_drifted: { status: 409, code: "FRAME_STALE_RECAPTURE_REQUIRED" },
   pointer_dispatch_failed: { status: 502, code: "POINTER_DISPATCH_FAILED" },
   store_or_state_failed: { status: 409, code: "STORE_OR_STATE_FAILED" },
 };

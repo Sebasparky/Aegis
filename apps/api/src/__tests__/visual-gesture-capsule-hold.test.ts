@@ -386,9 +386,22 @@ describe("probeHoldPresenceOnClient (in-hold / pre-press clear discipline)", () 
     expect(res).toBe("absent");
   });
 
-  it("lone pointer interceptor (weak) → unknown (keep holding, never auto-clears)", async () => {
+  it("lone pointer interceptor with HV absent → absent (a benign hero / sticky header occludes the center too; it is not a wall)", async () => {
+    // A lone pointer interceptor is produced by a benign marketing hero / sticky header
+    // exactly like a real wall, so with HV confidently absent and no scrim/iframe/denial
+    // marker the reading is healthy and the hold releases — it must NOT keep a benign
+    // page held. A real wall always also paints a scrim/iframe (kept strong below).
     const res = await probeHoldPresenceOnClient(
       probeClient({ present: false }, { ...NO_OBSTRUCTION, pointer_interceptor_seen: true }),
+    );
+    expect(res).toBe("absent");
+  });
+
+  it("lone pointer interceptor with HV unreadable → unknown (a half-read never clears)", async () => {
+    // When the HV detector cannot return a boolean, a lone pointer interceptor is not a
+    // confident healthy reading, so the hold is kept alive rather than released.
+    const res = await probeHoldPresenceOnClient(
+      probeClient({}, { ...NO_OBSTRUCTION, pointer_interceptor_seen: true }),
     );
     expect(res).toBe("unknown");
   });
@@ -403,10 +416,17 @@ describe("probeHoldPresenceOnClient (in-hold / pre-press clear discipline)", () 
     expect(res).toBe("present");
   });
 
-  it("strong geometry obstruction → present (keep holding)", async () => {
+  it("strong geometry obstruction (scrim/backdrop) → present (keep holding)", async () => {
+    const res = await probeHoldPresenceOnClient(
+      probeClient({ present: false }, { ...NO_OBSTRUCTION, viewport_scrim_seen: true }),
+    );
+    expect(res).toBe("present");
+  });
+
+  it("a large centered overlay WITHOUT a scrim/iframe marker → absent (a benign hero is not a wall)", async () => {
     const res = await probeHoldPresenceOnClient(
       probeClient({ present: false }, { ...NO_OBSTRUCTION, large_centered_overlay_seen: true }),
     );
-    expect(res).toBe("present");
+    expect(res).toBe("absent");
   });
 });

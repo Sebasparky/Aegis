@@ -27,6 +27,10 @@ import {
   recheckVisualGestureCapsule,
   combineRecheckPresence,
   geometryObstructionPresent,
+  geometryObstructionStrength,
+  classifyReleasePresence,
+  VGC_RECHECK_SETTLE_MS,
+  VGC_RECHECK_RETRY_SETTLE_MS,
   type VisualGestureCapsulePresenceProbe,
 } from "../runtime/visualGestureCapsuleRecheck.js";
 
@@ -47,6 +51,15 @@ afterEach(() => {
 
 function enable() {
   process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+}
+
+/**
+ * Recheck with the post-release settle delays disabled, so the existing
+ * behavioral assertions run instantly. Settle-timing is covered separately with
+ * an injected sleep spy. Args spread last so a case can re-enable a delay.
+ */
+function recheck(args: Parameters<typeof recheckVisualGestureCapsule>[0]) {
+  return recheckVisualGestureCapsule({ settleMs: 0, retrySettleMs: 0, ...args });
 }
 
 /** Seed an active capsule already moved to `checking` (the post-relay state). */
@@ -73,7 +86,7 @@ describe("recheckVisualGestureCapsule", () => {
     delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
 
     const probe = probeReturning({ ok: true, presence: "absent" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({ ok: false, reason: "flag_disabled" });
     expect(probe.mock).not.toHaveBeenCalled();
@@ -82,7 +95,7 @@ describe("recheckVisualGestureCapsule", () => {
   it("missing capsule → not_found, probe not called", async () => {
     enable();
     const probe = probeReturning({ ok: true, presence: "absent" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: "vgc_nope", cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: "vgc_nope", cdpUrl: CDP, probe });
 
     expect(res).toEqual({ ok: false, reason: "not_found" });
     expect(probe.mock).not.toHaveBeenCalled();
@@ -94,7 +107,7 @@ describe("recheckVisualGestureCapsule", () => {
     cancelVisualGestureCapsule(capsule.capsule_id); // terminal (cancelled)
 
     const probe = probeReturning({ ok: true, presence: "absent" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({ ok: false, reason: "terminal" });
     expect(probe.mock).not.toHaveBeenCalled();
@@ -109,7 +122,7 @@ describe("recheckVisualGestureCapsule", () => {
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("manual_fallback");
 
     const probe = probeReturning({ ok: true, presence: "absent" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({ ok: false, reason: "invalid_state" });
     expect(probe.mock).not.toHaveBeenCalled();
@@ -120,7 +133,7 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = seedCheckingCapsule();
 
     const probe = probeReturning({ ok: true, presence: "absent" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({
       ok: true,
@@ -138,7 +151,7 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = seedCheckingCapsule();
 
     const probe = probeReturning({ ok: true, presence: "present" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({
       ok: true,
@@ -155,12 +168,12 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = seedCheckingCapsule();
     const probe = probeReturning({ ok: true, presence: "present" });
 
-    const first = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const first = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
     expect(first).toMatchObject({ ok: true, status: "rejected_retryable", attempt_count: 1 });
 
     // rejected_retryable is an allowed recheck state — a second positive probe
     // exhausts the attempt budget and falls back to manual_fallback.
-    const second = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const second = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
     expect(second).toEqual({
       ok: true,
       capsule_id: capsule.capsule_id,
@@ -176,7 +189,7 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = seedCheckingCapsule();
 
     const probe = probeReturning({ ok: true, presence: "unknown" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({
       ok: true,
@@ -195,7 +208,7 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = seedCheckingCapsule();
 
     const probe = probeReturning({ ok: false, reason: "probe_connect_failed" });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toEqual({ ok: false, reason: "probe_failed" });
     const stored = getVisualGestureCapsule(capsule.capsule_id);
@@ -208,7 +221,7 @@ describe("recheckVisualGestureCapsule", () => {
     const capsule = createVisualGestureCapsule(BASE); // status: awaiting_user_gesture
     const probe = probeReturning({ ok: true, presence: "absent" });
 
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
     expect(res).toMatchObject({ ok: true, outcome: "cleared", status: "cleared" });
     expect(probe.mock).toHaveBeenCalledTimes(1);
   });
@@ -226,7 +239,7 @@ describe("recheckVisualGestureCapsule", () => {
       hv_present: false,
       geo_present: true,
     });
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
 
     expect(res).toMatchObject({ ok: true, outcome: "still_present", status: "rejected_retryable" });
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
@@ -243,7 +256,7 @@ describe("recheckVisualGestureCapsule", () => {
       reason: "control_box cssX cssY duration_ms perimeterx postMessage token",
     });
 
-    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe: leaky });
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe: leaky });
     const serialized = JSON.stringify(res);
     for (const token of [
       "png_base64",
@@ -264,6 +277,207 @@ describe("recheckVisualGestureCapsule", () => {
     ]) {
       expect(serialized).not.toContain(token);
     }
+  });
+
+  // ── Post-release settle + weak-geometry retry ──────────────────────────────
+
+  /** A probe returning a different verdict on each successive call. */
+  function probeSequence(
+    ...verdicts: Awaited<ReturnType<VisualGestureCapsulePresenceProbe>>[]
+  ): VisualGestureCapsulePresenceProbe & { mock: ReturnType<typeof vi.fn> } {
+    const mock = vi.fn();
+    for (const v of verdicts) mock.mockResolvedValueOnce(v);
+    return Object.assign(((args: any) => mock(args)) as VisualGestureCapsulePresenceProbe, { mock });
+  }
+
+  it("strong geometry only (hv absent) → still_present, attempt burned, no retry", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeReturning({ ok: true, presence: "present", hv_present: false, geo_strength: "strong" });
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "still_present", status: "rejected_retryable", attempt_count: 1 });
+    expect(probe.mock).toHaveBeenCalledTimes(1); // strong is decisive — no retry
+  });
+
+  it("weak geometry-only false positive after release → retries, then clears, NO attempt burned", async () => {
+    // The QA bug: a lone pointer interceptor on the now-healthy page reads weak on
+    // both probes. After the retry settle it must clear, not burn an attempt.
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+    );
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toEqual({
+      ok: true,
+      capsule_id: capsule.capsule_id,
+      outcome: "cleared",
+      status: "cleared",
+      attempt_count: 0,
+    });
+    expect(probe.mock).toHaveBeenCalledTimes(2); // first weak → one retry
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("cleared");
+  });
+
+  it("weak geometry then STRONG on retry → still_present (real wall confirmed)", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: true, presence: "present", hv_present: false, geo_strength: "strong" },
+    );
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "still_present", status: "rejected_retryable", attempt_count: 1 });
+    expect(probe.mock).toHaveBeenCalledTimes(2);
+  });
+
+  it("weak geometry then HV present on retry → still_present", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: true, presence: "present", hv_present: true, geo_strength: "none" },
+    );
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "still_present", attempt_count: 1 });
+  });
+
+  it("weak geometry then absent on retry → cleared", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: true, presence: "absent", hv_present: false, geo_strength: "none" },
+    );
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "cleared", status: "cleared", attempt_count: 0 });
+  });
+
+  it("weak geometry then probe failure on retry → unknown, no burn, no clear", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: false, reason: "probe_connect_failed" },
+    );
+
+    const res = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+
+    expect(res).toMatchObject({ ok: true, outcome: "unknown", status: "checking", attempt_count: 0 });
+    const stored = getVisualGestureCapsule(capsule.capsule_id);
+    expect(stored?.status).toBe("checking");
+    expect(stored?.attempt_count).toBe(0);
+  });
+
+  it("awaits the settle before the first probe; only weak readings pay the retry settle", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const probe = probeSequence(
+      { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      { ok: true, presence: "present", hv_present: false, geo_strength: "strong" },
+    );
+
+    // No settleMs/retrySettleMs override → exercises the real defaults via the spy.
+    await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe, sleep });
+
+    expect(sleep).toHaveBeenNthCalledWith(1, VGC_RECHECK_SETTLE_MS);
+    expect(sleep).toHaveBeenNthCalledWith(2, VGC_RECHECK_RETRY_SETTLE_MS);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("clearly-absent first probe takes the fast path: one settle, no retry", async () => {
+    enable();
+    const capsule = seedCheckingCapsule();
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const probe = probeReturning({ ok: true, presence: "absent", hv_present: false, geo_strength: "none" });
+
+    const res = await recheckVisualGestureCapsule({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe, sleep });
+
+    expect(res).toMatchObject({ ok: true, outcome: "cleared" });
+    expect(probe.mock).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(1); // settle only — no retry settle
+    expect(sleep).toHaveBeenNthCalledWith(1, VGC_RECHECK_SETTLE_MS);
+  });
+});
+
+describe("geometryObstructionStrength (signal-strength reduction)", () => {
+  it("any strong signal → strong", () => {
+    expect(geometryObstructionStrength({ denial_text_seen: true })).toBe("strong");
+    expect(geometryObstructionStrength({ viewport_scrim_seen: true })).toBe("strong");
+    expect(geometryObstructionStrength({ large_centered_overlay_seen: true })).toBe("strong");
+    expect(geometryObstructionStrength({ visible_inaccessible_iframe_seen: true })).toBe("strong");
+    expect(geometryObstructionStrength({ near_zero_interactive: true })).toBe("strong");
+  });
+
+  it("pointer interceptor alone → weak", () => {
+    expect(geometryObstructionStrength({ pointer_interceptor_seen: true })).toBe("weak");
+    // ...but a strong signal alongside it dominates.
+    expect(
+      geometryObstructionStrength({ pointer_interceptor_seen: true, large_centered_overlay_seen: true }),
+    ).toBe("strong");
+    expect(
+      geometryObstructionStrength({ pointer_interceptor_seen: true, near_zero_interactive: true }),
+    ).toBe("strong");
+  });
+
+  it("all signals false → none", () => {
+    expect(
+      geometryObstructionStrength({
+        denial_text_seen: false,
+        viewport_scrim_seen: false,
+        large_centered_overlay_seen: false,
+        visible_inaccessible_iframe_seen: false,
+        near_zero_interactive: false,
+        pointer_interceptor_seen: false,
+      }),
+    ).toBe("none");
+  });
+
+  it("unparseable / no recognizable boolean field → undefined", () => {
+    expect(geometryObstructionStrength(null)).toBeUndefined();
+    expect(geometryObstructionStrength("nope")).toBeUndefined();
+    expect(geometryObstructionStrength({})).toBeUndefined();
+    expect(geometryObstructionStrength({ repeated_stale: true })).toBeUndefined();
+  });
+});
+
+describe("classifyReleasePresence (HV + geometry-strength decision)", () => {
+  it("structural HV present → present (regardless of geometry)", () => {
+    expect(classifyReleasePresence(true, "none")).toBe("present");
+    expect(classifyReleasePresence(true, "weak")).toBe("present");
+    expect(classifyReleasePresence(true, undefined)).toBe("present");
+  });
+
+  it("strong geometry → present", () => {
+    expect(classifyReleasePresence(false, "strong")).toBe("present");
+    expect(classifyReleasePresence(undefined, "strong")).toBe("present");
+  });
+
+  it("weak geometry only → weak_ambiguous", () => {
+    expect(classifyReleasePresence(false, "weak")).toBe("weak_ambiguous");
+    expect(classifyReleasePresence(undefined, "weak")).toBe("weak_ambiguous");
+  });
+
+  it("hv absent or no geometry obstruction → absent", () => {
+    expect(classifyReleasePresence(false, "none")).toBe("absent");
+    expect(classifyReleasePresence(false, undefined)).toBe("absent");
+    expect(classifyReleasePresence(undefined, "none")).toBe("absent");
+  });
+
+  it("neither verdict usable → unknown", () => {
+    expect(classifyReleasePresence(undefined, undefined)).toBe("unknown");
   });
 });
 

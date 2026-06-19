@@ -116,9 +116,19 @@ function makeDeps(opts: {
   return { deps, order, probeCalls: () => probeOnClient.mock.calls.length };
 }
 
-/** A recheck that runs the REAL capsule transitions against a fixed probe verdict. */
+/**
+ * A recheck that runs the REAL capsule transitions against a fixed probe verdict.
+ * Settle delays are disabled here (these tests run under fake timers and exercise
+ * the hold mechanics, not the recheck settle — that is covered in the recheck suite).
+ */
 function recheckWithVerdict(presence: "present" | "absent" | "unknown"): VgcHoldDeps["recheck"] {
-  return (args) => recheckVisualGestureCapsule({ ...args, probe: async () => ({ ok: true, presence }) });
+  return (args) =>
+    recheckVisualGestureCapsule({
+      ...args,
+      settleMs: 0,
+      retrySettleMs: 0,
+      probe: async () => ({ ok: true, presence }),
+    });
 }
 
 beforeEach(() => {
@@ -213,6 +223,11 @@ describe("endVgcHoldSession release behavior", () => {
     const end = await endVgcHoldSession(capsule.capsule_id);
     expect(end).toEqual({ ok: true, hold_state: "cleared" });
     expect(order).toContain("mouseReleased");
+    // No replay after release: exactly one press, and it precedes the release —
+    // the recorded-duration replay path (single-shot relay) is never taken here.
+    expect(order.filter((o) => o === "mousePressed")).toHaveLength(1);
+    expect(order.lastIndexOf("mousePressed")).toBeLessThan(order.indexOf("mouseReleased"));
+    expect(order.lastIndexOf("mousePressed")).toBeGreaterThan(-1);
     expect(isTerminalVisualGestureStatus(getVisualGestureCapsule(capsule.capsule_id)!.status)).toBe(true);
   });
 

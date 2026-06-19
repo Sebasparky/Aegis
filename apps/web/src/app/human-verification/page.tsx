@@ -39,6 +39,17 @@ const POLL_MS = 2500;
 const HEARTBEAT_INTERVAL_MS = 300;
 const ELAPSED_TICK_MS = 100;
 
+// Guided fixed-duration attempts. Generic Antigen attempt durations — NOT tied
+// to any provider's timing. Attempt 1 asks for a 5s hold, attempt 2 a longer
+// 10s hold; after both, the user is sent to the visible browser (manual_fallback).
+// The user always releases physically once prompted — Antigen never extends or
+// replays the hold past release.
+const ATTEMPT_HOLD_TARGETS_MS = [5000, 10000] as const;
+function targetForAttempt(attemptCount: number): number {
+  const i = Math.min(Math.max(attemptCount, 0), ATTEMPT_HOLD_TARGETS_MS.length - 1);
+  return ATTEMPT_HOLD_TARGETS_MS[i];
+}
+
 // Dev-only affordance gate. Next.js inlines process.env.NODE_ENV in client code;
 // the backend smoke route is itself NODE_ENV-gated, so this only hides the button.
 const IS_DEV = process.env.NODE_ENV !== "production";
@@ -342,20 +353,27 @@ export default function HumanVerificationPage() {
       pointerIdRef.current = null;
       captureElRef.current = null;
       setBusy(true);
+      setStatusMsg("Checking whether it cleared…");
+      setHint(null);
       try {
         const res = await endVisualGestureCapsuleHold(capsuleId);
         if (res.data.status === "manual_fallback") {
+          // Both guided attempts used and the wall is still up — hand off.
           setStatusMsg("Please complete this in the visible browser.");
           setHint(null);
         } else if (res.hold_state === "cleared") {
           setStatusMsg("Cleared — presence confirmed. The agent can resume.");
           setHint(null);
         } else if (res.hold_state === "too_short") {
-          setStatusMsg("That was too short — hold until Antigen says verification cleared.");
+          // No attempt burned — guide the user to redo the same attempt fully.
+          setStatusMsg(
+            `That was too short — hold for the full ${Math.round(targetForAttempt(res.data.attempt_count) / 1000)} seconds.`,
+          );
           setHint(null);
         } else if (res.hold_state === "still_present") {
+          // attempt_count is post-increment, so this picks the longer next target.
           setStatusMsg(
-            `Still present — keep holding until it clears, or try again. (attempt ${res.data.attempt_count}/${res.data.max_attempts})`,
+            `Still present. Try a longer ${Math.round(targetForAttempt(res.data.attempt_count) / 1000)}-second hold.`,
           );
           setHint("The frame may have changed — recapture to see the current view.");
           await loadScreenshot(capsuleId);
@@ -414,6 +432,7 @@ export default function HumanVerificationPage() {
     if (IS_DEV) setMarkerPoint({ fx: pt.fx, fy: pt.fy });
 
     const capsuleId = selected.capsule_id;
+    const targetMs = targetForAttempt(selected.attempt_count);
     // Capture the pointer so release/leave outside the image still ends the hold.
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -440,7 +459,7 @@ export default function HumanVerificationPage() {
         holdStartMsRef.current = Date.now();
         setHoldElapsedMs(0);
         setStatusMsg(null);
-        setHint("Keep holding until Antigen says verification cleared.");
+        setHint(`Hold for ${Math.round(targetMs / 1000)} seconds.`);
         heartbeatTimerRef.current = setInterval(() => void heartbeatTick(capsuleId), HEARTBEAT_INTERVAL_MS);
         elapsedTimerRef.current = setInterval(
           () => setHoldElapsedMs(Date.now() - holdStartMsRef.current),
@@ -737,16 +756,35 @@ export default function HumanVerificationPage() {
                 </div>
               )}
 
-              {/* Live hold timer — visible while the browser mouse is held down. */}
-              {holding && (
-                <div className="mt-3 flex items-center gap-2 rounded-md border border-indigo-700 bg-indigo-950/40 px-3 py-2 text-sm text-indigo-200">
-                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-                  <span>
-                    Holding {(holdElapsedMs / 1000).toFixed(1)}s — keep holding until Antigen says
-                    verification cleared.
-                  </span>
-                </div>
-              )}
+              {/* Live hold timer — guides a fixed-duration attempt: hold to the
+                  target, then release on the prompt. The browser mouse is down
+                  only while the user physically holds. */}
+              {holding &&
+                (() => {
+                  const targetMs = targetForAttempt(selected.attempt_count);
+                  const reached = holdElapsedMs >= targetMs;
+                  const remainingS = Math.max(0, Math.ceil((targetMs - holdElapsedMs) / 1000));
+                  return (
+                    <div
+                      className={`mt-3 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+                        reached
+                          ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
+                          : "border-indigo-700 bg-indigo-950/40 text-indigo-200"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-2 w-2 animate-pulse rounded-full ${
+                          reached ? "bg-emerald-400" : "bg-indigo-400"
+                        }`}
+                      />
+                      <span>
+                        {reached
+                          ? "Release now — checking…"
+                          : `Hold for ${Math.round(targetMs / 1000)} seconds — ${remainingS}s left.`}
+                      </span>
+                    </div>
+                  );
+                })()}
 
               {/* Status + hint */}
               {statusMsg && <div className="mt-3 text-sm text-gray-300">{statusMsg}</div>}

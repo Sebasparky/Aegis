@@ -37,6 +37,28 @@ import { openCdpPageClient, buildHumanVerificationProbeExpr } from "./humanPrese
 import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
 import { logHvDebug } from "./humanVerificationState.js";
 
+// ─── Post-release settle tunables ────────────────────────────────────────────
+
+/**
+ * Settle before the FIRST post-release probe. A wall frequently clears a beat
+ * AFTER the user releases (the site finishes its own animation / navigation),
+ * so probing instantly produced a premature `still_present`. Generic Antigen
+ * timing — never provider-specific.
+ */
+export const VGC_RECHECK_SETTLE_MS = 750;
+
+/**
+ * Extra settle before the SINGLE weak-geometry retry probe. Used ONLY when the
+ * first probe is geometry-only ambiguous (a lone pointer interceptor on an
+ * otherwise-interactive page). A clearly-absent or clearly-walled first probe
+ * resolves immediately WITHOUT this delay (the fast path).
+ */
+export const VGC_RECHECK_RETRY_SETTLE_MS = 1250;
+
+/** Real wall-clock sleep; injectable so tests resolve instantly. */
+type SleepFn = (ms: number) => Promise<void>;
+const realSleep: SleepFn = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Injectable presence probe seam. Production default lives below; tests inject a
  * fake. The probe receives only connection coordinates and returns a coarse
@@ -57,6 +79,13 @@ export interface VisualGestureCapsulePresenceProbe {
          */
         hv_present?: boolean;
         geo_present?: boolean;
+        /**
+         * Coarse STRENGTH of the geometry obstruction, used to separate a weak
+         * ambiguous reading (a lone pointer interceptor) from a strong wall
+         * (centered overlay / scrim / inaccessible iframe / denial / near-zero
+         * interactive). Booleans only — no rects, coordinates, or page text.
+         */
+        geo_strength?: "none" | "weak" | "strong";
       }
     | { ok: false; reason?: string }
   >;
@@ -142,6 +171,67 @@ export function geometryObstructionPresent(raw: unknown): boolean | undefined {
 }
 
 /**
+ * Classify the geometry-obstruction probe's STATIC signals by STRENGTH so a
+ * weak, ambiguous obstruction is handled differently from a real wall.
+ *
+ * STRONG (a genuine wall — keep `still_present`): an explicit denial page
+ * (`denial_text_seen`), a full-viewport scrim (`viewport_scrim_seen`), a
+ * centered top-layer overlay / modal / card (`large_centered_overlay_seen`), a
+ * visible inaccessible cross-origin iframe (`visible_inaccessible_iframe_seen`),
+ * or a near-zero-interactive page (`near_zero_interactive`).
+ *
+ * WEAK (ambiguous — a healthy interactive page can produce this): ONLY a
+ * `pointer_interceptor_seen` with NONE of the strong signals. A fixed header /
+ * sticky bar on an otherwise-interactive page can intercept sampled points, so
+ * this alone must not keep a capsule pending once the page has settled.
+ *
+ * `repeated_stale` is deliberately NOT consulted (a runtime signal, not a
+ * page-state signal — same as geometryObstructionPresent). Returns undefined
+ * when the shape is unusable so the caller can fall back to the HV verdict.
+ */
+export function geometryObstructionStrength(
+  raw: unknown,
+): "none" | "weak" | "strong" | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const v = raw as Record<string, unknown>;
+  const strongKeys = [
+    "denial_text_seen",
+    "viewport_scrim_seen",
+    "large_centered_overlay_seen",
+    "visible_inaccessible_iframe_seen",
+    "near_zero_interactive",
+  ] as const;
+  const allKeys = [...strongKeys, "pointer_interceptor_seen"] as const;
+  // Require at least one recognizable boolean field before trusting the verdict.
+  if (!allKeys.some((k) => typeof v[k] === "boolean")) return undefined;
+  if (strongKeys.some((k) => v[k] === true)) return "strong";
+  if (v["pointer_interceptor_seen"] === true) return "weak";
+  return "none";
+}
+
+/**
+ * Final post-release presence decision: combine the structural-HV verdict with
+ * the geometry-obstruction STRENGTH. Separates a weak, ambiguous geometry-only
+ * reading (retry, then clear if it persists alone) from a strong wall:
+ *   - structural HV present                    → "present"
+ *   - strong geometry                          → "present"
+ *   - weak geometry only (pointer interceptor) → "weak_ambiguous"
+ *   - HV absent or no geometry obstruction     → "absent"
+ *   - neither verdict usable                   → "unknown"
+ * Exported for direct unit testing.
+ */
+export function classifyReleasePresence(
+  hvPresent: boolean | undefined,
+  geoStrength: "none" | "weak" | "strong" | undefined,
+): "present" | "weak_ambiguous" | "absent" | "unknown" {
+  if (hvPresent === true) return "present";
+  if (geoStrength === "strong") return "present";
+  if (geoStrength === "weak") return "weak_ambiguous";
+  if (hvPresent === false || geoStrength === "none") return "absent";
+  return "unknown";
+}
+
+/**
  * Default production probe — a thin, fail-safe adapter that unions the existing
  * page-level structural-HV detection with the geometry-obstruction detection on
  * a SINGLE opened CDP client. Reuses openCdpPageClient +
@@ -167,11 +257,14 @@ const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl,
     // Geometry detector is best-effort: a failure here must not block a valid HV
     // verdict, so a throw degrades the geometry side to undefined (not probe_failed).
     let geoPresent: boolean | undefined;
+    let geoStrength: "none" | "weak" | "strong" | undefined;
     try {
       const geoRaw = await opened.client.evaluate(buildAmbiguousVisualObstructionExpr());
       geoPresent = geometryObstructionPresent(geoRaw);
+      geoStrength = geometryObstructionStrength(geoRaw);
     } catch {
       geoPresent = undefined;
+      geoStrength = undefined;
     }
 
     return {
@@ -179,6 +272,7 @@ const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl,
       presence: combineRecheckPresence(hvPresent, geoPresent),
       ...(hvPresent !== undefined ? { hv_present: hvPresent } : {}),
       ...(geoPresent !== undefined ? { geo_present: geoPresent } : {}),
+      ...(geoStrength !== undefined ? { geo_strength: geoStrength } : {}),
     };
   } catch {
     return { ok: false, reason: "probe_eval_failed" };
@@ -191,9 +285,36 @@ const defaultPresenceProbe: VisualGestureCapsulePresenceProbe = async ({ cdpUrl,
   }
 };
 
+/** Per-probe presence reading reduced to a single classification. */
+type ProbeReading = Awaited<ReturnType<VisualGestureCapsulePresenceProbe>>;
+
 /**
- * Recheck a capsule after a relayed gesture. Flag-off short-circuits BEFORE any
- * probe runs. See RecheckVisualGestureCapsuleResult for the outcome/error union.
+ * Reduce one probe reading to a release-decision, preferring the granular
+ * hv_present / geo_strength fields. Falls back to the legacy `presence` verdict
+ * for probes (and injected fakes) that don't surface the granular fields, so no
+ * existing caller regresses. Never returns weak_ambiguous via the legacy path.
+ */
+function decideFromProbe(
+  r: Extract<ProbeReading, { ok: true }>,
+): "present" | "weak_ambiguous" | "absent" | "unknown" {
+  const geoStrength =
+    r.geo_strength ??
+    (r.geo_present === true ? "strong" : r.geo_present === false ? "none" : undefined);
+  if (r.hv_present !== undefined || geoStrength !== undefined) {
+    return classifyReleasePresence(r.hv_present, geoStrength);
+  }
+  return r.presence;
+}
+
+/**
+ * Recheck a capsule after a relayed gesture / live press-hold release. Flag-off
+ * short-circuits BEFORE any settle or probe. A short settle precedes the first
+ * probe (walls often clear a beat after release). A clearly-absent or
+ * clearly-walled first probe resolves immediately; a WEAK geometry-only reading
+ * (a lone pointer interceptor on an otherwise-interactive page) triggers ONE
+ * retry after a further settle, and the capsule is cleared unless the retry
+ * shows a real wall — so a healthy page is never kept pending by geometry alone.
+ * See RecheckVisualGestureCapsuleResult for the outcome/error union.
  */
 export async function recheckVisualGestureCapsule(args: {
   capsuleId: string;
@@ -201,6 +322,12 @@ export async function recheckVisualGestureCapsule(args: {
   targetId?: string;
   expectedUrl?: string;
   probe?: VisualGestureCapsulePresenceProbe;
+  /** Injectable sleep (tests resolve instantly). */
+  sleep?: SleepFn;
+  /** Override the first-probe settle (default VGC_RECHECK_SETTLE_MS). */
+  settleMs?: number;
+  /** Override the weak-geometry retry settle (default VGC_RECHECK_RETRY_SETTLE_MS). */
+  retrySettleMs?: number;
 }): Promise<RecheckVisualGestureCapsuleResult> {
   if (!isVisualGestureCapsuleEnabled()) return { ok: false, reason: "flag_disabled" };
 
@@ -210,33 +337,54 @@ export async function recheckVisualGestureCapsule(args: {
   if (!RECHECK_ALLOWED_STATES.has(capsule.status)) return { ok: false, reason: "invalid_state" };
 
   const probe = args.probe ?? defaultPresenceProbe;
-  const result = await probe({
-    cdpUrl: args.cdpUrl,
-    targetId: args.targetId,
-    expectedUrl: args.expectedUrl,
-  });
+  const sleep = args.sleep ?? realSleep;
+  const settleMs = args.settleMs ?? VGC_RECHECK_SETTLE_MS;
+  const retrySettleMs = args.retrySettleMs ?? VGC_RECHECK_RETRY_SETTLE_MS;
+  const runProbe = (): Promise<ProbeReading> =>
+    probe({ cdpUrl: args.cdpUrl, targetId: args.targetId, expectedUrl: args.expectedUrl });
+
+  // Settle before the first probe — a wall often clears a beat after release.
+  if (settleMs > 0) await sleep(settleMs);
+  const first = await runProbe();
 
   // Probe could not run — leave attempts and status untouched.
-  if (!result.ok) {
+  if (!first.ok) {
     logHvDebug({ scope: "vgc_recheck", recheck_outcome: "probe_failed" });
     return { ok: false, reason: "probe_failed" };
   }
 
-  // Safe debug: coarse per-detector booleans + outcome enum only. No-op when
-  // ANTIGEN_HV_DEBUG is off; never carries coords, durations, or page bytes.
+  // Fast path for clearly-absent / clearly-walled; only WEAK geometry retries.
+  let decision = decideFromProbe(first);
+  let last: ProbeReading = first;
+  let retryUsed = false;
+  if (decision === "weak_ambiguous") {
+    retryUsed = true;
+    if (retrySettleMs > 0) await sleep(retrySettleMs);
+    const second = await runProbe();
+    if (!second.ok) {
+      // Couldn't corroborate the weak reading — do NOT burn, do NOT clear.
+      decision = "unknown";
+    } else {
+      last = second;
+      // Real wall only if the retry shows a strong signal / HV present; a lone
+      // pointer interceptor (weak again), absent, or unknown → page is healthy.
+      decision = decideFromProbe(second) === "present" ? "present" : "absent";
+    }
+  }
+
+  // Safe debug: coarse per-detector booleans + strength + outcome enum only.
+  // No-op when ANTIGEN_HV_DEBUG is off; never carries coords, durations, bytes.
   logHvDebug({
     scope: "vgc_recheck",
-    ...(result.hv_present !== undefined ? { probe_hv_present: result.hv_present } : {}),
-    ...(result.geo_present !== undefined ? { probe_geo_present: result.geo_present } : {}),
+    ...(last.ok && last.hv_present !== undefined ? { probe_hv_present: last.hv_present } : {}),
+    ...(last.ok && last.geo_present !== undefined ? { probe_geo_present: last.geo_present } : {}),
+    ...(last.ok && last.geo_strength !== undefined ? { geo_strength: last.geo_strength } : {}),
+    retry_used: retryUsed,
     recheck_outcome:
-      result.presence === "absent"
-        ? "cleared"
-        : result.presence === "present"
-          ? "still_present"
-          : "unknown",
+      decision === "absent" ? "cleared" : decision === "present" ? "still_present" : "unknown",
   });
 
-  if (result.presence === "absent") {
+  if (decision === "absent") {
     const cleared = markGestureCapsuleCleared(args.capsuleId);
     if (!cleared.ok || !cleared.capsule) return { ok: false, reason: "state_update_failed" };
     return {
@@ -248,7 +396,7 @@ export async function recheckVisualGestureCapsule(args: {
     };
   }
 
-  if (result.presence === "present") {
+  if (decision === "present") {
     const rejected = markGestureAttemptRejected(args.capsuleId);
     if (!rejected.ok || !rejected.capsule) return { ok: false, reason: "state_update_failed" };
     return {
@@ -260,7 +408,7 @@ export async function recheckVisualGestureCapsule(args: {
     };
   }
 
-  // presence === "unknown": cannot safely decide — no attempt burn, no clear,
+  // decision === "unknown": cannot safely decide — no attempt burn, no clear,
   // status and attempt_count unchanged.
   return {
     ok: true,

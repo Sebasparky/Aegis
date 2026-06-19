@@ -491,9 +491,11 @@ export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldRe
     return { ok: true, hold_state: "too_short" };
   }
 
-  // Definitive post-release recheck. The page settle + presence union live in the
+  // Definitive post-release recheck. The post-release SETTLE, the structural-HV
+  // + geometry-strength union, and the single WEAK-geometry retry all live in the
   // recheck helper, which owns the cleared / attempt-burn / manual_fallback state
-  // transitions. unknown / probe failure never burn an attempt.
+  // transitions. A lone pointer interceptor on a settled page no longer keeps the
+  // capsule pending; unknown / probe failure never burn an attempt.
   const result = await recheck({
     capsuleId,
     cdpUrl,

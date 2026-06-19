@@ -4,13 +4,16 @@
  * After a user gesture is relayed (M1E/M1F) the capsule sits in `checking`. This
  * helper classifies the post-gesture page state from a SAFE, page-level presence
  * probe and resolves the capsule:
- *   - probe says the wall is gone  → markGestureCapsuleCleared  (outcome "cleared")
+ *   - confident healthy page       → markGestureCapsuleCleared  (outcome "cleared")
  *   - probe says the wall remains  → markGestureAttemptRejected (outcome "still_present")
+ *   - weak/ambiguous, unresolved   → markGestureAttemptRejected (outcome "inconclusive")
  *   - probe cannot decide          → no state change            (outcome "unknown")
  *   - probe failed to run          → no state change            (reason "probe_failed")
  *
- * Attempts are burned ONLY on a positive "still present" classification. Probe
- * failure and `unknown` never burn an attempt and never mark cleared.
+ * Clearing requires a CONFIDENT healthy reading from BOTH detectors (HV absent
+ * AND no geometry obstruction) — a weak/ambiguous reading must NEVER clear.
+ * Attempts are burned on "still_present" AND "inconclusive" (both step the guided
+ * hold up). Probe failure and `unknown` never burn an attempt and never clear.
  *
  * State decisions are made strictly from safe page-level detection. The probe
  * must NOT inspect provider internals, iframe tokens, postMessage payloads, or
@@ -116,7 +119,7 @@ export type RecheckVisualGestureCapsuleResult =
   | {
       ok: true;
       capsule_id: string;
-      outcome: "cleared" | "still_present" | "unknown";
+      outcome: "cleared" | "still_present" | "inconclusive" | "unknown";
       status: VisualGestureCapsuleStatus;
       attempt_count: number;
     }
@@ -212,13 +215,20 @@ export function geometryObstructionStrength(
 /**
  * Final post-release presence decision: combine the structural-HV verdict with
  * the geometry-obstruction STRENGTH. Separates a weak, ambiguous geometry-only
- * reading (retry, then clear if it persists alone) from a strong wall:
- *   - structural HV present                    → "present"
- *   - strong geometry                          → "present"
- *   - weak geometry only (pointer interceptor) → "weak_ambiguous"
- *   - HV absent or no geometry obstruction     → "absent"
- *   - neither verdict usable                   → "unknown"
- * Exported for direct unit testing.
+ * reading from a strong wall, and — critically — only CLEARS on a CONFIDENT
+ * healthy reading from BOTH detectors:
+ *   - structural HV present                       → "present"
+ *   - strong geometry                             → "present"
+ *   - weak geometry only (pointer interceptor)    → "weak_ambiguous"
+ *   - HV absent AND no geometry obstruction       → "absent"  (CLEAR)
+ *   - anything else (one side unreadable, weak,…) → "unknown"
+ *
+ * The clear condition is a strict AND (`hvPresent === false` AND
+ * `geoStrength === "none"`), NOT an OR: a lone pointer interceptor, a probe that
+ * could only read one detector, or any weak/ambiguous reading must NEVER mark the
+ * capsule cleared. `geoStrength === "none"` is itself the healthy-page
+ * confirmation — it requires >3 interactive controls and no overlay/scrim/
+ * iframe/denial/pointer-interceptor signal. Exported for direct unit testing.
  */
 export function classifyReleasePresence(
   hvPresent: boolean | undefined,
@@ -227,7 +237,8 @@ export function classifyReleasePresence(
   if (hvPresent === true) return "present";
   if (geoStrength === "strong") return "present";
   if (geoStrength === "weak") return "weak_ambiguous";
-  if (hvPresent === false || geoStrength === "none") return "absent";
+  // CLEAR requires a CONFIDENT healthy reading from BOTH detectors.
+  if (hvPresent === false && geoStrength === "none") return "absent";
   return "unknown";
 }
 
@@ -311,9 +322,12 @@ function decideFromProbe(
  * short-circuits BEFORE any settle or probe. A short settle precedes the first
  * probe (walls often clear a beat after release). A clearly-absent or
  * clearly-walled first probe resolves immediately; a WEAK geometry-only reading
- * (a lone pointer interceptor on an otherwise-interactive page) triggers ONE
- * retry after a further settle, and the capsule is cleared unless the retry
- * shows a real wall — so a healthy page is never kept pending by geometry alone.
+ * (a lone pointer interceptor) triggers ONE retry after a further settle. A weak
+ * reading NEVER clears: the capsule clears ONLY if the retry yields a CONFIDENT
+ * healthy `absent` (HV absent AND no geometry obstruction). A real wall on retry
+ * burns an attempt (`still_present`); a retry that stays weak/ambiguous is
+ * `inconclusive` (burns an attempt to step the guided hold up, but does not
+ * clear); a retry probe that could not run is `unknown` (no burn, no clear).
  * See RecheckVisualGestureCapsuleResult for the outcome/error union.
  */
 export async function recheckVisualGestureCapsule(args: {
@@ -354,7 +368,10 @@ export async function recheckVisualGestureCapsule(args: {
   }
 
   // Fast path for clearly-absent / clearly-walled; only WEAK geometry retries.
-  let decision = decideFromProbe(first);
+  // Widened to include "inconclusive" — the resolved state of an unresolved weak
+  // reading (weak first probe, still weak/ambiguous on retry).
+  let decision: "present" | "weak_ambiguous" | "absent" | "inconclusive" | "unknown" =
+    decideFromProbe(first);
   let last: ProbeReading = first;
   let retryUsed = false;
   if (decision === "weak_ambiguous") {
@@ -362,13 +379,18 @@ export async function recheckVisualGestureCapsule(args: {
     if (retrySettleMs > 0) await sleep(retrySettleMs);
     const second = await runProbe();
     if (!second.ok) {
-      // Couldn't corroborate the weak reading — do NOT burn, do NOT clear.
+      // Couldn't even RUN the retry probe — do NOT burn, do NOT clear; the UI can
+      // recheck again. Distinct from a probe that ran but stayed ambiguous.
       decision = "unknown";
     } else {
       last = second;
-      // Real wall only if the retry shows a strong signal / HV present; a lone
-      // pointer interceptor (weak again), absent, or unknown → page is healthy.
-      decision = decideFromProbe(second) === "present" ? "present" : "absent";
+      // A weak reading NEVER clears. It clears ONLY if the retry gives a CONFIDENT
+      // healthy `absent` (hv_present === false AND geo_strength === "none"). A real
+      // wall (strong / HV present) burns an attempt; a still-weak / unknown retry is
+      // INCONCLUSIVE — burn an attempt to step the guided hold up, but never clear.
+      const retry = decideFromProbe(second);
+      decision =
+        retry === "present" ? "present" : retry === "absent" ? "absent" : "inconclusive";
     }
   }
 
@@ -381,7 +403,13 @@ export async function recheckVisualGestureCapsule(args: {
     ...(last.ok && last.geo_strength !== undefined ? { geo_strength: last.geo_strength } : {}),
     retry_used: retryUsed,
     recheck_outcome:
-      decision === "absent" ? "cleared" : decision === "present" ? "still_present" : "unknown",
+      decision === "absent"
+        ? "cleared"
+        : decision === "present"
+          ? "still_present"
+          : decision === "inconclusive"
+            ? "inconclusive"
+            : "unknown",
   });
 
   if (decision === "absent") {
@@ -403,6 +431,24 @@ export async function recheckVisualGestureCapsule(args: {
       ok: true,
       capsule_id: args.capsuleId,
       outcome: "still_present",
+      status: rejected.capsule.status,
+      attempt_count: rejected.capsule.attempt_count,
+    };
+  }
+
+  if (decision === "inconclusive") {
+    // A weak/ambiguous reading that the retry could not resolve to a confident
+    // healthy `absent`. We must NEVER clear here — instead burn one attempt so the
+    // guided hold steps up (5s → 10s → 15s → manual fallback) and the UI prompts a
+    // longer hold. Shares the attempt accounting with `still_present`, but reports
+    // a distinct outcome so the UI can say "couldn't confirm" rather than "still
+    // present" (and never "presence confirmed").
+    const rejected = markGestureAttemptRejected(args.capsuleId);
+    if (!rejected.ok || !rejected.capsule) return { ok: false, reason: "state_update_failed" };
+    return {
+      ok: true,
+      capsule_id: args.capsuleId,
+      outcome: "inconclusive",
       status: rejected.capsule.status,
       attempt_count: rejected.capsule.attempt_count,
     };

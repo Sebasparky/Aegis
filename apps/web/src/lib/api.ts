@@ -1460,6 +1460,8 @@ export interface VisualGestureCapsuleView {
   supported_gestures: VisualGestureKind[];
   attempt_count: number;
   max_attempts: number;
+  /** Recommended hold duration (ms) for the current attempt — guided 5s/10s/15s ladder. */
+  recommended_hold_ms: number;
   domain: string;
   page_url?: string;
   expires_at: string;
@@ -1492,7 +1494,11 @@ export interface VisualGestureGestureResult {
   data: VisualGestureCapsuleView;
 }
 
-export type VisualGestureRecheckOutcome = "cleared" | "still_present" | "unknown";
+export type VisualGestureRecheckOutcome =
+  | "cleared"
+  | "still_present"
+  | "inconclusive"
+  | "unknown";
 
 export interface VisualGestureRecheckResult {
   recheck: VisualGestureRecheckOutcome;
@@ -1589,7 +1595,7 @@ export interface VisualGestureHeartbeatResult {
 
 /** hold-end: the post-release recheck outcome (or too_short under the min hold). */
 export interface VisualGestureHoldEndResult {
-  hold_state: "cleared" | "still_present" | "unknown" | "too_short";
+  hold_state: "cleared" | "still_present" | "inconclusive" | "unknown" | "too_short";
   data: VisualGestureCapsuleView;
 }
 

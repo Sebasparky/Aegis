@@ -21,6 +21,8 @@ import {
   VISUAL_GESTURE_CAPSULE_TTL_MS,
   VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS,
   MAX_GESTURE_ATTEMPTS,
+  GESTURE_HOLD_TARGETS_MS,
+  recommendedHoldMsForAttempt,
 } from "../runtime/visualGestureCapsule.js";
 import {
   captureVisualGestureCapsuleScreenshotFrame,
@@ -60,8 +62,8 @@ describe("createVisualGestureCapsule", () => {
     const c = createVisualGestureCapsule(BASE);
     expect(c.status).toBe("awaiting_user_gesture");
     expect(c.supported_gestures).toEqual(["tap", "press_hold"]);
-    expect(c.max_attempts).toBe(2);
-    expect(MAX_GESTURE_ATTEMPTS).toBe(2);
+    expect(c.max_attempts).toBe(3);
+    expect(MAX_GESTURE_ATTEMPTS).toBe(3);
     expect(c.attempt_count).toBe(0);
     expect(c.user_presence_required).toBe(true);
     expect(c.purchase_authorized).toBe(false);
@@ -107,6 +109,7 @@ describe("getSafeVisualGestureCapsuleView", () => {
         "page_url",
         "purchase_authorized",
         "raw_gesture_revealed_to_agent",
+        "recommended_hold_ms",
         "screenshot_available",
         "screenshot_revealed_to_agent",
         "status",
@@ -119,6 +122,8 @@ describe("getSafeVisualGestureCapsuleView", () => {
     expect(view.raw_gesture_revealed_to_agent).toBe(false);
     expect(view.screenshot_revealed_to_agent).toBe(false);
     expect(view.purchase_authorized).toBe(false);
+    // Fresh capsule (attempt 0) → first ladder rung (5s).
+    expect(view.recommended_hold_ms).toBe(5_000);
   });
 
   it("excludes screenshot bytes, coordinates, fractions, viewport dims, and traces", () => {
@@ -220,26 +225,54 @@ describe("mapNormalizedImagePointToViewport", () => {
 });
 
 describe("attempt accounting", () => {
-  it("rejected attempt 1 -> rejected_retryable (attempts remain)", () => {
+  it("rejected attempts 1 & 2 -> rejected_retryable (attempts remain)", () => {
     const c = createVisualGestureCapsule(BASE);
-    const res = markGestureAttemptRejected(c.capsule_id);
-    expect(res.ok).toBe(true);
-    expect(res.capsule?.attempt_count).toBe(1);
-    expect(res.capsule?.status).toBe("rejected_retryable");
+    const r1 = markGestureAttemptRejected(c.capsule_id);
+    expect(r1.ok).toBe(true);
+    expect(r1.capsule?.attempt_count).toBe(1);
+    expect(r1.capsule?.status).toBe("rejected_retryable");
+    const r2 = markGestureAttemptRejected(c.capsule_id);
+    expect(r2.capsule?.attempt_count).toBe(2);
+    expect(r2.capsule?.status).toBe("rejected_retryable");
     expect(isTerminalVisualGestureStatus("rejected_retryable")).toBe(false);
   });
 
-  it("rejected attempt 2 -> manual_fallback (exhausted, non-terminal waiting state)", () => {
+  it("rejected attempt 3 -> manual_fallback (exhausted, non-terminal waiting state)", () => {
     const c = createVisualGestureCapsule(BASE);
     markGestureAttemptRejected(c.capsule_id);
+    markGestureAttemptRejected(c.capsule_id);
     const res = markGestureAttemptRejected(c.capsule_id);
-    expect(res.capsule?.attempt_count).toBe(2);
+    expect(res.capsule?.attempt_count).toBe(3);
     expect(res.capsule?.status).toBe("manual_fallback");
     // manual_fallback is a waiting state — it can still resolve to cleared.
     expect(isTerminalVisualGestureStatus("manual_fallback")).toBe(false);
     const cleared = markGestureCapsuleCleared(c.capsule_id);
     expect(cleared.ok).toBe(true);
     expect(cleared.capsule?.status).toBe("cleared");
+  });
+});
+
+describe("guided hold ladder (recommendedHoldMsForAttempt)", () => {
+  it("steps 5s → 10s → 15s and clamps past the last rung", () => {
+    expect(GESTURE_HOLD_TARGETS_MS).toEqual([5_000, 10_000, 15_000]);
+    expect(recommendedHoldMsForAttempt(0)).toBe(5_000);
+    expect(recommendedHoldMsForAttempt(1)).toBe(10_000);
+    expect(recommendedHoldMsForAttempt(2)).toBe(15_000);
+    // Clamp: an out-of-range / negative index never indexes past the ladder.
+    expect(recommendedHoldMsForAttempt(3)).toBe(15_000);
+    expect(recommendedHoldMsForAttempt(99)).toBe(15_000);
+    expect(recommendedHoldMsForAttempt(-1)).toBe(5_000);
+  });
+
+  it("the safe view's recommended_hold_ms advances with attempt_count (UI prompts a longer hold)", () => {
+    // Mirrors the inconclusive → next-longer-hold loop: each burned attempt makes
+    // the next recommended hold longer (5s after attempt 0, 10s after 1, 15s after 2).
+    const c = createVisualGestureCapsule(BASE);
+    expect(getSafeVisualGestureCapsuleView(c).recommended_hold_ms).toBe(5_000);
+    markGestureAttemptRejected(c.capsule_id);
+    expect(getSafeVisualGestureCapsuleView(c).recommended_hold_ms).toBe(10_000);
+    markGestureAttemptRejected(c.capsule_id);
+    expect(getSafeVisualGestureCapsuleView(c).recommended_hold_ms).toBe(15_000);
   });
 });
 

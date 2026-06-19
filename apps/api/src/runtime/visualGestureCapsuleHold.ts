@@ -57,8 +57,8 @@ import {
 } from "./visualGestureCapsuleRelay.js";
 import {
   recheckVisualGestureCapsule,
-  combineRecheckPresence,
-  geometryObstructionPresent,
+  classifyReleasePresence,
+  geometryObstructionStrength,
 } from "./visualGestureCapsuleRecheck.js";
 import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
 import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
@@ -68,11 +68,12 @@ import { logHvDebug } from "./humanVerificationState.js";
 
 /**
  * Hard ceiling on a single VGC press-hold. Shorter than the DOM relay's 30s
- * ceiling: a screenshot frame goes stale fast and most press-hold walls clear
- * within a few seconds, so 12s bounds the live hold while staying within the
- * 10–12s window product asked for. Provider-agnostic — no provider timing.
+ * ceiling, but large enough to accommodate the longest rung of the guided hold
+ * ladder (15s) plus reaction headroom: a user prompted to "hold for 15 seconds"
+ * may release a beat late, so the ceiling sits at 20s. Provider-agnostic — the
+ * ladder timing comes from GESTURE_HOLD_TARGETS_MS, never from provider internals.
  */
-export const VGC_HOLD_MAX_DURATION_MS = 12_000;
+export const VGC_HOLD_MAX_DURATION_MS = 20_000;
 
 /** In-hold cleared-probe cadence. LOW-frequency, armed only after the min hold. */
 export const VGC_IN_HOLD_PROBE_INTERVAL_MS = 1_000;
@@ -84,10 +85,17 @@ export type VgcHoldPresence = "present" | "absent" | "unknown";
 
 /**
  * Run the SAME page-level presence detection the recheck slice uses, but on an
- * ALREADY-OPEN hold client (no second connection). Unions the structural-HV and
- * geometry-obstruction probes; both IIFEs reduce geometry to booleans inside the
- * page, so control_box / rects / vw/vh / page text never escape. Any throw →
- * "unknown" (never clears, never burns) so a flaky probe can't drop the hold.
+ * ALREADY-OPEN hold client (no second connection). Combines the structural-HV and
+ * geometry-obstruction probes via classifyReleasePresence; both IIFEs reduce
+ * geometry to booleans inside the page, so control_box / rects / vw/vh / page text
+ * never escape. Any throw → "unknown" (never clears, never burns) so a flaky probe
+ * can't drop the hold.
+ *
+ * Mirrors the recheck clear discipline: it returns "absent" (→ in-hold auto-clear
+ * or pre-press challenge_gone) ONLY on a CONFIDENT healthy reading — HV absent AND
+ * no geometry obstruction. A weak/ambiguous reading (a lone pointer interceptor)
+ * or a probe that could read only one detector keeps the hold alive ("unknown"),
+ * so a still-active wall is never released prematurely.
  */
 export async function probeHoldPresenceOnClient(
   client: Pick<CdpPageClient, "evaluate">,
@@ -100,14 +108,19 @@ export async function probeHoldPresenceOnClient(
   } catch {
     hvPresent = undefined;
   }
-  let geoPresent: boolean | undefined;
+  let geoStrength: "none" | "weak" | "strong" | undefined;
   try {
     const geoRaw = await client.evaluate(buildAmbiguousVisualObstructionExpr());
-    geoPresent = geometryObstructionPresent(geoRaw);
+    geoStrength = geometryObstructionStrength(geoRaw);
   } catch {
-    geoPresent = undefined;
+    geoStrength = undefined;
   }
-  return combineRecheckPresence(hvPresent, geoPresent);
+  const decision = classifyReleasePresence(hvPresent, geoStrength);
+  // Only a confident healthy "absent" releases; "present" keeps holding; a
+  // weak_ambiguous / unknown reading is reported as "unknown" (keep holding).
+  if (decision === "absent") return "absent";
+  if (decision === "present") return "present";
+  return "unknown";
 }
 
 export interface VgcHoldDeps {
@@ -452,15 +465,16 @@ export function heartbeatVgcHoldSession(capsuleId: string): HeartbeatVgcHoldResu
 export interface EndVgcHoldResult {
   ok: true;
   /** `too_short` when released under the min threshold — no attempt burned. */
-  hold_state: "cleared" | "still_present" | "unknown" | "too_short" | "no_hold";
+  hold_state: "cleared" | "still_present" | "inconclusive" | "unknown" | "too_short" | "no_hold";
 }
 
 /**
  * User released (or a timer already released): release the browser mouse
  * immediately (idempotent), then resolve. A sub-threshold hold is `too_short`
  * (no recheck, NO attempt burned). Otherwise — unless an in-hold probe already
- * cleared it — run the definitive post-release recheck (cleared / still_present
- * → attempt burn / unknown). The mouse is always released before this returns.
+ * cleared it — run the definitive post-release recheck, whose outcome flows
+ * straight through (`cleared` / `still_present` / `inconclusive` → attempt burn /
+ * `unknown` → no burn). The mouse is always released before this returns.
  */
 export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldResult> {
   const hold = vgcHoldSessions.get(capsuleId);

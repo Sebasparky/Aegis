@@ -116,7 +116,8 @@ describe("recheckVisualGestureCapsule", () => {
   it("manual_fallback → invalid_state, probe not called", async () => {
     enable();
     const capsule = createVisualGestureCapsule(BASE);
-    // Burn both attempts to reach manual_fallback (max_attempts = 2).
+    // Burn all three ladder attempts to reach manual_fallback (max_attempts = 3).
+    markGestureAttemptRejected(capsule.capsule_id);
     markGestureAttemptRejected(capsule.capsule_id);
     markGestureAttemptRejected(capsule.capsule_id);
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("manual_fallback");
@@ -163,7 +164,7 @@ describe("recheckVisualGestureCapsule", () => {
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("rejected_retryable");
   });
 
-  it("second present after prior rejection → manual_fallback, attempt_count increments", async () => {
+  it("repeated present steps rejected_retryable → manual_fallback across the 3-rung ladder", async () => {
     enable();
     const capsule = seedCheckingCapsule();
     const probe = probeReturning({ ok: true, presence: "present" });
@@ -171,15 +172,19 @@ describe("recheckVisualGestureCapsule", () => {
     const first = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
     expect(first).toMatchObject({ ok: true, status: "rejected_retryable", attempt_count: 1 });
 
-    // rejected_retryable is an allowed recheck state — a second positive probe
-    // exhausts the attempt budget and falls back to manual_fallback.
+    // rejected_retryable is an allowed recheck state — the second positive probe
+    // burns another attempt but the ladder still has a rung left.
     const second = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
-    expect(second).toEqual({
+    expect(second).toMatchObject({ ok: true, status: "rejected_retryable", attempt_count: 2 });
+
+    // The third positive probe exhausts the attempt budget → manual_fallback.
+    const third = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe });
+    expect(third).toEqual({
       ok: true,
       capsule_id: capsule.capsule_id,
       outcome: "still_present",
       status: "manual_fallback",
-      attempt_count: 2,
+      attempt_count: 3,
     });
     expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("manual_fallback");
   });
@@ -301,9 +306,11 @@ describe("recheckVisualGestureCapsule", () => {
     expect(probe.mock).toHaveBeenCalledTimes(1); // strong is decisive — no retry
   });
 
-  it("weak geometry-only false positive after release → retries, then clears, NO attempt burned", async () => {
-    // The QA bug: a lone pointer interceptor on the now-healthy page reads weak on
-    // both probes. After the retry settle it must clear, not burn an attempt.
+  it("weak geometry-only after release → retries, then INCONCLUSIVE (never cleared), attempt burned", async () => {
+    // The QA bug regression: a lone pointer interceptor reads weak on both probes.
+    // This is NOT proof the wall cleared (a still-active opaque wall reads the same),
+    // so it must NEVER clear. It resolves `inconclusive` — burning one attempt to
+    // step the guided hold up — but the capsule stays active (rejected_retryable).
     enable();
     const capsule = seedCheckingCapsule();
     const probe = probeSequence(
@@ -316,12 +323,32 @@ describe("recheckVisualGestureCapsule", () => {
     expect(res).toEqual({
       ok: true,
       capsule_id: capsule.capsule_id,
-      outcome: "cleared",
-      status: "cleared",
-      attempt_count: 0,
+      outcome: "inconclusive",
+      status: "rejected_retryable",
+      attempt_count: 1,
     });
     expect(probe.mock).toHaveBeenCalledTimes(2); // first weak → one retry
-    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("cleared");
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
+  });
+
+  it("repeated inconclusive rechecks step the ladder to manual_fallback (never cleared)", async () => {
+    // Weak-on-both reads inconclusive each round; three rounds exhaust the ladder
+    // and hand off to the visible browser — at no point is the capsule cleared.
+    enable();
+    const capsule = seedCheckingCapsule();
+    const weakWeak = (): VisualGestureCapsulePresenceProbe =>
+      probeSequence(
+        { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+        { ok: true, presence: "present", hv_present: false, geo_strength: "weak" },
+      );
+
+    const r1 = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe: weakWeak() });
+    expect(r1).toMatchObject({ outcome: "inconclusive", status: "rejected_retryable", attempt_count: 1 });
+    const r2 = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe: weakWeak() });
+    expect(r2).toMatchObject({ outcome: "inconclusive", status: "rejected_retryable", attempt_count: 2 });
+    const r3 = await recheck({ capsuleId: capsule.capsule_id, cdpUrl: CDP, probe: weakWeak() });
+    expect(r3).toMatchObject({ outcome: "inconclusive", status: "manual_fallback", attempt_count: 3 });
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).not.toBe("cleared");
   });
 
   it("weak geometry then STRONG on retry → still_present (real wall confirmed)", async () => {
@@ -470,10 +497,14 @@ describe("classifyReleasePresence (HV + geometry-strength decision)", () => {
     expect(classifyReleasePresence(undefined, "weak")).toBe("weak_ambiguous");
   });
 
-  it("hv absent or no geometry obstruction → absent", () => {
+  it("CONFIDENT healthy reading from BOTH detectors → absent (clear)", () => {
     expect(classifyReleasePresence(false, "none")).toBe("absent");
-    expect(classifyReleasePresence(false, undefined)).toBe("absent");
-    expect(classifyReleasePresence(undefined, "none")).toBe("absent");
+  });
+
+  it("only ONE side readable → unknown (never clears on a half-read)", () => {
+    // Strict AND: a probe that could read only HV, or only geometry, must not clear.
+    expect(classifyReleasePresence(false, undefined)).toBe("unknown");
+    expect(classifyReleasePresence(undefined, "none")).toBe("unknown");
   });
 
   it("neither verdict usable → unknown", () => {

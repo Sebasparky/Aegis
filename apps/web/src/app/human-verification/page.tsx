@@ -39,15 +39,15 @@ const POLL_MS = 2500;
 const HEARTBEAT_INTERVAL_MS = 300;
 const ELAPSED_TICK_MS = 100;
 
-// Guided fixed-duration attempts. Generic Antigen attempt durations — NOT tied
-// to any provider's timing. Attempt 1 asks for a 5s hold, attempt 2 a longer
-// 10s hold; after both, the user is sent to the visible browser (manual_fallback).
-// The user always releases physically once prompted — Antigen never extends or
-// replays the hold past release.
-const ATTEMPT_HOLD_TARGETS_MS = [5000, 10000] as const;
-function targetForAttempt(attemptCount: number): number {
-  const i = Math.min(Math.max(attemptCount, 0), ATTEMPT_HOLD_TARGETS_MS.length - 1);
-  return ATTEMPT_HOLD_TARGETS_MS[i];
+// Guided fixed-duration attempts. The duration ladder (generic Antigen timing —
+// NOT tied to any provider) lives server-side and arrives as `recommended_hold_ms`
+// on each capsule view: attempt 1 asks for a 5s hold, attempt 2 a longer 10s hold,
+// attempt 3 a 15s hold; after the ladder is exhausted the user is sent to the
+// visible browser (manual_fallback). The user always releases physically once
+// prompted — Antigen never extends or replays the hold past release.
+const DEFAULT_HOLD_MS = 5000;
+function holdTargetMs(view: { recommended_hold_ms?: number } | null | undefined): number {
+  return view?.recommended_hold_ms ?? DEFAULT_HOLD_MS;
 }
 
 // Dev-only affordance gate. Next.js inlines process.env.NODE_ENV in client code;
@@ -231,6 +231,15 @@ export default function HumanVerificationPage() {
         await loadScreenshot(capsuleId);
         return;
       }
+      if (res.recheck === "inconclusive") {
+        // Weak/ambiguous — NOT cleared. Prompt a longer hold; never claim presence.
+        setStatusMsg(
+          `Couldn't confirm it cleared — try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold. (attempt ${res.attempt_count}/${selected?.max_attempts ?? "?"})`,
+        );
+        setHint("The frame may have changed — recapture to see the current view.");
+        await loadScreenshot(capsuleId);
+        return;
+      }
       // unknown / probe could not decide.
       setStatusMsg("Could not confirm yet. Try Recheck or Recapture.");
       setHint(null);
@@ -367,13 +376,21 @@ export default function HumanVerificationPage() {
         } else if (res.hold_state === "too_short") {
           // No attempt burned — guide the user to redo the same attempt fully.
           setStatusMsg(
-            `That was too short — hold for the full ${Math.round(targetForAttempt(res.data.attempt_count) / 1000)} seconds.`,
+            `That was too short — hold for the full ${Math.round(holdTargetMs(res.data) / 1000)} seconds.`,
           );
           setHint(null);
         } else if (res.hold_state === "still_present") {
-          // attempt_count is post-increment, so this picks the longer next target.
+          // res.data is post-recheck, so recommended_hold_ms is the longer next rung.
           setStatusMsg(
-            `Still present. Try a longer ${Math.round(targetForAttempt(res.data.attempt_count) / 1000)}-second hold.`,
+            `Still present. Try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold.`,
+          );
+          setHint("The frame may have changed — recapture to see the current view.");
+          await loadScreenshot(capsuleId);
+        } else if (res.hold_state === "inconclusive") {
+          // Couldn't confirm the wall cleared — do NOT claim presence confirmed.
+          // res.data is post-recheck, so recommended_hold_ms is the longer next rung.
+          setStatusMsg(
+            `Couldn't confirm it cleared — try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold.`,
           );
           setHint("The frame may have changed — recapture to see the current view.");
           await loadScreenshot(capsuleId);
@@ -408,8 +425,8 @@ export default function HumanVerificationPage() {
           setStatusMsg("Verification cleared — finishing up…");
           void finalizeHold(capsuleId);
         } else if (res.hold_state === "released_fail_closed") {
-          // The browser hold dropped (heartbeat gap or the 12s ceiling). End and
-          // recheck — the wall may still have cleared during the hold.
+          // The browser hold dropped (heartbeat gap or the max-duration ceiling).
+          // End and recheck — the wall may still have cleared during the hold.
           void finalizeHold(capsuleId);
         }
       } catch {
@@ -432,7 +449,7 @@ export default function HumanVerificationPage() {
     if (IS_DEV) setMarkerPoint({ fx: pt.fx, fy: pt.fy });
 
     const capsuleId = selected.capsule_id;
-    const targetMs = targetForAttempt(selected.attempt_count);
+    const targetMs = holdTargetMs(selected);
     // Capture the pointer so release/leave outside the image still ends the hold.
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -761,7 +778,7 @@ export default function HumanVerificationPage() {
                   only while the user physically holds. */}
               {holding &&
                 (() => {
-                  const targetMs = targetForAttempt(selected.attempt_count);
+                  const targetMs = holdTargetMs(selected);
                   const reached = holdElapsedMs >= targetMs;
                   const remainingS = Math.max(0, Math.ceil((targetMs - holdElapsedMs) / 1000));
                   return (

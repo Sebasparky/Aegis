@@ -34,6 +34,7 @@ import {
   cancelVgcHoldSession,
   hasLiveVgcHoldSession,
   clearVgcHoldSessionsForTests,
+  probeHoldPresenceOnClient,
   VGC_HOLD_MAX_DURATION_MS,
   type VgcHoldPresence,
   type VgcHoldDeps,
@@ -353,5 +354,59 @@ describe("safety invariants", () => {
     for (const banned of ["cssX", "cssY", '"fx"', '"fy"', "1280", "800", "640", "400", "localhost:9222", "cdp_url", "point"]) {
       expect(raw).not.toContain(banned);
     }
+  });
+});
+
+describe("probeHoldPresenceOnClient (in-hold / pre-press clear discipline)", () => {
+  // The function runs the HV probe first, then the geometry probe, on a single
+  // already-open client. This fake replays the HV verdict on the first evaluate
+  // and the geometry verdict on the second (or throws to simulate a geo failure).
+  function probeClient(hv: unknown, geo: unknown | "throw") {
+    let call = 0;
+    return {
+      async evaluate() {
+        const idx = call++;
+        if (idx === 0) return hv;
+        if (geo === "throw") throw new Error("geometry probe boom");
+        return geo;
+      },
+    };
+  }
+  const NO_OBSTRUCTION = {
+    denial_text_seen: false,
+    viewport_scrim_seen: false,
+    large_centered_overlay_seen: false,
+    visible_inaccessible_iframe_seen: false,
+    near_zero_interactive: false,
+    pointer_interceptor_seen: false,
+  };
+
+  it("CONFIDENT healthy reading (HV absent + no obstruction) → absent (release/clear)", async () => {
+    const res = await probeHoldPresenceOnClient(probeClient({ present: false }, NO_OBSTRUCTION));
+    expect(res).toBe("absent");
+  });
+
+  it("lone pointer interceptor (weak) → unknown (keep holding, never auto-clears)", async () => {
+    const res = await probeHoldPresenceOnClient(
+      probeClient({ present: false }, { ...NO_OBSTRUCTION, pointer_interceptor_seen: true }),
+    );
+    expect(res).toBe("unknown");
+  });
+
+  it("HV absent but geometry probe failed → unknown (a half-read never clears)", async () => {
+    const res = await probeHoldPresenceOnClient(probeClient({ present: false }, "throw"));
+    expect(res).toBe("unknown");
+  });
+
+  it("structural HV present → present (keep holding)", async () => {
+    const res = await probeHoldPresenceOnClient(probeClient({ present: true }, NO_OBSTRUCTION));
+    expect(res).toBe("present");
+  });
+
+  it("strong geometry obstruction → present (keep holding)", async () => {
+    const res = await probeHoldPresenceOnClient(
+      probeClient({ present: false }, { ...NO_OBSTRUCTION, large_centered_overlay_seen: true }),
+    );
+    expect(res).toBe("present");
   });
 });

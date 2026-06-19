@@ -60,8 +60,27 @@ export const VISUAL_GESTURE_CAPSULE_TTL_MS = HUMAN_VERIFICATION_TTL_MS;
  */
 export const VISUAL_GESTURE_SCREENSHOT_FRAME_TTL_MS = 45_000;
 
-/** Max gesture attempts per handoff before manual fallback (design §8). */
-export const MAX_GESTURE_ATTEMPTS = 2;
+/**
+ * Guided press-hold duration ladder (generic Antigen timing — NEVER tied to any
+ * provider). Each successive attempt prompts a longer hold; once the ladder is
+ * exhausted the capsule falls back to manual completion in the visible browser.
+ * The array length is the single source of truth for `MAX_GESTURE_ATTEMPTS`, so
+ * the two never drift.
+ */
+export const GESTURE_HOLD_TARGETS_MS = [5_000, 10_000, 15_000] as const;
+
+/**
+ * Recommended hold duration for the given (0-based) attempt. Clamps to the last
+ * rung. Derived ONLY from the attempt index — carries no provider, geometry, or
+ * screenshot data, so it is safe to surface in the agent/UI-safe view.
+ */
+export function recommendedHoldMsForAttempt(attemptCount: number): number {
+  const i = Math.min(Math.max(attemptCount, 0), GESTURE_HOLD_TARGETS_MS.length - 1);
+  return GESTURE_HOLD_TARGETS_MS[i];
+}
+
+/** Max gesture attempts per handoff before manual fallback (= ladder length). */
+export const MAX_GESTURE_ATTEMPTS = GESTURE_HOLD_TARGETS_MS.length;
 
 /**
  * Terminal statuses. `manual_fallback` is intentionally NOT terminal — it is a
@@ -492,6 +511,12 @@ export interface SafeVisualGestureCapsuleView {
   supported_gestures: VisualGestureKind[];
   attempt_count: number;
   max_attempts: number;
+  /**
+   * Recommended hold duration (ms) for the CURRENT attempt — generic guided-ladder
+   * timing derived only from `attempt_count` (5s → 10s → 15s). Carries no provider,
+   * geometry, or screenshot data. The UI uses it to prompt "hold for N seconds".
+   */
+  recommended_hold_ms: number;
   domain: string;
   page_url?: string;
   expires_at: string;
@@ -520,6 +545,7 @@ export function getSafeVisualGestureCapsuleView(
     supported_gestures: capsule.supported_gestures,
     attempt_count: capsule.attempt_count,
     max_attempts: capsule.max_attempts,
+    recommended_hold_ms: recommendedHoldMsForAttempt(capsule.attempt_count),
     domain: capsule.domain,
     ...(capsule.page_url ? { page_url: capsule.page_url } : {}),
     expires_at: capsule.expires_at,

@@ -805,6 +805,39 @@ function hvElementCountBucket(n: number): string {
 }
 
 /**
+ * Dev-only attribution for WHY a screen-level HV wall did NOT mint on a snapshot.
+ * Reports the EARLIEST failed gate so a live miss is self-explaining without the
+ * classifier loosening. Reads only the already-sanitized, value-free `screenHv`
+ * signals (booleans/enum) — no text, coords, or DOM. `"none"` = detected (not a
+ * failure). `sanitization_dropped` is folded into `not_plumbed` at this layer
+ * (we only ever see the post-sanitize `screenHv`); distinguishing it would need a
+ * flag from the bundle extractor — deferred, not required for this diagnosis.
+ */
+type ScreenHvFailureReason =
+  | "disabled"
+  | "no_scrim"
+  | "no_hv_phrase"
+  | "no_foreground_container"
+  | "no_press_hold_affordance"
+  | "sanitization_dropped"
+  | "not_plumbed"
+  | "unknown"
+  | "none";
+
+function deriveScreenHvFailureReason(
+  s: ScreenHvWallSignals | undefined,
+): ScreenHvFailureReason {
+  if (!isHumanVerificationEnabled()) return "disabled";
+  if (s === undefined) return "not_plumbed"; // eval threw/timed out or sanitize rejected
+  if (s.wall) return "none"; // detected — not a failure
+  if (!s.viewport_scrim_seen) return "no_scrim"; // step-1 blocker (fixedCoverage>=0.5) failed
+  if (!s.centered_modal_seen) return "no_foreground_container";
+  if (!s.hv_phrase_seen && !s.press_hold_affordance_seen) return "no_hv_phrase";
+  if (s.hv_phrase_seen && !s.press_hold_affordance_seen) return "no_press_hold_affordance";
+  return "unknown"; // scrim + phrase present, but hvTypeFromScan still returned null
+}
+
+/**
  * No-progress live HV backstop. Called when a ref-based action is about to return
  * a NO_PROGRESS_ACTION_FAIL_CODES 422 (stale / page-changed / out-of-viewport /
  * realization failure). Runs the live page-level wall probe; if a structural wall
@@ -6059,6 +6092,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           screen_hv_phrase_seen: screenHv?.hv_phrase_seen === true,
           screen_hv_top_layer_dialog_seen: screenHv?.top_layer_dialog_seen === true,
           screen_hv_created_capsule: screenHvMinted,
+          screen_hv_failure_reason: deriveScreenHvFailureReason(screenHv),
         };
         // Only run the extra debug probe when production actually attempted —
         // never on clean snapshots — so it can reveal WHICH gate failed.
@@ -6320,6 +6354,38 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             }
           }
         }
+      }
+
+      // ── Always-on snapshot HV gate telemetry (dev-only; ANTIGEN_HV_DEBUG) ──
+      // The rich `hvDebug` object above is only attached to the 200 RESPONSE BODY
+      // (human_verification_debug). When a snapshot does NOT mint (the preserved-
+      // background wall case), nothing reaches the LOG stream — exactly why a live
+      // screen-HV miss was invisible while `no_progress_backstop` lines showed up.
+      // This single console line emits the screen-HV consideration on EVERY snapshot
+      // (mint or not) so the failing sub-gate is attributable from logs alone.
+      // Booleans/enums/buckets only — never text, selectors, coords, iframe src,
+      // screenshots, target ids, or raw DOM. Byte-identical when the flag is off.
+      if (isHvDebugEnabled()) {
+        logHvActionDebug({
+          scope: "snapshot_hv_gate",
+          tool: "antigen_snapshot",
+          hv_member_present: !!hvMember,
+          hv_wall_hint: hvWallHint,
+          screen_hv_considered: !hvMember,
+          screen_hv_detected: screenHv?.wall === true,
+          screen_hv_challenge_type: screenHv?.challenge_type ?? "none",
+          screen_viewport_scrim_seen: screenHv?.viewport_scrim_seen === true,
+          screen_centered_modal_seen: screenHv?.centered_modal_seen === true,
+          screen_press_hold_affordance_seen: screenHv?.press_hold_affordance_seen === true,
+          screen_hv_phrase_seen: screenHv?.hv_phrase_seen === true,
+          screen_top_layer_dialog_seen: screenHv?.top_layer_dialog_seen === true,
+          page_wall_attempted: pageWallAttempted,
+          ambiguous_gate_open: hvDebug?.ambiguous_fallback_considered === true,
+          element_count_bucket: hvElementCountBucket(elements.length),
+          returned_409: !!snapshotMintedHv,
+          created_capsule: !!snapshotMintedHv,
+          screen_hv_failure_reason: deriveScreenHvFailureReason(screenHv),
+        });
       }
     }
 

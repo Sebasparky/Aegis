@@ -948,6 +948,7 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
     "screen_hv_phrase_seen",
     "screen_hv_top_layer_dialog_seen",
     "screen_hv_created_capsule",
+    "screen_hv_failure_reason",
   ]);
 
   function withEnv(
@@ -1020,6 +1021,9 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
       expect(dbg.page_wall_probe_reason).toBe("low_element_count");
       expect(dbg.page_wall_probe_result).toBe("null");
       expect(dbg.page_wall_probe_error_code).toBe("cdp_connect_failed");
+      // No live screenHv in this harness (bundle mock omits it) → the attribution
+      // reports the eval-absent gate, NOT a false "no_scrim".
+      expect(dbg.screen_hv_failure_reason).toBe("not_plumbed");
     });
   });
 });
@@ -1241,5 +1245,145 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — screen-HV visible wall
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.element_count).toBe(25);
+  });
+});
+
+// ─── Always-on snapshot_hv_gate console telemetry ────────────────────────────
+// The rich human_verification_debug object only rides the 200 RESPONSE BODY; on a
+// NON-minting snapshot (the live B&BW preserved-background miss) nothing reached
+// the LOG stream, so the failing screen-HV sub-gate was invisible from logs. This
+// suite proves the dedicated `[HvDebug] scope=snapshot_hv_gate` line emits on EVERY
+// snapshot HV consideration (mint or not) with the correct screen_hv_failure_reason
+// attribution — and stays silent when ANTIGEN_HV_DEBUG is off.
+describe("POST /api/agent/v1/runtime/browser-snapshot — snapshot_hv_gate telemetry", () => {
+  const prevVgc = process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+  const prevHv = process.env.ANTIGEN_HUMAN_VERIFICATION;
+  const prevDebug = process.env.ANTIGEN_HV_DEBUG;
+
+  const HIGH_ELEMENT_CANDIDATES: AntigenSnapshotCandidate[] = Array.from({ length: 25 }, (_, i) =>
+    candidate({ name: `Product ${i}`, normalized_name: `product ${i}`, href: `/p/${i}`, href_path: `/p/${i}` }),
+  );
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HUMAN_VERIFICATION = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    clearVisualGestureCapsulesForTests();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    clearVisualGestureCapsulesForTests();
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    restore("ANTIGEN_VISUAL_GESTURE_CAPSULE", prevVgc);
+    restore("ANTIGEN_HUMAN_VERIFICATION", prevHv);
+    restore("ANTIGEN_HV_DEBUG", prevDebug);
+  });
+
+  // Parse the single `scope=snapshot_hv_gate` [HvDebug] line into a key→value map.
+  function gateLine(): Record<string, string> | undefined {
+    for (const call of logSpy.mock.calls) {
+      const line = call.map(String).join(" ");
+      if (!line.includes("[HvDebug]") || !line.includes("scope=snapshot_hv_gate")) continue;
+      const out: Record<string, string> = {};
+      for (const tok of line.replace("[HvDebug]", "").trim().split(/\s+/)) {
+        const eq = tok.indexOf("=");
+        if (eq > 0) out[tok.slice(0, eq)] = tok.slice(eq + 1);
+      }
+      return out;
+    }
+    return undefined;
+  }
+
+  async function snapshot() {
+    return server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+  }
+
+  it("emits screen_hv_failure_reason=no_scrim on a 200 miss (the B&BW preserved-background shape)", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: {
+        wall: false,
+        viewport_scrim_seen: false,
+        centered_modal_seen: false,
+        press_hold_affordance_seen: false,
+        hv_phrase_seen: false,
+        top_layer_dialog_seen: false,
+      },
+    });
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    const g = gateLine();
+    expect(g).toBeDefined();
+    expect(g!.screen_hv_detected).toBe("false");
+    expect(g!.screen_viewport_scrim_seen).toBe("false");
+    expect(g!.created_capsule).toBe("false");
+    expect(g!.returned_409).toBe("false");
+    expect(g!.screen_hv_failure_reason).toBe("no_scrim");
+  });
+
+  it("emits screen_hv_failure_reason=no_hv_phrase when a scrim+card are present but no HV phrase", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: {
+        wall: false,
+        viewport_scrim_seen: true,
+        centered_modal_seen: true,
+        press_hold_affordance_seen: false,
+        hv_phrase_seen: false,
+        top_layer_dialog_seen: false,
+      },
+    });
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    expect(gateLine()!.screen_hv_failure_reason).toBe("no_hv_phrase");
+  });
+
+  it("emits screen_hv_failure_reason=none + created_capsule=true on a minted wall (409)", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: {
+        wall: true,
+        challenge_type: "press_and_hold",
+        viewport_scrim_seen: true,
+        centered_modal_seen: true,
+        press_hold_affordance_seen: true,
+        hv_phrase_seen: true,
+        top_layer_dialog_seen: false,
+      },
+    });
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    const g = gateLine();
+    expect(g).toBeDefined();
+    expect(g!.screen_hv_detected).toBe("true");
+    expect(g!.created_capsule).toBe("true");
+    expect(g!.returned_409).toBe("true");
+    expect(g!.screen_hv_failure_reason).toBe("none");
+  });
+
+  it("emits NO snapshot_hv_gate line when ANTIGEN_HV_DEBUG is off", async () => {
+    process.env.ANTIGEN_HV_DEBUG = "false";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: { wall: false, viewport_scrim_seen: false, centered_modal_seen: false, press_hold_affordance_seen: false, hv_phrase_seen: false, top_layer_dialog_seen: false },
+    });
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    expect(gateLine()).toBeUndefined();
   });
 });

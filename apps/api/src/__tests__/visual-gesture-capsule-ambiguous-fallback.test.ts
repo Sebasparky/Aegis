@@ -769,7 +769,7 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
 
 // ── Snapshot endpoint no-structural-wall branch ───────────────────────────────
 describe("ambiguous fallback — snapshot endpoint", () => {
-  it("(3-snap) zero-ref access-denied + VGC ON surfaces human_verification + visual_gesture_capsule", async () => {
+  it("(3-snap) zero-ref access-denied + VGC ON fails closed with HUMAN_VERIFICATION_REQUIRED + a minted VGC", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
     // Zero extracted candidates → the full-denial shape (<= PAGE_HV_PROBE_MAX).
@@ -783,13 +783,15 @@ describe("ambiguous fallback — snapshot endpoint", () => {
 
     const res = await snapshot();
 
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data;
-    expect(data.recommended_next_step).toBe("human_presence_relay_required");
-    expect(data.human_verification.user_presence_required).toBe(true);
-    expect(data.human_verification.request_id).toMatch(/^hvr_/);
-    expect(data.visual_gesture_capsule.available).toBe(true);
-    expect(data.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
+    // A freshly minted capsule fails the snapshot closed (409) — the SAME shape the
+    // action-triggered path emits — so the user can relay the gesture immediately.
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.request_id).toMatch(/^hvr_/);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
     expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
     expect(listActiveVisualGestureCapsules()).toHaveLength(1);
   });
@@ -891,10 +893,12 @@ describe("ambiguous fallback — snapshot endpoint", () => {
 
     const res = await snapshot();
 
-    expect(res.statusCode).toBe(200);
-    const data = res.json().data;
-    expect(data.human_verification.user_presence_required).toBe(true);
-    expect(data.visual_gesture_capsule.available).toBe(true);
+    // Minted capsule → fail closed with 409 (was 200 before the snapshot-time fix).
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
     expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
     expect(listActiveVisualGestureCapsules()).toHaveLength(1);
   });
@@ -919,6 +923,92 @@ describe("ambiguous fallback — snapshot endpoint", () => {
     expect(res.json().data).not.toHaveProperty("visual_gesture_capsule");
     // The gate opened (marker present) so the probe ran, but the classifier held.
     expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  // ── Structural page-level wall at snapshot time (the full-page denied fix) ─────
+  it("(structural-snap) page-level wall at snapshot mints a VGC + fails closed with 409 (ambiguous probe not consulted)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Zero candidates — the full-page "Access denied" / press-and-hold shape whose
+    // control lives in a cross-origin iframe.
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.challenge_type).toBe("press_and_hold");
+    expect(body.error.user_presence_required).toBe(true);
+    expect(body.error.purchase_authorized).toBe(false);
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.capsule_id).toMatch(/^vgc_/);
+    expect(body.error.visual_gesture_capsule.capsule.screenshot_available).toBe(true);
+    // The structural wall path handled it — the ambiguous probe never ran.
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(structural-snap-off) page-level wall at snapshot with VGC OFF stays 200 + synthesized surface, no capsule", async () => {
+    delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+
+    const res = await snapshot();
+
+    // VGC off → no mint → existing 200 synthesized-surface behavior (byte-identical).
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.recommended_next_step).toBe("human_presence_relay_required");
+    expect(data.page_level_human_verification).toBe(true);
+    expect(data.human_verification.user_presence_required).toBe(true);
+    expect(data).not.toHaveProperty("visual_gesture_capsule");
+    expect(
+      (data.active_surfaces ?? []).some((s: { surface_id?: string }) => s.surface_id === "surf_hv_page"),
+    ).toBe(true);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(structural-snap-leak) the 409 structural-wall body leaks no bytes/coords/viewport/cdp/session keys", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+    assertNoLeak(res.json());
+  });
+
+  it("(empty-snap) ordinary empty page (no wall, no denial) returns 200 element_count 0 and mints nothing", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(null);
+    // The gate opens (near-zero candidates) so the probe runs, but with no denial /
+    // iframe / geometry signal the classifier holds — and repeated_stale is NOT set
+    // at snapshot time (no action failed), so nothing mints.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.element_count).toBe(0);
+    expect(data.elements).toEqual([]);
+    expect(data).not.toHaveProperty("visual_gesture_capsule");
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 });

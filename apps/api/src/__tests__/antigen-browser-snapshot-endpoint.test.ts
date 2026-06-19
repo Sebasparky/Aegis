@@ -919,6 +919,25 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
     "top_doc_text_flags",
     "iframe_flags",
     "blocker_flags",
+    "overlay_intercept_flags",
+    "oopif_flags",
+    "would_classify_oopif",
+    // Ambiguous visual-obstruction fallback diagnostics (no-structural-wall branch).
+    // Booleans / enums / counts only — see HumanVerificationDebug. The capsule id is
+    // never emitted here; ambiguous_skip_reason: "fired" denotes a successful create.
+    "ambiguous_fallback_considered",
+    "ambiguous_skip_reason",
+    "ambiguous_element_count",
+    "ambiguous_hv_wall_hint",
+    "ambiguous_denial_text_seen",
+    "ambiguous_near_zero_interactive",
+    "ambiguous_visible_inaccessible_iframe_seen",
+    "ambiguous_large_centered_overlay_seen",
+    "ambiguous_viewport_scrim_seen",
+    "ambiguous_pointer_interceptor_seen",
+    "ambiguous_top_layer_dialog_seen",
+    "ambiguous_repeated_stale",
+    "ambiguous_created_capsule",
   ]);
 
   function withEnv(

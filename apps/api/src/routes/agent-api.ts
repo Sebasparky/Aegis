@@ -5849,6 +5849,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // Safe Visual Gesture Capsule view, set only by the ambiguous visual-obstruction
     // fallback (VGC flag on + concrete obstruction signal + no structural HV wall).
     let vgcSnapshotInfo: { available: true; capsule: SafeVisualGestureCapsuleView } | undefined;
+    // Set when THIS snapshot freshly minted a Visual Gesture Capsule (page-level
+    // structural wall OR ambiguous visual obstruction). When set, the snapshot fails
+    // closed with 409 HUMAN_VERIFICATION_REQUIRED instead of returning a 200 — the
+    // same shape the action-triggered path uses, so the user can relay the gesture in
+    // the Aegis UI immediately rather than on the next snapshot. The pre-extract guard
+    // (rejectIfVisualGestureCapsuleActive) already returned for pre-existing capsules,
+    // so any capsule reached here is new this call and safe to fail closed on.
+    let snapshotMintedHv:
+      | {
+          request: { request_id: string; status: string; challenge_type: string; domain: string };
+          vgc: { available: true; capsule: SafeVisualGestureCapsuleView };
+        }
+      | undefined;
     // Set when the detected challenge is a page-level full-page denial wall whose
     // control is inside a cross-origin iframe (zero candidate elements). Drives a
     // synthesized blocking active surface + manual-completion guidance.
@@ -5953,6 +5966,41 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           next_action: humanVerificationAgentNextAction(hvRequest),
           ...(hvRequest.page_level ? { page_level: true as const } : {}),
         };
+        // Page-level (opaque) wall ONLY: the control lives in an inaccessible
+        // cross-origin iframe (zero/near-zero candidates — the full-page denied /
+        // press-and-hold shape), so there is no DOM control_box for a live relay.
+        // When the VGC flag is on, mint a Visual Gesture Capsule + first redacted
+        // frame so the snapshot can fail closed with a screenshot-point relay — the
+        // SAME behavior as the action-triggered path (rejectNoProgressActionAs-
+        // HumanVerification). Fail-safe: the orchestrator never throws, and a failed
+        // create/capture leaves snapshotMintedHv undefined → the response degrades to
+        // the pre-VGC 200 synthesized-surface behavior (byte-identical when off).
+        // hvMember (a per-element overlay with a real control box) is deliberately
+        // excluded — it keeps the DOM live-relay path.
+        if (isPageLevel && isVisualGestureCapsuleEnabled() && session.cdp_url) {
+          const created = await createVisualGestureCapsuleForOpaqueHv({
+            humanVerificationRequestId: hvRequest.request_id,
+            browserSessionId: session.browser_session_id,
+            domain: hvDomain,
+            cdpUrl: session.cdp_url,
+            pageUrl: snapshot.url ?? "",
+            delegationId: delegation.id,
+            userId: MOCK_USER_ID,
+            reason: "opaque_hv_no_control_box",
+          });
+          if (created.ok) {
+            vgcSnapshotInfo = { available: true, capsule: created.capsule };
+            snapshotMintedHv = {
+              request: {
+                request_id: hvRequest.request_id,
+                status: hvRequest.status,
+                challenge_type: hvRequest.challenge_type,
+                domain: hvRequest.domain,
+              },
+              vgc: vgcSnapshotInfo,
+            };
+          }
+        }
       } else {
         // No structural HV wall. Ambiguous visual-obstruction fallback: a live page
         // may be visually blocked (opaque overlay / denial wall) without the DOM/ref
@@ -6047,6 +6095,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             next_action: humanVerificationAgentNextAction(r),
           };
           vgcSnapshotInfo = ambiguous.vgc;
+          // A capsule was freshly minted — fail closed with 409 below (same as the
+          // structural page-level wall and the action-triggered path) so the user can
+          // relay the gesture immediately rather than on the next snapshot.
+          snapshotMintedHv = {
+            request: {
+              request_id: r.request_id,
+              status: r.status,
+              challenge_type: r.challenge_type,
+              domain: r.domain,
+            },
+            vgc: ambiguous.vgc,
+          };
           // HV is now active for this session — the no-progress marker has served
           // its purpose and must not linger to re-probe later snapshots.
           clearActionNoProgress(session.browser_session_id);
@@ -6071,6 +6131,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           }
         }
       }
+    }
+
+    // Fail closed when THIS snapshot freshly minted a Visual Gesture Capsule (a
+    // full-page denied / press-and-hold wall at element_count 0, or an ambiguous
+    // visual obstruction). Return the canonical 409 HUMAN_VERIFICATION_REQUIRED with
+    // the safe capsule view — the SAME shape the action-triggered path emits — so the
+    // user relays the gesture in the Aegis UI now, not on a later snapshot. Subsequent
+    // snapshots short-circuit on the pre-extract guard (rejectIfVisualGestureCapsuleActive)
+    // until the capsule clears. No bytes/coords/cdp/refs leak — sendHumanVerification-
+    // Required + getSafeVisualGestureCapsuleView enforce that.
+    if (snapshotMintedHv) {
+      sendHumanVerificationRequired(
+        session,
+        reply,
+        "antigen_snapshot",
+        snapshotMintedHv.request,
+        snapshotMintedHv.vgc,
+      );
+      return;
     }
 
     timing.mark("record_store_and_pagemap");

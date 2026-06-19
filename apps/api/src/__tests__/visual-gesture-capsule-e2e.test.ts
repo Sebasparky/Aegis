@@ -486,11 +486,11 @@ describe("VGC backend E2E — A. happy path (opaque HV → capsule → screensho
 });
 
 describe("VGC backend E2E — B. retry path (recheck still_present)", () => {
-  it("first still_present → rejected_retryable, attempt_count 1; second → manual_fallback, attempt_count 2", async () => {
+  it("still_present rounds step rejected_retryable → manual_fallback across the 3-rung ladder", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     const capsuleId = await mintCapsuleViaOpaqueHv();
 
-    // Round 1: gesture → recheck still_present.
+    // Rounds 1 & 2: gesture → recheck still_present → rejected_retryable (attempts remain).
     await postGesture(capsuleId, { kind: "tap", fx: 0.5, fy: 0.5 });
     wireRecheckStillPresent();
     const r1 = await postRecheck(capsuleId);
@@ -501,15 +501,24 @@ describe("VGC backend E2E — B. retry path (recheck still_present)", () => {
     expect(b1.attempt_count).toBe(1);
     assertNoLeak(b1);
 
-    // Round 2: gesture again → recheck still_present → attempts exhausted.
     await postGesture(capsuleId, { kind: "press_hold", fx: 0.4, fy: 0.6, duration_ms: 1200 });
     const r2 = await postRecheck(capsuleId);
     expect(r2.statusCode).toBe(200);
     const b2 = r2.json();
     expect(b2.recheck).toBe("still_present");
-    expect(b2.status).toBe("manual_fallback");
+    expect(b2.status).toBe("rejected_retryable");
     expect(b2.attempt_count).toBe(2);
     assertNoLeak(b2);
+
+    // Round 3: final rung exhausts attempts → manual_fallback.
+    await postGesture(capsuleId, { kind: "press_hold", fx: 0.4, fy: 0.6, duration_ms: 1200 });
+    const r3 = await postRecheck(capsuleId);
+    expect(r3.statusCode).toBe(200);
+    const b3 = r3.json();
+    expect(b3.recheck).toBe("still_present");
+    expect(b3.status).toBe("manual_fallback");
+    expect(b3.attempt_count).toBe(3);
+    assertNoLeak(b3);
   });
 });
 

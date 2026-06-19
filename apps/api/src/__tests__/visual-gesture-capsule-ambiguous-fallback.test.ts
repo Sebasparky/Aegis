@@ -312,6 +312,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.ANTIGEN_HUMAN_VERIFICATION;
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+  delete process.env.ANTIGEN_HV_DEBUG;
 });
 
 // ── Pure classifier truth table (the over-fire guard) ─────────────────────────
@@ -1010,5 +1011,150 @@ describe("ambiguous fallback — snapshot endpoint", () => {
     expect(data.elements).toEqual([]);
     expect(data).not.toHaveProperty("visual_gesture_capsule");
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+});
+
+// ── Snapshot HV/VGC 409 attribution (ANTIGEN_HV_DEBUG) ────────────────────────
+// Phase 1 telemetry: every snapshot-minted (or reused) 409 carries a sanitized
+// `hv_debug` reason so the next healthy-/cart false positive is self-attributing.
+// Detection behavior is unchanged — these assert ONLY the added telemetry and that
+// it is absent / byte-identical when the flag is off, with no raw leaks.
+describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
+  // The exact suspected false-positive shape: high-element page + a lingering
+  // no-progress marker (synthetic repeated_stale) + weak geometry (lone
+  // pointer_interceptor). The telemetry must name it: ambiguous_fired,
+  // repeated_stale_source=no_progress_marker, geometry_strength=weak.
+  it("attributes the ambiguous weak-geometry mint (the /cart shape) when the flag is on", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // Lone pointer_interceptor (a sticky header on an otherwise-healthy page) — the
+    // weak shape. It only fires because the marker synthesizes repeated_stale.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    const dbg = res.json().error.hv_debug;
+    expect(dbg).toMatchObject({
+      scope: "snapshot_hv",
+      tool: "antigen_snapshot",
+      returned_409: true,
+      reason: "ambiguous_fired",
+      structural_wall_seen: false,
+      ambiguous_considered: true,
+      created_capsule: true,
+      no_progress_signal: true,
+      repeated_stale_source: "no_progress_marker",
+      geometry_strength: "weak",
+      pointer_interceptor_seen: true,
+      denial_text_seen: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+    // Bucket, never a raw count.
+    expect(dbg.element_count_bucket).toBe("4-20");
+    expect(dbg).not.toHaveProperty("element_count");
+  });
+
+  it("attributes the structural page-level wall mint", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.hv_debug).toMatchObject({
+      scope: "snapshot_hv",
+      reason: "structural_page_level_wall",
+      structural_wall_seen: true,
+      page_level: true,
+      ambiguous_considered: false,
+      created_capsule: true,
+    });
+  });
+
+  it("attributes the pre-extract reuse guard on the SECOND snapshot", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    // First snapshot mints a capsule (structural wall).
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+    const first = await snapshot();
+    expect(first.statusCode).toBe(409);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+
+    // Second snapshot short-circuits in the pre-extract guard — page state is never
+    // inspected; the reason names the reuse, not a fresh mint.
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.hv_debug).toMatchObject({
+      scope: "hv_active_guard",
+      tool: "antigen_snapshot",
+      reason: "reused_existing_capsule",
+      reused_existing_capsule: true,
+      created_capsule: false,
+    });
+    // The reuse path does not re-run the page probe.
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("emits NO hv_debug when the flag is off (byte-identical 409 body)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    // ANTIGEN_HV_DEBUG intentionally unset.
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).not.toHaveProperty("hv_debug");
+  });
+
+  it("a 409 carrying hv_debug still leaks no bytes/coords/viewport/cdp/session keys", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.hv_debug).toBeDefined();
+    assertNoLeak(res.json());
   });
 });

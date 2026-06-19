@@ -129,6 +129,7 @@ import {
   type SafeVisualGestureCapsuleView,
 } from "../runtime/visualGestureCapsule.js";
 import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
+import { geometryObstructionStrength } from "../runtime/visualGestureCapsuleRecheck.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
 import { executePaymentCardFillViaCDP, validateCardFillSelector, isAntigenRef, orderPaymentFillFields, isIframeCapablePaymentField } from "../runtime/paymentCardFill.js";
@@ -529,6 +530,12 @@ function sendHumanVerificationRequired(
   tool: string,
   request: { request_id: string; status: string; challenge_type: string; domain: string },
   visualGestureCapsule?: { available: true; capsule: SafeVisualGestureCapsuleView },
+  // Dev-only HV/VGC 409 attribution (ANTIGEN_HV_DEBUG). Booleans / enums / buckets
+  // only — never refs, coords, iframe srcs, capsule ids, or page text. Emitted to
+  // the [HvDebug] log here (the single 409 chokepoint, so it survives the snapshot
+  // early-return) and attached to the response body ONLY when the flag is on. When
+  // the flag is off this is a no-op and the payload is byte-identical.
+  hvDebug?: Record<string, string | number | boolean>,
 ): void {
   recordActionPreflight(session, tool, "returned_human_verification_required");
   recordBrowserTraceEvent(session.browser_session_id, {
@@ -537,6 +544,7 @@ function sendHumanVerificationRequired(
     tool,
     error_code: "HUMAN_VERIFICATION_REQUIRED",
   });
+  if (hvDebug) logHvActionDebug(hvDebug);
   reply.status(409).send({
     ok: false,
     error: {
@@ -555,6 +563,9 @@ function sendHumanVerificationRequired(
       // never included (the safe view carries none of them). Absent otherwise →
       // payload byte-identical to the pre-VGC shape.
       ...(visualGestureCapsule ? { visual_gesture_capsule: visualGestureCapsule } : {}),
+      // Dev-only attribution — present ONLY when ANTIGEN_HV_DEBUG is on. Absent
+      // otherwise → payload byte-identical to the pre-telemetry shape.
+      ...(isHvDebugEnabled() && hvDebug ? { hv_debug: hvDebug } : {}),
     },
   });
 }
@@ -681,7 +692,15 @@ function rejectIfVisualGestureCapsuleActive(
         challenge_type: "unknown_human_verification",
         domain: capsule.domain,
       };
-  sendHumanVerificationRequired(session, reply, tool, request, { available: true, capsule: safe });
+  sendHumanVerificationRequired(session, reply, tool, request, { available: true, capsule: safe }, {
+    scope: "hv_active_guard",
+    tool,
+    returned_409: true,
+    reason: "reused_existing_capsule",
+    reused_existing_capsule: true,
+    created_capsule: false,
+    capsule_status: capsule.status,
+  });
   return true;
 }
 
@@ -769,6 +788,19 @@ function logHvActionDebug(fields: Record<string, string | number | boolean>): vo
   if (!isHvDebugEnabled()) return;
   const parts = Object.entries(fields).map(([k, v]) => `${k}=${v}`);
   console.log(`[HvDebug] ${parts.join(" ")}`);
+}
+
+/**
+ * Coarse element-count bucket for HV 409 attribution. A bucket — never the raw
+ * count — so candidate_count is never recorded as (or mistaken for) a health
+ * proxy: real walls can preserve a high-element background, so the raw number is
+ * not evidence either way. Used only in dev HV telemetry.
+ */
+function hvElementCountBucket(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n <= 3) return "1-3";
+  if (n <= 20) return "4-20";
+  return "21+";
 }
 
 /**
@@ -5862,6 +5894,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           vgc: { available: true; capsule: SafeVisualGestureCapsuleView };
         }
       | undefined;
+    // Dev-only attribution for a snapshot-minted 409 (ANTIGEN_HV_DEBUG). Set in
+    // lockstep with snapshotMintedHv so the [HvDebug] log + response body name the
+    // exact branch (structural_page_level_wall vs ambiguous_fired) and the signal
+    // combination that fired. Booleans / enums / buckets only — never refs/coords.
+    let snapshotHvDebug: Record<string, string | number | boolean> | undefined;
     // Set when the detected challenge is a page-level full-page denial wall whose
     // control is inside a cross-origin iframe (zero candidate elements). Drives a
     // synthesized blocking active surface + manual-completion guidance.
@@ -5999,6 +6036,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               },
               vgc: vgcSnapshotInfo,
             };
+            snapshotHvDebug = {
+              scope: "snapshot_hv",
+              tool: "antigen_snapshot",
+              returned_409: true,
+              reason: "structural_page_level_wall",
+              structural_wall_seen: true,
+              page_level: true,
+              ambiguous_considered: false,
+              created_capsule: true,
+              element_count_bucket: hvElementCountBucket(elements.length),
+            };
           }
         }
       } else {
@@ -6107,6 +6155,37 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             },
             vgc: ambiguous.vgc,
           };
+          // Attribution for the ambiguous branch — the suspected healthy-cart false-
+          // positive path. repeated_stale_source = "no_progress_marker" means the
+          // corroborating stale signal was re-derived from a lingering action marker
+          // (NOT a fresh action), and geometry_strength comes from the RAW probe
+          // (before repeated_stale was synthesized in) so a "weak" reading (lone
+          // pointer_interceptor / sticky header) is distinguishable from a "strong"
+          // occlusion. This is what makes the next /cart 409 self-attributing.
+          snapshotHvDebug = {
+            scope: "snapshot_hv",
+            tool: "antigen_snapshot",
+            returned_409: true,
+            reason: "ambiguous_fired",
+            structural_wall_seen: false,
+            ambiguous_considered: true,
+            created_capsule: true,
+            no_progress_signal: noProgressSignal,
+            repeated_stale_source: noProgressSignal ? "no_progress_marker" : "none",
+            geometry_strength: geometryObstructionStrength(ambiguousProbe) ?? "none",
+            element_count_bucket: hvElementCountBucket(elements.length),
+            ...(ambiguousProbe
+              ? {
+                  denial_text_seen: ambiguousProbe.denial_text_seen,
+                  near_zero_interactive: ambiguousProbe.near_zero_interactive,
+                  visible_inaccessible_iframe_seen: ambiguousProbe.visible_inaccessible_iframe_seen,
+                  large_centered_overlay_seen: ambiguousProbe.large_centered_overlay_seen,
+                  viewport_scrim_seen: ambiguousProbe.viewport_scrim_seen,
+                  pointer_interceptor_seen: ambiguousProbe.pointer_interceptor_seen,
+                  top_layer_dialog_seen: ambiguousProbe.top_layer_dialog_seen,
+                }
+              : {}),
+          };
           // HV is now active for this session — the no-progress marker has served
           // its purpose and must not linger to re-probe later snapshots.
           clearActionNoProgress(session.browser_session_id);
@@ -6148,6 +6227,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         "antigen_snapshot",
         snapshotMintedHv.request,
         snapshotMintedHv.vgc,
+        snapshotHvDebug,
       );
       return;
     }

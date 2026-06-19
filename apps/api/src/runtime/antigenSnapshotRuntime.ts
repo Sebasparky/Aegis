@@ -2211,8 +2211,82 @@ export function buildPageHvWallHintExpr(): string {
     function clip(s,max){ s=txt(s); return s.length>max?s.slice(0,max):s; }
     function attr(el,n){ try{ return el.getAttribute(n); }catch(e){ return null; } }
     ${buildOverlaySnippetJs(isHumanVerificationEnabled())}
-    if(!SCREEN_HV_ENABLED) return { hint:false };
-    // A visible inaccessible iframe is REQUIRED for both shapes.
+    // ── Screen-level visible-wall verdict (same-origin / top-level modal shape) ──
+    // Authoritative mint signal: screenHumanVerification() AND-gates a full-page
+    // scrim (fixedCoverage>=0.5 blocker) with a STRONG HV phrase. It needs NO
+    // inaccessible iframe and NO stale/no-progress signal, so a same-origin
+    // "Press & Hold" wall sitting over a high-element background page is caught —
+    // exactly the case the iframe-required hvWallHint below misses. NULL when
+    // SCREEN_HV_ENABLED is off (byte-identical). The granular booleans are
+    // value-free telemetry only (ANTIGEN_HV_DEBUG) and never gate the mint.
+    var screenHvType=null; try{ screenHvType=screenHumanVerification(); }catch(e){ screenHvType=null; }
+    var scrimSeen=false, centeredModalSeen=false, pressHoldSeen=false, hvPhraseSeen=false, topLayerSeen=false;
+    if(SCREEN_HV_ENABLED){
+      // viewport scrim: a body-level fixed/sticky high-z >=0.5-coverage blocker
+      // (the SAME test screenHumanVerification uses) — bounded top-two DOM levels.
+      try{
+        if(document.body){
+          var sch=document.body.children;
+          for(var si=0;si<sch.length&&si<80&&!scrimSeen;si++){
+            if(fixedCoverage(sch[si])>=0.5){ scrimSeen=true; break; }
+            var sgc=sch[si].children;
+            for(var sj=0;sgc&&sj<sgc.length&&sj<24;sj++){ if(fixedCoverage(sgc[sj])>=0.5){ scrimSeen=true; break; } }
+          }
+        }
+      }catch(e){}
+      // Foreground positioned high-z card + bounded, value-free phrase scan
+      // (visible button names/aria-labels + positioned container text). No
+      // unbounded body scan; nothing escapes — only the regex verdicts below.
+      var hscan='';
+      try{
+        var hbs=document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]');
+        for(var bi=0;bi<hbs.length&&bi<40&&hscan.length<1600;bi++){
+          var hb=hbs[bi],hbr=null; try{ hbr=hb.getBoundingClientRect(); }catch(e){}
+          if(!hbr||!(hbr.width>0&&hbr.height>0)) continue;
+          var hal=attr(hb,'aria-label'); if(hal) hscan+=' '+String(hal);
+          var hbt=hb.textContent; if(hbt) hscan+=' '+txt(String(hbt)).slice(0,80);
+        }
+      }catch(e){}
+      try{
+        var hpos=document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog,div,section,aside,main,form');
+        var hscanned=0;
+        for(var pi=0;pi<hpos.length&&hscanned<240&&hscan.length<3000;pi++){
+          var hn=hpos[pi]; var hcs=cssOf(hn); if(!hcs) continue;
+          var hp=hcs.position||''; if(hp!=='fixed'&&hp!=='absolute'&&hp!=='sticky') continue;
+          var hz=parseInt(hcs.zIndex,10); if(isNaN(hz)) hz=0; if(hz<10) continue;
+          hscanned++; centeredModalSeen=true;
+          var htt=hn.textContent; if(htt) hscan+=' '+txt(String(htt)).slice(0,400);
+        }
+      }catch(e){}
+      hscan=txt(hscan);
+      hvPhraseSeen=HV_TEXT_RE.test(hscan);
+      pressHoldSeen=HV_HOLD_RE.test(hscan);
+      // top-layer / native modal dialog present.
+      try{
+        var hdlgs=document.querySelectorAll('dialog');
+        for(var di=0;di<hdlgs.length&&di<20;di++){
+          var hd=hdlgs[di],hopen=false; try{ hopen=(hd.open===true)||(attr(hd,'open')!=null); }catch(e){ hopen=attr(hd,'open')!=null; }
+          var hmodal=false; try{ hmodal=!!(hd.matches&&hd.matches(':modal')); }catch(e){ hmodal=false; }
+          if(hopen||hmodal){ topLayerSeen=true; break; }
+        }
+      }catch(e){}
+    }
+    function withScreen(hint){
+      return {
+        hint: hint,
+        screen_hv_wall: (screenHvType!=null),
+        screen_hv_challenge_type: screenHvType,
+        viewport_scrim_seen: !!scrimSeen,
+        centered_modal_seen: !!centeredModalSeen,
+        press_hold_affordance_seen: !!pressHoldSeen,
+        hv_phrase_seen: !!hvPhraseSeen,
+        top_layer_dialog_seen: !!topLayerSeen
+      };
+    }
+    if(!SCREEN_HV_ENABLED) return withScreen(false);
+    // ── hvWallHint (UNCHANGED semantics) — both shapes REQUIRE an inaccessible
+    // iframe, so this signal stays exactly as before; the screen-HV verdict above
+    // is the new, iframe-independent path that the snapshot mint gate consumes.
     var hasInaccessibleIframe=false;
     try{
       var frames=document.querySelectorAll('iframe');
@@ -2223,11 +2297,11 @@ export function buildPageHvWallHintExpr(): string {
         if(!accessible){ hasInaccessibleIframe=true; break; }
       }
     }catch(e){}
-    if(!hasInaccessibleIframe) return { hint:false };
+    if(!hasInaccessibleIframe) return withScreen(false);
     // TEXT shape: strong HV text in the top document.
     var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
     var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
-    if(HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText)) return { hint:true };
+    if(HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText)) return withScreen(true);
     // OOPIF shape: a blocking overlay (fixed >=0.5-coverage backdrop OR center
     // click-intercept), text-independent. Reuses fixedCoverage() — zero drift.
     var fixedOverlay=false;
@@ -2249,7 +2323,7 @@ export function buildPageHvWallHintExpr(): string {
         while(el&&depth<8){ if(fixedCoverage(el)>=0.5){ clickIntercept=true; break; } el=el.parentElement; depth++; }
       }
     }catch(e){}
-    return { hint: !!(fixedOverlay||clickIntercept) };
+    return withScreen(!!(fixedOverlay||clickIntercept));
   })()`;
 }
 
@@ -2620,6 +2694,18 @@ export interface HumanVerificationDebug {
   ambiguous_top_layer_dialog_seen?: boolean;
   ambiguous_repeated_stale?: boolean;
   ambiguous_created_capsule?: boolean;
+  // ── Snapshot-level screen-HV visible-wall diagnostics (same-origin / top-level
+  // modal shape). Iframe-, element-count-, and stale-independent. Booleans / enum
+  // only — never raw text, geometry, refs, iframe internals, or a capsule id.
+  screen_hv_considered?: boolean;
+  screen_hv_detected?: boolean;
+  screen_hv_challenge_type?: HumanVerificationChallengeType;
+  screen_hv_viewport_scrim_seen?: boolean;
+  screen_hv_centered_modal_seen?: boolean;
+  screen_hv_press_hold_affordance_seen?: boolean;
+  screen_hv_phrase_seen?: boolean;
+  screen_hv_top_layer_dialog_seen?: boolean;
+  screen_hv_created_capsule?: boolean;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
@@ -2786,6 +2872,47 @@ export async function extractAntigenPageMetaViaCDP(
 
 // ─── Bundled candidate + page-meta extraction (single connection) ────────────
 
+/**
+ * Page-level screen-HV verdict surfaced alongside hvWallHint (present only when
+ * ANTIGEN_HUMAN_VERIFICATION is on). `wall` is the authoritative mint signal:
+ * screenHumanVerification() detected a full-page scrim AND a strong HV phrase in
+ * the top document — the same-origin / top-level "Press & Hold" modal shape that
+ * the iframe-required hvWallHint misses. It does NOT depend on element count,
+ * stale/no-progress, or an inaccessible iframe. The remaining booleans/enum are
+ * value-free telemetry only (ANTIGEN_HV_DEBUG). All fields are re-validated
+ * server-side; nothing here is raw text, geometry, refs, or iframe internals.
+ */
+export interface ScreenHvWallSignals {
+  wall: boolean;
+  challenge_type?: HumanVerificationChallengeType;
+  viewport_scrim_seen: boolean;
+  centered_modal_seen: boolean;
+  press_hold_affordance_seen: boolean;
+  hv_phrase_seen: boolean;
+  top_layer_dialog_seen: boolean;
+}
+
+/** Re-validate the raw screen-HV page value into a strict, value-free object. */
+export function sanitizeScreenHvWallSignals(value: unknown): ScreenHvWallSignals | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.screen_hv_wall !== "boolean") return undefined;
+  const ctRaw = v.screen_hv_challenge_type;
+  const challenge_type =
+    typeof ctRaw === "string" && HV_CHALLENGE_TYPES.has(ctRaw)
+      ? (ctRaw as HumanVerificationChallengeType)
+      : undefined;
+  return {
+    wall: v.screen_hv_wall === true,
+    ...(challenge_type ? { challenge_type } : {}),
+    viewport_scrim_seen: v.viewport_scrim_seen === true,
+    centered_modal_seen: v.centered_modal_seen === true,
+    press_hold_affordance_seen: v.press_hold_affordance_seen === true,
+    hv_phrase_seen: v.hv_phrase_seen === true,
+    top_layer_dialog_seen: v.top_layer_dialog_seen === true,
+  };
+}
+
 /** Result of the bundled snapshot extraction: candidates + best-effort page meta. */
 export interface AntigenSnapshotBundle {
   candidates: AntigenSnapshotCandidate[];
@@ -2797,6 +2924,10 @@ export interface AntigenSnapshotBundle {
   // preserved (high element_count). Best-effort: `undefined` when the flag is
   // off or the hint eval failed/timed out.
   hvWallHint?: boolean;
+  // Page-level screen-HV verdict (same-origin / top-level visible wall). Present
+  // only when ANTIGEN_HUMAN_VERIFICATION is on; `undefined` when off or the eval
+  // failed/timed out. `screenHv.wall === true` is the snapshot mint signal.
+  screenHv?: ScreenHvWallSignals;
 }
 
 /** Sub-timeout for the best-effort page-meta eval after candidates returned. */
@@ -3033,6 +3164,9 @@ export async function extractAntigenSnapshotBundleViaCDP(
     rawHint && typeof rawHint === "object" && typeof (rawHint as { hint?: unknown }).hint === "boolean"
       ? (rawHint as { hint: boolean }).hint
       : undefined;
+  // The same hint eval ALSO carries the iframe-independent screen-HV verdict
+  // (screen_hv_wall + value-free telemetry). Re-validated to a strict object.
+  const screenHv = sanitizeScreenHvWallSignals(rawHint);
   timing.mark("sanitize_map");
   timing.end({
     candidate_count: candidates.length,
@@ -3044,6 +3178,7 @@ export async function extractAntigenSnapshotBundleViaCDP(
     candidates,
     ...(pageMeta !== undefined ? { pageMeta } : {}),
     ...(hvWallHint !== undefined ? { hvWallHint } : {}),
+    ...(screenHv !== undefined ? { screenHv } : {}),
   };
 }
 

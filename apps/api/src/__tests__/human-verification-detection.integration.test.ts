@@ -41,6 +41,7 @@ import {
   classifyAmbiguousVisualObstruction,
   collectPageHvWallDebugViaCDP,
   type AntigenSnapshotCandidate,
+  type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
 import {
   buildHumanVerificationProbeExpr,
@@ -82,6 +83,12 @@ const FIXTURE_OOPIF_NO_TEXT = fileURLToPath(new URL("./fixtures/oopif-overlay-no
 const FIXTURE_CENTERED_OVERLAY = fileURLToPath(new URL("./fixtures/centered-overlay-over-normal-page.html", import.meta.url));
 const FIXTURE_STICKY_HEADER = fileURLToPath(new URL("./fixtures/sticky-header-healthy-page.html", import.meta.url));
 const FIXTURE_HOMEPAGE_HERO = fileURLToPath(new URL("./fixtures/homepage-hero-no-scrim.html", import.meta.url));
+// Same-origin / top-level "Press & Hold" wall over a PRESERVED high-element
+// background (NO iframe, NO stale signal). Only screenHumanVerification()
+// (scrim + strong HV phrase) classifies it — the iframe-required hint is false.
+// Plus a high-element benign-hero page (no scrim / no HV phrase) that must NOT.
+const FIXTURE_SCREEN_HV_PRODUCT = fileURLToPath(new URL("./fixtures/screen-hv-wall-over-product-page.html", import.meta.url));
+const FIXTURE_SCREEN_HV_BENIGN = fileURLToPath(new URL("./fixtures/screen-hv-benign-hero-product-page.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -566,6 +573,77 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     await gotoFixture(cdpUrl, FIXTURE_OVERLAY_WALL);
     expect(await withHvFlag("false", detectWall)).toBeNull();
     expect(await withHvFlag("false", bundleHint)).toBeUndefined();
+  }, 20_000);
+
+  // ─── Same-origin / top-level screen-HV wall over a high-element page ───────
+  // The visible "Press & Hold" wall has NO inaccessible iframe (so hvWallHint is
+  // false) and sits over a preserved high-element background (so the low-element
+  // probe is skipped). Only the iframe-independent screen-HV verdict classifies
+  // it. This is the confirmed snapshot-200 miss.
+  async function bundleScreenHv(): Promise<ScreenHvWallSignals | undefined> {
+    const b = await extractAntigenSnapshotBundleViaCDP({
+      cdpUrl,
+      viewportOnly: false,
+      resolvedTarget: await resolveTarget(),
+    });
+    return b.screenHv;
+  }
+
+  it("emits a screen-HV wall verdict on a same-origin Press & Hold wall over a high-element page (no iframe / no stale)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_PRODUCT);
+
+    // The background DOM is fully present (20+ refs) and NONE is the HV control
+    // (the affordance is a painted, non-interactive div), so no per-candidate hv
+    // member is emitted — the page-level screen verdict is the only signal.
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.length).toBeGreaterThan(20);
+    expect(cands.filter((c) => c.overlay?.human_verification === true)).toHaveLength(0);
+
+    // The iframe-required hint is FALSE (no inaccessible iframe present)…
+    expect(await withHvFlag("true", bundleHint)).toBe(false);
+    // …but the screen-HV verdict fires on scrim + strong HV phrase.
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(true);
+    expect(sv!.challenge_type).toBe("press_and_hold");
+    expect(sv!.viewport_scrim_seen).toBe(true);
+    expect(sv!.hv_phrase_seen).toBe(true);
+    expect(sv!.press_hold_affordance_seen).toBe(true);
+  }, 20_000);
+
+  it("does NOT emit a screen-HV wall verdict on a high-element benign marketing hero (no scrim / no HV phrase)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_BENIGN);
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.length).toBeGreaterThan(20);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(false);
+    expect(sv!.viewport_scrim_seen).toBe(false);
+    expect(sv!.hv_phrase_seen).toBe(false);
+  }, 20_000);
+
+  it("does NOT emit a screen-HV wall verdict on a scrim-only overlay with NO HV phrase (geometry preserved)", async () => {
+    // centered-overlay-over-normal-page has a full scrim but no HV language; the
+    // screen verdict must stay false (it keys on scrim AND phrase), leaving the
+    // existing geometry/ambiguous handling untouched.
+    await gotoFixture(cdpUrl, FIXTURE_CENTERED_OVERLAY);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(false);
+    expect(sv!.hv_phrase_seen).toBe(false);
+  }, 20_000);
+
+  it("does NOT emit a screen-HV wall verdict on the homepage hero (no scrim)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_HOMEPAGE_HERO);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.wall).toBe(false);
+    expect(sv!.viewport_scrim_seen).toBe(false);
+  }, 20_000);
+
+  it("flag OFF: the screen-HV wall emits no verdict (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_PRODUCT);
+    expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
   }, 20_000);
 
   // ─── OOPIF / cross-origin-iframe wall with NO top-document HV text ─────────

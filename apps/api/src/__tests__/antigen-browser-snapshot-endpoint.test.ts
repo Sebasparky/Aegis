@@ -938,6 +938,16 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
     "ambiguous_top_layer_dialog_seen",
     "ambiguous_repeated_stale",
     "ambiguous_created_capsule",
+    // Snapshot-level screen-HV visible-wall diagnostics. Booleans / enum only.
+    "screen_hv_considered",
+    "screen_hv_detected",
+    "screen_hv_challenge_type",
+    "screen_hv_viewport_scrim_seen",
+    "screen_hv_centered_modal_seen",
+    "screen_hv_press_hold_affordance_seen",
+    "screen_hv_phrase_seen",
+    "screen_hv_top_layer_dialog_seen",
+    "screen_hv_created_capsule",
   ]);
 
   function withEnv(
@@ -1120,5 +1130,116 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — active VGC guard", () 
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.element_count).toBe(3);
+  });
+});
+
+// ─── Snapshot-level screen-HV visible-wall mint ──────────────────────────────
+// A visible same-origin / top-level "Press & Hold" wall can sit over a HIGH
+// element-count background page. The bundle surfaces `screenHv.wall === true`
+// (iframe-, element-count-, and stale-independent). The snapshot must fail closed
+// with 409 HUMAN_VERIFICATION_REQUIRED + a freshly minted VGC — while a normal
+// high-element product/search page (screenHv.wall === false) still returns 200.
+describe("POST /api/agent/v1/runtime/browser-snapshot — screen-HV visible wall", () => {
+  const prevVgc = process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+  const prevHv = process.env.ANTIGEN_HUMAN_VERIFICATION;
+
+  // 25 overlay-free candidates → a HIGH element count, so neither the low-element
+  // structural probe nor the ambiguous fallback can open; only the screen-HV path
+  // can produce a 409. This proves the detector does not rely on a low count.
+  const HIGH_ELEMENT_CANDIDATES: AntigenSnapshotCandidate[] = Array.from({ length: 25 }, (_, i) =>
+    candidate({ name: `Product ${i}`, normalized_name: `product ${i}`, href: `/p/${i}`, href_path: `/p/${i}` }),
+  );
+
+  const SCREEN_HV: import("../runtime/antigenSnapshotRuntime.js").ScreenHvWallSignals = {
+    wall: true,
+    challenge_type: "press_and_hold",
+    viewport_scrim_seen: true,
+    centered_modal_seen: true,
+    press_hold_affordance_seen: true,
+    hv_phrase_seen: true,
+    top_layer_dialog_seen: false,
+  };
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HUMAN_VERIFICATION = "true";
+    clearVisualGestureCapsulesForTests();
+  });
+
+  afterEach(() => {
+    clearVisualGestureCapsulesForTests();
+    if (prevVgc === undefined) delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
+    else process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = prevVgc;
+    if (prevHv === undefined) delete process.env.ANTIGEN_HUMAN_VERIFICATION;
+    else process.env.ANTIGEN_HUMAN_VERIFICATION = prevHv;
+  });
+
+  it("returns 409 + a minted VGC for a visible wall over a HIGH-element page (no stale / no low count)", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: HIGH_ELEMENT_CANDIDATES, screenHv: SCREEN_HV });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.visual_gesture_capsule.capsule.capsule_id).toMatch(/^vgc_/);
+    expect(body.error.visual_gesture_capsule.capsule.status).toBe("awaiting_user_gesture");
+    // NOT a normal snapshot.
+    expect(body.data).toBeUndefined();
+  });
+
+  it("never leaks bytes/coords/cdp/session internals in the screen-HV stop response", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: HIGH_ELEMENT_CANDIDATES, screenHv: SCREEN_HV });
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    const raw = JSON.stringify(res.json());
+    for (const f of [
+      "png_base64", "\"box\"", "\"x\":", "\"y\":", "cdp_url", "user_data_dir",
+      "9222", "target_id", "secret_ref",
+    ]) {
+      expect(raw).not.toContain(f);
+    }
+  });
+
+  it("returns 200 for a normal HIGH-element page with no screen-HV wall", async () => {
+    seedSession();
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: { ...SCREEN_HV, wall: false, challenge_type: undefined, viewport_scrim_seen: false, hv_phrase_seen: false },
+    });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(res.json().data.element_count).toBe(25);
+  });
+
+  it("does NOT mint when the VGC flag is off (screen-HV wall present but capsule disabled)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "false";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: HIGH_ELEMENT_CANDIDATES, screenHv: SCREEN_HV });
+
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, action: "dom_snapshot" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.element_count).toBe(25);
   });
 });

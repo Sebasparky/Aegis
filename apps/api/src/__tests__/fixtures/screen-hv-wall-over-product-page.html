@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Men's Body Care</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* Full-page blocking dimmer: fixed, full-coverage, high z-index. This is
+         the viewport SCRIM that screenHumanVerification() requires as the
+         blocking affordance — same-origin, NO iframe. */
+      #hv-dimmer {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.62);
+      }
+      /* Centered challenge card carrying the strong human-verification phrase.
+         It has NO interactive control — the gesture surface is an opaque painted
+         widget (a styled div), so no top-document candidate is the press-hold
+         control. The per-candidate detector therefore finds NO hv member; only
+         the page-level screen-HV verdict (scrim + phrase) classifies it. */
+      #hv-card {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10000;
+        width: 360px;
+        background: #fff;
+        border-radius: 8px;
+        padding: 24px;
+        text-align: center;
+      }
+      #hv-card h2 { font-size: 20px; margin: 0 0 8px; }
+      #hv-card p { color: #444; margin: 6px 0; }
+      #hv-card .ref { color: #999; font-size: 12px; margin-top: 16px; }
+      /* Painted (non-interactive) press-hold affordance — NOT a button/anchor,
+         so it is never extracted as an interactive candidate. */
+      #hv-widget {
+        margin: 16px auto 0;
+        width: 240px;
+        height: 52px;
+        line-height: 52px;
+        border-radius: 26px;
+        background: #1f6feb;
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      Same-origin / top-level "Press & Hold" wall over a PRESERVED high-element
+      background (20+ extractable refs). element_count is high, there is NO
+      inaccessible iframe (so the iframe-required hvWallHint is false), and a
+      fresh snapshot has no stale / no-progress signal. The only signal that can
+      classify this is screenHumanVerification(): a full-page scrim PLUS a strong
+      HV phrase. The snapshot mint gate must return 409 here, and a normal
+      high-element product page (no scrim / no HV phrase) must still return 200.
+    -->
+
+    <!-- ── Preserved background page (20+ interactive controls) ─────────────── -->
+    <header>
+      <a href="/">Home</a>
+      <a href="/account">Account</a>
+      <a href="/bag">Bag</a>
+      <input type="search" name="q" placeholder="Search products" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/body-care">Body Care</a>
+      <a href="/fragrance">Fragrance</a>
+      <a href="/soaps">Soaps &amp; Sanitizers</a>
+      <a href="/candles">Candles</a>
+      <a href="/gifts">Gifts</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>Men's Body Care</h1>
+      <div class="cats">
+        <a href="/body-wash">Body Wash &amp; Scrub</a>
+        <a href="/deodorant">Deodorant</a>
+        <a href="/lotion">Lotion</a>
+        <a href="/cologne">Cologne</a>
+      </div>
+      <div class="grid">
+        <div class="card"><a href="/p/1">Teakwood Wash</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/2">Graphite Spray</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/3">Ocean Lotion</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/4">Mahogany Bar</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/5">Cedar Mist</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/6">Noir Cologne</a><button type="button">Add to bag</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+
+    <!-- ── Same-origin Press & Hold wall over the preserved background ───────── -->
+    <div id="hv-dimmer"></div>
+    <div id="hv-card" role="presentation">
+      <h2>Before we continue…</h2>
+      <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+      <div id="hv-widget">Press &amp; Hold</div>
+      <p class="ref">Reference ID 6ce89eb0-678d-11f1-83b7-4fb63be07420</p>
+    </div>
+  </body>
+</html>

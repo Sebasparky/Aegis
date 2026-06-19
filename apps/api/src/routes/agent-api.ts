@@ -65,6 +65,7 @@ import {
   type PageHumanVerificationWall,
   type PageWallProbeReason,
   type PageWallProbeResult,
+  type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
@@ -5799,6 +5800,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // overlay-wall snapshots whose background DOM is preserved (high element
     // count), where the low-element fast path would otherwise skip the probe.
     let hvWallHint = false;
+    // Page-level screen-HV verdict from the SAME extraction session. Iframe- and
+    // element-count-independent: `screenHv.wall === true` mints a VGC for a
+    // visible same-origin / top-level "Press & Hold" wall sitting over a
+    // high-element background page (the case hvWallHint structurally misses).
+    let screenHv: ScreenHvWallSignals | undefined;
     try {
       const bundle = await extractAntigenSnapshotBundleViaCDP({
         cdpUrl: session.cdp_url,
@@ -5809,6 +5815,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       candidates = bundle.candidates;
       pageMeta = bundle.pageMeta;
       hvWallHint = bundle.hvWallHint === true;
+      screenHv = bundle.screenHv;
       timing.mark("candidate_and_meta_extract");
     } catch {
       recordBrowserTraceEvent(session.browser_session_id, {
@@ -5911,6 +5918,94 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
       );
+      // ── Snapshot-level screen-HV visible-wall mint ──────────────────────────
+      // A visible same-origin / top-level "Press & Hold" wall can sit ABOVE a
+      // high-element background page. screenHumanVerification() detects it via a
+      // full-page scrim + a strong HV phrase WITHOUT an inaccessible iframe, a low
+      // element count, or a stale/no-progress signal — the exact gap that let the
+      // preserved background DOM return a healthy 200. When detected and no
+      // per-candidate HV control attached (hvMember), mint a PAGE-LEVEL Visual
+      // Gesture Capsule (the control box is opaque) and fail closed with 409 —
+      // independent of hvWallHint / element_count / stale. It deliberately does
+      // NOT use large-centered / pointer-interceptor geometry, so a benign
+      // marketing hero (no scrim / no HV phrase) and a normal product/search page
+      // both still return 200. Fail-safe: a failed create degrades to the existing
+      // structural/ambiguous paths (screenHvMinted stays false).
+      let screenHvMinted = false;
+      if (
+        !hvMember &&
+        screenHv?.wall === true &&
+        isVisualGestureCapsuleEnabled() &&
+        session.cdp_url
+      ) {
+        let hvDomain = "unknown";
+        try {
+          if (snapshot.url) hvDomain = new URL(snapshot.url).hostname;
+        } catch {
+          /* keep "unknown" */
+        }
+        const hvRequest = createOrReuseHumanVerificationRequest({
+          user_id: MOCK_USER_ID,
+          delegation_id: delegation.id,
+          agent_name: delegation.agent_name,
+          browser_session_id: session.browser_session_id,
+          domain: hvDomain,
+          page_url: snapshot.url ?? "",
+          challenge_type: screenHv.challenge_type ?? "unknown_human_verification",
+          surface_title: "Verification required",
+          page_level: true,
+        });
+        pageLevelHv = hvRequest.page_level === true;
+        const created = await createVisualGestureCapsuleForOpaqueHv({
+          humanVerificationRequestId: hvRequest.request_id,
+          browserSessionId: session.browser_session_id,
+          domain: hvDomain,
+          cdpUrl: session.cdp_url,
+          pageUrl: snapshot.url ?? "",
+          delegationId: delegation.id,
+          userId: MOCK_USER_ID,
+          reason: "screen_hv_visible_wall",
+        });
+        if (created.ok) {
+          screenHvMinted = true;
+          vgcSnapshotInfo = { available: true, capsule: created.capsule };
+          hvSnapshotInfo = {
+            request_id: hvRequest.request_id,
+            status: hvRequest.status,
+            challenge_type: hvRequest.challenge_type,
+            domain: hvRequest.domain,
+            expires_at: hvRequest.expires_at,
+            instructions: hvRequest.instructions,
+            next_action: humanVerificationAgentNextAction(hvRequest),
+            page_level: true as const,
+          };
+          snapshotMintedHv = {
+            request: {
+              request_id: hvRequest.request_id,
+              status: hvRequest.status,
+              challenge_type: hvRequest.challenge_type,
+              domain: hvRequest.domain,
+            },
+            vgc: vgcSnapshotInfo,
+          };
+          snapshotHvDebug = {
+            scope: "snapshot_screen_hv",
+            tool: "antigen_snapshot",
+            returned_409: true,
+            reason: "screen_hv_visible_wall",
+            screen_hv_detected: true,
+            page_level: true,
+            hv_wall_hint: hvWallHint,
+            viewport_scrim_seen: screenHv.viewport_scrim_seen,
+            centered_modal_seen: screenHv.centered_modal_seen,
+            press_hold_affordance_seen: screenHv.press_hold_affordance_seen,
+            hv_phrase_seen: screenHv.hv_phrase_seen,
+            top_layer_dialog_seen: screenHv.top_layer_dialog_seen,
+            created_capsule: true,
+            element_count_bucket: hvElementCountBucket(elements.length),
+          };
+        }
+      }
       // Page-level fallback: run the confirming probe when NO per-candidate HV
       // member was found AND either (a) the cheap hint fired — strong HV text +
       // an inaccessible iframe — which catches the live B&BW OVERLAY wall whose
@@ -5918,7 +6013,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // (near-)empty of candidates — the full-denial wall shape. Best-effort and
       // fail-safe (null on any error). The hint is false on clean pages, so
       // normal snapshots pay no extra round-trip; never runs when flag off.
-      const pageWallAttempted = !hvMember && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS);
+      const pageWallAttempted =
+        !hvMember && !screenHvMinted && (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS);
       const pageWall = pageWallAttempted
         ? await detectPageHumanVerificationWallViaCDP({
             cdpUrl: session.cdp_url,
@@ -5952,6 +6048,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           page_wall_probe_attempted: pageWallAttempted,
           page_wall_probe_reason: reason,
           page_wall_probe_result: prodResult,
+          // Screen-HV visible-wall consideration (populated whether or not it
+          // minted). screen_hv_detected reflects the iframe-independent verdict.
+          screen_hv_considered: !hvMember,
+          screen_hv_detected: screenHv?.wall === true,
+          ...(screenHv?.challenge_type ? { screen_hv_challenge_type: screenHv.challenge_type } : {}),
+          screen_hv_viewport_scrim_seen: screenHv?.viewport_scrim_seen === true,
+          screen_hv_centered_modal_seen: screenHv?.centered_modal_seen === true,
+          screen_hv_press_hold_affordance_seen: screenHv?.press_hold_affordance_seen === true,
+          screen_hv_phrase_seen: screenHv?.hv_phrase_seen === true,
+          screen_hv_top_layer_dialog_seen: screenHv?.top_layer_dialog_seen === true,
+          screen_hv_created_capsule: screenHvMinted,
         };
         // Only run the extra debug probe when production actually attempted —
         // never on clean snapshots — so it can reveal WHICH gate failed.
@@ -6063,6 +6170,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           | undefined;
         const noProgressSignal = hasRecentActionNoProgress(session.browser_session_id);
         const ambiguousGateOpen =
+          !screenHvMinted &&
           isVisualGestureCapsuleEnabled() &&
           (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || noProgressSignal);
         let ambiguousProbe: Awaited<ReturnType<typeof detectAmbiguousVisualObstructionViaCDP>> = null;
@@ -6189,7 +6297,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           // HV is now active for this session — the no-progress marker has served
           // its purpose and must not linger to re-probe later snapshots.
           clearActionNoProgress(session.browser_session_id);
-        } else {
+        } else if (!screenHvMinted) {
+          // Skipped when the screen-HV path just minted this snapshot's capsule —
+          // the page IS blocked, so the no-longer-present cleanup must not run and
+          // tear down the request/capsule we just created.
           const openRequest = findActiveHumanVerificationRequest(session.browser_session_id);
           if (openRequest) resolveChallengeNoLongerPresent(openRequest);
           clearActiveHumanVerification(session.browser_session_id);

@@ -6428,6 +6428,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           screen_viewport_scrim_seen: screenHv?.viewport_scrim_seen === true,
           screen_centered_modal_seen: screenHv?.centered_modal_seen === true,
           surface_dominant_visible_surface_seen: screenHv?.dominant_visible_surface_seen === true,
+          surface_dominant_visible_surface_kind: screenHv?.dominant_visible_surface_kind,
           surface_dominant_text_extraction_attempted:
             screenHv?.dominant_text_extraction_attempted === true,
           surface_dominant_text_extractable: screenHv?.dominant_text_extractable === true,
@@ -6453,6 +6454,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             screenHv?.dominant_text_uninspectable === true;
           hvDebug.surface_visible_but_semantically_unclassified =
             screenHv?.visible_but_semantically_unclassified === true;
+          hvDebug.surface_dominant_surface_contains_iframe =
+            screenHv?.dominant_surface_contains_iframe === true;
+          hvDebug.surface_dominant_surface_iframe_text_not_harvested =
+            screenHv?.dominant_surface_iframe_text_not_harvested === true;
+          hvDebug.surface_unreadable_dominant_surface_seen =
+            screenHv?.unreadable_dominant_surface_seen === true;
         }
         logHvActionDebug({
           scope: "snapshot_hv_gate",
@@ -6485,6 +6492,12 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           surface_dominant_text_uninspectable: screenHv?.dominant_text_uninspectable === true,
           surface_visible_but_semantically_unclassified:
             screenHv?.visible_but_semantically_unclassified === true,
+          surface_dominant_surface_contains_iframe:
+            screenHv?.dominant_surface_contains_iframe === true,
+          surface_dominant_surface_iframe_text_not_harvested:
+            screenHv?.dominant_surface_iframe_text_not_harvested === true,
+          surface_unreadable_dominant_surface_seen:
+            screenHv?.unreadable_dominant_surface_seen === true,
         });
       }
     }

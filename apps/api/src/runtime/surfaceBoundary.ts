@@ -91,6 +91,12 @@ export interface SurfaceBoundarySignals {
   // `dominant_visible_surface_uninspectable` concept — opacity that is NOT a
   // cross-origin iframe. Booleans only; the harvested text never leaves the page.
   surface_dominant_visible_surface_seen?: boolean;
+  surface_dominant_visible_surface_kind?:
+    | "scrim_center_modal"
+    | "top_layer_dialog"
+    | "fixed_overlay"
+    | "iframe"
+    | "unknown";
   surface_dominant_text_extraction_attempted?: boolean;
   surface_dominant_text_extractable?: boolean;
   surface_dominant_text_uninspectable?: boolean;
@@ -153,6 +159,20 @@ export function classifySurfaceBoundary(
   const textUninspectable =
     s.surface_dominant_text_uninspectable === true || (textAttempted && !textExtractable);
 
+  // A dominant surface is known to be present (scrim-backed centered / top-layer /
+  // fixed wall) but its own text could not be read. The strict DOM probe may have
+  // failed to isolate the surface's subtree on a live B&BW/PerimeterX "Press & Hold"
+  // wall whose card renders in an iframe/closed shadow — so derive uninspectability
+  // from the surface KIND when the source-of-truth boolean wasn't pre-set. Restricted
+  // to scrim/centered/top-layer/fixed kinds (never a bare hero) and gated below by the
+  // scrim+centered requirement so it cannot overfire.
+  const dominantSeen = s.surface_dominant_visible_surface_seen === true;
+  const dominantKind = s.surface_dominant_visible_surface_kind ?? "unknown";
+  const dominantKindEligible =
+    dominantKind === "scrim_center_modal" ||
+    dominantKind === "top_layer_dialog" ||
+    dominantKind === "fixed_overlay";
+
   // Aggregate dominance signals across BOTH probes: the ambiguous geometry probe
   // (iframe/0.85-scrim/pointer) and the always-present screen scan (0.5-scrim +
   // centered modal). The screen scan is what catches the same-origin / textless wall.
@@ -171,7 +191,11 @@ export function classifySurfaceBoundary(
   // extractable. This is the live B&BW/PerimeterX "Press & Hold" wall whose card +
   // button render inside an iframe/shadow the DOM scan never descends into, so the
   // phrase scanner sees nothing. NOT a cross-origin iframe; opacity is semantic.
-  const unreadableDominant = !opaqueDominant && scrimAny && centeredAny && textUninspectable;
+  const unreadableDominant =
+    !opaqueDominant &&
+    scrimAny &&
+    centeredAny &&
+    (textUninspectable || (dominantSeen && dominantKindEligible && !textExtractable));
 
   // Route 3 — INSPECTABLE: a readable surface WITH a genuine blocking backdrop /
   // top-layer modal (or a scrim+centered surface that DID yield text). A bare large

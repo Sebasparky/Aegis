@@ -92,6 +92,61 @@ describe("classifySurfaceBoundary — pure shadow verdict", () => {
     expect(d.visual_classifier_candidate_reason).toBe("unreadable_dominant_surface");
   });
 
+  it("live B&BW shape — kind-driven (strict probe missed, no pre-set uninspectable) → visual_classifier_candidate / unreadable_dominant_surface", () => {
+    // The exact live signal set: screen scan saw scrim + centered, the dominant
+    // surface kind is scrim_center_modal, but its own text was NOT extractable, and
+    // the source-of-truth uninspectable boolean was NOT pre-derived. NO cross-origin
+    // iframe signal — opacity is semantic, not iframe.
+    const d = classifySurfaceBoundary({
+      screen_viewport_scrim_seen: true,
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_visible_surface_kind: "scrim_center_modal",
+      surface_dominant_text_extractable: false,
+      opaque_iframe_seen: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+    expect(d.route_decided).toBe("visual_classifier_candidate");
+    expect(d.trigger_basis).toBe("unreadable_dominant_surface");
+    expect(d.inspectability_class).toBe("opaque");
+    expect(d.visual_classifier_candidate_reason).toBe("unreadable_dominant_surface");
+  });
+
+  it("readable modal WITH scrim (kind set, text extractable) → dom_semantic_candidate", () => {
+    const d = classifySurfaceBoundary({
+      screen_viewport_scrim_seen: true,
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_visible_surface_kind: "scrim_center_modal",
+      surface_dominant_text_extraction_attempted: true,
+      surface_dominant_text_extractable: true,
+    });
+    expect(d.route_decided).toBe("dom_semantic_candidate");
+    expect(d.trigger_basis).toBe("inspectable_dominant_surface");
+    expect(d.inspectability_class).toBe("inspectable");
+  });
+
+  it("bare hero/carousel (no scrim, kind unknown) does not become unreadable_dominant", () => {
+    const d = classifySurfaceBoundary({
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_visible_surface_kind: "unknown",
+      surface_dominant_text_extractable: false,
+    });
+    expect(d.route_decided).toBe("none");
+    expect(d.trigger_basis).toBe("none");
+  });
+
+  it("fixed_overlay kind WITHOUT a scrim (centered only) stays none — the scrim gate holds", () => {
+    const d = classifySurfaceBoundary({
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_visible_surface_kind: "fixed_overlay",
+      surface_dominant_text_extractable: false,
+    });
+    // No scrim ⇒ not a blocking wall in shadow mode, even with an eligible kind.
+    expect(d.route_decided).toBe("none");
+  });
+
   it("protected DOMINANT iframe still routes opaque_dominant_surface (not unreadable_dominant_surface)", () => {
     const d = classifySurfaceBoundary({
       opaque_iframe_seen: true,

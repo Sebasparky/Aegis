@@ -2346,7 +2346,7 @@ export function buildPageHvWallHintExpr(): string {
     var scrimSeen=false, centeredModalSeen=false, pressHoldSeen=false, hvPhraseSeen=false, topLayerSeen=false;
     // Dominant-visible-surface inspectability (shadow telemetry only). Defaults are
     // byte-identical when SCREEN_HV_ENABLED is off.
-    var domSurfaceSeen=false, domSurfaceKind='unknown', domTextAttempted=false, domTextExtractable=false, domTextUninspectable=false, domTextSource='unknown', domUnclassified=false;
+    var domSurfaceSeen=false, domSurfaceKind='unknown', domTextAttempted=false, domTextExtractable=false, domTextUninspectable=false, domTextSource='unknown', domUnclassified=false, domUnreadableSurfaceSeen=false, domIframeTextNotHarvested=false, domSurfaceHasIframe=false;
     if(SCREEN_HV_ENABLED){
       // viewport scrim: a body-level fixed/sticky high-z >=0.5-coverage blocker
       // (the SAME test screenHumanVerification uses) — bounded top-two DOM levels.
@@ -2425,13 +2425,26 @@ export function buildPageHvWallHintExpr(): string {
         : (_dsp.kind!=='unknown')?_dsp.kind
         : (scrimSeen||centeredModalSeen)?'fixed_overlay'
         : _domVisIframe?'iframe':'unknown';
-      // Only claim an extraction was ATTEMPTED when we actually located and measured a
-      // dominant surface — otherwise we must not assert (un)inspectability.
-      domTextAttempted=!!_dsp.seen;
+      // A dominant surface is "uninspectable" in two cases:
+      //  (a) _domSurfaceProbe located it but its OWN subtree yielded no readable text
+      //      (challenge body inside an iframe / closed shadow / canvas), OR
+      //  (b) the strict probe could NOT isolate the surface's subtree at all, yet a
+      //      full-page scrim + a centered/top-layer/fixed dominant surface IS present
+      //      (the live B&BW/PerimeterX "Press & Hold" wall whose card the probe never
+      //      finds). In both cases we KNOW a dominant blocking surface exists but cannot
+      //      read its semantics. Case (b) is GATED ON scrimSeen (the >=0.5-coverage
+      //      blocker) so a bare hero/carousel / lone centered overlay with no scrim
+      //      never trips it — scrim is the obstruction discriminator.
+      var _domKindEligible=(domSurfaceKind==='scrim_center_modal'||domSurfaceKind==='top_layer_dialog'||domSurfaceKind==='fixed_overlay');
+      var _domProbeMissedWall=(!_dsp.seen)&&scrimSeen&&_domKindEligible;
+      domTextAttempted=!!(_dsp.seen||_domProbeMissedWall);
       domTextExtractable=!!(_dsp.seen&&_dsp.textLen>=8); // the SURFACE'S OWN text, not background
       domTextSource=domTextExtractable?'dom':'none';
-      domTextUninspectable=!!(_dsp.seen&&!domTextExtractable);
+      domTextUninspectable=!!(domTextAttempted&&!domTextExtractable);
       domUnclassified=!!(domTextUninspectable&&!hvPhraseSeen);
+      domUnreadableSurfaceSeen=!!(domSurfaceSeen&&_domKindEligible&&domTextUninspectable);
+      domSurfaceHasIframe=!!_domVisIframe;
+      domIframeTextNotHarvested=!!(_domVisIframe&&domTextUninspectable);
     }
     function withScreen(hint){
       return {
@@ -2449,7 +2462,10 @@ export function buildPageHvWallHintExpr(): string {
         dominant_text_extractable: !!domTextExtractable,
         dominant_text_uninspectable: !!domTextUninspectable,
         dominant_text_source: domTextSource,
-        visible_but_semantically_unclassified: !!domUnclassified
+        visible_but_semantically_unclassified: !!domUnclassified,
+        dominant_surface_contains_iframe: !!domSurfaceHasIframe,
+        dominant_surface_iframe_text_not_harvested: !!domIframeTextNotHarvested,
+        unreadable_dominant_surface_seen: !!domUnreadableSurfaceSeen
       };
     }
     if(!SCREEN_HV_ENABLED) return withScreen(false);
@@ -2903,6 +2919,9 @@ export interface HumanVerificationDebug {
   surface_dominant_text_extractable?: boolean;
   surface_dominant_text_uninspectable?: boolean;
   surface_visible_but_semantically_unclassified?: boolean;
+  surface_dominant_surface_contains_iframe?: boolean;
+  surface_dominant_surface_iframe_text_not_harvested?: boolean;
+  surface_unreadable_dominant_surface_seen?: boolean;
   surface_newly_appeared?: "unknown";
   surface_overlaps_agent_target?: "unknown" | boolean;
   surface_visible_cross_origin_iframe_seen?: boolean;
@@ -3131,6 +3150,9 @@ export interface ScreenHvWallSignals {
   dominant_text_uninspectable: boolean;
   dominant_text_source: DominantTextSource;
   visible_but_semantically_unclassified: boolean;
+  dominant_surface_contains_iframe: boolean;
+  dominant_surface_iframe_text_not_harvested: boolean;
+  unreadable_dominant_surface_seen: boolean;
 }
 
 /** Re-validate the raw screen-HV page value into a strict, value-free object. */
@@ -3168,6 +3190,9 @@ export function sanitizeScreenHvWallSignals(value: unknown): ScreenHvWallSignals
     dominant_text_uninspectable: v.dominant_text_uninspectable === true,
     dominant_text_source,
     visible_but_semantically_unclassified: v.visible_but_semantically_unclassified === true,
+    dominant_surface_contains_iframe: v.dominant_surface_contains_iframe === true,
+    dominant_surface_iframe_text_not_harvested: v.dominant_surface_iframe_text_not_harvested === true,
+    unreadable_dominant_surface_seen: v.unreadable_dominant_surface_seen === true,
   };
 }
 

@@ -43,6 +43,7 @@ export type SurfaceBoundaryRoute =
 export type SurfaceBoundaryTriggerBasis =
   | "opaque_dominant_surface"
   | "unreadable_dominant_surface"
+  | "page_level_hv_wall"
   | "inspectable_dominant_surface"
   | "off_path_iframe"
   | "legacy_no_progress_fallback"
@@ -52,6 +53,7 @@ export type SurfaceBoundaryTriggerBasis =
 export type SurfaceVisualClassifierCandidateReason =
   | "opaque_iframe"
   | "unreadable_dominant_surface"
+  | "page_level_hv_wall"
   | "visual_dom_mismatch"
   | "none";
 
@@ -101,6 +103,16 @@ export interface SurfaceBoundarySignals {
   surface_dominant_text_extractable?: boolean;
   surface_dominant_text_uninspectable?: boolean;
   surface_visible_but_semantically_unclassified?: boolean;
+  // Page-level HV wall signals (the no-scrim, full-page terminal blocker case where
+  // the page IS the wall — "Access to this page has been denied" / "Press & Hold").
+  // These are strong screen-HV TEXT signals reported independently of the scrim gate,
+  // plus a precomputed "page is near-empty / unusable" boolean. `page_wall_attempted`
+  // is corroborating telemetry ONLY and must never be a sufficient trigger (it is set
+  // on every near-empty page, so on its own it would route ordinary blank pages).
+  screen_hv_phrase_seen?: boolean;
+  screen_press_hold_affordance_seen?: boolean;
+  page_appears_unusable?: boolean;
+  page_wall_attempted?: boolean;
 }
 
 export interface SurfaceBoundaryDecision {
@@ -197,12 +209,27 @@ export function classifySurfaceBoundary(
     centeredAny &&
     (textUninspectable || (dominantSeen && dominantKindEligible && !textExtractable));
 
-  // Route 3 — INSPECTABLE: a readable surface WITH a genuine blocking backdrop /
+  // Route 3 — PAGE-LEVEL HV WALL: a full-page terminal blocker DOCUMENT where the page
+  // ITSELF is the wall (PerimeterX "Access to this page has been denied" / "Press &
+  // Hold"). There is no scrim over a normal page, no cross-origin iframe required, and
+  // (near-)zero usable refs — so Routes 1 and 2 both miss it. The discriminator is a
+  // STRONG screen-HV TEXT signal (phrase or press-and-hold affordance, reported
+  // independently of the scrim gate) on a page that appears unusable. NOTE:
+  // `page_wall_attempted` is deliberately NOT part of this condition — it fires on
+  // every near-empty page and would route ordinary blank pages.
+  const strongScreenHvText =
+    s.screen_hv_phrase_seen === true || s.screen_press_hold_affordance_seen === true;
+  const pageUnusable = s.page_appears_unusable === true;
+  const pageLevelHvWall =
+    !opaqueDominant && !unreadableDominant && strongScreenHvText && pageUnusable;
+
+  // Route 4 — INSPECTABLE: a readable surface WITH a genuine blocking backdrop /
   // top-layer modal (or a scrim+centered surface that DID yield text). A bare large
   // hero / carousel (no scrim, not :modal) is NOT a boundary and routes to `none`.
   const inspectableDominant =
     !opaqueIframe &&
     !unreadableDominant &&
+    !pageLevelHvWall &&
     ((inspectableText && (scrim || modal)) ||
       (scrimAny && centeredAny && textAttempted && textExtractable));
 
@@ -217,6 +244,10 @@ export function classifySurfaceBoundary(
     route = "visual_classifier_candidate";
     computedBasis = "unreadable_dominant_surface";
     reason = "unreadable_dominant_surface";
+  } else if (pageLevelHvWall) {
+    route = "visual_classifier_candidate";
+    computedBasis = "page_level_hv_wall";
+    reason = "page_level_hv_wall";
   } else if (inspectableDominant) {
     route = "dom_semantic_candidate";
     computedBasis = "inspectable_dominant_surface";
@@ -239,6 +270,7 @@ export function classifySurfaceBoundary(
   if (opaqueIframe && (inspectableText || normalDomBehind)) inspectability_class = "mixed";
   else if (opaqueIframe) inspectability_class = "opaque";
   else if (unreadableDominant) inspectability_class = "opaque"; // visible but semantically unreadable
+  else if (pageLevelHvWall) inspectability_class = "opaque"; // full-page wall: visible, not semantically usable
   else if (inspectableDominant) inspectability_class = "inspectable";
   else inspectability_class = "none";
 

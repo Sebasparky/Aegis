@@ -6460,6 +6460,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           surface_dominant_text_uninspectable: screenHv?.dominant_text_uninspectable === true,
           surface_visible_but_semantically_unclassified:
             screenHv?.visible_but_semantically_unclassified === true,
+          // Page-level HV wall inputs: a full-page terminal blocker DOCUMENT (no scrim,
+          // no iframe, near-zero usable refs) where the page itself is the wall. The
+          // strong screen-HV TEXT signals are reported independently of the scrim gate.
+          // page_wall_attempted is corroborating telemetry only (never a trigger).
+          screen_hv_phrase_seen: screenHv?.hv_phrase_seen === true,
+          screen_press_hold_affordance_seen: screenHv?.press_hold_affordance_seen === true,
+          page_appears_unusable: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
+          page_wall_attempted: pageWallAttempted,
         };
         const surfaceDecision = classifySurfaceBoundary(surfaceSignals);
         // hv_debug controls ONLY the existing snapshot_hv_gate debug output and the

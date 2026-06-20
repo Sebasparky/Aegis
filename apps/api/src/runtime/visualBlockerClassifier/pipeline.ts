@@ -56,9 +56,9 @@ function logVisionClassifierDebug(fields: Record<string, string | number | boole
 function deriveTriggerBasis(
   reason: VisualClassifierCandidateReason,
 ): VisualClassifierTriggerBasis {
-  return reason === "unreadable_dominant_surface"
-    ? "unreadable_dominant_surface"
-    : "opaque_dominant_surface";
+  if (reason === "unreadable_dominant_surface") return "unreadable_dominant_surface";
+  if (reason === "page_level_hv_wall") return "page_level_hv_wall";
+  return "opaque_dominant_surface";
 }
 
 function deriveDominantSurfaceKind(

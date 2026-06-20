@@ -34,11 +34,13 @@ export type ConfidenceBucket = "low" | "medium" | "high";
 
 export type VisualClassifierTriggerBasis =
   | "opaque_dominant_surface"
-  | "unreadable_dominant_surface";
+  | "unreadable_dominant_surface"
+  | "page_level_hv_wall";
 
 export type VisualClassifierCandidateReason =
   | "opaque_iframe"
   | "unreadable_dominant_surface"
+  | "page_level_hv_wall"
   | "visual_dom_mismatch";
 
 export type VisualClassifierDominantSurfaceKind =

@@ -162,6 +162,30 @@ const UNREADABLE_SURFACE_HV: ScreenHvWallSignals = {
   unreadable_dominant_surface_seen: true,
 };
 
+// A PAGE-LEVEL HV WALL: a full-page terminal blocker DOCUMENT (no scrim, no dominant
+// surface, no iframe) where the page itself is the wall. `wall: false` (the no-scrim
+// case the screen-HV mint misses), but the strong screen-HV TEXT signals are present.
+// Combined with a near-empty page (zero candidates) this drives the new
+// `page_level_hv_wall` route → route_decided === "visual_classifier_candidate".
+const PAGE_LEVEL_WALL_HV: ScreenHvWallSignals = {
+  wall: false,
+  viewport_scrim_seen: false,
+  centered_modal_seen: true,
+  press_hold_affordance_seen: true,
+  hv_phrase_seen: true,
+  top_layer_dialog_seen: false,
+  dominant_visible_surface_seen: false,
+  dominant_visible_surface_kind: "unknown",
+  dominant_text_extraction_attempted: false,
+  dominant_text_extractable: false,
+  dominant_text_uninspectable: false,
+  dominant_text_source: "none",
+  visible_but_semantically_unclassified: false,
+  dominant_surface_contains_iframe: false,
+  dominant_surface_iframe_text_not_harvested: false,
+  unreadable_dominant_surface_seen: false,
+};
+
 // A normal page: no scrim, no dominant surface → route_decided !== candidate.
 const NO_SURFACE_HV: ScreenHvWallSignals = {
   wall: false,
@@ -369,6 +393,41 @@ describe("browser-snapshot — capture-and-skip exploration mode", () => {
     const raw = JSON.stringify(res.json());
     expect(raw).not.toContain("HUMAN_VERIFICATION_REQUIRED");
     expect(raw).not.toContain("visual_gesture_capsule");
+  });
+
+  it("ON + page-level HV wall (no scrim, zero elements) → 422 page_level_hv_wall, VGC suppressed", async () => {
+    enableExplorationMode();
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true"; // would normally mint; must be suppressed
+    captureMock.mockResolvedValueOnce({ written: true });
+    seedSession();
+    // Zero candidates → page_appears_unusable true. The full-page terminal wall.
+    bundleMock.mockResolvedValueOnce({ candidates: [], screenHv: PAGE_LEVEL_WALL_HV });
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("ANTIGEN_VISUAL_BLOCKER_CAPTURED");
+    expect(body.error.trigger_basis).toBe("page_level_hv_wall");
+    expect(body.error.candidate_reason).toBe("page_level_hv_wall");
+    expect(body.error.blocker_status).toBe("capture_written");
+    // No VGC, no 409 — capture-and-skip wins.
+    expect(getActiveVisualGestureCapsuleForBrowserSession(SESSION_ID)).toBeUndefined();
+    expect(res.statusCode).not.toBe(409);
+    expect(JSON.stringify(body)).not.toContain("HUMAN_VERIFICATION_REQUIRED");
+  });
+
+  it("ON + ordinary zero-element page without HV text → no 422, normal 200 (page_wall_attempted is not a trigger)", async () => {
+    enableExplorationMode();
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    // Zero candidates (page_appears_unusable + page_wall_attempted both true) but NO
+    // screen-HV text → must NOT become a page_level_hv_wall candidate.
+    bundleMock.mockResolvedValueOnce({ candidates: [], screenHv: NO_SURFACE_HV });
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(captureMock).not.toHaveBeenCalled();
   });
 
   it("ON + non-candidate route (normal page) → no 422, normal 200", async () => {

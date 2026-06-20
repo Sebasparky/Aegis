@@ -58,6 +58,19 @@ const opaqueSignals: SurfaceBoundarySignals = {
   surface_text_uninspectable: true,
 };
 
+/**
+ * A PAGE-LEVEL HV WALL: a full-page terminal blocker DOCUMENT (no scrim, no iframe,
+ * near-zero usable refs) where the page itself is the wall. Strong screen-HV TEXT
+ * signals are present; page_appears_unusable reflects the (near-)empty page.
+ */
+const pageLevelHvWallSignals: SurfaceBoundarySignals = {
+  screen_hv_phrase_seen: true,
+  screen_press_hold_affordance_seen: true,
+  page_appears_unusable: true,
+  // page_wall_attempted is corroborating telemetry only — present but never a trigger.
+  page_wall_attempted: true,
+};
+
 function run(signals: SurfaceBoundarySignals, decision?: SurfaceBoundaryDecision) {
   const surfaceDecision = decision ?? classifySurfaceBoundary(signals);
   return runVisualBlockerClassifierPipeline({
@@ -115,6 +128,35 @@ describe("pipeline runs for visual_classifier_candidate bases", () => {
     expect(out.policy.action).toBe("fail_closed_or_ask_user");
     expect(out.policy.enforced).toBe(false);
   });
+
+  it("page_level_hv_wall (no scrim, no iframe, unusable page) → candidate, runs", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary(pageLevelHvWallSignals);
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("page_level_hv_wall");
+    expect(decision.visual_classifier_candidate_reason).toBe("page_level_hv_wall");
+    // Deliberately NOT a scrim/iframe surface.
+    expect(decision.inspectability_class).toBe("opaque");
+
+    const out = run(pageLevelHvWallSignals, decision);
+    expect(out.ran).toBe(true);
+    if (out.ran !== true) throw new Error("expected ran");
+    expect(out.candidate.trigger_basis).toBe("page_level_hv_wall");
+    expect(out.candidate.candidate_reason).toBe("page_level_hv_wall");
+    expect(out.result.blocker_type).toBe("unknown_blocked");
+    expect(out.policy.action).toBe("fail_closed_or_ask_user");
+    expect(out.policy.enforced).toBe(false);
+  });
+
+  it("press-hold affordance alone (no phrase) still routes to page_level_hv_wall", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary({
+      screen_press_hold_affordance_seen: true,
+      page_appears_unusable: true,
+    });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("page_level_hv_wall");
+  });
 });
 
 // ── Non-candidate routes never run ────────────────────────────────────────────
@@ -151,6 +193,32 @@ describe("pipeline does not run for non-candidate routes", () => {
     expect(decision.route_decided).toBe("none");
     const out = run({}, decision);
     expect(out.ran).toBe(false);
+  });
+
+  it("ordinary near-empty page without HV text → none (page_wall_attempted is not a trigger)", () => {
+    withFlag(true);
+    // page_appears_unusable + page_wall_attempted are BOTH true on any near-empty page;
+    // without a strong screen-HV text signal this must NOT become a candidate.
+    const signals: SurfaceBoundarySignals = {
+      page_appears_unusable: true,
+      page_wall_attempted: true,
+    };
+    const decision = classifySurfaceBoundary(signals);
+    expect(decision.route_decided).toBe("none");
+    const out = run(signals, decision);
+    expect(out.ran).toBe(false);
+    if (out.ran === false) expect(out.skip_reason).toBe("not_a_candidate");
+  });
+
+  it("HV text on a USABLE (element-rich) page → none (requires page unusable)", () => {
+    withFlag(true);
+    const signals: SurfaceBoundarySignals = {
+      screen_hv_phrase_seen: true,
+      screen_press_hold_affordance_seen: true,
+      page_appears_unusable: false,
+    };
+    const decision = classifySurfaceBoundary(signals);
+    expect(decision.route_decided).toBe("none");
   });
 
   it("unknown route (synthetic) → not_a_candidate", () => {

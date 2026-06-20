@@ -69,6 +69,8 @@ import {
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
+import { isHvVisionClassifierEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -6408,7 +6410,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // (mint or not) so the failing sub-gate is attributable from logs alone.
       // Booleans/enums/buckets only — never text, selectors, coords, iframe src,
       // screenshots, target ids, or raw DOM. Byte-identical when the flag is off.
-      if (isHvDebugEnabled()) {
+      //
+      // The surface signals + shadow decision are also the input to the (shadow)
+      // VisualBlockerClassifierPipeline, so this block runs when EITHER hv_debug or
+      // the vision-classifier flag is on. hv_debug still controls ONLY the debug
+      // output below; the vision flag independently controls the pipeline. Both off
+      // ⇒ byte-identical.
+      if (isHvDebugEnabled() || isHvVisionClassifierEnabled()) {
         // ── Surface-Boundary Router SHADOW decision on EVERY snapshot ──
         // Merge BOTH probes: the ambiguous geometry probe's booleans (copied onto
         // hvDebug above when it ran) and the always-present screen-scan signals. The
@@ -6437,6 +6445,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             screenHv?.visible_but_semantically_unclassified === true,
         };
         const surfaceDecision = classifySurfaceBoundary(surfaceSignals);
+        // hv_debug controls ONLY the existing snapshot_hv_gate debug output and the
+        // surface_* fields on the response's human_verification_debug object. Keeping
+        // these inside this guard preserves byte-identical responses when hv_debug is
+        // off (even if the vision-classifier flag is on).
+        if (isHvDebugEnabled()) {
         if (hvDebug) {
           hvDebug.surface_boundary_route_decided = surfaceDecision.route_decided;
           hvDebug.surface_boundary_trigger_basis = surfaceDecision.trigger_basis;
@@ -6499,6 +6512,31 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           surface_unreadable_dominant_surface_seen:
             screenHv?.unreadable_dominant_surface_seen === true,
         });
+        } // end hv_debug-only output
+
+        // ── VisualBlockerClassifierPipeline — Phase 1 SHADOW (vision-flag-gated) ──
+        // Runs only when the SurfaceBoundaryRouter already decided this surface needs
+        // visual classification. SHADOW ONLY: the outcome is discarded — never branched
+        // on, never mints a VGC, never returns a 409, never mutates the response body.
+        // It emits safe booleans/enums/buckets/ids telemetry and a stub policy with
+        // enforced:false. Independent of hv_debug.
+        if (
+          isHvVisionClassifierEnabled() &&
+          surfaceDecision.route_decided === "visual_classifier_candidate"
+        ) {
+          let visionDomain = "unknown";
+          try {
+            if (snapshot.url) visionDomain = new URL(snapshot.url).hostname;
+          } catch {
+            /* keep "unknown" — never throw from the shadow path */
+          }
+          runVisualBlockerClassifierPipeline({
+            surfaceDecision,
+            surfaceSignals,
+            browserSessionId: session.browser_session_id,
+            domain: visionDomain,
+          });
+        }
       }
     }
 

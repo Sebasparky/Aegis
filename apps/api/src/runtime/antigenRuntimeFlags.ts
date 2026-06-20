@@ -27,6 +27,7 @@ import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
 import { isVisualGestureCapsuleEnabled } from "./visualGestureCapsule.js";
+import { isHvVisionClassifierEnabled } from "./visualBlockerClassifier/flags.js";
 
 export interface AntigenRuntimeStatus {
   click_verify: boolean;
@@ -46,6 +47,14 @@ export interface AntigenRuntimeStatus {
    * is byte-identical when off — no capsule created, no capture, no relay.
    */
   visual_gesture_capsule: boolean;
+  /**
+   * Whether ANTIGEN_HV_VISION_CLASSIFIER is on (default off). Gates the shadow-only
+   * VisualBlockerClassifierPipeline that runs after the SurfaceBoundaryRouter decides
+   * `visual_classifier_candidate`. Phase 1 is byte-identical when off and shadow-only
+   * when on — no VGC mint, no 409, no capsule change; every PolicyDecision is
+   * `enforced: false`. Independent of hv_debug (which gates only debug logging).
+   */
+  hv_vision_classifier: boolean;
   fill_state: boolean;
   /**
    * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
@@ -81,6 +90,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     human_verification: isHumanVerificationEnabled(),
     hv_debug: isHvDebugEnabled(),
     visual_gesture_capsule: isVisualGestureCapsuleEnabled(),
+    hv_vision_classifier: isHvVisionClassifierEnabled(),
     fill_state: isFillStateEnabled(),
     keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
@@ -111,6 +121,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `human_verification=${s.human_verification}`,
     `hv_debug=${s.hv_debug}`,
     `visual_gesture_capsule=${s.visual_gesture_capsule}`,
+    `hv_vision_classifier=${s.hv_vision_classifier}`,
     `fill_state=${s.fill_state}`,
     `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,

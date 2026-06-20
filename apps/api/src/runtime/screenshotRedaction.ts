@@ -250,6 +250,196 @@ export function redactPngBoxes(
   return PNG.sync.write(png).toString("base64");
 }
 
+/**
+ * Crop a PNG to a viewport-CSS-px rectangle. Used ONLY by the dev-only vision
+ * dataset capture (Phase 2B) to save a blocker-region crop of an ALREADY-REDACTED
+ * frame — cropping after redaction can only remove pixels, never unredact. The box
+ * is in viewport CSS px and scaled to image px exactly like `redactPngBoxes` so it
+ * is correct under any deviceScaleFactor. The box is clamped to the image bounds.
+ * Throws on decode/encode failure or an empty resulting rect so the caller can fall
+ * back to the full frame. Coordinates are never logged or returned.
+ */
+export function cropPng(
+  pngBase64: string,
+  box: { x: number; y: number; w: number; h: number },
+  viewport: { vw: number; vh: number },
+): string {
+  const png = PNG.sync.read(Buffer.from(pngBase64, "base64"));
+  const scaleX = viewport.vw > 0 ? png.width / viewport.vw : 1;
+  const scaleY = viewport.vh > 0 ? png.height / viewport.vh : 1;
+  const x0 = Math.max(0, Math.min(png.width, Math.floor(box.x * scaleX)));
+  const y0 = Math.max(0, Math.min(png.height, Math.floor(box.y * scaleY)));
+  const x1 = Math.max(0, Math.min(png.width, Math.ceil((box.x + box.w) * scaleX)));
+  const y1 = Math.max(0, Math.min(png.height, Math.ceil((box.y + box.h) * scaleY)));
+  const cw = x1 - x0;
+  const ch = y1 - y0;
+  if (cw <= 0 || ch <= 0) throw new Error("CROP_EMPTY");
+  const dst = new PNG({ width: cw, height: ch });
+  // Manual RGBA row copy of the (cw×ch) region at (x0,y0) → dst (0,0). Avoids
+  // depending on a particular pngjs bitblt surface across the sync/stream APIs.
+  for (let row = 0; row < ch; row++) {
+    const srcStart = ((png.width * (y0 + row)) + x0) << 2;
+    const dstStart = (cw * row) << 2;
+    png.data.copy(dst.data, dstStart, srcStart, srcStart + (cw << 2));
+  }
+  return PNG.sync.write(dst).toString("base64");
+}
+
+/** Internal-only blocker-region geometry. NEVER logged, stored, or returned to agents. */
+export interface BlockerCropBox {
+  box: { x: number; y: number; w: number; h: number };
+  viewport: { vw: number; vh: number };
+}
+
+// Rect-only probe for the dominant blocking surface. A simplified, self-contained
+// mirror of `_domSurfaceProbe` in antigenSnapshotRuntime.ts (kept separate ON PURPOSE
+// so blocker geometry never flows through the snapshot/signals/telemetry path). Raw JS
+// string IIFE (the Node tsconfig has no DOM lib). Returns NUMBERS ONLY — no text,
+// selectors, src, or values ever leave the page.
+const BLOCKER_CROP_PROBE_EXPR = `(function(){
+  try {
+    var vw = window.innerWidth||0, vh = window.innerHeight||0;
+    if(!(vw>0&&vh>0)) return { ok:false };
+    function visRect(el){
+      var r=null; try{ r=el.getBoundingClientRect(); }catch(e){ return null; }
+      if(!r||!(r.width>0&&r.height>0)) return null;
+      var cs=null; try{ cs=window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ cs=null; }
+      if(cs){
+        if(cs.display==='none'||cs.visibility==='hidden'||cs.visibility==='collapse') return null;
+        if(String(cs.opacity)==='0') return null;
+      }
+      return r;
+    }
+    function onScreen(r){ return r.left<vw&&(r.left+r.width)>0&&r.top<vh&&(r.top+r.height)>0; }
+    var best=null, bestZ=-1;
+    // 1. A genuinely modal <dialog> is the strongest blocker signal.
+    try {
+      var dlgs=document.querySelectorAll('dialog');
+      for(var i=0;i<dlgs.length;i++){
+        var d=dlgs[i], isModal=false;
+        try{ isModal=(d.open===true)||(d.matches&&d.matches(':modal'))||d.getAttribute('open')!=null; }catch(e){ isModal=false; }
+        if(!isModal) continue;
+        var rd=visRect(d); if(!rd||!onScreen(rd)) continue;
+        best=rd; bestZ=1000000; break;
+      }
+    } catch(e){}
+    // 2. Else the highest-z, center-ish, large fixed/absolute surface.
+    if(!best){
+      var nodes=document.querySelectorAll('div,section,aside,[role="dialog"],[role="alertdialog"]');
+      for(var j=0;j<nodes.length&&j<400;j++){
+        var n=nodes[j], cs2=null;
+        try{ cs2=window.getComputedStyle?window.getComputedStyle(n):null; }catch(e){ cs2=null; }
+        if(!cs2) continue;
+        var p=cs2.position||''; if(p!=='fixed'&&p!=='absolute') continue;
+        var r2=visRect(n); if(!r2||!onScreen(r2)) continue;
+        if(!(r2.width>=200&&r2.height>=120)) continue;
+        var cx=r2.left+r2.width/2, cy=r2.top+r2.height/2;
+        if(!(cx>=0.2*vw&&cx<=0.8*vw&&cy>=0.15*vh&&cy<=0.85*vh)) continue;
+        var z=parseInt(cs2.zIndex,10); if(isNaN(z)) z=0;
+        if(z>=bestZ){ bestZ=z; best=r2; }
+      }
+    }
+    // 3. Else the largest visible iframe (a common challenge host).
+    if(!best){
+      var frames=document.querySelectorAll('iframe');
+      var fb=null, fa=0;
+      for(var k=0;k<frames.length&&k<20;k++){
+        var rf=visRect(frames[k]); if(!rf||!onScreen(rf)) continue;
+        var area=rf.width*rf.height; if(area>fa){ fa=area; fb=rf; }
+      }
+      if(fb) best=fb;
+    }
+    if(!best) return { ok:false };
+    return { ok:true, x:best.left, y:best.top, w:best.width, h:best.height, vw:vw, vh:vh };
+  } catch(e){ return { ok:false }; }
+})()`;
+
+/**
+ * Locate the dominant blocking surface's bounding box for dev-only dataset cropping.
+ * Returns viewport-CSS-px geometry + the live viewport size, or null on ANY failure
+ * (transport, attach, no surface, non-finite numbers, timeout). Caller treats null as
+ * "no safe crop" and keeps the full viewport. Fail-safe: never throws, never logs the
+ * box. This is the ONLY place blocker geometry is computed off the snapshot path.
+ */
+export async function computeBlockerCropBox(params: {
+  browserWsUrl: string;
+  pageTargetId: string;
+}): Promise<BlockerCropBox | null> {
+  const { browserWsUrl, pageTargetId } = params;
+  return await new Promise<BlockerCropBox | null>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let settled = false;
+    const pending = new Map<number, (r: Record<string, unknown> | undefined, e?: unknown) => void>();
+    const finish = (r: BlockerCropBox | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish(null), 8_000);
+
+    const send = (
+      method: string,
+      p: Record<string, unknown> = {},
+      sid?: string,
+    ): Promise<Record<string, unknown> | undefined> =>
+      new Promise((res, rej) => {
+        const id = msgId++;
+        pending.set(id, (result, error) => (error ? rej(error) : res(result)));
+        const message: Record<string, unknown> = { id, method, params: p };
+        if (sid) message.sessionId = sid;
+        ws.send(JSON.stringify(message));
+      });
+
+    const run = async () => {
+      const attach = await send("Target.attachToTarget", { targetId: pageTargetId, flatten: true });
+      const sessionId = (attach?.sessionId as string) ?? null;
+      if (!sessionId) return finish(null);
+      const res = await send(
+        "Runtime.evaluate",
+        { expression: BLOCKER_CROP_PROBE_EXPR, returnByValue: true },
+        sessionId,
+      );
+      const val = (res?.result as Record<string, unknown> | undefined)?.value as
+        | { ok?: boolean; x?: number; y?: number; w?: number; h?: number; vw?: number; vh?: number }
+        | undefined;
+      if (!val?.ok) return finish(null);
+      const nums = [val.x, val.y, val.w, val.h, val.vw, val.vh];
+      if (nums.some((v) => typeof v !== "number" || !Number.isFinite(v))) return finish(null);
+      return finish({
+        box: { x: val.x as number, y: val.y as number, w: val.w as number, h: val.h as number },
+        viewport: { vw: val.vw as number, vh: val.vh as number },
+      });
+    };
+
+    ws.on("open", () => {
+      run().catch(() => finish(null));
+    });
+    ws.on("message", (raw) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const cb = pending.get(id);
+      if (!cb) return;
+      pending.delete(id);
+      if (msg.error) cb(undefined, msg.error);
+      else cb(msg.result as Record<string, unknown> | undefined);
+    });
+    ws.on("error", () => finish(null));
+  });
+}
+
 export async function captureRedactedScreenshot(
   params: CaptureRedactedScreenshotParams,
 ): Promise<CaptureRedactedScreenshotResult> {

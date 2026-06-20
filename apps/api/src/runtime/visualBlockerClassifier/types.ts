@@ -169,8 +169,21 @@ export interface VisionDatasetCaptureMeta {
   policy_enforced: false;
   redaction_verified: boolean;
   redacted_field_count: number;
-  /** Phase 2A captures the full redacted viewport. Crop is Phase 2B. */
-  region: "full_viewport";
+  /**
+   * Phase 2B: `blocker_crop` when a redacted crop around the detected blocker was
+   * written; `full_viewport` when no safe crop could be determined (probe miss,
+   * invalid/too-broad geometry, or crop error) and the full redacted frame was kept.
+   * Coordinates are NEVER stored — only this enum + the two flags below.
+   */
+  region: "blocker_crop" | "full_viewport";
+  /** Phase 2B: true only when the saved frame.png is a blocker-region crop. */
+  crop_applied: boolean;
+  /**
+   * Phase 2B provenance of the saved frame: `capture_reprobe` (geometry came from a
+   * dataset-capture-only re-probe of the live page) or `fallback_full_viewport`.
+   * Never a rect/coordinate.
+   */
+  crop_source: "capture_reprobe" | "fallback_full_viewport";
   /** Null at capture — human label slot for a later phase. */
   label: null;
   /** Null at capture — outcome label slot for a later phase. */

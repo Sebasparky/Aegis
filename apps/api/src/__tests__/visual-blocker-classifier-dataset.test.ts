@@ -11,13 +11,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PNG } from "pngjs";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
   captureVisionDatasetRecord,
   decideDatasetCapture,
+  resolveCrop,
+  validateAndPadCrop,
   __resetVisionDatasetThrottle,
   type DatasetScreenshot,
+  type VisualDatasetCropHint,
 } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { getAntigenRuntimeStatus } from "../runtime/antigenRuntimeFlags.js";
 import type { PipelineOutcome } from "../runtime/visualBlockerClassifier/types.js";
@@ -27,6 +31,30 @@ const FLAG = "ANTIGEN_HV_VISION_DATASET";
 // 1x1 transparent PNG — stands in for a redacted frame.
 const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/** A solid-grey PNG of the given size — a realistic full-viewport stand-in for crops. */
+function solidPng(w: number, h: number): string {
+  const png = new PNG({ width: w, height: h });
+  for (let i = 0; i < png.data.length; i += 4) {
+    png.data[i] = 128;
+    png.data[i + 1] = 128;
+    png.data[i + 2] = 128;
+    png.data[i + 3] = 255;
+  }
+  return PNG.sync.write(png).toString("base64");
+}
+
+const VIEWPORT_PNG_B64 = solidPng(100, 100);
+
+/** A crop probe that finds a centered blocker rect in a 100×100 viewport. */
+const validCropProbe = async (): Promise<VisualDatasetCropHint> => ({
+  box: { x: 30, y: 30, w: 30, h: 30 },
+  viewport: { vw: 100, vh: 100 },
+  source: "capture_reprobe",
+});
+
+/** A crop probe that misses (no safe geometry) → full_viewport fallback. */
+const missCropProbe = async (): Promise<VisualDatasetCropHint | null> => null;
 
 const FIXED_NOW = new Date("2026-06-20T12:00:00.000Z");
 const fixedNow = () => FIXED_NOW;
@@ -153,7 +181,13 @@ describe("dataset capture writes redacted record", () => {
     const root = tmpRoot();
     const res = await captureVisionDatasetRecord(
       { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
-      { outputRoot: root, now: fixedNow, screenshotProvider: okScreenshot, disableThrottle: true },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: okScreenshot,
+        cropProbe: missCropProbe,
+        disableThrottle: true,
+      },
     );
     expect(res.written).toBe(true);
     const dir = recordDir(root);
@@ -162,30 +196,114 @@ describe("dataset capture writes redacted record", () => {
     expect(fs.statSync(path.join(dir, "frame.png")).size).toBeGreaterThan(0);
   });
 
-  it("meta.json has label:null, outcome:null, policy_enforced:false, region:full_viewport", async () => {
+  it("crop probe miss → meta region:full_viewport, crop_applied:false, fallback source", async () => {
     withFlag(true);
     const root = tmpRoot();
     await captureVisionDatasetRecord(
       { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
-      { outputRoot: root, now: fixedNow, screenshotProvider: okScreenshot, disableThrottle: true },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: okScreenshot,
+        cropProbe: missCropProbe,
+        disableThrottle: true,
+      },
     );
     const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
     expect(meta.label).toBeNull();
     expect(meta.outcome).toBeNull();
     expect(meta.policy_enforced).toBe(false);
     expect(meta.region).toBe("full_viewport");
+    expect(meta.crop_applied).toBe(false);
+    expect(meta.crop_source).toBe("fallback_full_viewport");
     expect(meta.redaction_verified).toBe(true);
     expect(meta.redacted_field_count).toBe(2);
     expect(meta.blocker_type).toBe("unknown_blocked");
     expect(meta.classifier_source).toBe("shadow_stub");
   });
 
-  it("meta.json contains no unsafe keys or nested base64", async () => {
+  it("valid crop hint → writes a cropped frame.png, meta region:blocker_crop/crop_applied:true", async () => {
+    withFlag(true);
+    const root = tmpRoot();
+    const fullSize = Buffer.from(VIEWPORT_PNG_B64, "base64").length;
+    const res = await captureVisionDatasetRecord(
+      { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: async () => ({ ok: true, base64: VIEWPORT_PNG_B64, redacted_field_count: 1 }),
+        cropProbe: validCropProbe,
+        disableThrottle: true,
+      },
+    );
+    expect(res.written).toBe(true);
+    const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
+    expect(meta.region).toBe("blocker_crop");
+    expect(meta.crop_applied).toBe(true);
+    expect(meta.crop_source).toBe("capture_reprobe");
+    // The cropped frame is a real, smaller-than-full PNG.
+    const framePath = path.join(recordDir(root), "frame.png");
+    const frameBuf = fs.readFileSync(framePath);
+    const decoded = PNG.sync.read(frameBuf);
+    expect(decoded.width).toBeLessThan(100);
+    expect(decoded.height).toBeLessThan(100);
+    expect(frameBuf.length).toBeLessThan(fullSize);
+  });
+
+  it("cropPng failure (corrupt frame) → safe full_viewport fallback, write still succeeds", async () => {
+    withFlag(true);
+    const root = tmpRoot();
+    const res = await captureVisionDatasetRecord(
+      { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        // A non-PNG body makes cropPng throw; resolveCrop must fall back to the full frame.
+        screenshotProvider: async () => ({ ok: true, base64: "bm90LWEtcG5n", redacted_field_count: 0 }),
+        cropProbe: validCropProbe,
+        disableThrottle: true,
+      },
+    );
+    expect(res.written).toBe(true);
+    const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
+    expect(meta.region).toBe("full_viewport");
+    expect(meta.crop_applied).toBe(false);
+    expect(meta.crop_source).toBe("fallback_full_viewport");
+  });
+
+  it("crop probe throwing → safe full_viewport fallback, never throws", async () => {
+    withFlag(true);
+    const root = tmpRoot();
+    const res = await captureVisionDatasetRecord(
+      { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: okScreenshot,
+        cropProbe: async () => {
+          throw new Error("probe blew up");
+        },
+        disableThrottle: true,
+      },
+    );
+    expect(res.written).toBe(true);
+    const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
+    expect(meta.region).toBe("full_viewport");
+    expect(meta.crop_applied).toBe(false);
+  });
+
+  it("meta.json contains no unsafe keys or nested base64 (crop path)", async () => {
     withFlag(true);
     const root = tmpRoot();
     await captureVisionDatasetRecord(
       { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
-      { outputRoot: root, now: fixedNow, screenshotProvider: okScreenshot, disableThrottle: true },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: async () => ({ ok: true, base64: VIEWPORT_PNG_B64, redacted_field_count: 1 }),
+        cropProbe: validCropProbe,
+        disableThrottle: true,
+      },
     );
     const raw = fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8");
     const meta = JSON.parse(raw);
@@ -200,8 +318,76 @@ describe("dataset capture writes redacted record", () => {
       }
     };
     scan(meta);
-    // The redacted PNG bytes must never be embedded as a string anywhere in meta.
+    // No rect/coordinate keys, and the redacted PNG bytes are never embedded in meta.
+    expect(meta.crop_applied).toBe(true);
+    expect(raw.includes(VIEWPORT_PNG_B64)).toBe(false);
     expect(raw.includes(TINY_PNG_B64)).toBe(false);
+  });
+});
+
+// ── Crop geometry resolution (pure) ───────────────────────────────────────────
+
+describe("resolveCrop / validateAndPadCrop", () => {
+  const vp = { vw: 1000, vh: 800 };
+
+  it("valid centered hint → blocker_crop with capture_reprobe source", () => {
+    const hint: VisualDatasetCropHint = {
+      box: { x: 400, y: 300, w: 200, h: 160 },
+      viewport: vp,
+      source: "capture_reprobe",
+    };
+    const out = resolveCrop(hint, solidPng(1000, 800));
+    expect(out.region).toBe("blocker_crop");
+    expect(out.crop_applied).toBe(true);
+    expect(out.crop_source).toBe("capture_reprobe");
+    const decoded = PNG.sync.read(Buffer.from(out.base64, "base64"));
+    expect(decoded.width).toBeLessThan(1000);
+    expect(decoded.height).toBeLessThan(800);
+  });
+
+  it("null hint → full_viewport fallback", () => {
+    const full = solidPng(40, 40);
+    const out = resolveCrop(null, full);
+    expect(out.region).toBe("full_viewport");
+    expect(out.crop_applied).toBe(false);
+    expect(out.crop_source).toBe("fallback_full_viewport");
+    expect(out.base64).toBe(full);
+  });
+
+  it("rejects NaN / negative / zero-area / off-screen / oversized geometry", () => {
+    const bad: VisualDatasetCropHint[] = [
+      { box: { x: NaN, y: 0, w: 10, h: 10 }, viewport: vp, source: "capture_reprobe" },
+      { box: { x: 0, y: 0, w: -5, h: 10 }, viewport: vp, source: "capture_reprobe" },
+      { box: { x: 0, y: 0, w: 0, h: 0 }, viewport: vp, source: "capture_reprobe" },
+      { box: { x: 5000, y: 5000, w: 10, h: 10 }, viewport: vp, source: "capture_reprobe" },
+      { box: { x: 0, y: 0, w: 10, h: 10 }, viewport: { vw: 0, vh: 0 }, source: "capture_reprobe" },
+      // Covers ~the whole viewport → adds nothing over the full frame.
+      { box: { x: 0, y: 0, w: 1000, h: 800 }, viewport: vp, source: "capture_reprobe" },
+    ];
+    for (const h of bad) expect(validateAndPadCrop(h)).toBeNull();
+    // …and resolveCrop turns each into a safe full_viewport fallback.
+    const full = solidPng(20, 20);
+    for (const h of bad) {
+      const out = resolveCrop(h, full);
+      expect(out.region).toBe("full_viewport");
+      expect(out.crop_applied).toBe(false);
+    }
+  });
+
+  it("clamps padding to the viewport (never exceeds bounds)", () => {
+    const hint: VisualDatasetCropHint = {
+      box: { x: 10, y: 10, w: 200, h: 160 },
+      viewport: { vw: 300, vh: 300 },
+      source: "capture_reprobe",
+    };
+    const rect = validateAndPadCrop(hint);
+    expect(rect).not.toBeNull();
+    if (rect) {
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.y).toBeGreaterThanOrEqual(0);
+      expect(rect.x + rect.w).toBeLessThanOrEqual(300);
+      expect(rect.y + rect.h).toBeLessThanOrEqual(300);
+    }
   });
 });
 

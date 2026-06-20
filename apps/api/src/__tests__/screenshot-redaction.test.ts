@@ -25,7 +25,7 @@ import { PNG } from "pngjs";
 import WebSocket from "ws";
 import { chromium } from "playwright";
 
-import { redactPngBoxes, captureRedactedScreenshot, buildTopLevelRemaskExpr } from "../runtime/screenshotRedaction.js";
+import { redactPngBoxes, cropPng, captureRedactedScreenshot, buildTopLevelRemaskExpr } from "../runtime/screenshotRedaction.js";
 import { executeProtectedRealisticFill } from "../runtime/protectedRealisticFill.js";
 
 // ─── Part 1: pure pixel-pass redactor ────────────────────────────────────────
@@ -69,6 +69,40 @@ describe("redactPngBoxes — pixel pass", () => {
   it("clamps a box that runs past the image bounds without throwing", () => {
     const out = redactPngBoxes(solidWhitePng(30, 30), [{ x: 20, y: 20, w: 100, h: 100 }], { vw: 30, vh: 30 });
     expect(pixelAt(out, 25, 25)).toEqual([0, 0, 0, 255]);
+  });
+});
+
+// ─── cropPng — pixel crop (dev-only Phase 2B dataset) ────────────────────────
+
+describe("cropPng — pixel crop", () => {
+  it("crops the requested sub-rect (scale 1) and yields those exact dimensions", () => {
+    const out = cropPng(solidWhitePng(100, 80), { x: 20, y: 10, w: 30, h: 25 }, { vw: 100, vh: 80 });
+    const png = PNG.sync.read(Buffer.from(out, "base64"));
+    expect(png.width).toBe(30);
+    expect(png.height).toBe(25);
+  });
+
+  it("scales the crop rect by the image/viewport ratio (deviceScaleFactor 2)", () => {
+    // Image is 2x the CSS viewport: a CSS 30×25 crop maps to a 60×50 image crop.
+    const out = cropPng(solidWhitePng(200, 160), { x: 10, y: 10, w: 30, h: 25 }, { vw: 100, vh: 80 });
+    const png = PNG.sync.read(Buffer.from(out, "base64"));
+    expect(png.width).toBe(60);
+    expect(png.height).toBe(50);
+  });
+
+  it("clamps a crop rect that runs past the image bounds", () => {
+    const out = cropPng(solidWhitePng(40, 40), { x: 30, y: 30, w: 100, h: 100 }, { vw: 40, vh: 40 });
+    const png = PNG.sync.read(Buffer.from(out, "base64"));
+    expect(png.width).toBe(10);
+    expect(png.height).toBe(10);
+  });
+
+  it("throws on an empty resulting rect (caller falls back to the full frame)", () => {
+    expect(() => cropPng(solidWhitePng(40, 40), { x: 50, y: 50, w: 5, h: 5 }, { vw: 40, vh: 40 })).toThrow();
+  });
+
+  it("throws on a corrupt PNG body", () => {
+    expect(() => cropPng("not-a-png", { x: 0, y: 0, w: 10, h: 10 }, { vw: 40, vh: 40 })).toThrow();
   });
 });
 

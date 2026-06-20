@@ -4,6 +4,8 @@
 > Do **not** modify runtime code, add dependencies, or build the model based on this document.
 > This is a product/engineering memo we can return to deliberately later.
 
+> **Related design memo:** [`docs/visual-blocker-classifier-pipeline.md`](./visual-blocker-classifier-pipeline.md) expands this direction into a staged SurfaceBoundaryRouter → VisualBlockerClassifierPipeline → Policy architecture, while preserving the rule that visual classification does not directly mint VGC.
+
 ## Why this matters
 
 Language-model agents keep getting better at normal browsing. As they do, the share of failures that look like "the agent couldn't figure out the page" shrinks, and the share that looks like "the agent hit a trust boundary or a web blocker" grows. That is exactly Antigen's territory.

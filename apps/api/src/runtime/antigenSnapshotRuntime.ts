@@ -41,6 +41,11 @@ import type { HumanVerificationChallengeType } from "@aegis/types";
 
 import { BrowserTimingScope } from "./browserTiming.js";
 import { isHumanVerificationEnabled } from "./humanVerificationState.js";
+import type {
+  SurfaceBoundaryRoute,
+  SurfaceBoundaryTriggerBasis,
+  SurfaceInspectabilityClass,
+} from "./surfaceBoundary.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -2042,6 +2047,21 @@ export interface AmbiguousVisualObstructionProbe {
   viewport_scrim_seen: boolean;
   pointer_interceptor_seen: boolean;
   top_layer_dialog_seen: boolean;
+  // ── Surface-boundary shadow signals (optional; SHADOW TELEMETRY ONLY) ──
+  // Computed by the same probe IIFE but consumed only by classifySurfaceBoundary
+  // for ANTIGEN_HV_DEBUG logging. They NEVER affect classifyAmbiguousVisualObstruction,
+  // VGC minting, or any current path. Optional so existing probe literals/mocks stay valid.
+  visible_cross_origin_iframe_seen?: boolean;
+  opaque_iframe_seen?: boolean;
+  off_path_iframe_seen?: boolean;
+  opaque_dominant_surface_seen?: boolean;
+  surface_text_inspectable?: boolean;
+  surface_text_uninspectable?: boolean;
+  surface_over_main_content?: boolean;
+  surface_blocks_viewport_center?: boolean;
+  normal_page_dom_present_behind_surface?: boolean;
+  background_refs_available_behind_surface?: boolean;
+  visual_dom_contradiction_seen?: boolean;
 }
 
 /**
@@ -2070,7 +2090,15 @@ export function buildAmbiguousVisualObstructionExpr(): string {
         if(cr&&cr.width>0&&cr.height>0){ interactive++; if(interactive>3) break; }
       }
     }catch(e){}
-    var visIframe=false, inaccIframe=false;
+    // ── Viewport + coverage helpers (defined BEFORE the iframe scan so iframe
+    //    dominance can be measured with the same coverage math) ──
+    var vpW=0,vpH=0;
+    try{ vpW=window.innerWidth||document.documentElement.clientWidth||0; vpH=window.innerHeight||document.documentElement.clientHeight||0; }catch(e){}
+    var vpArea=vpW*vpH;
+    function vis(el){ try{ var s=getComputedStyle(el); if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')===0) return false; }catch(e){ return false; } return true; }
+    function coverage(r){ if(!vpArea||!r) return 0; var w=Math.max(0,Math.min(r.right,vpW)-Math.max(r.left,0)); var h=Math.max(0,Math.min(r.bottom,vpH)-Math.max(r.top,0)); return (w*h)/vpArea; }
+    function centeredRect(r){ if(!r||!vpW||!vpH) return false; var cx=r.left+r.width/2, cy=r.top+r.height/2; return cx>=0.25*vpW&&cx<=0.75*vpW&&cy>=0.2*vpH&&cy<=0.8*vpH; }
+    var visIframe=false, inaccIframe=false, opaqueIframeDominant=false;
     try{
       var frames=document.querySelectorAll('iframe');
       for(var i=0;i<frames.length&&i<20;i++){
@@ -2078,15 +2106,13 @@ export function buildAmbiguousVisualObstructionExpr(): string {
         if(!r||!(r.width>0&&r.height>0)) continue;
         visIframe=true;
         var ok=false; try{ ok=!!fr.contentDocument; }catch(e){ ok=false; }
-        if(!ok){ inaccIframe=true; }
+        // Cross-origin iframe (text unreadable). Dominance reuses the same coverage
+        // math as overlays: a cross-origin frame is "opaque dominant" only when it
+        // covers a large, centered fraction of the viewport — a generic ad/embed is not.
+        if(!ok){ inaccIframe=true; if(coverage(r)>=0.40&&centeredRect(r)){ opaqueIframeDominant=true; } }
       }
     }catch(e){}
     // ── Coarse layout-geometry obstruction signals (booleans only) ──
-    var vpW=0,vpH=0;
-    try{ vpW=window.innerWidth||document.documentElement.clientWidth||0; vpH=window.innerHeight||document.documentElement.clientHeight||0; }catch(e){}
-    var vpArea=vpW*vpH;
-    function vis(el){ try{ var s=getComputedStyle(el); if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')===0) return false; }catch(e){ return false; } return true; }
-    function coverage(r){ if(!vpArea||!r) return 0; var w=Math.max(0,Math.min(r.right,vpW)-Math.max(r.left,0)); var h=Math.max(0,Math.min(r.bottom,vpH)-Math.max(r.top,0)); return (w*h)/vpArea; }
     var largeCentered=false, scrim=false, topLayer=false;
     try{
       var nodes=document.querySelectorAll('div,section,dialog,[role="dialog"],[role="alertdialog"],[aria-modal],[class*="overlay"],[class*="modal"],[class*="backdrop"],[class*="scrim"]');
@@ -2135,6 +2161,12 @@ export function buildAmbiguousVisualObstructionExpr(): string {
       }
     }catch(e){}
     var pointerIntercept=sampleCount>0&&interceptHits*2>sampleCount;
+    // ── Surface-boundary shadow signals (booleans only; reuse the work above) ──
+    var crossOriginIframe=!!(visIframe&&inaccIframe);
+    var offPathIframe=crossOriginIframe&&!opaqueIframeDominant; // present but NOT dominant (generic ad/embed)
+    var normalDomBehind=interactive>3;                          // page still has real interactive controls
+    var surfaceOverMain=!!(largeCentered||scrim||opaqueIframeDominant);
+    var surfaceInspectable=(!!(scrim||topLayer||largeCentered))&&!opaqueIframeDominant; // readable same-origin surface
     return {
       denial_text_seen:!!denial,
       near_zero_interactive: interactive<=3,
@@ -2142,7 +2174,18 @@ export function buildAmbiguousVisualObstructionExpr(): string {
       large_centered_overlay_seen:!!largeCentered,
       viewport_scrim_seen:!!scrim,
       pointer_interceptor_seen:!!pointerIntercept,
-      top_layer_dialog_seen:!!topLayer
+      top_layer_dialog_seen:!!topLayer,
+      visible_cross_origin_iframe_seen:crossOriginIframe,
+      opaque_iframe_seen:!!opaqueIframeDominant,
+      off_path_iframe_seen:offPathIframe,
+      opaque_dominant_surface_seen:!!(opaqueIframeDominant||scrim),
+      surface_text_inspectable:surfaceInspectable,
+      surface_text_uninspectable:!!opaqueIframeDominant,
+      surface_over_main_content:surfaceOverMain,
+      surface_blocks_viewport_center:!!pointerIntercept,
+      normal_page_dom_present_behind_surface:normalDomBehind,
+      background_refs_available_behind_surface:normalDomBehind,
+      visual_dom_contradiction_seen:!!(opaqueIframeDominant&&normalDomBehind)
     };
   })()`;
 }
@@ -2240,6 +2283,18 @@ export async function detectAmbiguousVisualObstructionViaCDP(params: {
     viewport_scrim_seen: v.viewport_scrim_seen === true,
     pointer_interceptor_seen: v.pointer_interceptor_seen === true,
     top_layer_dialog_seen: v.top_layer_dialog_seen === true,
+    // Surface-boundary shadow signals (booleans only; debug-logging use only).
+    visible_cross_origin_iframe_seen: v.visible_cross_origin_iframe_seen === true,
+    opaque_iframe_seen: v.opaque_iframe_seen === true,
+    off_path_iframe_seen: v.off_path_iframe_seen === true,
+    opaque_dominant_surface_seen: v.opaque_dominant_surface_seen === true,
+    surface_text_inspectable: v.surface_text_inspectable === true,
+    surface_text_uninspectable: v.surface_text_uninspectable === true,
+    surface_over_main_content: v.surface_over_main_content === true,
+    surface_blocks_viewport_center: v.surface_blocks_viewport_center === true,
+    normal_page_dom_present_behind_surface: v.normal_page_dom_present_behind_surface === true,
+    background_refs_available_behind_surface: v.background_refs_available_behind_surface === true,
+    visual_dom_contradiction_seen: v.visual_dom_contradiction_seen === true,
   };
 }
 
@@ -2766,6 +2821,25 @@ export interface HumanVerificationDebug {
     | "not_plumbed"
     | "unknown"
     | "none";
+  // ── Surface-Boundary Router SHADOW telemetry (dev-only; ANTIGEN_HV_DEBUG). ──
+  // The route a future SurfaceBoundaryRouter WOULD take for the dominant visible
+  // surface. Observational ONLY — never gates VGC/409/recheck. Booleans / enums only.
+  surface_boundary_route_decided?: SurfaceBoundaryRoute;
+  surface_boundary_trigger_basis?: SurfaceBoundaryTriggerBasis;
+  surface_inspectability_class?: SurfaceInspectabilityClass;
+  surface_opaque_dominant_with_bg_dom_contradiction?: boolean;
+  surface_newly_appeared?: "unknown";
+  surface_overlaps_agent_target?: "unknown" | boolean;
+  surface_visible_cross_origin_iframe_seen?: boolean;
+  surface_opaque_iframe_seen?: boolean;
+  surface_off_path_iframe_seen?: boolean;
+  surface_opaque_dominant_surface_seen?: boolean;
+  surface_text_inspectable?: boolean;
+  surface_text_uninspectable?: boolean;
+  surface_over_main_content?: boolean;
+  surface_blocks_viewport_center?: boolean;
+  surface_normal_page_dom_present_behind?: boolean;
+  surface_visual_dom_contradiction_seen?: boolean;
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────

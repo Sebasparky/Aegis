@@ -68,6 +68,7 @@ import {
   type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
+import { classifySurfaceBoundary } from "../runtime/surfaceBoundary.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -893,6 +894,12 @@ async function rejectNoProgressActionAsHumanVerification(
             pageUrl: session.current_url ?? "",
             signals: { ...probe, repeated_stale: true },
           });
+          // Surface-Boundary Router SHADOW decision — computed ONLY when HV debug is
+          // on (otherwise byte-identical, no overhead). This path is the repeated-
+          // stale / no-progress backstop, so the trigger basis marks fallback origin.
+          const sb = isHvDebugEnabled()
+            ? classifySurfaceBoundary(probe, { fromNoProgressFallback: true })
+            : null;
           logHvActionDebug({
             scope: "no_progress_backstop",
             tool,
@@ -907,6 +914,17 @@ async function rejectNoProgressActionAsHumanVerification(
             top_layer_dialog_seen: probe.top_layer_dialog_seen,
             repeated_stale: true,
             created_capsule: !!fallback,
+            ...(sb
+              ? {
+                  surface_boundary_route_decided: sb.route_decided,
+                  surface_boundary_trigger_basis: sb.trigger_basis,
+                  surface_inspectability_class: sb.inspectability_class,
+                  surface_opaque_iframe_seen: probe.opaque_iframe_seen === true,
+                  surface_off_path_iframe_seen: probe.off_path_iframe_seen === true,
+                  surface_visual_dom_contradiction_seen:
+                    probe.visual_dom_contradiction_seen === true,
+                }
+              : {}),
           });
           if (fallback) {
             sendHumanVerificationRequired(session, reply, tool, fallback.request, fallback.vgc);
@@ -6270,6 +6288,30 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             hvDebug.ambiguous_viewport_scrim_seen = ambiguousProbe.viewport_scrim_seen;
             hvDebug.ambiguous_pointer_interceptor_seen = ambiguousProbe.pointer_interceptor_seen;
             hvDebug.ambiguous_top_layer_dialog_seen = ambiguousProbe.top_layer_dialog_seen;
+            // ── Surface-Boundary Router SHADOW decision (observational only) ──
+            // What a future router WOULD do with this surface. Never branched on.
+            const sb = classifySurfaceBoundary(ambiguousProbe);
+            hvDebug.surface_boundary_route_decided = sb.route_decided;
+            hvDebug.surface_boundary_trigger_basis = sb.trigger_basis;
+            hvDebug.surface_inspectability_class = sb.inspectability_class;
+            hvDebug.surface_opaque_dominant_with_bg_dom_contradiction =
+              sb.opaque_dominant_surface_with_background_dom_contradiction;
+            hvDebug.surface_newly_appeared = sb.surface_newly_appeared;
+            hvDebug.surface_overlaps_agent_target = sb.surface_overlaps_agent_target;
+            hvDebug.surface_visible_cross_origin_iframe_seen =
+              ambiguousProbe.visible_cross_origin_iframe_seen;
+            hvDebug.surface_opaque_iframe_seen = ambiguousProbe.opaque_iframe_seen;
+            hvDebug.surface_off_path_iframe_seen = ambiguousProbe.off_path_iframe_seen;
+            hvDebug.surface_opaque_dominant_surface_seen =
+              ambiguousProbe.opaque_dominant_surface_seen;
+            hvDebug.surface_text_inspectable = ambiguousProbe.surface_text_inspectable;
+            hvDebug.surface_text_uninspectable = ambiguousProbe.surface_text_uninspectable;
+            hvDebug.surface_over_main_content = ambiguousProbe.surface_over_main_content;
+            hvDebug.surface_blocks_viewport_center = ambiguousProbe.surface_blocks_viewport_center;
+            hvDebug.surface_normal_page_dom_present_behind =
+              ambiguousProbe.normal_page_dom_present_behind_surface;
+            hvDebug.surface_visual_dom_contradiction_seen =
+              ambiguousProbe.visual_dom_contradiction_seen;
           }
           hvDebug.ambiguous_created_capsule = !!ambiguous;
         }

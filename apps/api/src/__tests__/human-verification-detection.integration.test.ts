@@ -775,6 +775,7 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
   // gates on the VGC flag), so it is driven directly here. Every returned field is
   // a boolean — no rects, coordinates, selectors, or text.
   const AMBIGUOUS_KEYS = [
+    // Legacy ambiguous-obstruction signals (drive classifyAmbiguousVisualObstruction).
     "denial_text_seen",
     "large_centered_overlay_seen",
     "near_zero_interactive",
@@ -782,7 +783,19 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     "top_layer_dialog_seen",
     "viewport_scrim_seen",
     "visible_inaccessible_iframe_seen",
-  ];
+    // Surface-Boundary Router SHADOW signals (observational only; never gate anything).
+    "background_refs_available_behind_surface",
+    "normal_page_dom_present_behind_surface",
+    "off_path_iframe_seen",
+    "opaque_dominant_surface_seen",
+    "opaque_iframe_seen",
+    "surface_blocks_viewport_center",
+    "surface_over_main_content",
+    "surface_text_inspectable",
+    "surface_text_uninspectable",
+    "visible_cross_origin_iframe_seen",
+    "visual_dom_contradiction_seen",
+  ].sort();
 
   async function detectAmbiguous() {
     return detectAmbiguousVisualObstructionViaCDP({ cdpUrl, resolvedTarget: await resolveTarget() });
@@ -802,6 +815,11 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     expect(probe!.denial_text_seen).toBe(false);
     expect(probe!.visible_inaccessible_iframe_seen).toBe(false);
     expect(probe!.near_zero_interactive).toBe(false);
+    // Shadow surface-boundary signals: a same-origin scrim+overlay is NOT opaque —
+    // the future router must not misroute a readable overlay to the visual classifier.
+    expect(probe!.opaque_iframe_seen).toBe(false);
+    expect(probe!.off_path_iframe_seen).toBe(false);
+    expect(probe!.surface_text_inspectable).toBe(true);
 
     // Result is booleans ONLY — never raw geometry, selectors, text, or coordinates.
     expect(Object.keys(probe!).sort()).toEqual(AMBIGUOUS_KEYS);

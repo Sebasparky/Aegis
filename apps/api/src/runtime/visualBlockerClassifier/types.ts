@@ -131,15 +131,55 @@ export interface PolicyDecision {
 
 export type DatasetCaptureSkipReason =
   | "flag_disabled"
-  | "redaction_unverified"
   | "not_a_candidate"
-  | "rate_limited"
-  | "no_session";
+  | "no_session"
+  | "redaction_failed"
+  | "redaction_unverified"
+  | "write_failed"
+  | "rate_limited";
 
 export interface DatasetCaptureDecision {
   capture: boolean;
   skip_reason?: DatasetCaptureSkipReason;
 }
+
+/**
+ * Safe metadata written to `<dataset_dir>/<date>/<candidate_id>/meta.json` (Phase 2A).
+ * SAFETY: every field is a boolean, enum, bucket, count, hostname, ISO timestamp, or
+ * an already-non-sensitive id. NEVER a screenshot, base64, rect, coordinate, selector,
+ * iframe `src`, raw page text, field value, or URL path/query. `domain` is hostname
+ * only. `label`/`outcome` are null at capture — slots a LATER phase fills via human or
+ * outcome labeling (never the stub's own guess).
+ */
+export interface VisionDatasetCaptureMeta {
+  candidate_id: string;
+  created_at: string;
+  /** Hostname only — never path or query. */
+  domain: string;
+  trigger_basis: VisualClassifierTriggerBasis;
+  candidate_reason: VisualClassifierCandidateReason;
+  dominant_surface_kind: VisualClassifierDominantSurfaceKind;
+  /** All booleans (see VisualClassifierCandidate["signals"]). */
+  signals: VisualClassifierCandidate["signals"];
+  classifier_source: VisualClassifierSource;
+  blocker_type: BlockerType;
+  confidence_bucket: ConfidenceBucket;
+  policy_action: PolicyDecisionAction;
+  /** Phase 2A: ALWAYS the literal `false` — shadow capture, never enforcement. */
+  policy_enforced: false;
+  redaction_verified: boolean;
+  redacted_field_count: number;
+  /** Phase 2A captures the full redacted viewport. Crop is Phase 2B. */
+  region: "full_viewport";
+  /** Null at capture — human label slot for a later phase. */
+  label: null;
+  /** Null at capture — outcome label slot for a later phase. */
+  outcome: null;
+}
+
+export type VisionDatasetCaptureResult =
+  | { written: true }
+  | { written: false; skip_reason: DatasetCaptureSkipReason };
 
 /** Reasons the pipeline does not run (returned, never thrown). */
 export type PipelineSkipReason = "flag_disabled" | "not_a_candidate";

@@ -27,7 +27,7 @@ import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
 import { isVisualGestureCapsuleEnabled } from "./visualGestureCapsule.js";
-import { isHvVisionClassifierEnabled } from "./visualBlockerClassifier/flags.js";
+import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled } from "./visualBlockerClassifier/flags.js";
 
 export interface AntigenRuntimeStatus {
   click_verify: boolean;
@@ -55,6 +55,14 @@ export interface AntigenRuntimeStatus {
    * `enforced: false`. Independent of hv_debug (which gates only debug logging).
    */
   hv_vision_classifier: boolean;
+  /**
+   * Whether ANTIGEN_HV_VISION_DATASET is on (default off). Additional opt-in on top
+   * of hv_vision_classifier that enables DEV-ONLY, LOCAL, gitignored redacted dataset
+   * capture (frame.png + safe meta.json) for a real visual_classifier_candidate.
+   * Fire-and-forget — never affects the request; byte-identical when off. No API route
+   * or labeling UI (those are a later phase).
+   */
+  hv_vision_dataset: boolean;
   fill_state: boolean;
   /**
    * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
@@ -91,6 +99,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     hv_debug: isHvDebugEnabled(),
     visual_gesture_capsule: isVisualGestureCapsuleEnabled(),
     hv_vision_classifier: isHvVisionClassifierEnabled(),
+    hv_vision_dataset: isHvVisionDatasetEnabled(),
     fill_state: isFillStateEnabled(),
     keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
@@ -122,6 +131,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `hv_debug=${s.hv_debug}`,
     `visual_gesture_capsule=${s.visual_gesture_capsule}`,
     `hv_vision_classifier=${s.hv_vision_classifier}`,
+    `hv_vision_dataset=${s.hv_vision_dataset}`,
     `fill_state=${s.fill_state}`,
     `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,

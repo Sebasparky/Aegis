@@ -69,8 +69,9 @@ import {
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
-import { isHvVisionClassifierEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled } from "../runtime/visualBlockerClassifier/flags.js";
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
+import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -6530,12 +6531,27 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           } catch {
             /* keep "unknown" — never throw from the shadow path */
           }
-          runVisualBlockerClassifierPipeline({
+          const visionOutcome = runVisualBlockerClassifierPipeline({
             surfaceDecision,
             surfaceSignals,
             browserSessionId: session.browser_session_id,
             domain: visionDomain,
           });
+
+          // ── Phase 2A — dev-only redacted dataset capture (dataset-flag-gated) ──
+          // Additional opt-in on top of the classifier flag. Fire-and-forget: it
+          // writes a gitignored frame.png + safe meta.json LOCALLY and can never
+          // affect this request (void + .catch, never awaited, never throws). When
+          // ANTIGEN_HV_VISION_DATASET is off, this branch is skipped entirely —
+          // behavior byte-identical. No bytes/paths/values leak into the response.
+          if (isHvVisionDatasetEnabled() && visionOutcome.ran && session.cdp_url) {
+            void captureVisionDatasetRecord({
+              outcome: visionOutcome,
+              cdpUrl: session.cdp_url,
+            }).catch(() => {
+              /* dev-only capture is best-effort and must never surface to the agent */
+            });
+          }
         }
       }
     }

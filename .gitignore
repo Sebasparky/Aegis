@@ -15,4 +15,6 @@ apps/api/.aegis-artifacts
 .playwright-mcp/
 apps/web/tsconfig.tsbuildinfo
 dev-artifacts/
+# Dev-only redacted visual-blocker dataset capture (Phase 2A) — never commit.
+dev-artifacts/hv-vision-dataset/
 tmp-pointer-test/

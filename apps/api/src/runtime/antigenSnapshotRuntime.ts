@@ -45,6 +45,7 @@ import type {
   SurfaceBoundaryRoute,
   SurfaceBoundaryTriggerBasis,
   SurfaceInspectabilityClass,
+  SurfaceVisualClassifierCandidateReason,
 } from "./surfaceBoundary.js";
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -2343,6 +2344,9 @@ export function buildPageHvWallHintExpr(): string {
     // value-free telemetry only (ANTIGEN_HV_DEBUG) and never gate the mint.
     var screenHvType=null; try{ screenHvType=screenHumanVerification(); }catch(e){ screenHvType=null; }
     var scrimSeen=false, centeredModalSeen=false, pressHoldSeen=false, hvPhraseSeen=false, topLayerSeen=false;
+    // Dominant-visible-surface inspectability (shadow telemetry only). Defaults are
+    // byte-identical when SCREEN_HV_ENABLED is off.
+    var domSurfaceSeen=false, domSurfaceKind='unknown', domTextAttempted=false, domTextExtractable=false, domTextUninspectable=false, domTextSource='unknown', domUnclassified=false;
     if(SCREEN_HV_ENABLED){
       // viewport scrim: a body-level fixed/sticky high-z >=0.5-coverage blocker
       // (the SAME test screenHumanVerification uses) — bounded top-two DOM levels.
@@ -2372,6 +2376,62 @@ export function buildPageHvWallHintExpr(): string {
           if(hopen||hmodal){ topLayerSeen=true; break; }
         }
       }catch(e){}
+      // ── Dominant-visible-surface inspectability (shadow telemetry only) ──
+      // A dominant surface (scrim / centered modal / top-layer dialog) is visibly
+      // present, but its semantic TEXT may be unreadable via the DOM scan when the
+      // challenge renders inside an iframe document / closed shadow / canvas (the
+      // live B&BW/PerimeterX "Press & Hold" wall). Extractability is measured on the
+      // DOMINANT SURFACE'S OWN SUBTREE — NOT the page-wide button harvest, which would
+      // pick up background "Add to bag" buttons behind a translucent scrim and read as
+      // readable. el.textContent excludes iframe documents and closed-shadow content,
+      // so a centered fixed/modal card whose body is an iframe yields ~no text. Booleans
+      // / enums only — only the text LENGTH (a number) is used; no text leaves the page.
+      var _domSurfaceProbe=function(){
+        var best=null, bestZ=-1, isDlgBest=false;
+        var dhosts=_scrHosts();
+        var dsel='[role="dialog"],[role="alertdialog"],dialog,div,section,aside';
+        var dvw=window.innerWidth||0, dvh=window.innerHeight||0;
+        for(var dh=0;dh<dhosts.length;dh++){
+          var dn=null; try{ dn=dhosts[dh].querySelectorAll(dsel); }catch(e){ dn=null; }
+          if(!dn) continue;
+          for(var i=0;i<dn.length&&i<300;i++){
+            var n=dn[i], keep=false, zi=0, isDlg=false;
+            try{ isDlg=(n.tagName||'').toLowerCase()==='dialog'&&((n.open===true)||attr(n,'open')!=null||(n.matches&&n.matches(':modal'))); }catch(e){ isDlg=false; }
+            if(isDlg){ keep=true; zi=1000000; }
+            else{
+              var cs=cssOf(n); if(!cs) continue;
+              var p=cs.position||''; if(p!=='fixed'&&p!=='absolute') continue;
+              var r=_scrVisible(n); if(!(r&&r.width>=200&&r.height>=120&&_scrOnScreen(r))) continue;
+              var cx=r.left+r.width/2, cy=r.top+r.height/2;
+              if(!(cx>=0.2*dvw&&cx<=0.8*dvw&&cy>=0.15*dvh&&cy<=0.85*dvh)) continue; // center-ish
+              keep=true; zi=parseInt(cs.zIndex,10); if(isNaN(zi)) zi=0;
+            }
+            if(keep&&zi>=bestZ){ bestZ=zi; best=n; isDlgBest=isDlg; }
+          }
+        }
+        if(!best) return { seen:false, kind:'unknown', textLen:0 };
+        var tl=0; try{ tl=txt(String(best.textContent||'')).length; }catch(e){ tl=0; }
+        return { seen:true, kind:isDlgBest?'top_layer_dialog':'unknown', textLen:tl };
+      };
+      var _domVisIframe=false;
+      try{
+        var _dfr=document.querySelectorAll('iframe');
+        for(var _dfi=0;_dfi<_dfr.length&&_dfi<20;_dfi++){ var _df=_dfr[_dfi],_drc=null; try{ _drc=_df.getBoundingClientRect(); }catch(e){} if(_drc&&_drc.width>0&&_drc.height>0){ _domVisIframe=true; break; } }
+      }catch(e){}
+      var _dsp=_domSurfaceProbe();
+      domSurfaceSeen=!!(scrimSeen||centeredModalSeen||topLayerSeen||_dsp.seen);
+      domSurfaceKind = topLayerSeen?'top_layer_dialog'
+        : (scrimSeen&&(centeredModalSeen||_dsp.seen))?'scrim_center_modal'
+        : (_dsp.kind!=='unknown')?_dsp.kind
+        : (scrimSeen||centeredModalSeen)?'fixed_overlay'
+        : _domVisIframe?'iframe':'unknown';
+      // Only claim an extraction was ATTEMPTED when we actually located and measured a
+      // dominant surface — otherwise we must not assert (un)inspectability.
+      domTextAttempted=!!_dsp.seen;
+      domTextExtractable=!!(_dsp.seen&&_dsp.textLen>=8); // the SURFACE'S OWN text, not background
+      domTextSource=domTextExtractable?'dom':'none';
+      domTextUninspectable=!!(_dsp.seen&&!domTextExtractable);
+      domUnclassified=!!(domTextUninspectable&&!hvPhraseSeen);
     }
     function withScreen(hint){
       return {
@@ -2382,7 +2442,14 @@ export function buildPageHvWallHintExpr(): string {
         centered_modal_seen: !!centeredModalSeen,
         press_hold_affordance_seen: !!pressHoldSeen,
         hv_phrase_seen: !!hvPhraseSeen,
-        top_layer_dialog_seen: !!topLayerSeen
+        top_layer_dialog_seen: !!topLayerSeen,
+        dominant_visible_surface_seen: !!domSurfaceSeen,
+        dominant_visible_surface_kind: domSurfaceKind,
+        dominant_text_extraction_attempted: !!domTextAttempted,
+        dominant_text_extractable: !!domTextExtractable,
+        dominant_text_uninspectable: !!domTextUninspectable,
+        dominant_text_source: domTextSource,
+        visible_but_semantically_unclassified: !!domUnclassified
       };
     }
     if(!SCREEN_HV_ENABLED) return withScreen(false);
@@ -2827,7 +2894,15 @@ export interface HumanVerificationDebug {
   surface_boundary_route_decided?: SurfaceBoundaryRoute;
   surface_boundary_trigger_basis?: SurfaceBoundaryTriggerBasis;
   surface_inspectability_class?: SurfaceInspectabilityClass;
+  surface_visual_classifier_candidate_reason?: SurfaceVisualClassifierCandidateReason;
   surface_opaque_dominant_with_bg_dom_contradiction?: boolean;
+  // Dominant-visible-surface inspectability (the same-origin / textless wall path).
+  surface_dominant_visible_surface_seen?: boolean;
+  surface_dominant_visible_surface_kind?: DominantSurfaceKind;
+  surface_dominant_text_extraction_attempted?: boolean;
+  surface_dominant_text_extractable?: boolean;
+  surface_dominant_text_uninspectable?: boolean;
+  surface_visible_but_semantically_unclassified?: boolean;
   surface_newly_appeared?: "unknown";
   surface_overlaps_agent_target?: "unknown" | boolean;
   surface_visible_cross_origin_iframe_seen?: boolean;
@@ -3016,6 +3091,30 @@ export async function extractAntigenPageMetaViaCDP(
  * value-free telemetry only (ANTIGEN_HV_DEBUG). All fields are re-validated
  * server-side; nothing here is raw text, geometry, refs, or iframe internals.
  */
+export type DominantSurfaceKind =
+  | "scrim_center_modal"
+  | "top_layer_dialog"
+  | "fixed_overlay"
+  | "iframe"
+  | "unknown";
+
+export type DominantTextSource = "dom" | "open_shadow" | "same_origin_iframe" | "none" | "unknown";
+
+const DOMINANT_SURFACE_KINDS = new Set<string>([
+  "scrim_center_modal",
+  "top_layer_dialog",
+  "fixed_overlay",
+  "iframe",
+  "unknown",
+]);
+const DOMINANT_TEXT_SOURCES = new Set<string>([
+  "dom",
+  "open_shadow",
+  "same_origin_iframe",
+  "none",
+  "unknown",
+]);
+
 export interface ScreenHvWallSignals {
   wall: boolean;
   challenge_type?: HumanVerificationChallengeType;
@@ -3024,6 +3123,14 @@ export interface ScreenHvWallSignals {
   press_hold_affordance_seen: boolean;
   hv_phrase_seen: boolean;
   top_layer_dialog_seen: boolean;
+  // Dominant-visible-surface inspectability (shadow telemetry only).
+  dominant_visible_surface_seen: boolean;
+  dominant_visible_surface_kind: DominantSurfaceKind;
+  dominant_text_extraction_attempted: boolean;
+  dominant_text_extractable: boolean;
+  dominant_text_uninspectable: boolean;
+  dominant_text_source: DominantTextSource;
+  visible_but_semantically_unclassified: boolean;
 }
 
 /** Re-validate the raw screen-HV page value into a strict, value-free object. */
@@ -3036,6 +3143,16 @@ export function sanitizeScreenHvWallSignals(value: unknown): ScreenHvWallSignals
     typeof ctRaw === "string" && HV_CHALLENGE_TYPES.has(ctRaw)
       ? (ctRaw as HumanVerificationChallengeType)
       : undefined;
+  const kindRaw = v.dominant_visible_surface_kind;
+  const dominant_visible_surface_kind: DominantSurfaceKind =
+    typeof kindRaw === "string" && DOMINANT_SURFACE_KINDS.has(kindRaw)
+      ? (kindRaw as DominantSurfaceKind)
+      : "unknown";
+  const srcRaw = v.dominant_text_source;
+  const dominant_text_source: DominantTextSource =
+    typeof srcRaw === "string" && DOMINANT_TEXT_SOURCES.has(srcRaw)
+      ? (srcRaw as DominantTextSource)
+      : "unknown";
   return {
     wall: v.screen_hv_wall === true,
     ...(challenge_type ? { challenge_type } : {}),
@@ -3044,6 +3161,13 @@ export function sanitizeScreenHvWallSignals(value: unknown): ScreenHvWallSignals
     press_hold_affordance_seen: v.press_hold_affordance_seen === true,
     hv_phrase_seen: v.hv_phrase_seen === true,
     top_layer_dialog_seen: v.top_layer_dialog_seen === true,
+    dominant_visible_surface_seen: v.dominant_visible_surface_seen === true,
+    dominant_visible_surface_kind,
+    dominant_text_extraction_attempted: v.dominant_text_extraction_attempted === true,
+    dominant_text_extractable: v.dominant_text_extractable === true,
+    dominant_text_uninspectable: v.dominant_text_uninspectable === true,
+    dominant_text_source,
+    visible_but_semantically_unclassified: v.visible_but_semantically_unclassified === true,
   };
 }
 

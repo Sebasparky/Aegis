@@ -59,6 +59,68 @@ describe("classifySurfaceBoundary — pure shadow verdict", () => {
     expect(d.inspectability_class).toBe("opaque");
   });
 
+  it("centered scrim modal with READABLE text → dom_semantic_candidate (the live B&BW shape, but text extractable)", () => {
+    const d = classifySurfaceBoundary({
+      screen_viewport_scrim_seen: true,
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_text_extraction_attempted: true,
+      surface_dominant_text_extractable: true,
+    });
+    expect(d.route_decided).toBe("dom_semantic_candidate");
+    expect(d.trigger_basis).toBe("inspectable_dominant_surface");
+    expect(d.inspectability_class).toBe("inspectable");
+    expect(d.visual_classifier_candidate_reason).toBe("none");
+  });
+
+  it("centered scrim modal with NO extractable text → visual_classifier_candidate / unreadable_dominant_surface (the B&BW/PerimeterX miss)", () => {
+    const d = classifySurfaceBoundary({
+      screen_viewport_scrim_seen: true,
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_text_extraction_attempted: true,
+      surface_dominant_text_extractable: false,
+      surface_dominant_text_uninspectable: true,
+      surface_visible_but_semantically_unclassified: true,
+      // Critically: NO cross-origin iframe signal — opacity is semantic, not iframe.
+      opaque_iframe_seen: false,
+      visible_inaccessible_iframe_seen: false,
+    });
+    expect(d.route_decided).toBe("visual_classifier_candidate");
+    expect(d.trigger_basis).toBe("unreadable_dominant_surface");
+    expect(d.inspectability_class).toBe("opaque");
+    expect(d.visual_classifier_candidate_reason).toBe("unreadable_dominant_surface");
+  });
+
+  it("protected DOMINANT iframe still routes opaque_dominant_surface (not unreadable_dominant_surface)", () => {
+    const d = classifySurfaceBoundary({
+      opaque_iframe_seen: true,
+      surface_over_main_content: true,
+      surface_blocks_viewport_center: true,
+      // even if a scrim + uninspectable text co-occur, the cross-origin iframe wins
+      screen_viewport_scrim_seen: true,
+      screen_centered_modal_seen: true,
+      surface_dominant_text_extraction_attempted: true,
+      surface_dominant_text_extractable: false,
+      surface_dominant_text_uninspectable: true,
+    });
+    expect(d.route_decided).toBe("visual_classifier_candidate");
+    expect(d.trigger_basis).toBe("opaque_dominant_surface");
+    expect(d.visual_classifier_candidate_reason).toBe("opaque_iframe");
+  });
+
+  it("a dominant surface with NO scrim (lone centered modal) does not become unreadable_dominant", () => {
+    const d = classifySurfaceBoundary({
+      screen_centered_modal_seen: true,
+      surface_dominant_visible_surface_seen: true,
+      surface_dominant_text_extraction_attempted: true,
+      surface_dominant_text_extractable: false,
+      surface_dominant_text_uninspectable: true,
+    });
+    // No scrim ⇒ not enough to call it a blocking wall in shadow mode.
+    expect(d.route_decided).toBe("none");
+  });
+
   it("inspectable modal WITH a scrim/backdrop → dom_semantic_candidate (inspectable)", () => {
     const d = classifySurfaceBoundary({
       viewport_scrim_seen: true,

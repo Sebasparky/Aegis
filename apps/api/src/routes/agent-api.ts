@@ -68,7 +68,7 @@ import {
   type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
-import { classifySurfaceBoundary } from "../runtime/surfaceBoundary.js";
+import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -919,6 +919,7 @@ async function rejectNoProgressActionAsHumanVerification(
                   surface_boundary_route_decided: sb.route_decided,
                   surface_boundary_trigger_basis: sb.trigger_basis,
                   surface_inspectability_class: sb.inspectability_class,
+                  surface_visual_classifier_candidate_reason: sb.visual_classifier_candidate_reason,
                   surface_opaque_iframe_seen: probe.opaque_iframe_seen === true,
                   surface_off_path_iframe_seen: probe.off_path_iframe_seen === true,
                   surface_visual_dom_contradiction_seen:
@@ -6408,6 +6409,51 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // Booleans/enums/buckets only — never text, selectors, coords, iframe src,
       // screenshots, target ids, or raw DOM. Byte-identical when the flag is off.
       if (isHvDebugEnabled()) {
+        // ── Surface-Boundary Router SHADOW decision on EVERY snapshot ──
+        // Merge BOTH probes: the ambiguous geometry probe's booleans (copied onto
+        // hvDebug above when it ran) and the always-present screen-scan signals. The
+        // screen scan is what catches the same-origin / textless dominant wall (the
+        // live B&BW/PerimeterX "Press & Hold" case) that the iframe-only signals miss.
+        // Observational ONLY — never branched on, never mints a capsule.
+        const surfaceSignals: SurfaceBoundarySignals = {
+          opaque_iframe_seen: hvDebug?.surface_opaque_iframe_seen,
+          off_path_iframe_seen: hvDebug?.surface_off_path_iframe_seen,
+          visual_dom_contradiction_seen: hvDebug?.surface_visual_dom_contradiction_seen,
+          surface_over_main_content: hvDebug?.surface_over_main_content,
+          surface_blocks_viewport_center: hvDebug?.surface_blocks_viewport_center,
+          surface_text_inspectable: hvDebug?.surface_text_inspectable,
+          viewport_scrim_seen: hvDebug?.ambiguous_viewport_scrim_seen,
+          large_centered_overlay_seen: hvDebug?.ambiguous_large_centered_overlay_seen,
+          normal_page_dom_present_behind_surface: hvDebug?.surface_normal_page_dom_present_behind,
+          screen_viewport_scrim_seen: screenHv?.viewport_scrim_seen === true,
+          screen_centered_modal_seen: screenHv?.centered_modal_seen === true,
+          surface_dominant_visible_surface_seen: screenHv?.dominant_visible_surface_seen === true,
+          surface_dominant_text_extraction_attempted:
+            screenHv?.dominant_text_extraction_attempted === true,
+          surface_dominant_text_extractable: screenHv?.dominant_text_extractable === true,
+          surface_dominant_text_uninspectable: screenHv?.dominant_text_uninspectable === true,
+          surface_visible_but_semantically_unclassified:
+            screenHv?.visible_but_semantically_unclassified === true,
+        };
+        const surfaceDecision = classifySurfaceBoundary(surfaceSignals);
+        if (hvDebug) {
+          hvDebug.surface_boundary_route_decided = surfaceDecision.route_decided;
+          hvDebug.surface_boundary_trigger_basis = surfaceDecision.trigger_basis;
+          hvDebug.surface_inspectability_class = surfaceDecision.inspectability_class;
+          hvDebug.surface_visual_classifier_candidate_reason =
+            surfaceDecision.visual_classifier_candidate_reason;
+          hvDebug.surface_dominant_visible_surface_seen =
+            screenHv?.dominant_visible_surface_seen === true;
+          hvDebug.surface_dominant_visible_surface_kind =
+            screenHv?.dominant_visible_surface_kind ?? "unknown";
+          hvDebug.surface_dominant_text_extraction_attempted =
+            screenHv?.dominant_text_extraction_attempted === true;
+          hvDebug.surface_dominant_text_extractable = screenHv?.dominant_text_extractable === true;
+          hvDebug.surface_dominant_text_uninspectable =
+            screenHv?.dominant_text_uninspectable === true;
+          hvDebug.surface_visible_but_semantically_unclassified =
+            screenHv?.visible_but_semantically_unclassified === true;
+        }
         logHvActionDebug({
           scope: "snapshot_hv_gate",
           tool: "antigen_snapshot",
@@ -6427,6 +6473,18 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           returned_409: !!snapshotMintedHv,
           created_capsule: !!snapshotMintedHv,
           screen_hv_failure_reason: deriveScreenHvFailureReason(screenHv),
+          // Surface-boundary shadow decision (route a future router WOULD take).
+          surface_boundary_route_decided: surfaceDecision.route_decided,
+          surface_boundary_trigger_basis: surfaceDecision.trigger_basis,
+          surface_inspectability_class: surfaceDecision.inspectability_class,
+          surface_visual_classifier_candidate_reason:
+            surfaceDecision.visual_classifier_candidate_reason,
+          surface_dominant_visible_surface_seen: screenHv?.dominant_visible_surface_seen === true,
+          surface_dominant_visible_surface_kind: screenHv?.dominant_visible_surface_kind ?? "unknown",
+          surface_dominant_text_extractable: screenHv?.dominant_text_extractable === true,
+          surface_dominant_text_uninspectable: screenHv?.dominant_text_uninspectable === true,
+          surface_visible_but_semantically_unclassified:
+            screenHv?.visible_but_semantically_unclassified === true,
         });
       }
     }

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Men's Body Care</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+      header, nav, main, footer { padding: 12px 20px; }
+      nav a, .cats a { margin-right: 14px; }
+      .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+      .card { width: 180px; border: 1px solid #eee; padding: 10px; }
+      .card button { display: block; margin-top: 8px; }
+
+      /* Full-page blocking dimmer — the viewport SCRIM (same-origin, NO iframe). It
+         is TRANSLUCENT, so background buttons remain visible behind it (exactly why
+         a page-wide button harvest would wrongly read as "readable"). */
+      #hv-dimmer {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.62);
+      }
+      /* Centered challenge card. Its visible content — the "Before we continue /
+         Press & Hold" copy AND the button — render INSIDE a same-origin iframe, so
+         the top-document card's own textContent is empty. This reproduces the live
+         B&BW/PerimeterX shape: scrim + centered modal geometry is detectable, but the
+         challenge TEXT is not reachable through the DOM/open-shadow scan. */
+      #hv-card {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10000;
+        width: 360px;
+        height: 240px;
+        background: #fff;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      #hv-card iframe { width: 100%; height: 100%; border: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Same-origin "Press & Hold" wall whose challenge text + control live INSIDE an
+      iframe document. The DOM/open-shadow phrase scan never descends into the iframe,
+      so screen_hv_phrase_seen stays false even though scrim + centered modal are
+      detected. There is NO cross-origin (inaccessible) iframe, so the opaque-iframe
+      discriminator cannot fire either. The dominant-surface inspectability probe must
+      report the surface as visible-but-text-uninspectable.
+    -->
+
+    <!-- ── Preserved background page (20+ interactive controls, visible behind the
+         translucent scrim — the false-"readable" trap) ─────────────────────────── -->
+    <header>
+      <a href="/">Home</a>
+      <a href="/account">Account</a>
+      <a href="/bag">Bag</a>
+      <input type="search" name="q" placeholder="Search products" />
+      <button type="button">Search</button>
+    </header>
+    <nav aria-label="Primary">
+      <a href="/body-care">Body Care</a>
+      <a href="/fragrance">Fragrance</a>
+      <a href="/soaps">Soaps &amp; Sanitizers</a>
+      <a href="/candles">Candles</a>
+      <a href="/gifts">Gifts</a>
+      <a href="/sale">Sale</a>
+    </nav>
+    <main>
+      <h1>Men's Body Care</h1>
+      <div class="grid">
+        <div class="card"><a href="/p/1">Teakwood Wash</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/2">Graphite Spray</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/3">Ocean Lotion</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/4">Mahogany Bar</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/5">Cedar Mist</a><button type="button">Add to bag</button></div>
+        <div class="card"><a href="/p/6">Noir Cologne</a><button type="button">Add to bag</button></div>
+      </div>
+    </main>
+    <footer>
+      <a href="/help">Help</a>
+      <a href="/stores">Stores</a>
+      <a href="/privacy">Privacy</a>
+    </footer>
+
+    <!-- ── Same-origin scrim + centered card whose body is an iframe (textless to the
+         top-document scan) ─────────────────────────────────────────────────────── -->
+    <div id="hv-dimmer"></div>
+    <div id="hv-card" role="presentation">
+      <iframe
+        title="challenge"
+        srcdoc="<!doctype html><html><body style='font-family:system-ui;text-align:center;padding:24px'><h2>Before we continue&hellip;</h2><p>Press &amp; Hold to confirm you are a human (and not a bot).</p><div style='margin:16px auto;width:240px;height:52px;line-height:52px;border-radius:26px;background:#1f6feb;color:#fff'>Press &amp; Hold</div><p style='color:#999;font-size:12px'>Reference ID 32929d30-6cd1-11f1-b777-eb882f1f3b10</p></body></html>"
+      ></iframe>
+    </div>
+  </body>
+</html>

@@ -43,6 +43,7 @@ import {
   type AntigenSnapshotCandidate,
   type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
+import { classifySurfaceBoundary } from "../runtime/surfaceBoundary.js";
 import {
   buildHumanVerificationProbeExpr,
   startHoldSession,
@@ -97,6 +98,11 @@ const FIXTURE_SCREEN_HV_BENIGN = fileURLToPath(new URL("./fixtures/screen-hv-ben
 // Both have a detected scrim + centered modal; only the widened scan reads them.
 const FIXTURE_SPLIT_HOLD_ZAUTO = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold-zauto.html", import.meta.url));
 const FIXTURE_SPLIT_HOLD_SHADOW = fileURLToPath(new URL("./fixtures/split-overlay-press-and-hold-shadow.html", import.meta.url));
+// The dominant_visible_surface_uninspectable shape: scrim + centered modal whose
+// challenge text + control render INSIDE a same-origin iframe (textless to the
+// top-document scan). No cross-origin iframe, so the opaque-iframe discriminator
+// cannot fire — only the dominant-surface inspectability probe catches it.
+const FIXTURE_SCREEN_HV_IFRAME_TEXTLESS = fileURLToPath(new URL("./fixtures/screen-hv-wall-iframe-textless.html", import.meta.url));
 
 function chromiumExe(): string | null {
   try {
@@ -654,6 +660,63 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
     await gotoFixture(cdpUrl, FIXTURE_SPLIT_HOLD_SHADOW);
     expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
+  }, 20_000);
+
+  it("dominant_visible_surface_uninspectable: scrim + centered modal whose text is inside an iframe → unreadable_dominant_surface shadow route (the live B&BW miss)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_IFRAME_TEXTLESS);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+
+    // Reproduce the live miss: geometry is detected, but the DOM phrase scan is blind
+    // to the iframe-rendered card, and there is NO cross-origin (inaccessible) iframe.
+    expect(sv!.viewport_scrim_seen).toBe(true);
+    expect(sv!.centered_modal_seen).toBe(true);
+    expect(sv!.hv_phrase_seen).toBe(false);
+    expect(sv!.wall).toBe(false);
+    expect(await withHvFlag("true", bundleHint)).toBe(false); // no inaccessible iframe
+
+    // The NEW dominant-surface inspectability signals catch it: surface seen, its own
+    // text not extractable (background "Add to bag" buttons behind the translucent
+    // scrim must NOT count), visible-but-unclassified true.
+    expect(sv!.dominant_visible_surface_seen).toBe(true);
+    expect(sv!.dominant_text_extraction_attempted).toBe(true);
+    expect(sv!.dominant_text_extractable).toBe(false);
+    expect(sv!.dominant_text_uninspectable).toBe(true);
+    expect(sv!.visible_but_semantically_unclassified).toBe(true);
+    expect(sv!.dominant_visible_surface_kind).toBe("scrim_center_modal");
+
+    // And the shadow router (fed the screen signals) WOULD route this to the visual
+    // classifier — before any repeated-stale/no-progress — without minting anything.
+    const decision = classifySurfaceBoundary({
+      screen_viewport_scrim_seen: sv!.viewport_scrim_seen,
+      screen_centered_modal_seen: sv!.centered_modal_seen,
+      surface_dominant_visible_surface_seen: sv!.dominant_visible_surface_seen,
+      surface_dominant_text_extraction_attempted: sv!.dominant_text_extraction_attempted,
+      surface_dominant_text_extractable: sv!.dominant_text_extractable,
+      surface_dominant_text_uninspectable: sv!.dominant_text_uninspectable,
+      surface_visible_but_semantically_unclassified: sv!.visible_but_semantically_unclassified,
+    });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("unreadable_dominant_surface");
+    expect(decision.visual_classifier_candidate_reason).toBe("unreadable_dominant_surface");
+  }, 20_000);
+
+  it("flag OFF: the iframe-textless wall emits no screen verdict (byte-identical)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_IFRAME_TEXTLESS);
+    expect(await withHvFlag("false", bundleScreenHv)).toBeUndefined();
+  }, 20_000);
+
+  it("readable centered scrim modal stays inspectable → NOT unreadable (the over-fire guard)", async () => {
+    // The original product wall has the SAME scrim + centered card geometry but its
+    // text is in the top document. Its own surface text IS extractable, so the
+    // dominant-surface probe must NOT flag it uninspectable.
+    await gotoFixture(cdpUrl, FIXTURE_SCREEN_HV_PRODUCT);
+    const sv = await withHvFlag("true", bundleScreenHv);
+    expect(sv).toBeDefined();
+    expect(sv!.dominant_visible_surface_seen).toBe(true);
+    expect(sv!.dominant_text_extractable).toBe(true);
+    expect(sv!.dominant_text_uninspectable).toBe(false);
+    expect(sv!.visible_but_semantically_unclassified).toBe(false);
   }, 20_000);
 
   it("does NOT emit a screen-HV wall verdict on a high-element benign marketing hero (no scrim / no HV phrase)", async () => {

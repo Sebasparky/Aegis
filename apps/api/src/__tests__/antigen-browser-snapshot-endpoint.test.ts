@@ -949,6 +949,31 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
     "screen_hv_top_layer_dialog_seen",
     "screen_hv_created_capsule",
     "screen_hv_failure_reason",
+    // Surface-Boundary Router SHADOW telemetry. Booleans / enums only — the route a
+    // future router WOULD take; never gates anything. No text/src/coords/refs.
+    "surface_boundary_route_decided",
+    "surface_boundary_trigger_basis",
+    "surface_inspectability_class",
+    "surface_visual_classifier_candidate_reason",
+    "surface_opaque_dominant_with_bg_dom_contradiction",
+    "surface_newly_appeared",
+    "surface_overlaps_agent_target",
+    "surface_visible_cross_origin_iframe_seen",
+    "surface_opaque_iframe_seen",
+    "surface_off_path_iframe_seen",
+    "surface_opaque_dominant_surface_seen",
+    "surface_text_inspectable",
+    "surface_text_uninspectable",
+    "surface_over_main_content",
+    "surface_blocks_viewport_center",
+    "surface_normal_page_dom_present_behind",
+    "surface_visual_dom_contradiction_seen",
+    "surface_dominant_visible_surface_seen",
+    "surface_dominant_visible_surface_kind",
+    "surface_dominant_text_extraction_attempted",
+    "surface_dominant_text_extractable",
+    "surface_dominant_text_uninspectable",
+    "surface_visible_but_semantically_unclassified",
   ]);
 
   function withEnv(

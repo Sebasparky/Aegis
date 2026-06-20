@@ -42,9 +42,17 @@ export type SurfaceBoundaryRoute =
 
 export type SurfaceBoundaryTriggerBasis =
   | "opaque_dominant_surface"
+  | "unreadable_dominant_surface"
   | "inspectable_dominant_surface"
   | "off_path_iframe"
   | "legacy_no_progress_fallback"
+  | "none";
+
+/** Why a `visual_classifier_candidate` was proposed (shadow attribution only). */
+export type SurfaceVisualClassifierCandidateReason =
+  | "opaque_iframe"
+  | "unreadable_dominant_surface"
+  | "visual_dom_mismatch"
   | "none";
 
 /**
@@ -60,7 +68,7 @@ export interface SurfaceBoundarySignals {
   large_centered_overlay_seen?: boolean;
   pointer_interceptor_seen?: boolean;
   visible_inaccessible_iframe_seen?: boolean;
-  // New surface-boundary signals (computed in buildAmbiguousVisualObstructionExpr).
+  // Surface-boundary signals (computed in buildAmbiguousVisualObstructionExpr).
   visible_cross_origin_iframe_seen?: boolean;
   opaque_iframe_seen?: boolean;
   off_path_iframe_seen?: boolean;
@@ -72,6 +80,21 @@ export interface SurfaceBoundarySignals {
   normal_page_dom_present_behind_surface?: boolean;
   background_refs_available_behind_surface?: boolean;
   visual_dom_contradiction_seen?: boolean;
+  // Screen-scan signals (computed in buildPageHvWallHintExpr; always present on a
+  // snapshot). These catch a dominant SAME-ORIGIN / textless wall the iframe-only
+  // signals above cannot — the live B&BW/PerimeterX "Press & Hold" case.
+  screen_viewport_scrim_seen?: boolean;
+  screen_centered_modal_seen?: boolean;
+  // Dominant-visible-surface inspectability: a visible dominant surface is present
+  // but its semantic text was NOT extractable through the DOM/open-shadow scan
+  // (challenge text inside an iframe document / closed shadow / canvas). This is the
+  // `dominant_visible_surface_uninspectable` concept — opacity that is NOT a
+  // cross-origin iframe. Booleans only; the harvested text never leaves the page.
+  surface_dominant_visible_surface_seen?: boolean;
+  surface_dominant_text_extraction_attempted?: boolean;
+  surface_dominant_text_extractable?: boolean;
+  surface_dominant_text_uninspectable?: boolean;
+  surface_visible_but_semantically_unclassified?: boolean;
 }
 
 export interface SurfaceBoundaryDecision {
@@ -80,6 +103,8 @@ export interface SurfaceBoundaryDecision {
   /** Why the route was reached. `legacy_no_progress_fallback` marks fallback origin. */
   trigger_basis: SurfaceBoundaryTriggerBasis;
   inspectability_class: SurfaceInspectabilityClass;
+  /** Why a visual-classifier candidate was proposed (shadow attribution). */
+  visual_classifier_candidate_reason: SurfaceVisualClassifierCandidateReason;
   /** Opaque dominant surface sitting over a still-present normal page DOM. */
   opaque_dominant_surface_with_background_dom_contradiction: boolean;
   /** v1: never plumbed (no snapshot baseline) — always "unknown". */
@@ -106,8 +131,10 @@ export function classifySurfaceBoundary(
   const s = signals && typeof signals === "object" ? signals : {};
 
   const opaqueIframe = s.opaque_iframe_seen === true; // dominant cross-origin iframe (can't read its text)
-  const scrim = s.viewport_scrim_seen === true;
+  const scrim = s.viewport_scrim_seen === true; // ambiguous probe scrim (>=0.85 coverage)
+  const screenScrim = s.screen_viewport_scrim_seen === true; // screen scan scrim (>=0.5 coverage)
   const modal = s.top_layer_dialog_seen === true; // :modal top-layer dialog
+  const screenCentered = s.screen_centered_modal_seen === true;
   const blocksCenter = s.surface_blocks_viewport_center === true;
   const overMain = s.surface_over_main_content === true;
   const offPath = s.off_path_iframe_seen === true;
@@ -118,24 +145,54 @@ export function classifySurfaceBoundary(
     s.background_refs_available_behind_surface === true;
   const overlapsTarget = opts.overlapsAgentTarget === true;
 
-  // Opacity discriminator is the dominant cross-origin iframe ONLY. A scrim or
-  // :modal with readable DOM text behind it is inspectable, not opaque.
+  // Dominant visible surface present but its semantic text was NOT extractable
+  // through the DOM/open-shadow scan (text inside an iframe document, closed shadow,
+  // or canvas). The extraction was attempted and produced nothing classifier-usable.
+  const textAttempted = s.surface_dominant_text_extraction_attempted === true;
+  const textExtractable = s.surface_dominant_text_extractable === true;
+  const textUninspectable =
+    s.surface_dominant_text_uninspectable === true || (textAttempted && !textExtractable);
+
+  // Aggregate dominance signals across BOTH probes: the ambiguous geometry probe
+  // (iframe/0.85-scrim/pointer) and the always-present screen scan (0.5-scrim +
+  // centered modal). The screen scan is what catches the same-origin / textless wall.
+  const scrimAny = screenScrim || scrim;
+  const centeredAny = screenCentered || s.large_centered_overlay_seen === true || blocksCenter;
+
+  // Route 1 — OPAQUE: a dominant cross-origin iframe we cannot read. Cross-origin
+  // presence alone is never enough — require dominance / center / contradiction /
+  // explicit target overlap.
   const opaqueDominant = opaqueIframe;
-  // Cross-origin presence alone is never enough — require dominance / center /
-  // contradiction / explicit target overlap.
   const opaqueAutonomyRelevant =
     opaqueDominant && (blocksCenter || overMain || contradiction || overlapsTarget);
 
-  // An inspectable boundary worth DOM-semantic routing is readable surface text
-  // WITH a genuine blocking backdrop or top-layer modal. A bare large hero /
-  // carousel (no scrim, not :modal) is NOT a boundary and routes to `none`.
-  const inspectableDominant = inspectableText && !opaqueIframe && (scrim || modal);
+  // Route 2 — UNREADABLE DOMINANT SURFACE (the dominant_visible_surface_uninspectable
+  // concept): a scrim + centered surface is visibly present but its text is not
+  // extractable. This is the live B&BW/PerimeterX "Press & Hold" wall whose card +
+  // button render inside an iframe/shadow the DOM scan never descends into, so the
+  // phrase scanner sees nothing. NOT a cross-origin iframe; opacity is semantic.
+  const unreadableDominant = !opaqueDominant && scrimAny && centeredAny && textUninspectable;
+
+  // Route 3 — INSPECTABLE: a readable surface WITH a genuine blocking backdrop /
+  // top-layer modal (or a scrim+centered surface that DID yield text). A bare large
+  // hero / carousel (no scrim, not :modal) is NOT a boundary and routes to `none`.
+  const inspectableDominant =
+    !opaqueIframe &&
+    !unreadableDominant &&
+    ((inspectableText && (scrim || modal)) ||
+      (scrimAny && centeredAny && textAttempted && textExtractable));
 
   let route: SurfaceBoundaryRoute;
   let computedBasis: SurfaceBoundaryTriggerBasis;
+  let reason: SurfaceVisualClassifierCandidateReason = "none";
   if (opaqueAutonomyRelevant) {
     route = "visual_classifier_candidate";
     computedBasis = "opaque_dominant_surface";
+    reason = contradiction ? "visual_dom_mismatch" : "opaque_iframe";
+  } else if (unreadableDominant) {
+    route = "visual_classifier_candidate";
+    computedBasis = "unreadable_dominant_surface";
+    reason = "unreadable_dominant_surface";
   } else if (inspectableDominant) {
     route = "dom_semantic_candidate";
     computedBasis = "inspectable_dominant_surface";
@@ -157,6 +214,7 @@ export function classifySurfaceBoundary(
   let inspectability_class: SurfaceInspectabilityClass;
   if (opaqueIframe && (inspectableText || normalDomBehind)) inspectability_class = "mixed";
   else if (opaqueIframe) inspectability_class = "opaque";
+  else if (unreadableDominant) inspectability_class = "opaque"; // visible but semantically unreadable
   else if (inspectableDominant) inspectability_class = "inspectable";
   else inspectability_class = "none";
 
@@ -164,6 +222,7 @@ export function classifySurfaceBoundary(
     route_decided: route,
     trigger_basis,
     inspectability_class,
+    visual_classifier_candidate_reason: reason,
     opaque_dominant_surface_with_background_dom_contradiction:
       opaqueDominant && (contradiction || normalDomBehind),
     surface_newly_appeared: "unknown",

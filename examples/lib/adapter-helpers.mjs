@@ -821,3 +821,52 @@ export function navigationBlockMessage(category) {
   // product / generic link-result default
   return `${prefix} Use antigen_snapshot, then browser_click the product/result ref.`;
 }
+
+/**
+ * Error code the Antigen snapshot endpoint returns (HTTP 422) when, in
+ * vision capture-and-skip exploration mode (ANTIGEN_VISION_CAPTURE_AND_SKIP),
+ * a visual blocker was detected and captured for training. This is NOT a failed
+ * snapshot and NOT a human-verification challenge — it is an intentional Antigen
+ * policy outcome that means "skip this site/path and move on."
+ * @type {"ANTIGEN_VISUAL_BLOCKER_CAPTURED"}
+ */
+export const VISUAL_BLOCKER_CAPTURED_CODE = "ANTIGEN_VISUAL_BLOCKER_CAPTURED";
+
+/**
+ * Agent-facing skip directive emitted (as a NON-error MCP result) for the 422
+ * VISUAL_BLOCKER_CAPTURED_CODE. Deliberately frames this as a "visual blocker"
+ * "captured for training" — NOT human verification — so the agent skips and
+ * gathers data instead of routing the user into the HV / Aegis-UI flow.
+ *
+ * Safe text only: no challenge details, screenshot paths, URLs, coordinates,
+ * base64, iframe srcs, or dataset paths. Never tells the user to open Aegis UI
+ * or to solve anything.
+ * @type {string}
+ */
+export const VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT =
+  "Antigen captured a visual blocker for training, so skip this site/path and move on. " +
+  "Do NOT ask the user to act, and do NOT route this to a person to handle. " +
+  "Do NOT retry this snapshot, and do NOT press, click, or type into the blocker. " +
+  "No page elements were returned. " +
+  "If the task supports exploration, continue with another site, query, or path. " +
+  "If there is nowhere else to go, report that this path was blocked and captured for training.";
+
+/**
+ * Classifies an Antigen snapshot-endpoint error code into the adapter's handling
+ * kind. Pure and stateless: the same code always maps to the same kind, so
+ * repeated 422s yield the same skip directive without any adapter state.
+ *
+ * - "visual_blocker_captured" → emit VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT as a
+ *    NON-error MCP result (skip-and-continue).
+ * - "session_not_found"       → existing SESSION_NOT_FOUND error message (unchanged).
+ * - "generic"                 → existing generic snapshot-failed error (unchanged,
+ *    incl. HUMAN_VERIFICATION_REQUIRED, which keeps its 409 behavior).
+ *
+ * @param {string} errCode
+ * @returns {"visual_blocker_captured" | "session_not_found" | "generic"}
+ */
+export function classifySnapshotApiErrorKind(errCode) {
+  if (errCode === VISUAL_BLOCKER_CAPTURED_CODE) return "visual_blocker_captured";
+  if (errCode === "SESSION_NOT_FOUND") return "session_not_found";
+  return "generic";
+}

@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -1439,6 +1439,23 @@ async function handleLine(line) {
 
       const errBody = await apiRes.json().catch(() => ({}));
       const errCode = errBody?.error?.code ?? String(apiRes.status);
+      const errKind = classifySnapshotApiErrorKind(errCode);
+
+      // 422 ANTIGEN_VISUAL_BLOCKER_CAPTURED — vision capture-and-skip exploration
+      // mode. This is NOT a snapshot failure and NOT a human-verification challenge:
+      // a visual blocker was captured for training and the agent must skip this
+      // site/path and move on. Emit a NON-error result (no isError) with a terminal
+      // skip directive so the agent treats it as guidance, never the HV "open Aegis
+      // UI" recovery path. Stateless: every repeat 422 returns the same directive.
+      if (errKind === "visual_blocker_captured") {
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_visual_blocker_captured action=skip_and_continue\n`
+        );
+        await noteToolDisposition({ tool: "antigen_snapshot", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "visual_blocker_captured_skip" });
+        writeSyntheticResponse(requestId, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT);
+        return;
+      }
+
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] antigen_snapshot_error reason=${errCode}\n`
       );
@@ -1447,7 +1464,7 @@ async function handleLine(line) {
         "antigen_snapshot",
         requestId,
         errCode,
-        errCode === "SESSION_NOT_FOUND"
+        errKind === "session_not_found"
           ? sessionNotFoundMessage("antigen_snapshot")
           : `Antigen snapshot failed (${errCode}).`,
       );

@@ -69,9 +69,10 @@ import {
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
-import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isVisionCaptureAndSkipEnabled } from "../runtime/visualBlockerClassifier/flags.js";
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
+import { mapCaptureResultToBlockerStatus, buildVisualBlockerCapturedResponse, type VisualBlockerSkip } from "../runtime/visualBlockerClassifier/captureAndSkip.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -5956,6 +5957,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           vgc: { available: true; capsule: SafeVisualGestureCapsuleView };
         }
       | undefined;
+    // Set ONLY in ANTIGEN_VISION_CAPTURE_AND_SKIP exploration mode when this snapshot's
+    // surface is a captured visual_classifier_candidate. Drives the 422 skip response
+    // below (which takes precedence over — and in this mode replaces — any VGC/409).
+    let snapshotVisualBlockerSkip: VisualBlockerSkip | undefined;
     // Dev-only attribution for a snapshot-minted 409 (ANTIGEN_HV_DEBUG). Set in
     // lockstep with snapshotMintedHv so the [HvDebug] log + response body name the
     // exact branch (structural_page_level_wall vs ambiguous_fired) and the signal
@@ -5987,10 +5992,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // both still return 200. Fail-safe: a failed create degrades to the existing
       // structural/ambiguous paths (screenHvMinted stays false).
       let screenHvMinted = false;
+      // capture-and-skip exploration mode wins over VGC minting: suppress the mint so
+      // this blocker episode is captured + returned as a 422 skip, never a 409 VGC.
       if (
         !hvMember &&
         screenHv?.wall === true &&
         isVisualGestureCapsuleEnabled() &&
+        !isVisionCaptureAndSkipEnabled() &&
         session.cdp_url
       ) {
         let hvDomain = "unknown";
@@ -6177,7 +6185,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         // the pre-VGC 200 synthesized-surface behavior (byte-identical when off).
         // hvMember (a per-element overlay with a real control box) is deliberately
         // excluded — it keeps the DOM live-relay path.
-        if (isPageLevel && isVisualGestureCapsuleEnabled() && session.cdp_url) {
+        // capture-and-skip exploration mode wins over VGC minting (see above).
+        if (
+          isPageLevel &&
+          isVisualGestureCapsuleEnabled() &&
+          !isVisionCaptureAndSkipEnabled() &&
+          session.cdp_url
+        ) {
           const created = await createVisualGestureCapsuleForOpaqueHv({
             humanVerificationRequestId: hvRequest.request_id,
             browserSessionId: session.browser_session_id,
@@ -6228,6 +6242,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         const ambiguousGateOpen =
           !screenHvMinted &&
           isVisualGestureCapsuleEnabled() &&
+          // capture-and-skip exploration mode wins over VGC minting (see above).
+          !isVisionCaptureAndSkipEnabled() &&
           (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || noProgressSignal);
         let ambiguousProbe: Awaited<ReturnType<typeof detectAmbiguousVisualObstructionViaCDP>> = null;
         let ambiguousSkipReason: HumanVerificationDebug["ambiguous_skip_reason"];
@@ -6539,12 +6555,38 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           });
 
           // ── Phase 2A — dev-only redacted dataset capture (dataset-flag-gated) ──
-          // Additional opt-in on top of the classifier flag. Fire-and-forget: it
-          // writes a gitignored frame.png + safe meta.json LOCALLY and can never
-          // affect this request (void + .catch, never awaited, never throws). When
-          // ANTIGEN_HV_VISION_DATASET is off, this branch is skipped entirely —
-          // behavior byte-identical. No bytes/paths/values leak into the response.
-          if (isHvVisionDatasetEnabled() && visionOutcome.ran && session.cdp_url) {
+          // Additional opt-in on top of the classifier flag. Off-flag ⇒ this branch is
+          // skipped entirely — behavior byte-identical. No bytes/paths/values leak into
+          // the response in either mode.
+          if (isVisionCaptureAndSkipEnabled() && isHvVisionDatasetEnabled() && visionOutcome.ran) {
+            // ── Exploration / data-gathering mode ──
+            // AWAIT the existing capture so we can honestly report written/attempted/
+            // skipped, then return a 422 skip below. cdp_url may be absent → capture
+            // returns no_session → capture_skipped → we STILL skip (blocker is present).
+            // The capture never throws; any rejection maps to capture_attempted.
+            const captureResult = await captureVisionDatasetRecord({
+              outcome: visionOutcome,
+              cdpUrl: session.cdp_url ?? null,
+            }).catch(() => ({ written: false as const, skip_reason: "write_failed" as const }));
+            snapshotVisualBlockerSkip = {
+              candidate: visionOutcome.candidate,
+              blocker_status: mapCaptureResultToBlockerStatus(captureResult),
+            };
+            // Safe telemetry (no-op when ANTIGEN_HV_DEBUG off). Booleans/enums only.
+            logHvActionDebug({
+              scope: "snapshot_capture_and_skip",
+              tool: "antigen_snapshot",
+              capture_and_skip_enabled: true,
+              capture_and_skip_returned_422: true,
+              capture_and_skip_blocker_status: snapshotVisualBlockerSkip.blocker_status,
+              capture_and_skip_suppressed_vgc: true,
+              trigger_basis: snapshotVisualBlockerSkip.candidate.trigger_basis,
+              candidate_reason: snapshotVisualBlockerSkip.candidate.candidate_reason,
+            });
+          } else if (isHvVisionDatasetEnabled() && visionOutcome.ran && session.cdp_url) {
+            // ── Normal dataset mode — UNCHANGED fire-and-forget ──
+            // It writes a gitignored frame.png + safe meta.json LOCALLY and can never
+            // affect this request (void + .catch, never awaited, never throws).
             void captureVisionDatasetRecord({
               outcome: visionOutcome,
               cdpUrl: session.cdp_url,
@@ -6554,6 +6596,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           }
         }
       }
+    }
+
+    // ── ANTIGEN_VISION_CAPTURE_AND_SKIP exploration mode ──
+    // A visual_classifier_candidate was captured for the training set. Return a safe
+    // 422 skip signal so the agent abandons this path — NOT a VGC, NOT a 409
+    // HUMAN_VERIFICATION_REQUIRED (VGC minting is suppressed above in this mode, so
+    // snapshotMintedHv is undefined here; ordering this first makes precedence explicit).
+    // The body is safe-fields only (buildVisualBlockerCapturedResponse enforces it):
+    // no screenshot path, base64, crop geometry, URL, iframe src, raw text,
+    // candidate_id, domain, or challenge details.
+    if (snapshotVisualBlockerSkip) {
+      reply.status(422).send(buildVisualBlockerCapturedResponse(snapshotVisualBlockerSkip));
+      return;
     }
 
     // Fail closed when THIS snapshot freshly minted a Visual Gesture Capsule (a

@@ -27,3 +27,19 @@ export function isHvVisionClassifierEnabled(): boolean {
 export function isHvVisionDatasetEnabled(): boolean {
   return process.env.ANTIGEN_HV_VISION_DATASET === "true";
 }
+
+/**
+ * `ANTIGEN_VISION_CAPTURE_AND_SKIP` enables the explicit exploration / data-gathering
+ * mode (on top of the classifier + dataset flags). When all three are on AND the
+ * SurfaceBoundaryRouter decided this surface is a `visual_classifier_candidate`, the
+ * snapshot path: runs the existing pipeline, AWAITS the existing redacted dataset
+ * capture (so it can honestly report written/attempted/skipped), and returns a 422
+ * `ANTIGEN_VISUAL_BLOCKER_CAPTURED` skip response telling the agent to abandon this
+ * path. It does NOT mint a VGC and does NOT return a HUMAN_VERIFICATION_REQUIRED 409 —
+ * in this mode it suppresses snapshot-path VGC minting even if the VGC flag is on.
+ * This is exploration only — never solves, routes through, or assists a bypass.
+ * Default off ⇒ normal user-task mode is byte-identical.
+ */
+export function isVisionCaptureAndSkipEnabled(): boolean {
+  return process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP === "true";
+}

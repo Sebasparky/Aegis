@@ -231,10 +231,92 @@ describe("pipeline does not run for non-candidate routes", () => {
       opaque_dominant_surface_with_background_dom_contradiction: false,
       surface_newly_appeared: "unknown",
       surface_overlaps_agent_target: "unknown",
+      usable_page_veto_applied: false,
+      usable_page_veto_reason: "none",
     };
     const out = run({}, decision);
     expect(out.ran).toBe(false);
     if (out.ran === false) expect(out.skip_reason).toBe("not_a_candidate");
+  });
+});
+
+// ── Route 2 usable-page veto (normal-page false-positive reduction) ────────────
+
+describe("Route 2 usable-page veto", () => {
+  /** The cdw.sa repro: scrim+centered+uninspectable false signal on a rich page. */
+  const richUnreadable: SurfaceBoundarySignals = {
+    ...unreadableSignals,
+    page_has_rich_interactive_content: true,
+  };
+
+  it("normal product grid (rich page) → veto, route none, never a candidate", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary(richUnreadable);
+    expect(decision.route_decided).toBe("none");
+    expect(decision.trigger_basis).toBe("none");
+    expect(decision.inspectability_class).toBe("none");
+    expect(decision.usable_page_veto_applied).toBe(true);
+    expect(decision.usable_page_veto_reason).toBe("normal_usable_page");
+
+    const out = run(richUnreadable, decision);
+    expect(out.ran).toBe(false);
+    if (out.ran === false) expect(out.skip_reason).toBe("not_a_candidate");
+  });
+
+  it("true page-level HV wall (browser-check interstitial) still routes — not vetoed", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary({
+      screen_hv_phrase_seen: true,
+      page_appears_unusable: true,
+    });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("page_level_hv_wall");
+    expect(decision.usable_page_veto_applied).toBe(false);
+  });
+
+  it("access-denied / auth wall: denial text blocks the veto on a rich page", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary({ ...richUnreadable, denial_text_seen: true });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("unreadable_dominant_surface");
+    expect(decision.usable_page_veto_applied).toBe(false);
+  });
+
+  it("access-denied wall on a near-empty page still routes to page_level_hv_wall", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary({
+      screen_hv_phrase_seen: true,
+      page_appears_unusable: true,
+      denial_text_seen: true,
+    });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("page_level_hv_wall");
+    expect(decision.usable_page_veto_applied).toBe(false);
+  });
+
+  it("genuine covering modal NOT vetoed — no rich content ⇒ still a candidate", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary(unreadableSignals);
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("unreadable_dominant_surface");
+    expect(decision.usable_page_veto_applied).toBe(false);
+  });
+
+  it("genuine blocking overlay over a rich page (center pointer-blocked) NOT vetoed", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary({
+      ...richUnreadable,
+      surface_blocks_viewport_center: true,
+    });
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.usable_page_veto_applied).toBe(false);
+  });
+
+  it("veto attribution fields are safe enums only (no raw text/coords/urls)", () => {
+    withFlag(true);
+    const decision = classifySurfaceBoundary(richUnreadable);
+    expect(["normal_usable_page", "none"]).toContain(decision.usable_page_veto_reason);
+    expect(typeof decision.usable_page_veto_applied).toBe("boolean");
   });
 });
 

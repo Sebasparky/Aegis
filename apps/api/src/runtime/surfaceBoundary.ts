@@ -113,6 +113,13 @@ export interface SurfaceBoundarySignals {
   screen_press_hold_affordance_seen?: boolean;
   page_appears_unusable?: boolean;
   page_wall_attempted?: boolean;
+  /**
+   * STRONG evidence the page is normally usable (rich interactive content
+   * behind/around the surface). Set at the call site from the snapshot interactive
+   * ref count (elements.length >= USABLE_PAGE_RICH_INTERACTIVE_MIN). Used ONLY by the
+   * Route 2 usable-page veto; never a trigger on its own.
+   */
+  page_has_rich_interactive_content?: boolean;
 }
 
 export interface SurfaceBoundaryDecision {
@@ -129,6 +136,10 @@ export interface SurfaceBoundaryDecision {
   surface_newly_appeared: "unknown";
   /** v1: "unknown" unless an action-target overlap was provided by the caller. */
   surface_overlaps_agent_target: "unknown" | boolean;
+  /** True when the Route 2 unreadable-dominant verdict was vetoed as a usable page. */
+  usable_page_veto_applied: boolean;
+  /** Attribution for the veto. "none" when not vetoed. */
+  usable_page_veto_reason: "normal_usable_page" | "none";
 }
 
 export interface ClassifySurfaceBoundaryOptions {
@@ -223,6 +234,22 @@ export function classifySurfaceBoundary(
   const pageLevelHvWall =
     !opaqueDominant && !unreadableDominant && strongScreenHvText && pageUnusable;
 
+  // ── Usable-page veto (Route 2 ONLY) ──
+  // A benign marketing hero / fixed widget can trip scrim+centered while DOM text
+  // extraction fails, mislabeling a normally-usable page as an unreadable dominant
+  // surface. When the page has STRONG usable-page evidence AND no explicit HV /
+  // denial / press-hold signal, veto Route 2 → "none". Requires the ABSENCE of
+  // every HV signal Routes 1/3 depend on, so it cannot weaken them.
+  const richInteractive = s.page_has_rich_interactive_content === true;
+  const usablePageVetoApplied =
+    unreadableDominant &&
+    richInteractive &&
+    !strongScreenHvText && // no screen HV phrase / press-hold affordance
+    !pageUnusable && // page is NOT near-empty
+    s.denial_text_seen !== true && // no access-denied text
+    !opaqueDominant && // not a cross-origin opaque iframe (Route 1)
+    !blocksCenter; // surface does not pointer-block the center
+
   // Route 4 — INSPECTABLE: a readable surface WITH a genuine blocking backdrop /
   // top-layer modal (or a scrim+centered surface that DID yield text). A bare large
   // hero / carousel (no scrim, not :modal) is NOT a boundary and routes to `none`.
@@ -240,7 +267,7 @@ export function classifySurfaceBoundary(
     route = "visual_classifier_candidate";
     computedBasis = "opaque_dominant_surface";
     reason = contradiction ? "visual_dom_mismatch" : "opaque_iframe";
-  } else if (unreadableDominant) {
+  } else if (unreadableDominant && !usablePageVetoApplied) {
     route = "visual_classifier_candidate";
     computedBasis = "unreadable_dominant_surface";
     reason = "unreadable_dominant_surface";
@@ -269,7 +296,8 @@ export function classifySurfaceBoundary(
   let inspectability_class: SurfaceInspectabilityClass;
   if (opaqueIframe && (inspectableText || normalDomBehind)) inspectability_class = "mixed";
   else if (opaqueIframe) inspectability_class = "opaque";
-  else if (unreadableDominant) inspectability_class = "opaque"; // visible but semantically unreadable
+  else if (unreadableDominant && !usablePageVetoApplied)
+    inspectability_class = "opaque"; // visible but semantically unreadable
   else if (pageLevelHvWall) inspectability_class = "opaque"; // full-page wall: visible, not semantically usable
   else if (inspectableDominant) inspectability_class = "inspectable";
   else inspectability_class = "none";
@@ -284,5 +312,7 @@ export function classifySurfaceBoundary(
     surface_newly_appeared: "unknown",
     surface_overlaps_agent_target:
       opts.overlapsAgentTarget === undefined ? "unknown" : opts.overlapsAgentTarget,
+    usable_page_veto_applied: usablePageVetoApplied,
+    usable_page_veto_reason: usablePageVetoApplied ? "normal_usable_page" : "none",
   };
 }

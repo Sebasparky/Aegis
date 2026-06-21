@@ -2911,6 +2911,8 @@ export interface HumanVerificationDebug {
   surface_boundary_trigger_basis?: SurfaceBoundaryTriggerBasis;
   surface_inspectability_class?: SurfaceInspectabilityClass;
   surface_visual_classifier_candidate_reason?: SurfaceVisualClassifierCandidateReason;
+  surface_boundary_usable_page_veto?: boolean;
+  surface_boundary_veto_reason?: "normal_usable_page" | "none";
   surface_opaque_dominant_with_bg_dom_contradiction?: boolean;
   // Dominant-visible-surface inspectability (the same-origin / textless wall path).
   surface_dominant_visible_surface_seen?: boolean;

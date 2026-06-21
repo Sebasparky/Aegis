@@ -506,6 +506,14 @@ function resolveReadyRuntimeSession(
 const PAGE_HV_PROBE_MAX_ELEMENTS = 3;
 
 /**
+ * Minimum snapshot interactive-ref count for STRONG usable-page evidence. Well above
+ * the unusable floor (PAGE_HV_PROBE_MAX_ELEMENTS = 3) and above small cookie/login
+ * modals, but far below a normal product grid. Drives the surface-boundary Route 2
+ * usable-page veto (a benign hero/widget tripping scrim+centered on a usable page).
+ */
+const USABLE_PAGE_RICH_INTERACTIVE_MIN = 12;
+
+/**
  * Value-free preflight-ordering trace helper. No-op unless ANTIGEN_BROWSER_TRACE
  * is on. Emits only the enum-gated stage plus two booleans — never refs,
  * selectors, challenge text, iframe details, URLs, or any page content.
@@ -6483,6 +6491,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           screen_hv_phrase_seen: screenHv?.hv_phrase_seen === true,
           screen_press_hold_affordance_seen: screenHv?.press_hold_affordance_seen === true,
           page_appears_unusable: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
+          // Strong usable-page evidence: a normal product grid / nav / search / cart
+          // page has many interactive refs (well above the unusable floor of 3 and
+          // above small cookie/login modals). Drives the Route 2 usable-page veto.
+          page_has_rich_interactive_content:
+            elements.length >= USABLE_PAGE_RICH_INTERACTIVE_MIN,
           page_wall_attempted: pageWallAttempted,
         };
         const surfaceDecision = classifySurfaceBoundary(surfaceSignals);
@@ -6497,6 +6510,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           hvDebug.surface_inspectability_class = surfaceDecision.inspectability_class;
           hvDebug.surface_visual_classifier_candidate_reason =
             surfaceDecision.visual_classifier_candidate_reason;
+          hvDebug.surface_boundary_usable_page_veto = surfaceDecision.usable_page_veto_applied;
+          hvDebug.surface_boundary_veto_reason = surfaceDecision.usable_page_veto_reason;
           hvDebug.surface_dominant_visible_surface_seen =
             screenHv?.dominant_visible_surface_seen === true;
           hvDebug.surface_dominant_visible_surface_kind =
@@ -6540,6 +6555,8 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           surface_inspectability_class: surfaceDecision.inspectability_class,
           surface_visual_classifier_candidate_reason:
             surfaceDecision.visual_classifier_candidate_reason,
+          surface_boundary_usable_page_veto: surfaceDecision.usable_page_veto_applied,
+          surface_boundary_veto_reason: surfaceDecision.usable_page_veto_reason,
           surface_dominant_visible_surface_seen: screenHv?.dominant_visible_surface_seen === true,
           surface_dominant_visible_surface_kind: screenHv?.dominant_visible_surface_kind ?? "unknown",
           surface_dominant_text_extractable: screenHv?.dominant_text_extractable === true,

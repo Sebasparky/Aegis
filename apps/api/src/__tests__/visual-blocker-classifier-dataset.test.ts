@@ -514,6 +514,11 @@ describe("label taxonomy", () => {
         "true_visual_blocker",
         "page_level_hv_wall",
         "unreadable_hv_overlay",
+        "false_positive_normal_page",
+        "normal_product_grid",
+        "browser_check_interstitial",
+        "auth_wall",
+        "variant_selection_required",
       ].sort(),
     );
   });

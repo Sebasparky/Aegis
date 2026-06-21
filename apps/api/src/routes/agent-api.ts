@@ -866,6 +866,22 @@ async function rejectNoProgressActionAsHumanVerification(
 ): Promise<boolean> {
   if (!isHumanVerificationEnabled()) return false;
 
+  // ANTIGEN_VISION_CAPTURE_AND_SKIP exploration/dataset mode: never mint a VGC or HV
+  // request from an action no-progress failure — a durable capsule/marker would poison
+  // every later site in the run. Return false so the original no-progress action failure
+  // surfaces; the agent's next antigen_snapshot runs the existing visual classifier /
+  // dataset capture path and returns the 422 ANTIGEN_VISUAL_BLOCKER_CAPTURED skip
+  // directive. Guarded so normal mode is byte-identical.
+  if (isVisionCaptureAndSkipEnabled()) {
+    logHvActionDebug({
+      scope: "no_progress_backstop",
+      tool,
+      capture_and_skip_suppressed_vgc: true,
+      created_capsule: false,
+    });
+    return false;
+  }
+
   const { wall, resolvedTarget } = await detectLiveHumanVerificationWall(session);
   recordActionPreflight(session, tool, "hv_probe_checked", { hv_detected: !!wall });
   if (!wall) {

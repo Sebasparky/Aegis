@@ -313,6 +313,7 @@ afterEach(() => {
   delete process.env.ANTIGEN_HUMAN_VERIFICATION;
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   delete process.env.ANTIGEN_HV_DEBUG;
+  delete process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP;
 });
 
 // ── Pure classifier truth table (the over-fire guard) ─────────────────────────
@@ -1264,5 +1265,119 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error.hv_debug).toBeDefined();
     assertNoLeak(res.json());
+  });
+});
+
+// ── ANTIGEN_VISION_CAPTURE_AND_SKIP: action no-progress never mints a VGC ──────
+//
+// Dataset-gathering / exploration mode. The action no-progress backstop
+// (rejectNoProgressActionAsHumanVerification) must NOT mint a capsule or HV
+// request from an action failure — a single durable capsule would otherwise poison
+// every later site in the run via the hv_active_guard reuse path. The action
+// returns its original no-progress failure; the agent's next antigen_snapshot drives
+// the existing visual-classifier / dataset-capture path. Normal mode is unchanged.
+describe("capture-and-skip — action no-progress never mints a VGC", () => {
+  // The exact shape that DID mint a capsule in normal mode (case 1 of the no-progress
+  // suite). Proves the only difference is the flag.
+  function seedNoProgressOverlay() {
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    ambiguousProbeMock.mockResolvedValue({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
+    });
+  }
+
+  it("(off — control) flag off + action no-progress mints a VGC and 409s (unchanged baseline)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    // ANTIGEN_VISION_CAPTURE_AND_SKIP intentionally unset.
+    seedNoProgressOverlay();
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+  });
+
+  it("(2) flag on + action no-progress → no capsule, no HV request, original 422 surfaces", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    seedNoProgressOverlay();
+
+    const res = await clickStaleProductRef();
+
+    // Original action failure surfaces — NOT a 409 HUMAN_VERIFICATION_REQUIRED.
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    // No capsule and no HV request were created — nothing to poison later sites.
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+    expect(humanVerificationRequests.size).toBe(0);
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    // Short-circuits before any wall/visual probe runs.
+    expect(hvWallProbeMock).not.toHaveBeenCalled();
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("(3) flag on + action no-progress → response is never HUMAN_VERIFICATION_REQUIRED", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    seedNoProgressOverlay();
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).not.toBe(409);
+    expect(res.json().error.code).not.toBe("HUMAN_VERIFICATION_REQUIRED");
+  });
+
+  it("(4) flag on — a later snapshot is NOT blocked by hv_active_guard/reused_existing_capsule", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    seedNoProgressOverlay();
+
+    const action = await clickStaleProductRef();
+    expect(action.statusCode).toBe(422);
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+
+    // The next site/page snapshot must proceed independently — no leftover capsule.
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    const snap = await snapshot();
+
+    expect(snap.statusCode).toBe(200);
+    expect(snap.json().error?.code).not.toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(6) telemetry on the suppressed path is safe — booleans/enums only, no leaks", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedNoProgressOverlay();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    const hvLines = logSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .filter((line) => line.startsWith("[HvDebug]"));
+    const suppressLine = hvLines.find((l) => l.includes("capture_and_skip_suppressed_vgc=true"));
+    expect(suppressLine).toBeDefined();
+    expect(suppressLine).toContain("scope=no_progress_backstop");
+    expect(suppressLine).toContain("created_capsule=false");
+    // No URL, port, screenshot bytes, coords, or raw page text in the telemetry line.
+    for (const forbidden of ["9222", "data:image", "png_base64", "example-shop.com", "http"]) {
+      expect(suppressLine).not.toContain(forbidden);
+    }
+    // The 422 body itself is clean too.
+    assertNoLeak(res.json());
+    logSpy.mockRestore();
   });
 });

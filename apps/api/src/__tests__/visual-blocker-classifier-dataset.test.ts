@@ -24,6 +24,7 @@ import {
   type VisualDatasetCropHint,
 } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { getAntigenRuntimeStatus } from "../runtime/antigenRuntimeFlags.js";
+import { VISION_DATASET_LABELS } from "../runtime/visualBlockerClassifier/types.js";
 import type { PipelineOutcome } from "../runtime/visualBlockerClassifier/types.js";
 
 const FLAG = "ANTIGEN_HV_VISION_DATASET";
@@ -220,9 +221,12 @@ describe("dataset capture writes redacted record", () => {
     expect(meta.redacted_field_count).toBe(2);
     expect(meta.blocker_type).toBe("unknown_blocked");
     expect(meta.classifier_source).toBe("shadow_stub");
+    // No crop produced → no blocker_crop.png on disk (frame.png is the full viewport).
+    expect(fs.existsSync(path.join(recordDir(root), "frame.png"))).toBe(true);
+    expect(fs.existsSync(path.join(recordDir(root), "blocker_crop.png"))).toBe(false);
   });
 
-  it("valid crop hint → writes a cropped frame.png, meta region:blocker_crop/crop_applied:true", async () => {
+  it("valid crop hint → frame.png stays full viewport, crop written separately as blocker_crop.png", async () => {
     withFlag(true);
     const root = tmpRoot();
     const fullSize = Buffer.from(VIEWPORT_PNG_B64, "base64").length;
@@ -241,13 +245,19 @@ describe("dataset capture writes redacted record", () => {
     expect(meta.region).toBe("blocker_crop");
     expect(meta.crop_applied).toBe(true);
     expect(meta.crop_source).toBe("capture_reprobe");
-    // The cropped frame is a real, smaller-than-full PNG.
-    const framePath = path.join(recordDir(root), "frame.png");
-    const frameBuf = fs.readFileSync(framePath);
-    const decoded = PNG.sync.read(frameBuf);
-    expect(decoded.width).toBeLessThan(100);
-    expect(decoded.height).toBeLessThan(100);
-    expect(frameBuf.length).toBeLessThan(fullSize);
+    // frame.png is ALWAYS the full redacted viewport — never replaced by the crop.
+    const frameBuf = fs.readFileSync(path.join(recordDir(root), "frame.png"));
+    const frame = PNG.sync.read(frameBuf);
+    expect(frame.width).toBe(100);
+    expect(frame.height).toBe(100);
+    // The crop lives in a SEPARATE file and is a real, smaller-than-full PNG.
+    const cropPath = path.join(recordDir(root), "blocker_crop.png");
+    expect(fs.existsSync(cropPath)).toBe(true);
+    const cropBuf = fs.readFileSync(cropPath);
+    const crop = PNG.sync.read(cropBuf);
+    expect(crop.width).toBeLessThan(100);
+    expect(crop.height).toBeLessThan(100);
+    expect(cropBuf.length).toBeLessThan(fullSize);
   });
 
   it("cropPng failure (corrupt frame) → safe full_viewport fallback, write still succeeds", async () => {
@@ -269,6 +279,7 @@ describe("dataset capture writes redacted record", () => {
     expect(meta.region).toBe("full_viewport");
     expect(meta.crop_applied).toBe(false);
     expect(meta.crop_source).toBe("fallback_full_viewport");
+    expect(fs.existsSync(path.join(recordDir(root), "blocker_crop.png"))).toBe(false);
   });
 
   it("crop probe throwing → safe full_viewport fallback, never throws", async () => {
@@ -290,6 +301,7 @@ describe("dataset capture writes redacted record", () => {
     const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
     expect(meta.region).toBe("full_viewport");
     expect(meta.crop_applied).toBe(false);
+    expect(fs.existsSync(path.join(recordDir(root), "blocker_crop.png"))).toBe(false);
   });
 
   it("meta.json contains no unsafe keys or nested base64 (crop path)", async () => {
@@ -485,6 +497,42 @@ describe("runtime status flag exposure", () => {
   it("hv_vision_dataset true when the flag is on", () => {
     withFlag(true);
     expect(getAntigenRuntimeStatus().hv_vision_dataset).toBe(true);
+  });
+});
+
+// ── Label taxonomy ────────────────────────────────────────────────────────────
+
+describe("label taxonomy", () => {
+  it("allowlist holds the expected false-positive / blocker labels", () => {
+    expect([...VISION_DATASET_LABELS].sort()).toEqual(
+      [
+        "false_positive_normal_modal",
+        "cart_added_drawer",
+        "cookie_banner",
+        "sign_in_drawer",
+        "newsletter_modal",
+        "true_visual_blocker",
+        "page_level_hv_wall",
+        "unreadable_hv_overlay",
+      ].sort(),
+    );
+  });
+
+  it("capture never auto-labels — meta.label is null and is an allowed slot", async () => {
+    withFlag(true);
+    const root = tmpRoot();
+    await captureVisionDatasetRecord(
+      { outcome: ranOutcome(), cdpUrl: "http://localhost:9222" },
+      {
+        outputRoot: root,
+        now: fixedNow,
+        screenshotProvider: okScreenshot,
+        cropProbe: missCropProbe,
+        disableThrottle: true,
+      },
+    );
+    const meta = JSON.parse(fs.readFileSync(path.join(recordDir(root), "meta.json"), "utf-8"));
+    expect(meta.label).toBeNull();
   });
 });
 

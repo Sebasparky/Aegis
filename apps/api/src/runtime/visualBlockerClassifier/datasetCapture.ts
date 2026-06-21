@@ -8,14 +8,18 @@
  *
  * Hard guarantees:
  *   - Dev/local only: writes `dev-artifacts/hv-vision-dataset/<date>/<candidate_id>/`
- *     `{frame.png, meta.json}`. No API route, no labeling UI, no persistence.
+ *     `{frame.png, blocker_crop.png?, meta.json}`. `frame.png` is ALWAYS the full
+ *     redacted viewport; `blocker_crop.png` is an OPTIONAL separate file written only
+ *     when a safe blocker crop was produced — the crop never replaces `frame.png`.
+ *     No API route, no labeling UI, no persistence.
  *   - Fire-and-forget: never throws, never affects the request. Off-flag ⇒ no writes,
  *     no telemetry, behavior byte-identical.
  *   - Bytes (the redacted PNG) live ONLY on disk — never logged, never returned, never
  *     embedded in meta. meta.json is safe-keys only (booleans/enums/buckets/counts/
  *     hostname/ids); `label`/`outcome` are null at capture.
  *   - Reuses the fail-closed redaction primitive (`captureRedactedScreenshot`) — no
- *     second screenshot path. No crop in 2A (full viewport only); crop is Phase 2B.
+ *     second screenshot path. The optional crop (Phase 2B) is computed from the
+ *     already-redacted frame; any crop failure safely omits `blocker_crop.png`.
  */
 
 import fs from "node:fs";
@@ -353,14 +357,27 @@ export async function captureVisionDatasetRecord(
   }
   const crop = resolveCrop(cropHint, shot.base64);
 
-  // 3. Write frame.png + meta.json to the gitignored local dataset dir.
+  // 3. Write frame.png (ALWAYS the full redacted viewport) + the optional
+  //    blocker_crop.png + meta.json to the gitignored local dataset dir. The crop is
+  //    a SEPARATE file and never replaces frame.png. If the crop write fails, downgrade
+  //    the meta descriptor to full_viewport so meta.json never claims a crop that isn't
+  //    on disk.
+  let cropMeta: CropResolution = crop;
   try {
     const nowDate = seams.now ? seams.now() : new Date();
     const root = resolveDatasetRoot(seams.outputRoot);
     const dir = path.join(root, dateDir(nowDate), candidateId);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "frame.png"), Buffer.from(crop.base64, "base64"));
-    const meta = buildMeta(outcome, shot.redacted_field_count, nowDate.toISOString(), crop);
+    fs.writeFileSync(path.join(dir, "frame.png"), Buffer.from(shot.base64, "base64"));
+    if (crop.crop_applied) {
+      try {
+        fs.writeFileSync(path.join(dir, "blocker_crop.png"), Buffer.from(crop.base64, "base64"));
+      } catch {
+        // Crop file failed to write — keep frame.png + meta honest (no crop on disk).
+        cropMeta = fullViewportFallback(shot.base64);
+      }
+    }
+    const meta = buildMeta(outcome, shot.redacted_field_count, nowDate.toISOString(), cropMeta);
     fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
     // Record throttle marker only on a successful write.
     if (!seams.disableThrottle) {
@@ -380,9 +397,9 @@ export async function captureVisionDatasetRecord(
   logVisionDatasetDebug({
     event: "vision_dataset_capture_written",
     candidate_id: candidateId,
-    region: crop.region,
-    crop_applied: crop.crop_applied,
-    crop_source: crop.crop_source,
+    region: cropMeta.region,
+    crop_applied: cropMeta.crop_applied,
+    crop_source: cropMeta.crop_source,
     redacted_field_count: shot.redacted_field_count,
   });
   return { written: true };

@@ -146,7 +146,10 @@ export interface DatasetCaptureDecision {
 }
 
 /**
- * Safe metadata written to `<dataset_dir>/<date>/<candidate_id>/meta.json` (Phase 2A).
+ * Safe metadata written to `<dataset_dir>/<date>/<candidate_id>/meta.json` alongside
+ * `frame.png` (ALWAYS the full redacted viewport) and, when a blocker crop was
+ * produced, `blocker_crop.png` (the redacted blocker-region crop). `frame.png` is
+ * never replaced by the crop — the crop is always a separate, optional file.
  * SAFETY: every field is a boolean, enum, bucket, count, hostname, ISO timestamp, or
  * an already-non-sensitive id. NEVER a screenshot, base64, rect, coordinate, selector,
  * iframe `src`, raw page text, field value, or URL path/query. `domain` is hostname
@@ -172,25 +175,50 @@ export interface VisionDatasetCaptureMeta {
   redaction_verified: boolean;
   redacted_field_count: number;
   /**
-   * Phase 2B: `blocker_crop` when a redacted crop around the detected blocker was
-   * written; `full_viewport` when no safe crop could be determined (probe miss,
-   * invalid/too-broad geometry, or crop error) and the full redacted frame was kept.
-   * Coordinates are NEVER stored — only this enum + the two flags below.
+   * Phase 2B — describes the OPTIONAL `blocker_crop.png` artifact (NOT `frame.png`,
+   * which is always the full redacted viewport). `blocker_crop` when a redacted crop
+   * around the detected blocker was written to `blocker_crop.png`; `full_viewport`
+   * when no safe crop could be determined (probe miss, invalid/too-broad geometry, or
+   * crop error) and no crop file was written. Coordinates are NEVER stored — only this
+   * enum + the two flags below.
    */
   region: "blocker_crop" | "full_viewport";
-  /** Phase 2B: true only when the saved frame.png is a blocker-region crop. */
+  /** Phase 2B: true ⇔ a `blocker_crop.png` blocker-region crop was written. */
   crop_applied: boolean;
   /**
-   * Phase 2B provenance of the saved frame: `capture_reprobe` (geometry came from a
-   * dataset-capture-only re-probe of the live page) or `fallback_full_viewport`.
-   * Never a rect/coordinate.
+   * Phase 2B provenance of the crop decision: `capture_reprobe` (geometry came from a
+   * dataset-capture-only re-probe of the live page) or `fallback_full_viewport` (no
+   * crop written). Never a rect/coordinate.
    */
   crop_source: "capture_reprobe" | "fallback_full_viewport";
-  /** Null at capture — human label slot for a later phase. */
-  label: null;
+  /**
+   * Null at capture — human/QA label slot for a later phase. Future records may carry
+   * one of `VISION_DATASET_LABELS`; capture itself never auto-labels.
+   */
+  label: VisionDatasetLabel | null;
   /** Null at capture — outcome label slot for a later phase. */
   outcome: null;
 }
+
+/**
+ * Canonical human/QA label allowlist for dataset records. Kept as an `as const`
+ * tuple so the runtime allowlist and the `VisionDatasetLabel` union never drift —
+ * a future labeling tool (or a hand-edit of meta.json) may set `meta.label` to one
+ * of these. Capture NEVER auto-labels: `label` is always `null` at capture time
+ * (never the stub's own guess). Existing unlabeled records keep `label: null`.
+ */
+export const VISION_DATASET_LABELS = [
+  "false_positive_normal_modal",
+  "cart_added_drawer",
+  "cookie_banner",
+  "sign_in_drawer",
+  "newsletter_modal",
+  "true_visual_blocker",
+  "page_level_hv_wall",
+  "unreadable_hv_overlay",
+] as const;
+
+export type VisionDatasetLabel = (typeof VISION_DATASET_LABELS)[number];
 
 export type VisionDatasetCaptureResult =
   | { written: true }

@@ -148,6 +148,43 @@ describe("pipeline runs for visual_classifier_candidate bases", () => {
     expect(out.policy.enforced).toBe(false);
   });
 
+  it("browser_check_interstitial (stuck) → candidate, runs, trigger/reason carried through", () => {
+    withFlag(true);
+    const signals: SurfaceBoundarySignals = {
+      browser_check_phrase_seen: true,
+      browser_check_stuck: true,
+      page_appears_unusable: true,
+    };
+    const decision = classifySurfaceBoundary(signals);
+    expect(decision.route_decided).toBe("visual_classifier_candidate");
+    expect(decision.trigger_basis).toBe("browser_check_interstitial");
+    expect(decision.visual_classifier_candidate_reason).toBe("browser_check_interstitial");
+
+    const out = run(signals, decision);
+    expect(out.ran).toBe(true);
+    if (out.ran !== true) throw new Error("expected ran");
+    // deriveTriggerBasis must map the new reason explicitly (not the opaque fallback).
+    expect(out.candidate.trigger_basis).toBe("browser_check_interstitial");
+    expect(out.candidate.candidate_reason).toBe("browser_check_interstitial");
+    expect(out.result.blocker_type).toBe("unknown_blocked");
+    expect(out.policy.action).toBe("fail_closed_or_ask_user");
+    expect(out.policy.enforced).toBe(false);
+  });
+
+  it("browser_check phrase SEEN but NOT stuck → not a candidate (transient)", () => {
+    withFlag(true);
+    const signals: SurfaceBoundarySignals = {
+      browser_check_phrase_seen: true,
+      browser_check_stuck: false,
+      page_appears_unusable: true,
+    };
+    const decision = classifySurfaceBoundary(signals);
+    expect(decision.route_decided).toBe("none");
+    const out = run(signals, decision);
+    expect(out.ran).toBe(false);
+    if (out.ran === false) expect(out.skip_reason).toBe("not_a_candidate");
+  });
+
   it("press-hold affordance alone (no phrase) still routes to page_level_hv_wall", () => {
     withFlag(true);
     const decision = classifySurfaceBoundary({

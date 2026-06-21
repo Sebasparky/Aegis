@@ -974,6 +974,11 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — human_verification_deb
     "surface_dominant_text_extractable",
     "surface_dominant_text_uninspectable",
     "surface_visible_but_semantically_unclassified",
+    // Browser-check interstitial telemetry (only present when ANTIGEN_BROWSER_CHECK_
+    // TELEMETRY is on; these tests don't enable it, but the keys are safe scalars).
+    "browser_check_interstitial_seen",
+    "browser_check_outcome",
+    "browser_check_observation_bucket",
   ]);
 
   function withEnv(

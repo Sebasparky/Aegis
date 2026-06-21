@@ -245,6 +245,48 @@ describe("classifySurfaceBoundary — pure shadow verdict", () => {
     expect(d.trigger_basis).toBe("none");
   });
 
+  // ── Browser-check interstitial route (passive Cloudflare-style) ──
+  it("browser-check phrase + stuck (no HV) → visual_classifier_candidate / browser_check_interstitial", () => {
+    const d = classifySurfaceBoundary({
+      browser_check_phrase_seen: true,
+      browser_check_stuck: true,
+      page_appears_unusable: true,
+    });
+    expect(d.route_decided).toBe("visual_classifier_candidate");
+    expect(d.trigger_basis).toBe("browser_check_interstitial");
+    expect(d.visual_classifier_candidate_reason).toBe("browser_check_interstitial");
+    expect(d.inspectability_class).toBe("opaque");
+  });
+
+  it("browser-check phrase SEEN but NOT stuck (transient) → none (never captured)", () => {
+    const d = classifySurfaceBoundary({
+      browser_check_phrase_seen: true,
+      browser_check_stuck: false,
+      page_appears_unusable: true,
+    });
+    expect(d.route_decided).toBe("none");
+    expect(d.trigger_basis).toBe("none");
+  });
+
+  it("HV precedence: browser-check phrase + page-level HV text on an unusable page → page_level_hv_wall (NOT browser-check)", () => {
+    const d = classifySurfaceBoundary({
+      browser_check_phrase_seen: true,
+      browser_check_stuck: true,
+      screen_hv_phrase_seen: true,
+      page_appears_unusable: true,
+    });
+    expect(d.route_decided).toBe("visual_classifier_candidate");
+    expect(d.trigger_basis).toBe("page_level_hv_wall");
+    expect(d.visual_classifier_candidate_reason).toBe("page_level_hv_wall");
+  });
+
+  it("browser-check signals absent ⇒ classifier byte-identical (no spurious route)", () => {
+    // A normal product grid with rich content: no browser-check signals fed.
+    const d = classifySurfaceBoundary({ page_has_rich_interactive_content: true });
+    expect(d.route_decided).toBe("none");
+    expect(d.trigger_basis).toBe("none");
+  });
+
   it("surface_overlaps_agent_target reflects the provided value when known", () => {
     const provided = classifySurfaceBoundary(
       { opaque_iframe_seen: true },

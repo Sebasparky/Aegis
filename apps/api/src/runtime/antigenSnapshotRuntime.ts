@@ -642,6 +642,25 @@ export function mapRawToCandidate(raw: RawAntigenCandidate, index: number): Anti
   return candidate;
 }
 
+// ─── Browser-check interstitial phrase matcher (passive-only) ────────────────
+//
+// Cloudflare-style passive "Checking your browser" / "Just a moment" interstitial
+// phrases ONLY. This is intentionally NARROW and strictly DISJOINT from HV_TEXT_RE
+// (the active-challenge matcher below). It must NEVER include active-challenge
+// phrasing — "verify/prove you are human", "captcha", "press (&|and) hold",
+// "challenge", "i'm not a robot", "robot check", "security check". Those stay owned
+// by HV_TEXT_RE / the page-level HV wall path, so a page using them routes as HV
+// (escalated), never as a browser-check. The browser-check-regex test asserts this
+// disjointness. Defined once in TS and injected into the page snippet via .source
+// (see buildOverlaySnippetJs) so the in-page regex and this matcher can never drift.
+export const BROWSER_CHECK_PHRASE_RE =
+  /checking\s+(your\s+)?browser|just\s+a\s+moment|please\s+wait\s+while\s+we\s+(verify|check)|enable\s+(javascript|java\s*script)\s+and\s+cookies|ddos\s+protection\s+by\s+cloudflare|this\s+process\s+is\s+automatic|your\s+browser\s+will\s+redirect/i;
+
+/** Value-free passive browser-check phrase test. Used by tests; mirrors in-page RE. */
+export function matchesBrowserCheckPhrase(text: string): boolean {
+  return BROWSER_CHECK_PHRASE_RE.test(text);
+}
+
 // ─── Shared active-overlay / top-layer structural snippet ────────────────────
 
 /**
@@ -679,6 +698,12 @@ export function buildOverlaySnippetJs(screenHvEnabled: boolean = false): string 
     var HV_TXT_RE=/(type|enter)\\s+the\\s+(characters|text|letters|words)/i;
     var HV_PUZZLE_RE=/slide\\s+(the\\s+)?(puzzle|piece)|drag\\s+(the\\s+)?(puzzle|piece)|complete\\s+the\\s+puzzle/i;
     var HV_CHECKBOX_SEL='input[type="checkbox"],[role="checkbox"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[src*="turnstile"]';
+    // Passive browser-check interstitial phrases (Cloudflare "Checking your
+    // browser" / "Just a moment"). NARROW + strictly disjoint from HV_TEXT_RE —
+    // injected from the TS BROWSER_CHECK_PHRASE_RE so the two can never drift. Only
+    // a boolean escapes the page; the matched text never does. NOT a challenge
+    // matcher: a page with active-challenge text routes via HV_TEXT_RE instead.
+    var BROWSER_CHECK_RE=/${BROWSER_CHECK_PHRASE_RE.source}/${BROWSER_CHECK_PHRASE_RE.flags};
     // Per-container memo (containers repeat across member elements; the scan is
     // bounded but not free). Parallel arrays — container counts are tiny.
     var _hvMemoK=[],_hvMemoV=[];
@@ -2344,6 +2369,8 @@ export function buildPageHvWallHintExpr(): string {
     // value-free telemetry only (ANTIGEN_HV_DEBUG) and never gate the mint.
     var screenHvType=null; try{ screenHvType=screenHumanVerification(); }catch(e){ screenHvType=null; }
     var scrimSeen=false, centeredModalSeen=false, pressHoldSeen=false, hvPhraseSeen=false, topLayerSeen=false;
+    // Passive browser-check interstitial phrase verdict (value-free boolean).
+    var browserCheckSeen=false;
     // Dominant-visible-surface inspectability (shadow telemetry only). Defaults are
     // byte-identical when SCREEN_HV_ENABLED is off.
     var domSurfaceSeen=false, domSurfaceKind='unknown', domTextAttempted=false, domTextExtractable=false, domTextUninspectable=false, domTextSource='unknown', domUnclassified=false, domUnreadableSurfaceSeen=false, domIframeTextNotHarvested=false, domSurfaceHasIframe=false;
@@ -2367,6 +2394,14 @@ export function buildPageHvWallHintExpr(): string {
       centeredModalSeen=hsc.modalSeen;
       hvPhraseSeen=HV_TEXT_RE.test(hsc.scan);
       pressHoldSeen=HV_HOLD_RE.test(hsc.scan);
+      // Passive browser-check phrase: scan the foreground card text AND a bounded,
+      // value-free body/title read (Cloudflare interstitials render their text in
+      // the top document, not a foreground card). Only the boolean escapes.
+      try{
+        var _bcBody=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,2000);
+        var _bcTitle=txt(document.title||'');
+        browserCheckSeen=BROWSER_CHECK_RE.test(hsc.scan)||BROWSER_CHECK_RE.test(_bcBody)||BROWSER_CHECK_RE.test(_bcTitle);
+      }catch(e){ browserCheckSeen=false; }
       // top-layer / native modal dialog present.
       try{
         var hdlgs=document.querySelectorAll('dialog');
@@ -2465,7 +2500,8 @@ export function buildPageHvWallHintExpr(): string {
         visible_but_semantically_unclassified: !!domUnclassified,
         dominant_surface_contains_iframe: !!domSurfaceHasIframe,
         dominant_surface_iframe_text_not_harvested: !!domIframeTextNotHarvested,
-        unreadable_dominant_surface_seen: !!domUnreadableSurfaceSeen
+        unreadable_dominant_surface_seen: !!domUnreadableSurfaceSeen,
+        browser_check_phrase_seen: !!browserCheckSeen
       };
     }
     if(!SCREEN_HV_ENABLED) return withScreen(false);
@@ -2936,6 +2972,12 @@ export interface HumanVerificationDebug {
   surface_blocks_viewport_center?: boolean;
   surface_normal_page_dom_present_behind?: boolean;
   surface_visual_dom_contradiction_seen?: boolean;
+  // ── Browser-check interstitial telemetry (ANTIGEN_BROWSER_CHECK_TELEMETRY). ──
+  // Passive Cloudflare-style "Checking your browser" episode state for this
+  // snapshot. Booleans / enum / coarse bucket only — never raw text/URLs/refs.
+  browser_check_interstitial_seen?: boolean;
+  browser_check_outcome?: "none" | "seen" | "passed" | "stuck" | "escalated_to_hv";
+  browser_check_observation_bucket?: "0" | "1" | "2" | "3+";
 }
 
 // ─── Page metadata extraction (Snapshot v2) ──────────────────────────────────
@@ -3155,6 +3197,9 @@ export interface ScreenHvWallSignals {
   dominant_surface_contains_iframe: boolean;
   dominant_surface_iframe_text_not_harvested: boolean;
   unreadable_dominant_surface_seen: boolean;
+  // Passive browser-check interstitial phrase seen (Cloudflare-style). Value-free
+  // boolean; consumed only when ANTIGEN_BROWSER_CHECK_TELEMETRY is on.
+  browser_check_phrase_seen: boolean;
 }
 
 /** Re-validate the raw screen-HV page value into a strict, value-free object. */
@@ -3195,6 +3240,7 @@ export function sanitizeScreenHvWallSignals(value: unknown): ScreenHvWallSignals
     dominant_surface_contains_iframe: v.dominant_surface_contains_iframe === true,
     dominant_surface_iframe_text_not_harvested: v.dominant_surface_iframe_text_not_harvested === true,
     unreadable_dominant_surface_seen: v.unreadable_dominant_surface_seen === true,
+    browser_check_phrase_seen: v.browser_check_phrase_seen === true,
   };
 }
 

@@ -12,6 +12,7 @@ import type { TaskBrowserSession, TaskBrowserSessionStatus, ActionIntent, RiskSt
 import { newId, MOCK_USER_ID } from "../store/index.js";
 import { clearProtectedIframeRedactions } from "./protectedIframeRedaction.js";
 import { clearActionNoProgress } from "./humanVerificationState.js";
+import { clearBrowserCheck } from "./browserCheckState.js";
 
 // ─── Chrome binary detection ──────────────────────────────────────────────────
 
@@ -823,6 +824,9 @@ export async function closeTaskBrowserSession(id: string, userId: string): Promi
     // teardown so a recycled session id can never inherit a stale signal. TTL is
     // only a backstop; this explicit clear is the primary guarantee.
     clearActionNoProgress(id);
+    // The browser-check interstitial marker is likewise per-session and must not
+    // outlive its session — clear it on teardown alongside the no-progress marker.
+    clearBrowserCheck(id);
 
     if (portBusy) {
       session.cleanup_complete = false;

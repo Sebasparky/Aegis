@@ -79,6 +79,7 @@ import {
   clearVisualGestureCapsulesForTests,
   getActiveVisualGestureCapsuleForBrowserSession,
 } from "../runtime/visualGestureCapsule.js";
+import { clearAllBrowserCheckForTests } from "../runtime/browserCheckState.js";
 
 const BEARER = "Bearer tok_cas_001";
 const DELEGATION_ID = "del_cas_001";
@@ -160,6 +161,7 @@ const UNREADABLE_SURFACE_HV: ScreenHvWallSignals = {
   dominant_surface_contains_iframe: false,
   dominant_surface_iframe_text_not_harvested: false,
   unreadable_dominant_surface_seen: true,
+  browser_check_phrase_seen: false,
 };
 
 // A PAGE-LEVEL HV WALL: a full-page terminal blocker DOCUMENT (no scrim, no dominant
@@ -184,6 +186,7 @@ const PAGE_LEVEL_WALL_HV: ScreenHvWallSignals = {
   dominant_surface_contains_iframe: false,
   dominant_surface_iframe_text_not_harvested: false,
   unreadable_dominant_surface_seen: false,
+  browser_check_phrase_seen: false,
 };
 
 // A normal page: no scrim, no dominant surface → route_decided !== candidate.
@@ -204,6 +207,31 @@ const NO_SURFACE_HV: ScreenHvWallSignals = {
   dominant_surface_contains_iframe: false,
   dominant_surface_iframe_text_not_harvested: false,
   unreadable_dominant_surface_seen: false,
+  browser_check_phrase_seen: false,
+};
+
+// A passive browser-check interstitial: the Cloudflare-style phrase is present, but
+// there is NO active-challenge HV signal (wall:false, no hv_phrase / press-hold) and
+// no dominant scrim surface. Combined with a near-empty (zero-candidate) page this is
+// the "Checking your browser" shape. Stuck-ness is cross-snapshot (see tests).
+const BROWSER_CHECK_HV: ScreenHvWallSignals = {
+  wall: false,
+  viewport_scrim_seen: false,
+  centered_modal_seen: false,
+  press_hold_affordance_seen: false,
+  hv_phrase_seen: false,
+  top_layer_dialog_seen: false,
+  dominant_visible_surface_seen: false,
+  dominant_visible_surface_kind: "unknown",
+  dominant_text_extraction_attempted: false,
+  dominant_text_extractable: false,
+  dominant_text_uninspectable: false,
+  dominant_text_source: "none",
+  visible_but_semantically_unclassified: false,
+  dominant_surface_contains_iframe: false,
+  dominant_surface_iframe_text_not_harvested: false,
+  unreadable_dominant_surface_seen: false,
+  browser_check_phrase_seen: true,
 };
 
 // An INSPECTABLE scrim+centered surface that DID yield text → dom_semantic_candidate
@@ -259,6 +287,8 @@ const FLAG_KEYS = [
   "ANTIGEN_HV_VISION_CLASSIFIER",
   "ANTIGEN_HV_VISION_DATASET",
   "ANTIGEN_VISION_CAPTURE_AND_SKIP",
+  "ANTIGEN_BROWSER_CHECK_TELEMETRY",
+  "ANTIGEN_HV_DEBUG",
 ] as const;
 const prevFlags: Record<string, string | undefined> = {};
 
@@ -266,6 +296,7 @@ beforeEach(() => {
   taskBrowserSessions.clear();
   clearAntigenSnapshotStoreForTests();
   clearVisualGestureCapsulesForTests();
+  clearAllBrowserCheckForTests();
   vi.clearAllMocks();
   extractMock.mockResolvedValue(HIGH_ELEMENT_CANDIDATES);
   pageMetaMock.mockResolvedValue(undefined);
@@ -481,5 +512,129 @@ describe("browser-snapshot — capture-and-skip exploration mode", () => {
     ]) {
       expect(raw).not.toContain(forbidden);
     }
+  });
+});
+
+describe("browser-snapshot — browser-check interstitial telemetry", () => {
+  function enableBrowserCheckTelemetry(): void {
+    process.env.ANTIGEN_HUMAN_VERIFICATION = "true";
+    process.env.ANTIGEN_BROWSER_CHECK_TELEMETRY = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true"; // surfaces browser_check_outcome in the body
+  }
+
+  /** Drive a single snapshot showing a passive browser-check interstitial. */
+  function browserCheckSnapshot() {
+    bundleMock.mockResolvedValueOnce({ candidates: [], screenHv: BROWSER_CHECK_HV });
+    return snapshot();
+  }
+
+  it("Req 1 — interstitial seen then clears to a usable page → outcome=passed, no capture", async () => {
+    enableBrowserCheckTelemetry();
+    seedSession();
+
+    const first = await browserCheckSnapshot();
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data?.human_verification_debug?.browser_check_interstitial_seen).toBe(true);
+    expect(first.json().data?.human_verification_debug?.browser_check_outcome).toBe("seen");
+
+    // Next snapshot: phrase gone, page is now rich/usable → passed.
+    bundleMock.mockResolvedValueOnce({ candidates: HIGH_ELEMENT_CANDIDATES, screenHv: NO_SURFACE_HV });
+    const second = await snapshot();
+    expect(second.statusCode).toBe(200);
+    expect(second.json().data?.human_verification_debug?.browser_check_outcome).toBe("passed");
+    expect(second.json().data?.human_verification_debug?.surface_boundary_route_decided).toBe("none");
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it("Req 2 — interstitial persists (stuck) in exploration mode → 422 browser_check_interstitial", async () => {
+    enableBrowserCheckTelemetry();
+    process.env.ANTIGEN_HV_VISION_CLASSIFIER = "true";
+    process.env.ANTIGEN_HV_VISION_DATASET = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    captureMock.mockResolvedValue({ written: true });
+    seedSession();
+
+    // First two sightings are transient (seen) → normal 200, no capture.
+    const s1 = await browserCheckSnapshot();
+    expect(s1.statusCode).toBe(200);
+    const s2 = await browserCheckSnapshot();
+    expect(s2.statusCode).toBe(200);
+    expect(captureMock).not.toHaveBeenCalled();
+
+    // Third sighting: the interstitial did not clear → stuck → captured + 422 skip.
+    const s3 = await browserCheckSnapshot();
+    expect(s3.statusCode).toBe(422);
+    const body = s3.json();
+    expect(body.error.code).toBe("ANTIGEN_VISUAL_BLOCKER_CAPTURED");
+    expect(body.error.trigger_basis).toBe("browser_check_interstitial");
+    expect(body.error.candidate_reason).toBe("browser_check_interstitial");
+    expect(captureMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Req 3 — interstitial escalates into a real challenge → outcome=escalated_to_hv (HV path, not browser-check)", async () => {
+    enableBrowserCheckTelemetry();
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "false"; // shadow only → readable 200 body
+    seedSession();
+
+    const first = await browserCheckSnapshot();
+    expect(first.json().data?.human_verification_debug?.browser_check_outcome).toBe("seen");
+
+    // The interstitial resolves into an active HV wall (unreadable dominant surface).
+    bundleMock.mockResolvedValueOnce({
+      candidates: HIGH_ELEMENT_CANDIDATES,
+      screenHv: UNREADABLE_SURFACE_HV,
+    });
+    const second = await snapshot();
+    expect(second.statusCode).toBe(200); // VGC off ⇒ shadow only
+    const dbg = second.json().data?.human_verification_debug;
+    expect(dbg?.browser_check_outcome).toBe("escalated_to_hv");
+    // HV precedence: the surface routes as the HV/unreadable wall, never as browser-check.
+    expect(dbg?.surface_boundary_trigger_basis).not.toBe("browser_check_interstitial");
+  });
+
+  it("Req 4 — normal usable product grid is never a browser-check (no marker, no capture)", async () => {
+    enableBrowserCheckTelemetry();
+    process.env.ANTIGEN_HV_VISION_CLASSIFIER = "true";
+    process.env.ANTIGEN_HV_VISION_DATASET = "true";
+    process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: HIGH_ELEMENT_CANDIDATES, screenHv: NO_SURFACE_HV });
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data?.human_verification_debug?.browser_check_outcome).toBe("none");
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it("Req 6 — browser-check telemetry is safe enums/booleans/buckets only (no raw text/urls/coords)", async () => {
+    enableBrowserCheckTelemetry();
+    seedSession();
+    const res = await browserCheckSnapshot();
+    const dbg = res.json().data?.human_verification_debug ?? {};
+    // Browser-check telemetry is safe scalars only: a boolean, an enum, a bucket.
+    expect(typeof dbg.browser_check_interstitial_seen).toBe("boolean");
+    expect(["none", "seen", "passed", "stuck", "escalated_to_hv"]).toContain(dbg.browser_check_outcome);
+    expect(["0", "1", "2", "3+"]).toContain(dbg.browser_check_observation_bucket);
+    // The raw matched interstitial phrase (and any cdp/port detail) must never
+    // escape the page — only booleans/enums do. (url_host / url_path are part of the
+    // pre-existing snapshot envelope by design and are out of scope here.)
+    const raw = JSON.stringify(res.json());
+    for (const forbidden of ["checking your browser", "Checking your browser", "Just a moment", "cdp_url", ":9222"]) {
+      expect(raw).not.toContain(forbidden);
+    }
+  });
+
+  it("flag OFF (ANTIGEN_BROWSER_CHECK_TELEMETRY unset) → no browser_check fields, byte-identical", async () => {
+    process.env.ANTIGEN_HUMAN_VERIFICATION = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    delete process.env.ANTIGEN_BROWSER_CHECK_TELEMETRY;
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], screenHv: BROWSER_CHECK_HV });
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(200);
+    const dbg = res.json().data?.human_verification_debug ?? {};
+    expect(dbg.browser_check_outcome).toBeUndefined();
+    expect(dbg.browser_check_interstitial_seen).toBeUndefined();
   });
 });

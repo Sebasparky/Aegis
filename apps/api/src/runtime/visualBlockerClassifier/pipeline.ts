@@ -58,6 +58,7 @@ function deriveTriggerBasis(
 ): VisualClassifierTriggerBasis {
   if (reason === "unreadable_dominant_surface") return "unreadable_dominant_surface";
   if (reason === "page_level_hv_wall") return "page_level_hv_wall";
+  if (reason === "browser_check_interstitial") return "browser_check_interstitial";
   return "opaque_dominant_surface";
 }
 

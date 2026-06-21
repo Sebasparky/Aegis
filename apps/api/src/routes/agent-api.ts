@@ -120,6 +120,19 @@ import {
   hasRecentActionNoProgress,
   clearActionNoProgress,
 } from "../runtime/humanVerificationState.js";
+// Browser-Check Interstitial Telemetry v1 (ANTIGEN_BROWSER_CHECK_TELEMETRY,
+// default-off): records passive Cloudflare-style "Checking your browser"
+// interstitial episodes so transient (passed), stuck, and escalated states are
+// distinguishable. Instrumentation only — never solves, waits, or bypasses.
+import {
+  isBrowserCheckTelemetryEnabled,
+  logBrowserCheckDebug,
+  recordBrowserCheckSeen,
+  getBrowserCheckMarker,
+  clearBrowserCheck,
+  evaluateBrowserCheckTransition,
+  type BrowserCheckTransition,
+} from "../runtime/browserCheckState.js";
 import {
   createOrReuseHumanVerificationRequest,
   findActiveHumanVerificationRequest,
@@ -5998,6 +6011,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // response only when BOTH HV flags are on. Purely observational — it never
     // influences detection or response classification.
     let hvDebug: HumanVerificationDebug | undefined;
+    // Browser-check interstitial transition for THIS snapshot (ANTIGEN_BROWSER_CHECK_
+    // TELEMETRY, default-off → stays undefined). Computed after the HV classification
+    // below so it can observe whether a real challenge fired (escalation), then read
+    // into surfaceSignals to drive the (stuck-only) browser-check route.
+    let browserCheckTransition: BrowserCheckTransition | undefined;
     if (isHumanVerificationEnabled()) {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
@@ -6442,6 +6460,56 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
       }
 
+      // ── Browser-check interstitial telemetry (ANTIGEN_BROWSER_CHECK_TELEMETRY) ──
+      // Record passive Cloudflare-style "Checking your browser" / "Just a moment"
+      // interstitial episodes so a transient one that clears (passed), one that
+      // persists across snapshots (stuck), and one that escalates into a real
+      // challenge (escalated_to_hv) are distinguishable. Instrumentation ONLY: it
+      // never clicks, waits, solves, or bypasses. A real challenge (hvMember /
+      // pageWall / screen-HV wall) ALWAYS wins and is reported as escalation — the
+      // browser-check route never overrides the HV path. The stuck verdict is cross-
+      // snapshot (a single snapshot can never be stuck). Default-off ⇒ byte-identical:
+      // no marker write, no signal fed to the classifier, no log.
+      if (isBrowserCheckTelemetryEnabled()) {
+        let bcDomain = "unknown";
+        try {
+          if (snapshot.url) bcDomain = new URL(snapshot.url).hostname;
+        } catch {
+          /* keep "unknown" */
+        }
+        const hvEscalated =
+          !!snapshotMintedHv || !!hvMember || !!pageWall || screenHv?.wall === true;
+        const phraseSeen = screenHv?.browser_check_phrase_seen === true;
+        const pageBlocked =
+          elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || screenHv?.viewport_scrim_seen === true;
+        const richUsable = elements.length >= USABLE_PAGE_RICH_INTERACTIVE_MIN;
+        const prior = getBrowserCheckMarker(session.browser_session_id);
+        const transition = evaluateBrowserCheckTransition({
+          hvEscalated,
+          phraseSeen,
+          pageBlocked,
+          richUsable,
+          prior,
+          now: Date.now(),
+        });
+        if (transition.record) recordBrowserCheckSeen(session.browser_session_id, bcDomain);
+        if (transition.clear) clearBrowserCheck(session.browser_session_id);
+        browserCheckTransition = transition;
+        // Safe telemetry: booleans / enums / coarse buckets only — never raw text,
+        // URLs, selectors, coords, iframe src, screenshot paths, or user values.
+        logBrowserCheckDebug({
+          scope: "snapshot_browser_check",
+          tool: "antigen_snapshot",
+          browser_check_interstitial_seen: transition.seen,
+          browser_check_outcome: transition.outcome,
+          browser_check_passed: transition.outcome === "passed",
+          browser_check_stuck: transition.outcome === "stuck",
+          browser_check_escalated_to_hv: transition.outcome === "escalated_to_hv",
+          observation_count_bucket: transition.observation_count_bucket,
+          element_count_bucket: hvElementCountBucket(elements.length),
+        });
+      }
+
       // ── Always-on snapshot HV gate telemetry (dev-only; ANTIGEN_HV_DEBUG) ──
       // The rich `hvDebug` object above is only attached to the 200 RESPONSE BODY
       // (human_verification_debug). When a snapshot does NOT mint (the preserved-
@@ -6497,6 +6565,19 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           page_has_rich_interactive_content:
             elements.length >= USABLE_PAGE_RICH_INTERACTIVE_MIN,
           page_wall_attempted: pageWallAttempted,
+          // Browser-check interstitial inputs (only present when ANTIGEN_BROWSER_CHECK_
+          // TELEMETRY is on — the transition is undefined otherwise, so both stay
+          // absent/false and the browser-check route is unreachable; byte-identical).
+          // `phrase_seen` reflects the live interstitial presence for seen/stuck;
+          // `stuck` is the cross-snapshot persistence verdict and gates the route.
+          ...(browserCheckTransition
+            ? {
+                browser_check_phrase_seen:
+                  browserCheckTransition.outcome === "seen" ||
+                  browserCheckTransition.outcome === "stuck",
+                browser_check_stuck: browserCheckTransition.stuck_for_route,
+              }
+            : {}),
         };
         const surfaceDecision = classifySurfaceBoundary(surfaceSignals);
         // hv_debug controls ONLY the existing snapshot_hv_gate debug output and the
@@ -6529,12 +6610,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             screenHv?.dominant_surface_iframe_text_not_harvested === true;
           hvDebug.surface_unreadable_dominant_surface_seen =
             screenHv?.unreadable_dominant_surface_seen === true;
+          if (browserCheckTransition) {
+            hvDebug.browser_check_interstitial_seen = browserCheckTransition.seen;
+            hvDebug.browser_check_outcome = browserCheckTransition.outcome;
+            hvDebug.browser_check_observation_bucket =
+              browserCheckTransition.observation_count_bucket;
+          }
         }
         logHvActionDebug({
           scope: "snapshot_hv_gate",
           tool: "antigen_snapshot",
           hv_member_present: !!hvMember,
           hv_wall_hint: hvWallHint,
+          ...(browserCheckTransition
+            ? {
+                browser_check_interstitial_seen: browserCheckTransition.seen,
+                browser_check_outcome: browserCheckTransition.outcome,
+                browser_check_observation_bucket: browserCheckTransition.observation_count_bucket,
+              }
+            : {}),
           screen_hv_considered: !hvMember,
           screen_hv_detected: screenHv?.wall === true,
           screen_hv_challenge_type: screenHv?.challenge_type ?? "none",

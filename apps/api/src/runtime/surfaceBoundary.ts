@@ -44,6 +44,7 @@ export type SurfaceBoundaryTriggerBasis =
   | "opaque_dominant_surface"
   | "unreadable_dominant_surface"
   | "page_level_hv_wall"
+  | "browser_check_interstitial"
   | "inspectable_dominant_surface"
   | "off_path_iframe"
   | "legacy_no_progress_fallback"
@@ -54,6 +55,7 @@ export type SurfaceVisualClassifierCandidateReason =
   | "opaque_iframe"
   | "unreadable_dominant_surface"
   | "page_level_hv_wall"
+  | "browser_check_interstitial"
   | "visual_dom_mismatch"
   | "none";
 
@@ -120,6 +122,17 @@ export interface SurfaceBoundarySignals {
    * Route 2 usable-page veto; never a trigger on its own.
    */
   page_has_rich_interactive_content?: boolean;
+  // ── Browser-check interstitial (passive Cloudflare-style "Checking your
+  // browser" / "Just a moment"). These are NOT human-verification challenges; the
+  // browser frequently passes them passively. `browser_check_phrase_seen` is the
+  // passive phrase verdict for THIS snapshot; `browser_check_stuck` is the cross-
+  // snapshot persistence verdict computed at the call site from the per-session
+  // marker (a single snapshot can never be stuck). The Route 4.5 browser-check
+  // candidate requires BOTH, so a transient (seen-but-not-stuck) interstitial
+  // routes to `none` and is never captured. Both default false ⇒ byte-identical
+  // when ANTIGEN_BROWSER_CHECK_TELEMETRY is off (the call site never sets them).
+  browser_check_phrase_seen?: boolean;
+  browser_check_stuck?: boolean;
 }
 
 export interface SurfaceBoundaryDecision {
@@ -234,6 +247,22 @@ export function classifySurfaceBoundary(
   const pageLevelHvWall =
     !opaqueDominant && !unreadableDominant && strongScreenHvText && pageUnusable;
 
+  // Route 4.5 — BROWSER-CHECK INTERSTITIAL: a passive Cloudflare-style "Checking
+  // your browser" / "Just a moment" page that has PERSISTED across snapshots
+  // (`browser_check_stuck`, computed at the call site from the per-session marker —
+  // a single snapshot can never be stuck). The browser usually passes these
+  // passively, so this fires ONLY when it is genuinely stuck. Strictly lower
+  // precedence than every HV route above: an interstitial that escalates into a
+  // real challenge matches HV_TEXT_RE / page_level_hv_wall and routes as HV, never
+  // as a browser-check. A seen-but-not-stuck (transient) interstitial fails this
+  // and falls through to `none` — never captured.
+  const browserCheckRoute =
+    !opaqueDominant &&
+    !unreadableDominant &&
+    !pageLevelHvWall &&
+    s.browser_check_phrase_seen === true &&
+    s.browser_check_stuck === true;
+
   // ── Usable-page veto (Route 2 ONLY) ──
   // A benign marketing hero / fixed widget can trip scrim+centered while DOM text
   // extraction fails, mislabeling a normally-usable page as an unreadable dominant
@@ -257,6 +286,7 @@ export function classifySurfaceBoundary(
     !opaqueIframe &&
     !unreadableDominant &&
     !pageLevelHvWall &&
+    !browserCheckRoute &&
     ((inspectableText && (scrim || modal)) ||
       (scrimAny && centeredAny && textAttempted && textExtractable));
 
@@ -275,6 +305,10 @@ export function classifySurfaceBoundary(
     route = "visual_classifier_candidate";
     computedBasis = "page_level_hv_wall";
     reason = "page_level_hv_wall";
+  } else if (browserCheckRoute) {
+    route = "visual_classifier_candidate";
+    computedBasis = "browser_check_interstitial";
+    reason = "browser_check_interstitial";
   } else if (inspectableDominant) {
     route = "dom_semantic_candidate";
     computedBasis = "inspectable_dominant_surface";
@@ -299,6 +333,7 @@ export function classifySurfaceBoundary(
   else if (unreadableDominant && !usablePageVetoApplied)
     inspectability_class = "opaque"; // visible but semantically unreadable
   else if (pageLevelHvWall) inspectability_class = "opaque"; // full-page wall: visible, not semantically usable
+  else if (browserCheckRoute) inspectability_class = "opaque"; // interstitial: visible, not semantically usable
   else if (inspectableDominant) inspectability_class = "inspectable";
   else inspectability_class = "none";
 

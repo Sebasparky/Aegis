@@ -20,7 +20,13 @@ Hard rules this tool obeys (same as the rest of the harness):
      into, OCR, classify answers for, or bypass CAPTCHA / human verification.
 
 Error categories (an example may fall in more than one):
-  1. dangerous_false_hv      true != HV  and  predicted == HV   (highest risk)
+  1. dangerous_false_hv      true != HV  and  predicted == HV   (any false HV)
+     This bucket is further split BY CONFIDENCE against --hv-action-threshold:
+       - false_hv_actionable      false HV with confidence >= action threshold
+                                   (would route to a human at runtime — real risk)
+       - false_hv_low_confidence  false HV below the action threshold (or unknown
+                                   confidence) — useful model-debugging signal,
+                                   but would NOT trigger runtime routing
   2. missed_hv               true == HV  and  predicted != HV
   3. low_confidence_correct_hv  true == predicted == HV and confidence < thresh
   4. high_confidence_wrong   true != predicted and confidence > thresh
@@ -32,6 +38,9 @@ Usage:
   ... --out-dir <path>                    # override report output dir
   ... --low-confidence-threshold 0.80     # low-confidence correct HV cutoff
   ... --high-confidence-threshold 0.75    # high-confidence wrong cutoff
+  ... --hv-action-threshold 0.85          # runtime action-routing cutoff for
+                                          #   splitting actionable vs low-conf
+                                          #   false HV (reporting only)
   ... --hv-label page_level_hv_wall       # the dangerous label name
 """
 
@@ -57,6 +66,7 @@ DEFAULT_OUT_DIR = os.path.join(_REPO_ROOT, "dev-artifacts", "hv-vision-reports")
 DEFAULT_HV_LABEL = "page_level_hv_wall"
 DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.80
 DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.75
+DEFAULT_HV_ACTION_THRESHOLD = 0.85
 
 
 def _rel(path: str) -> str:
@@ -175,9 +185,15 @@ def categorize(
     hv_label: str,
     low_threshold: float,
     high_threshold: float,
+    hv_action_threshold: float,
 ) -> Dict[str, List[Dict[str, Any]]]:
+    # `dangerous_false_hv` is the full detailed false-HV set (any false HV).
+    # `false_hv_actionable` / `false_hv_low_confidence` split it by confidence
+    # against the runtime action threshold — reporting only.
     cats: Dict[str, List[Dict[str, Any]]] = {
         "dangerous_false_hv": [],
+        "false_hv_actionable": [],
+        "false_hv_low_confidence": [],
         "missed_hv": [],
         "low_confidence_correct_hv": [],
         "high_confidence_wrong": [],
@@ -189,6 +205,12 @@ def categorize(
 
         if true_label != hv_label and pred_label == hv_label:
             cats["dangerous_false_hv"].append(ex)
+            # Unknown confidence cannot be called actionable — it falls to the
+            # low-confidence bucket conservatively (would not route at runtime).
+            if conf is not None and conf >= hv_action_threshold:
+                cats["false_hv_actionable"].append(ex)
+            else:
+                cats["false_hv_low_confidence"].append(ex)
         if true_label == hv_label and pred_label != hv_label:
             cats["missed_hv"].append(ex)
         if (
@@ -210,18 +232,26 @@ def categorize(
 
 
 def recommend_focus(
-    cats: Dict[str, List[Dict[str, Any]]], totals: Dict[str, int], hv_label: str
+    cats: Dict[str, List[Dict[str, Any]]],
+    totals: Dict[str, int],
+    hv_label: str,
+    hv_action_threshold: float,
 ) -> str:
-    danger = cats["dangerous_false_hv"]
+    actionable = cats["false_hv_actionable"]
+    low_conf_false = cats["false_hv_low_confidence"]
     missed = cats["missed_hv"]
     wrong = cats["high_confidence_wrong"]
-    if totals["dangerous_false_hv"] > 0 or danger:
-        domains = sorted({ex["domain"] for ex in danger if ex.get("domain")})
+    # Only ACTIONABLE false HV (confidence >= action threshold) is a runtime
+    # risk — those would wrongly route a benign page to a human.
+    if actionable:
+        domains = sorted({ex["domain"] for ex in actionable if ex.get("domain")})
         domain_hint = f" (e.g. {', '.join(domains)})" if domains else ""
         return (
-            f"DANGEROUS: model predicts '{hv_label}' on benign pages{domain_hint}. "
-            f"Capture and review MORE NEGATIVE (non-wall) frames on these domains so "
-            f"the classifier learns they are not human-verification walls."
+            f"DANGEROUS: model predicts '{hv_label}' on benign pages at or above "
+            f"the action threshold ({hv_action_threshold}){domain_hint}. These would "
+            f"route to a human at runtime. Capture and review MORE NEGATIVE (non-wall) "
+            f"frames on these domains so the classifier learns they are not "
+            f"human-verification walls."
         )
     if missed:
         domains = sorted({ex["domain"] for ex in missed if ex.get("domain")})
@@ -237,6 +267,15 @@ def recommend_focus(
             f"Confident mistakes outside the HV class{domain_hint}. "
             f"Review these high-confidence wrong predictions before retraining."
         )
+    if low_conf_false:
+        domains = sorted({ex["domain"] for ex in low_conf_false if ex.get("domain")})
+        domain_hint = f" (e.g. {', '.join(domains)})" if domains else ""
+        return (
+            f"Low-confidence false '{hv_label}' predictions below the action "
+            f"threshold ({hv_action_threshold}){domain_hint}. Below action threshold; "
+            f"useful for model improvement, but would not trigger runtime routing "
+            f"under current threshold."
+        )
     return (
         "No high-consequence errors in the current eval subset. Expand eval "
         "coverage (more domains / classes) to keep this signal meaningful."
@@ -250,6 +289,7 @@ def build_report(
     hv_label: str,
     low_threshold: float,
     high_threshold: float,
+    hv_action_threshold: float,
 ) -> Dict[str, Any]:
     raw_examples = metrics.get("lowest_confidence_examples")
     if not isinstance(raw_examples, list):
@@ -265,8 +305,10 @@ def build_report(
     label_order = confusion.get("label_order") if isinstance(confusion.get("label_order"), list) else []
 
     totals = confusion_totals(confusion, hv_label)
-    cats = categorize(examples, hv_label, low_threshold, high_threshold)
-    focus = recommend_focus(cats, totals, hv_label)
+    cats = categorize(
+        examples, hv_label, low_threshold, high_threshold, hv_action_threshold
+    )
+    focus = recommend_focus(cats, totals, hv_label, hv_action_threshold)
 
     return {
         "harness": "antigen-visual-classifier-v0",
@@ -282,11 +324,18 @@ def build_report(
         "thresholds": {
             "low_confidence_threshold": low_threshold,
             "high_confidence_threshold": high_threshold,
+            "hv_action_threshold": hv_action_threshold,
         },
         # Matrix-derived totals are authoritative over the whole eval set; the
-        # *_detailed counts reflect only the lowest-confidence example subset
-        # for which we have per-example metadata.
+        # *_detailed counts (and the actionable / low-confidence split, which
+        # needs per-example confidence) reflect only the lowest-confidence
+        # example subset for which we have per-example metadata.
         "summary": {
+            # `false_hv_any_count` is the whole-eval false-HV total (matrix);
+            # `dangerous_false_hv_count` is retained as its backward-compat alias.
+            "false_hv_any_count": totals["dangerous_false_hv"],
+            "false_hv_actionable_count": len(cats["false_hv_actionable"]),
+            "false_hv_low_confidence_count": len(cats["false_hv_low_confidence"]),
             "dangerous_false_hv_count": totals["dangerous_false_hv"],
             "missed_hv_count": totals["missed_hv"],
             "dangerous_false_hv_count_detailed": len(cats["dangerous_false_hv"]),
@@ -296,6 +345,8 @@ def build_report(
             "examples_analyzed": len(examples),
         },
         "dangerous_false_hv": cats["dangerous_false_hv"],
+        "false_hv_actionable": cats["false_hv_actionable"],
+        "false_hv_low_confidence": cats["false_hv_low_confidence"],
         "missed_hv": cats["missed_hv"],
         "low_confidence_correct_hv": cats["low_confidence_correct_hv"],
         "high_confidence_wrong": cats["high_confidence_wrong"],
@@ -345,13 +396,19 @@ def render_markdown(report: Dict[str, Any]) -> str:
     out.append(
         f"- Thresholds: low_confidence < "
         f"`{report['thresholds']['low_confidence_threshold']}`, "
-        f"high_confidence > `{report['thresholds']['high_confidence_threshold']}`"
+        f"high_confidence > `{report['thresholds']['high_confidence_threshold']}`, "
+        f"hv_action >= `{report['thresholds']['hv_action_threshold']}`"
     )
     out.append("")
+    action_thresh = report["thresholds"]["hv_action_threshold"]
     out.append("## Summary")
     out.append("")
-    out.append(f"- **Dangerous false `{report['hv_label']}` (eval total): {s['dangerous_false_hv_count']}** "
+    out.append(f"- **False `{report['hv_label']}` — any (eval total): {s['false_hv_any_count']}** "
                f"(detailed examples: {s['dangerous_false_hv_count_detailed']})")
+    out.append(f"  - **Actionable (confidence >= `{action_thresh}`): {s['false_hv_actionable_count']}** "
+               f"— would route to a human at runtime")
+    out.append(f"  - Low-confidence (below action threshold): {s['false_hv_low_confidence_count']} "
+               f"— model-debugging signal only")
     out.append(f"- **Missed HV walls (eval total): {s['missed_hv_count']}** "
                f"(detailed examples: {s['missed_hv_count_detailed']})")
     out.append(f"- Low-confidence correct HV: {s['low_confidence_correct_hv_count']}")
@@ -360,12 +417,21 @@ def render_markdown(report: Dict[str, Any]) -> str:
     out.append("")
     out.append(f"**Recommended focus:** {report['recommended_focus']}")
     out.append("")
-    out.append(f"## Dangerous false `{report['hv_label']}` predictions (highest risk)")
+    out.append(f"## Actionable false `{report['hv_label']}` predictions (confidence >= `{action_thresh}`)")
     out.append("")
     out.append("True label is benign but the model predicted a human-verification "
-               "wall — this would wrongly gate the agent.")
+               "wall at or above the action threshold — this would wrongly gate the "
+               "agent at runtime (highest risk).")
     out.append("")
-    out.extend(_example_lines(report["dangerous_false_hv"]))
+    out.extend(_example_lines(report["false_hv_actionable"]))
+    out.append(f"## Low-confidence false `{report['hv_label']}` predictions (below `{action_thresh}`)")
+    out.append("")
+    out.append("True label is benign and the model predicted a human-verification "
+               "wall, but below the action threshold. Below action threshold; useful "
+               "for model improvement, but would not trigger runtime routing under "
+               "current threshold.")
+    out.append("")
+    out.extend(_example_lines(report["false_hv_low_confidence"]))
     out.append("## Missed HV walls")
     out.append("")
     out.append("True label is a human-verification wall but the model predicted "
@@ -388,8 +454,11 @@ def print_summary(report: Dict[str, Any]) -> None:
     print(f"  training_data_source     : {report.get('training_data_source')}")
     print(f"  eval_accuracy            : {report.get('eval_accuracy')}")
     print(f"  label order              : {', '.join(report['label_order']) or '(none)'}")
-    print(f"  dangerous_false_hv_count : {s['dangerous_false_hv_count']} "
+    print(f"  hv_action_threshold      : {report['thresholds']['hv_action_threshold']}")
+    print(f"  false_hv_any_count       : {s['false_hv_any_count']} "
           f"(detailed: {s['dangerous_false_hv_count_detailed']})")
+    print(f"  false_hv_actionable_count: {s['false_hv_actionable_count']}")
+    print(f"  false_hv_low_conf_count  : {s['false_hv_low_confidence_count']}")
     print(f"  missed_hv_count          : {s['missed_hv_count']} "
           f"(detailed: {s['missed_hv_count_detailed']})")
     print(f"  high_confidence_wrong    : {s['high_confidence_wrong_count']}")
@@ -413,6 +482,11 @@ def main() -> int:
     parser.add_argument("--high-confidence-threshold", type=float,
                         default=DEFAULT_HIGH_CONFIDENCE_THRESHOLD,
                         help="Wrong predictions above this are flagged (default 0.75)")
+    parser.add_argument("--hv-action-threshold", type=float,
+                        default=DEFAULT_HV_ACTION_THRESHOLD,
+                        help="Runtime action-routing cutoff: false HV at or above "
+                             "this confidence is 'actionable'; below is "
+                             "low-confidence model-debugging signal (default 0.85)")
     parser.add_argument("--hv-label", default=DEFAULT_HV_LABEL,
                         help="The dangerous human-verification wall label name")
     args = parser.parse_args()
@@ -427,6 +501,7 @@ def main() -> int:
         hv_label=args.hv_label,
         low_threshold=args.low_confidence_threshold,
         high_threshold=args.high_confidence_threshold,
+        hv_action_threshold=args.hv_action_threshold,
     )
 
     os.makedirs(args.out_dir, exist_ok=True)

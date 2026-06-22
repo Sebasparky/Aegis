@@ -124,10 +124,16 @@ dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_error_report.py
 Reads `dev-artifacts/hv-vision-models/metrics.json` and, optionally,
 `dev-artifacts/hv-vision-splits/eval-manifest.csv` (joined on `capture_dir`) to
 backfill `event_id` / `selection_reason` for examples that lack them. It sorts
-the lowest-confidence examples into four categories:
+the lowest-confidence examples into these categories:
 
 1. **`dangerous_false_hv`** — true label is benign but predicted
-   `page_level_hv_wall` (highest risk).
+   `page_level_hv_wall` (any false HV). This is split **by confidence** against
+   `--hv-action-threshold` (default `0.85`):
+   - **`false_hv_actionable`** — confidence `>=` the action threshold; at runtime
+     this would wrongly route a benign page to a human (the real risk).
+   - **`false_hv_low_confidence`** — below the action threshold (or unknown
+     confidence). Useful model-debugging signal, but would **not** trigger
+     runtime routing under the current threshold.
 2. **`missed_hv`** — true label is `page_level_hv_wall` but predicted something
    else.
 3. **`low_confidence_correct_hv`** — correct HV prediction below
@@ -135,17 +141,22 @@ the lowest-confidence examples into four categories:
 4. **`high_confidence_wrong`** — any wrong prediction above
    `--high-confidence-threshold` (default `0.75`).
 
-The dangerous-false-HV and missed-HV headline counts come from the **confusion
-matrix** (whole eval set); the per-example lists detail the lowest-confidence
-subset. Writes `dev-artifacts/hv-vision-reports/error-report.json` and
-`error-report.md`, prints a summary (source, eval accuracy, label order, the
-headline counts, and a recommended capture/review focus), and exits.
+The summary reports `false_hv_any_count` (whole-eval total, from the **confusion
+matrix**), `false_hv_actionable_count`, and `false_hv_low_confidence_count`;
+`dangerous_false_hv_count` is retained as a backward-compat alias for the "any"
+total. The actionable-vs-low-confidence split is computed over the per-example
+lowest-confidence subset (the only place per-example confidence exists). The
+**Recommended focus** only says "DANGEROUS" when there is at least one
+*actionable* false HV — a low-confidence-only false positive is reported as a
+model-improvement note, not a runtime risk. Writes
+`dev-artifacts/hv-vision-reports/error-report.json` and `error-report.md`, prints
+a summary, and exits.
 
 Flags: `--metrics`, `--eval-manifest`, `--out-dir`, `--low-confidence-threshold`,
-`--high-confidence-threshold`, `--hv-label`. **Stores no screenshot bytes**
-(only string `capture_dir` paths are referenced) and changes **no** runtime
-behavior — it only reads the metrics artifact and writes a report under the
-gitignored `dev-artifacts/`.
+`--high-confidence-threshold`, `--hv-action-threshold` (default `0.85`),
+`--hv-label`. **Stores no screenshot bytes** (only string `capture_dir` paths are
+referenced) and changes **no** runtime behavior — it only reads the metrics
+artifact and writes a report under the gitignored `dev-artifacts/`.
 
 ## Feature-group comparison
 

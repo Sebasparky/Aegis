@@ -177,6 +177,53 @@ Feature groups: grayscale layout (primary, weighted), edge/gradient per-tile
 stats, coarse contrast/threshold structure, and secondary RGB histogram +
 per-tile color means.
 
+## Import runtime judgments (runtime QA → review pipeline)
+
+Bridge runtime "visual judgment" dry-run QA events into the offline review pipeline
+so they become human-reviewable captures. The runtime seam appends safe, redacted
+events to `dev-artifacts/hv-vision-review/runtime-judgment-queue.jsonl`; this importer
+copies each captured frame into the dataset and records it for review:
+
+```bash
+python3 scripts/hv_vision_import_runtime_judgments.py
+```
+
+(Stdlib-only — no venv required. Pass `--dry-run` to compute and print without
+writing anything.)
+
+For each runtime event it:
+
+- Copies the frame to
+  `dev-artifacts/hv-vision-dataset/<date>/<event_id>/frame.png` and writes a safe
+  `meta.json` next to it (**safe metadata only — never screenshot bytes**: event_id,
+  origin_host, activation_reason, trigger_basis, model prediction/confidence/top-3,
+  outcome, runtime_action_taken_by_model, review_reason, label, human_label,
+  review_status, `source: runtime_judgment_queue`).
+- Upserts `dev-artifacts/hv-vision-reports/dataset-index.csv` (existing rows preserved
+  unchanged). **The imported row's `label` is left EMPTY** — the model's prediction is
+  recorded as context only and is **never** copied into `label`. Empty-label rows are
+  skipped by both the trainer and the review-queue builder, so importing changes **no**
+  training/manifest behavior; the label is filled only by a human reviewer.
+- Merges `dev-artifacts/hv-vision-review/review-queue.jsonl` using the existing review
+  event shape (`hv-vision-review/v0`), keyed by `event_id`, tagged
+  `source: runtime_judgment_queue`. Existing rows (offline and prior runtime) are kept,
+  and any human-entered `human_label` / `review_status` / `notes` are **preserved**.
+- Writes `dev-artifacts/hv-vision-review/runtime-import-summary.json` (counts by
+  predicted label / review reason / outcome, skip counts, and any events with an empty
+  `origin_host` to inspect before labeling).
+
+It is **idempotent** (deduplicates by `event_id` / `candidate_id`; reruns add no
+duplicates), **never mutates** `runtime-judgment-queue.jsonl`, imports nothing from
+`apps/`, and adds no dependencies. Skipped events: missing `event_id`, or a
+`frame_path` that is null or does not resolve from the repo root. After importing, run
+the review sheet below to label the new captures.
+
+> **Re-run after a review-queue rebuild.** `hv_vision_review_queue.py` *rebuilds*
+> `review-queue.jsonl` from `dataset-index.csv` and drops rows whose `label` is empty —
+> which includes still-pending (un-labeled) runtime imports. If you run that builder,
+> simply **re-run `hv_vision_import_runtime_judgments.py`** afterward to re-add the
+> pending runtime review entries (already-reviewed runtime rows keep their human label).
+
 ## Shadow review queue
 
 Build a privacy-safe human review queue of page-state candidates (model prediction
@@ -308,6 +355,7 @@ summary. No rows are duplicated/oversampled.
 | `hv_vision_eval.py` | Re-score a saved model (optional) |
 | `hv_vision_error_report.py` | Focused error report over metrics.json: dangerous false HV predictions, missed walls, confident mistakes (offline/dev-only) |
 | `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
+| `hv_vision_import_runtime_judgments.py` | Import runtime visual-judgment QA events into the offline review pipeline (offline/dev-only; empty labels, no auto-train, never mutates the runtime queue) |
 | `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
 | `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |
 | `hv_vision_export_reviewed_index.py` | Export reviewed human labels as a retraining overlay index (offline/dev-only; does not mutate the dataset) |

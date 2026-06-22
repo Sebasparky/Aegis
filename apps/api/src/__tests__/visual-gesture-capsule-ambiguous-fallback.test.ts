@@ -1268,6 +1268,139 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
   });
 });
 
+// ── ALWAYS-PRESENT human_verification_attribution (every 409 return path) ──────
+// Unlike hv_debug (flag-gated dev telemetry), `human_verification_attribution` is
+// present on EVERY HUMAN_VERIFICATION_REQUIRED 409 regardless of env flags, so every
+// 409 self-identifies its source path and whether a fresh visual judgment event is
+// expected. These assert ONLY the additive attribution — status code stays 409 and
+// existing top-level fields are unchanged — and that attribution leaks nothing.
+describe("human_verification_attribution (always present, every source)", () => {
+  it("snapshot mint → source snapshot_mint_visual_judgment, fresh judgment expected", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    // Flag intentionally OFF — attribution must still be present.
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    const err = res.json().error;
+    // Existing top-level fields unchanged.
+    expect(err.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(err.user_presence_required).toBe(true);
+    expect(err.purchase_authorized).toBe(false);
+    // Always present even with the debug flag off.
+    expect(err).not.toHaveProperty("hv_debug");
+    expect(err.human_verification_attribution).toMatchObject({
+      source: "snapshot_mint_visual_judgment",
+      visual_judgment_coverage: "fresh_judgment_possible",
+      fresh_visual_judgment_event_expected: true,
+    });
+    assertNoLeak(res.json());
+  });
+
+  it("VGC reuse guard (second snapshot) → source vgc_capsule_reuse_guard, no fresh judgment", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+    const first = await snapshot();
+    expect(first.statusCode).toBe(409);
+    expect(first.json().error.human_verification_attribution.source).toBe(
+      "snapshot_mint_visual_judgment",
+    );
+
+    // Second snapshot short-circuits in the pre-extract reuse guard.
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.human_verification_attribution).toMatchObject({
+      source: "vgc_capsule_reuse_guard",
+      visual_judgment_coverage: "not_covered_reused_existing_state",
+      fresh_visual_judgment_event_expected: false,
+    });
+    assertNoLeak(res.json());
+  });
+
+  it("ambiguous no-progress backstop (click) → source action_no_progress_ambiguous_backstop", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: false,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.human_verification_attribution).toMatchObject({
+      source: "action_no_progress_ambiguous_backstop",
+      visual_judgment_coverage: "not_covered_action_backstop",
+      fresh_visual_judgment_event_expected: false,
+    });
+    assertNoLeak(res.json());
+  });
+
+  it("structural no-progress backstop (click) → source action_no_progress_structural_backstop", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.human_verification_attribution).toMatchObject({
+      source: "action_no_progress_structural_backstop",
+      visual_judgment_coverage: "not_covered_action_backstop",
+      fresh_visual_judgment_event_expected: false,
+    });
+    // The ambiguous probe never ran — structural wall handled it.
+    expect(ambiguousProbeMock).not.toHaveBeenCalled();
+    assertNoLeak(res.json());
+  });
+
+  it("attribution adds no unsafe fields and is byte-safe when the debug flag is off", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate()]);
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: true,
+      near_zero_interactive: true,
+      visible_inaccessible_iframe_seen: true,
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+    expect(res.statusCode).toBe(409);
+    const attribution = res.json().error.human_verification_attribution;
+    // Only the safe attribution keys may appear.
+    const allowed = new Set([
+      "source",
+      "visual_judgment_coverage",
+      "fresh_visual_judgment_event_expected",
+      "reason",
+      "trigger_basis",
+      "visual_judgment_ran",
+      "visual_judgment_outcome",
+      "visual_judgment_suppress",
+    ]);
+    for (const key of Object.keys(attribution)) {
+      expect(allowed.has(key), `unexpected attribution key "${key}"`).toBe(true);
+    }
+    // reason is a short fixed prose string — never a URL/selector/coordinate.
+    expect(typeof attribution.reason).toBe("string");
+    expect(attribution.reason).not.toMatch(/https?:|:\/\/|<|>|\{|\}|px\b|\bref_|selector|\d{3,}/);
+    assertNoLeak(res.json());
+  });
+});
+
 // ── ANTIGEN_VISION_CAPTURE_AND_SKIP: action no-progress never mints a VGC ──────
 //
 // Dataset-gathering / exploration mode. The action no-progress backstop

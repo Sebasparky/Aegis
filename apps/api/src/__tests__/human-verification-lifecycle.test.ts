@@ -543,6 +543,13 @@ describe("HUMAN_VERIFICATION_REQUIRED pre-action guard", () => {
       expect(body.error.request_id).toBe(request.request_id);
       expect(body.error.purchase_authorized).toBe(false);
       expect(body.error.next_action).toContain("antigen_snapshot");
+      // The cached-marker guard reused a prior snapshot's marker — no fresh visual
+      // judgment ran. Attribution is always present (no debug flag set here).
+      expect(body.error.human_verification_attribution).toMatchObject({
+        source: "cached_hv_marker_guard",
+        visual_judgment_coverage: "not_covered_reused_existing_state",
+        fresh_visual_judgment_event_expected: false,
+      });
       expectNoSecrets(res.body);
       // The guard fires BEFORE ref resolution — no pointer dispatch, no
       // stale-ref machinery, no logical recovery behind the challenge.

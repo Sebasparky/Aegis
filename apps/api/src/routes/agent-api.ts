@@ -549,6 +549,35 @@ function recordActionPreflight(
 }
 
 /**
+ * Safe, ALWAYS-PRESENT attribution for a HUMAN_VERIFICATION_REQUIRED 409. Lets a
+ * consumer tell, for every 409, WHICH return path produced it and whether a fresh
+ * visual judgment event is expected to accompany it (only the snapshot-mint path
+ * runs snapshotVisualJudgment). Observability only — it changes NO stop/route/policy
+ * behavior. Contents are enums / booleans / short fixed reason strings ONLY: never a
+ * URL/path/query, selector, coordinate, raw page text, screenshot, or frame path.
+ */
+type HumanVerificationAttribution = {
+  source:
+    | "snapshot_mint_visual_judgment"
+    | "vgc_capsule_reuse_guard"
+    | "cached_hv_marker_guard"
+    | "action_no_progress_ambiguous_backstop"
+    | "action_no_progress_structural_backstop";
+  visual_judgment_coverage:
+    | "fresh_judgment_possible"
+    | "not_covered_reused_existing_state"
+    | "not_covered_action_backstop";
+  fresh_visual_judgment_event_expected: boolean;
+  reason: string;
+  trigger_basis?: string;
+  // Snapshot-mint path ONLY — safe scalar refs to the visual judgment that ran on
+  // THIS snapshot. Never a frame path (that stays queue-only).
+  visual_judgment_ran?: boolean;
+  visual_judgment_outcome?: string;
+  visual_judgment_suppress?: boolean;
+};
+
+/**
  * Sends the canonical 409 HUMAN_VERIFICATION_REQUIRED response for an active
  * request and records the rejection trace. Shared by the cached-marker guard and
  * the stale-ref live-probe path so both emit an identical, internals-free payload.
@@ -558,6 +587,10 @@ function sendHumanVerificationRequired(
   reply: any,
   tool: string,
   request: { request_id: string; status: string; challenge_type: string; domain: string },
+  // REQUIRED — every 409 call site must declare its source path. Always present in
+  // the response body (NOT flag-gated), so every 409 is self-describing. Making this
+  // required forces every current and future call site to supply attribution.
+  attribution: HumanVerificationAttribution,
   visualGestureCapsule?: { available: true; capsule: SafeVisualGestureCapsuleView },
   // Dev-only HV/VGC 409 attribution (ANTIGEN_HV_DEBUG). Booleans / enums / buckets
   // only — never refs, coords, iframe srcs, capsule ids, or page text. Emitted to
@@ -587,6 +620,10 @@ function sendHumanVerificationRequired(
       user_presence_required: true,
       purchase_authorized: false,
       next_action: humanVerificationAgentNextAction(request as any),
+      // ALWAYS present (not flag-gated) — identifies which 409 return path produced
+      // this response and whether a fresh visual judgment event is expected. Safe
+      // enums/booleans/short reason strings only; observability, not behavior.
+      human_verification_attribution: attribution,
       // Safe metadata only — present ONLY for opaque/page-level walls when a
       // Visual Gesture Capsule was minted. Bytes/coords/viewport/cdp/strategy are
       // never included (the safe view carries none of them). Absent otherwise →
@@ -721,15 +758,29 @@ function rejectIfVisualGestureCapsuleActive(
         challenge_type: "unknown_human_verification",
         domain: capsule.domain,
       };
-  sendHumanVerificationRequired(session, reply, tool, request, { available: true, capsule: safe }, {
-    scope: "hv_active_guard",
+  sendHumanVerificationRequired(
+    session,
+    reply,
     tool,
-    returned_409: true,
-    reason: "reused_existing_capsule",
-    reused_existing_capsule: true,
-    created_capsule: false,
-    capsule_status: capsule.status,
-  });
+    request,
+    {
+      source: "vgc_capsule_reuse_guard",
+      visual_judgment_coverage: "not_covered_reused_existing_state",
+      fresh_visual_judgment_event_expected: false,
+      reason:
+        "Reused an existing Visual Gesture Capsule; no fresh visual judgment ran on this action.",
+    },
+    { available: true, capsule: safe },
+    {
+      scope: "hv_active_guard",
+      tool,
+      returned_409: true,
+      reason: "reused_existing_capsule",
+      reused_existing_capsule: true,
+      created_capsule: false,
+      capsule_status: capsule.status,
+    },
+  );
   return true;
 }
 
@@ -782,7 +833,13 @@ function rejectIfHumanVerificationActive(
   // A known challenge is up. Terminal requests keep blocking until a fresh
   // snapshot re-evaluates the page — clicking behind it would only loop on stale.
   lazyExpireHumanVerificationRequest(request);
-  sendHumanVerificationRequired(session, reply, tool, request);
+  sendHumanVerificationRequired(session, reply, tool, request, {
+    source: "cached_hv_marker_guard",
+    visual_judgment_coverage: "not_covered_reused_existing_state",
+    fresh_visual_judgment_event_expected: false,
+    reason:
+      "Reused a cached human-verification marker from a prior snapshot; no fresh visual judgment ran on this action.",
+  });
   return true;
 }
 
@@ -971,7 +1028,23 @@ async function rejectNoProgressActionAsHumanVerification(
               : {}),
           });
           if (fallback) {
-            sendHumanVerificationRequired(session, reply, tool, fallback.request, fallback.vgc);
+            sendHumanVerificationRequired(
+              session,
+              reply,
+              tool,
+              fallback.request,
+              {
+                source: "action_no_progress_ambiguous_backstop",
+                visual_judgment_coverage: "not_covered_action_backstop",
+                fresh_visual_judgment_event_expected: false,
+                reason:
+                  "Minted by the action no-progress ambiguous-obstruction backstop; no fresh visual judgment ran.",
+                // sb is computed only under ANTIGEN_HV_DEBUG; include a safe enum
+                // trigger_basis when available, otherwise omit (still always present).
+                ...(sb ? { trigger_basis: sb.trigger_basis } : {}),
+              },
+              fallback.vgc,
+            );
             return true;
           }
         } else {
@@ -1049,7 +1122,20 @@ async function rejectNoProgressActionAsHumanVerification(
     if (created.ok) vgc = { available: true, capsule: created.capsule };
   }
 
-  sendHumanVerificationRequired(session, reply, tool, request, vgc);
+  sendHumanVerificationRequired(
+    session,
+    reply,
+    tool,
+    request,
+    {
+      source: "action_no_progress_structural_backstop",
+      visual_judgment_coverage: "not_covered_action_backstop",
+      fresh_visual_judgment_event_expected: false,
+      reason:
+        "Minted by the action no-progress structural-wall backstop; no fresh visual judgment ran.",
+    },
+    vgc,
+  );
   return true;
 }
 
@@ -6845,6 +6931,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         reply,
         "antigen_snapshot",
         snapshotMintedHv.request,
+        {
+          source: "snapshot_mint_visual_judgment",
+          visual_judgment_coverage: "fresh_judgment_possible",
+          fresh_visual_judgment_event_expected: true,
+          reason:
+            "Minted by the snapshot path, where fresh visual judgment runs; a fresh visual judgment event is expected.",
+          // Safe scalar refs to the visual judgment that ran on THIS snapshot, when
+          // one was evaluated (memoized in visualJudgmentCache). Frame paths stay
+          // queue-only — never echoed here.
+          ...(visualJudgmentCache
+            ? {
+                visual_judgment_ran: visualJudgmentCache.ran,
+                ...(visualJudgmentCache.outcome
+                  ? { visual_judgment_outcome: visualJudgmentCache.outcome }
+                  : {}),
+                visual_judgment_suppress: visualJudgmentCache.suppress,
+              }
+            : {}),
+        },
         snapshotMintedHv.vgc,
         snapshotHvDebug,
       );

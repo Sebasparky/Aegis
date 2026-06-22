@@ -1225,6 +1225,13 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — screen-HV visible wall
     expect(body.error.visual_gesture_capsule.available).toBe(true);
     expect(body.error.visual_gesture_capsule.capsule.capsule_id).toMatch(/^vgc_/);
     expect(body.error.visual_gesture_capsule.capsule.status).toBe("awaiting_user_gesture");
+    // Always-present attribution names the snapshot-mint path as the one path where
+    // fresh visual judgment runs (no debug flag required to observe it).
+    expect(body.error.human_verification_attribution).toMatchObject({
+      source: "snapshot_mint_visual_judgment",
+      visual_judgment_coverage: "fresh_judgment_possible",
+      fresh_visual_judgment_event_expected: true,
+    });
     // NOT a normal snapshot.
     expect(body.data).toBeUndefined();
   });

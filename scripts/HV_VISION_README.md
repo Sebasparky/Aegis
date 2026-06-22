@@ -139,6 +139,35 @@ priority first (`high_consequence_prediction` → `heuristic_model_disagreement`
 confidence first), with summary counts (total, by review reason, by predicted
 label, by review status) at the top. Flags: `--queue`, `--dataset-dir`, `--out`.
 
+## Reviewed-label export (retraining overlay)
+
+Turn the human review work into a clean, retraining-ready label index. For every
+queue row that has been **reviewed** with a non-empty `human_label`, the human
+label **overrides** the original/heuristic label (`label_source=human_reviewed`):
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_export_reviewed_index.py
+```
+
+By default this exports **reviewed-only** rows. Pass `--include-unreviewed-fallback`
+to also emit the still-pending rows using their `heuristic_label`, marked
+`label_source=heuristic_unreviewed`:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_export_reviewed_index.py --include-unreviewed-fallback
+```
+
+Writes `dev-artifacts/hv-vision-review/reviewed-training-index.csv` (columns:
+`capture_dir, frame_path, origin_host, effective_label, label_source,
+heuristic_label, human_label, review_status, review_reason, model_predicted_label,
+model_confidence, event_id`) and `dev-artifacts/hv-vision-review/reviewed-training-summary.json`
+(row/label/source counts), and prints the same summary to stdout. Flags: `--queue`,
+`--out-csv`, `--out-summary`, `--include-unreviewed-fallback`.
+
+**This is an overlay / export for retraining and does NOT mutate the source
+dataset** — `dev-artifacts/hv-vision-dataset/*/meta.json` files are never touched,
+and no screenshot bytes are stored (frame paths are referenced as strings).
+
 ## Files
 
 | File | Role |
@@ -150,4 +179,5 @@ label, by review status) at the top. Flags: `--queue`, `--dataset-dir`, `--out`.
 | `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
 | `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
 | `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |
+| `hv_vision_export_reviewed_index.py` | Export reviewed human labels as a retraining overlay index (offline/dev-only; does not mutate the dataset) |
 | `hv-vision-requirements.txt` | Pinned offline deps |

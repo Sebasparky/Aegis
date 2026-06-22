@@ -120,6 +120,25 @@ only — **not** CAPTCHA solving; Antigen detects and routes, it never solves or
 bypasses human verification. Schema and review-reason semantics:
 `docs/antigen-visual-judgment-review-queue.md`.
 
+## Review sheet (visual contact sheet)
+
+Render the review queue as a single static HTML contact sheet so a reviewer can
+eyeball every captured frame next to its model prediction, heuristic label, and
+human label — and hand-label quickly:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_review_sheet.py
+```
+
+Writes `dev-artifacts/hv-vision-review/review-sheet.html`. It is offline / dev-only,
+references the existing `frame.png` files by **relative path** (never embedded
+base64 image bytes), and is **static** — it does not save edits; the label options
+are shown as plain reference chips for manual labeling. Cards are sorted highest
+priority first (`high_consequence_prediction` → `heuristic_model_disagreement` →
+`low_confidence` → `new_domain` → `sampled_baseline`; within a reason, lower/null
+confidence first), with summary counts (total, by review reason, by predicted
+label, by review status) at the top. Flags: `--queue`, `--dataset-dir`, `--out`.
+
 ## Files
 
 | File | Role |
@@ -130,4 +149,5 @@ bypasses human verification. Schema and review-reason semantics:
 | `hv_vision_eval.py` | Re-score a saved model (optional) |
 | `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
 | `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
+| `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |
 | `hv-vision-requirements.txt` | Pinned offline deps |

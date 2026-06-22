@@ -18,3 +18,7 @@ dev-artifacts/
 # Dev-only redacted visual-blocker dataset capture (Phase 2A) — never commit.
 dev-artifacts/hv-vision-dataset/
 tmp-pointer-test/
+
+# Python bytecode cache (offline hv_vision_* harness in scripts/)
+__pycache__/
+*.pyc

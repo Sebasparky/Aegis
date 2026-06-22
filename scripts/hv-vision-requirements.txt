@@ -1,0 +1,16 @@
+# Antigen Visual Classifier v0 — OFFLINE / DEV-ONLY training harness deps.
+#
+# This is NOT a runtime dependency set. Nothing in apps/ imports these.
+# These libraries are used only by the offline scripts/hv_vision_*.py harness
+# to train + evaluate a small page-state classifier on the redacted
+# dev-artifacts/hv-vision-dataset/ frames.
+#
+# Deliberately lightweight: NO torch / transformers / onnxruntime / opencv.
+# Install into a local gitignored venv (see scripts/HV_VISION_README.md):
+#   python3 -m venv dev-artifacts/hv-vision-venv
+#   dev-artifacts/hv-vision-venv/bin/pip install -r scripts/hv-vision-requirements.txt
+
+Pillow>=10.0
+numpy>=1.26
+scikit-learn>=1.4
+joblib>=1.3

@@ -73,6 +73,7 @@ import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isVisionCaptureA
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { mapCaptureResultToBlockerStatus, buildVisualBlockerCapturedResponse, type VisualBlockerSkip } from "../runtime/visualBlockerClassifier/captureAndSkip.js";
+import { evaluateVisualJudgment, type VisualJudgmentEvaluation } from "../runtime/visualBlockerClassifier/visualJudgment.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -6016,6 +6017,33 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // below so it can observe whether a real challenge fired (escalation), then read
     // into surfaceSignals to drive the (stuck-only) browser-check route.
     let browserCheckTransition: BrowserCheckTransition | undefined;
+    // ── Activation-Gated Visual Judgment v0 (snapshot HV gate only) ──────────
+    // Request-scoped, memoized so a redacted frame is captured + the localhost
+    // sidecar is asked AT MOST ONCE per snapshot — and ONLY from inside a branch
+    // that has ALREADY detected an HV wall (activation-gated; no continuous
+    // watching). Flag-off ⇒ evaluateVisualJudgment returns {ran:false,suppress:false}
+    // with no capture/queue, so every mint site stays byte-identical. A
+    // high-confidence benign verdict (and only when not dry-run) sets suppress:true;
+    // confident_human_needed, uncertain, and classifier-unavailable all return
+    // suppress:false → the existing conservative mint/409 runs unchanged.
+    let visualJudgmentCache: VisualJudgmentEvaluation | undefined;
+    const snapshotVisualJudgment = async (triggerBasis: string): Promise<VisualJudgmentEvaluation> => {
+      if (visualJudgmentCache) return visualJudgmentCache;
+      let originHost = "unknown";
+      try {
+        if (snapshot.url) originHost = new URL(snapshot.url).hostname;
+      } catch {
+        /* keep "unknown" */
+      }
+      visualJudgmentCache = await evaluateVisualJudgment({
+        sessionId: session.browser_session_id,
+        activationReason: "possible_human_verification",
+        cdpUrl: session.cdp_url,
+        originHost,
+        triggerBasis,
+      });
+      return visualJudgmentCache;
+    };
     if (isHumanVerificationEnabled()) {
       const hvMember = elements.find(
         (el) => el.overlay?.human_verification === true && el.overlay?.blocking === true,
@@ -6036,7 +6064,29 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       let screenHvMinted = false;
       // capture-and-skip exploration mode wins over VGC minting: suppress the mint so
       // this blocker episode is captured + returned as a 422 skip, never a 409 VGC.
-      if (
+      // Visual Judgment v0: a screen-level wall would mint here → ask the classifier
+      // first. A high-confidence benign verdict (not dry-run) SUPPRESSES the mint/409
+      // so the flow continues; everything else falls through to the existing mint.
+      const screenHvWallCandidate =
+        !hvMember &&
+        screenHv?.wall === true &&
+        isVisualGestureCapsuleEnabled() &&
+        !isVisionCaptureAndSkipEnabled() &&
+        !!session.cdp_url;
+      const screenHvJudgment = screenHvWallCandidate
+        ? await snapshotVisualJudgment("page_level_hv_wall")
+        : undefined;
+      if (screenHvWallCandidate && screenHvJudgment?.suppress) {
+        snapshotHvDebug = {
+          scope: "snapshot_screen_hv",
+          tool: "antigen_snapshot",
+          returned_409: false,
+          reason: "visual_judgment_benign_suppressed",
+          visual_judgment_outcome: screenHvJudgment.outcome ?? "uncertain",
+          screen_hv_detected: true,
+          element_count_bucket: hvElementCountBucket(elements.length),
+        };
+      } else if (
         !hvMember &&
         screenHv?.wall === true &&
         isVisualGestureCapsuleEnabled() &&
@@ -6184,7 +6234,31 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         }
       }
 
-      if (hvMember || pageWall) {
+      // Visual Judgment v0: a STRUCTURAL page-level wall would mint below. Ask the
+      // classifier first (only for the page-level case — hvMember keeps its DOM relay
+      // and is never suppressed). A high-confidence benign verdict (not dry-run)
+      // suppresses the WHOLE block, so no HV request and no capsule are created —
+      // nothing dangles in the approvals UI.
+      const structuralIsPageLevel = !hvMember && !!pageWall;
+      const structuralPageLevelJudgment =
+        structuralIsPageLevel &&
+        isVisualGestureCapsuleEnabled() &&
+        !isVisionCaptureAndSkipEnabled() &&
+        session.cdp_url
+          ? await snapshotVisualJudgment("page_level_hv_wall")
+          : undefined;
+      if (structuralPageLevelJudgment?.suppress) {
+        snapshotHvDebug = {
+          scope: "snapshot_hv",
+          tool: "antigen_snapshot",
+          returned_409: false,
+          reason: "visual_judgment_benign_suppressed",
+          visual_judgment_outcome: structuralPageLevelJudgment.outcome ?? "uncertain",
+          structural_wall_seen: true,
+          page_level: true,
+          element_count_bucket: hvElementCountBucket(elements.length),
+        };
+      } else if (hvMember || pageWall) {
         let hvDomain = "unknown";
         try {
           if (snapshot.url) hvDomain = new URL(snapshot.url).hostname;
@@ -6304,21 +6378,31 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               } catch {
                 /* keep "unknown" */
               }
-              ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
-                session,
-                delegation,
-                domain: ambiguousDomain,
-                pageUrl: snapshot.url ?? "",
-                // The authoritative interactive count is the extracted element_count.
-                // repeated_stale is corroborating-only (never fires alone): set it
-                // ONLY when a recent no-progress marker corroborates a high-element
-                // overlay — the low-element path stays byte-identical.
-                signals: {
-                  ...ambiguousProbe,
-                  near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
-                  ...(noProgressSignal ? { repeated_stale: true } : {}),
-                },
-              });
+              // Visual Judgment v0: an ambiguous visual obstruction would mint here →
+              // ask the classifier first. A high-confidence benign verdict (not dry-run)
+              // declines the mint (no capsule, no HV request) so the flow continues.
+              const ambiguousJudgment = session.cdp_url
+                ? await snapshotVisualJudgment("unreadable_dominant_surface")
+                : undefined;
+              ambiguous = ambiguousJudgment?.suppress
+                ? undefined
+                : await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+                    session,
+                    delegation,
+                    domain: ambiguousDomain,
+                    pageUrl: snapshot.url ?? "",
+                    // The authoritative interactive count is the extracted element_count.
+                    // repeated_stale is corroborating-only (never fires alone): set it
+                    // ONLY when a recent no-progress marker corroborates a high-element
+                    // overlay — the low-element path stays byte-identical.
+                    signals: {
+                      ...ambiguousProbe,
+                      near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
+                      ...(noProgressSignal ? { repeated_stale: true } : {}),
+                    },
+                  });
+              // classifier_false here covers both "obstruction classifier declined" and
+              // "visual judgment suppressed as benign" — both mean: do not mint.
               ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
             } else {
               ambiguousSkipReason = "probe_returned_null";

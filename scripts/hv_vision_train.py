@@ -141,19 +141,21 @@ def _counts(labels: List[str]) -> Dict[str, int]:
     return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Antigen Visual Classifier v0 — offline trainer (shadow/dev-only).")
-    ap.add_argument("--dataset-index", default=DEFAULT_INDEX)
-    ap.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT)
-    ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
-    ap.add_argument("--features", choices=["combined", "grayscale_only", "color_only"], default="combined")
-    ap.add_argument("--classifier", choices=["logreg", "centroid"], default="logreg")
-    ap.add_argument("--test-size", type=float, default=DEFAULT_TEST_SIZE)
-    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    ap.add_argument("--low-conf-n", type=int, default=5, help="How many lowest-confidence eval examples to report.")
-    args = ap.parse_args()
+def train_and_evaluate(
+    rows: List[DatasetRow],
+    train_idx: List[int],
+    eval_idx: List[int],
+    cfg: FeatureConfig,
+    classifier_name: str,
+    all_labels: List[str] | None = None,
+    low_conf_n: int = 5,
+) -> Dict:
+    """Featurize -> scale -> fit -> evaluate for one FeatureConfig.
 
-    import sklearn
+    Pure compute, no printing or file I/O. Shared by main() and the offline
+    feature-comparison harness so both follow one code path. Returns the fitted
+    clf/scaler plus accuracy, confusion matrix, per-label P/R/F1, and the
+    lowest-confidence eval examples."""
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
     from sklearn.neighbors import NearestCentroid
@@ -162,34 +164,9 @@ def main() -> int:
         confusion_matrix,
         precision_recall_fscore_support,
     )
-    import joblib
 
-    print("=== Antigen Visual Classifier v0 — OFFLINE / SHADOW / DEV-ONLY ===")
-    print("(not wired to runtime; any future runtime use must be activation-gated)\n")
-
-    rows, skips = load_dataset(args.dataset_index, args.dataset_root)
-    if not rows:
-        print(f"ERROR: no usable rows loaded from {args.dataset_index}", file=sys.stderr)
-        return 2
-
-    all_labels = [r.label for r in rows]
-    label_counts = _counts(all_labels)
-    print(f"Usable frames: {len(rows)}  (skipped: {skips})")
-    print("Label counts:")
-    for lb, c in label_counts.items():
-        print(f"  {lb:30s} {c}")
-    print()
-
-    cfg = feature_groups_preset(args.features)
-    train_idx, eval_idx, forced_train = build_split(rows, args.test_size, args.seed)
-
-    print(f"Split (seed={args.seed}, test_size={args.test_size}, features={args.features}):")
-    print(f"  train: {len(train_idx)}   eval: {len(eval_idx)}")
-    if forced_train:
-        print(f"  NOTE: singleton classes forced into TRAIN (unevaluated): {forced_train}")
-    print(f"  train class counts: {_counts([rows[i].label for i in train_idx])}")
-    print(f"  eval  class counts: {_counts([rows[i].label for i in eval_idx])}")
-    print("  (38-image dataset with tiny classes — metrics are DIRECTIONAL, not conclusive)\n")
+    if all_labels is None:
+        all_labels = [r.label for r in rows]
 
     X_train = _featurize(rows, train_idx, cfg)
     X_eval = _featurize(rows, eval_idx, cfg)
@@ -200,7 +177,7 @@ def main() -> int:
     X_train_s = scaler.fit_transform(X_train)
     X_eval_s = scaler.transform(X_eval)
 
-    if args.classifier == "logreg":
+    if classifier_name == "logreg":
         clf = LogisticRegression(max_iter=2000, C=1.0)
     else:
         clf = NearestCentroid()
@@ -221,7 +198,7 @@ def main() -> int:
         proba_classes = list(clf.classes_)
         conf = proba.max(axis=1)
         order = np.argsort(conf)  # ascending = least confident first
-        for j in order[: args.low_conf_n]:
+        for j in order[:low_conf_n]:
             row = rows[eval_idx[j]]
             top3_i = np.argsort(proba[j])[::-1][:3]
             low_conf.append(
@@ -253,6 +230,74 @@ def main() -> int:
         }
         for i in range(len(class_labels))
     } if eval_idx else {}
+
+    return {
+        "clf": clf,
+        "scaler": scaler,
+        "class_labels": class_labels,
+        "label_map": label_map,
+        "y_pred": y_pred,
+        "y_eval": y_eval,
+        "accuracy": acc,
+        "confusion_matrix": cm,
+        "per_label": per_label,
+        "lowest_confidence_examples": low_conf,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Antigen Visual Classifier v0 — offline trainer (shadow/dev-only).")
+    ap.add_argument("--dataset-index", default=DEFAULT_INDEX)
+    ap.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT)
+    ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    ap.add_argument("--features", choices=["combined", "grayscale_only", "color_only"], default="combined")
+    ap.add_argument("--classifier", choices=["logreg", "centroid"], default="logreg")
+    ap.add_argument("--test-size", type=float, default=DEFAULT_TEST_SIZE)
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ap.add_argument("--low-conf-n", type=int, default=5, help="How many lowest-confidence eval examples to report.")
+    args = ap.parse_args()
+
+    import sklearn
+    import joblib
+
+    print("=== Antigen Visual Classifier v0 — OFFLINE / SHADOW / DEV-ONLY ===")
+    print("(not wired to runtime; any future runtime use must be activation-gated)\n")
+
+    rows, skips = load_dataset(args.dataset_index, args.dataset_root)
+    if not rows:
+        print(f"ERROR: no usable rows loaded from {args.dataset_index}", file=sys.stderr)
+        return 2
+
+    all_labels = [r.label for r in rows]
+    label_counts = _counts(all_labels)
+    print(f"Usable frames: {len(rows)}  (skipped: {skips})")
+    print("Label counts:")
+    for lb, c in label_counts.items():
+        print(f"  {lb:30s} {c}")
+    print()
+
+    cfg = feature_groups_preset(args.features)
+    train_idx, eval_idx, forced_train = build_split(rows, args.test_size, args.seed)
+
+    print(f"Split (seed={args.seed}, test_size={args.test_size}, features={args.features}):")
+    print(f"  train: {len(train_idx)}   eval: {len(eval_idx)}")
+    if forced_train:
+        print(f"  NOTE: singleton classes forced into TRAIN (unevaluated): {forced_train}")
+    print(f"  train class counts: {_counts([rows[i].label for i in train_idx])}")
+    print(f"  eval  class counts: {_counts([rows[i].label for i in eval_idx])}")
+    print("  (38-image dataset with tiny classes — metrics are DIRECTIONAL, not conclusive)\n")
+
+    result = train_and_evaluate(
+        rows, train_idx, eval_idx, cfg, args.classifier, all_labels, args.low_conf_n
+    )
+    clf = result["clf"]
+    scaler = result["scaler"]
+    class_labels = result["class_labels"]
+    label_map = result["label_map"]
+    acc = result["accuracy"]
+    cm = result["confusion_matrix"]
+    per_label = result["per_label"]
+    low_conf = result["lowest_confidence_examples"]
 
     # ---- Report to stdout ----
     print(f"Classifier: {args.classifier}   sklearn={sklearn.__version__}")

@@ -74,13 +74,28 @@ dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_eval.py
 ## Feature-group comparison
 
 The extractor (`hv_vision_features.py`) is grayscale-first but keeps color, and
-the groups are individually toggleable. Compare presets via `--features`:
+the groups are individually toggleable. You can compare a single preset at a
+time via `hv_vision_train.py --features`:
 
 ```bash
 ... scripts/hv_vision_train.py --features grayscale_only
 ... scripts/hv_vision_train.py --features color_only
 ... scripts/hv_vision_train.py --features combined     # default
 ```
+
+Or run all three at once with the comparison harness, which reuses the exact
+same deterministic split / seed / classifier / test-size and writes a single
+report:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_compare_features.py
+```
+
+It prints a concise table (`preset | accuracy | page_level_hv_wall P/R/F1 |
+notes`) and writes `dev-artifacts/hv-vision-models/feature-comparison.json`
+(accuracy, per-label P/R/F1, confusion matrix, lowest-confidence examples, and
+the singleton train-only labels for each preset). It does NOT overwrite
+`model.joblib`.
 
 Feature groups: grayscale layout (primary, weighted), edge/gradient per-tile
 stats, coarse contrast/threshold structure, and secondary RGB histogram +
@@ -94,4 +109,5 @@ per-tile color means.
 | `hv_vision_train.py` | Train + report + save artifacts |
 | `hv_vision_predict.py` | Single-frame prediction CLI |
 | `hv_vision_eval.py` | Re-score a saved model (optional) |
+| `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
 | `hv-vision-requirements.txt` | Pinned offline deps |

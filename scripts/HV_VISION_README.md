@@ -101,6 +101,25 @@ Feature groups: grayscale layout (primary, weighted), edge/gradient per-tile
 stats, coarse contrast/threshold structure, and secondary RGB histogram +
 per-tile color means.
 
+## Shadow review queue
+
+Build a privacy-safe human review queue of page-state candidates (model prediction
++ page context, **never screenshot bytes**) from the current dataset + model:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_review_queue.py
+```
+
+Writes `dev-artifacts/hv-vision-review/review-queue.jsonl` (one review event per
+line) + a `review-queue-summary.json` with counts (total queued, by predicted
+label, by review reason, by confidence bucket). Re-running is idempotent and
+preserves any human-entered `human_label` / `review_status` / `notes`. Flags:
+`--no-model`, `--csv`, `--include-all`, `--sample-baseline-every N`,
+`--review-threshold`. This is page-state classification for human review/training
+only — **not** CAPTCHA solving; Antigen detects and routes, it never solves or
+bypasses human verification. Schema and review-reason semantics:
+`docs/antigen-visual-judgment-review-queue.md`.
+
 ## Files
 
 | File | Role |
@@ -110,4 +129,5 @@ per-tile color means.
 | `hv_vision_predict.py` | Single-frame prediction CLI |
 | `hv_vision_eval.py` | Re-score a saved model (optional) |
 | `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
+| `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
 | `hv-vision-requirements.txt` | Pinned offline deps |

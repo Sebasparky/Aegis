@@ -168,6 +168,60 @@ model_confidence, event_id`) and `dev-artifacts/hv-vision-review/reviewed-traini
 dataset** — `dev-artifacts/hv-vision-dataset/*/meta.json` files are never touched,
 and no screenshot bytes are stored (frame paths are referenced as strings).
 
+## Build sampled train/eval manifests
+
+Reviewed labels form a **candidate pool, not an automatic training set.** The
+review queue accumulates continuously from the crawl stream, which is currently
+dominated by false positives, cookie banners, and normal pages/modals, and which
+over-represents whichever domains/classes arrived first. Training directly from
+"whatever arrived" would inherit that bias. So: capture broadly, review
+carefully, but **train from sampled, balanced manifests** that you build
+deliberately and periodically — not on every new capture.
+
+This script turns the reviewed-label pool
+(`dev-artifacts/hv-vision-review/reviewed-training-index.csv`) into a
+deterministic, reproducible train/eval split:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_build_manifests.py
+```
+
+Writes `dev-artifacts/hv-vision-splits/train-manifest.csv`,
+`dev-artifacts/hv-vision-splits/eval-manifest.csv` (columns: `split, capture_dir,
+frame_path, origin_host, effective_label, label_source, review_status,
+review_reason, event_id, selection_reason`), and
+`dev-artifacts/hv-vision-splits/split-summary.json` (seed/params, per-label and
+per-domain counts for total/train/eval, `train_only_labels_due_to_low_count`,
+`capped_domains`, and `warnings`).
+
+How the split is chosen (deterministic with `--seed`): rows are grouped by
+`effective_label`; a per-domain cap (`--max-per-domain`, default 3) prevents any
+one crawl domain from dominating a label; labels with enough rows hold out at
+least `--min-eval-per-label` (default 1) eval examples (`--eval-ratio` default
+0.25), preferring eval examples from domains **not** used in that label's train
+set to reduce leakage; labels too small to split are train-only and listed in the
+summary. No rows are duplicated/oversampled.
+
+- **Default uses only `human_reviewed` labels.** Pass
+  `--include-heuristic-unreviewed` **for experiments only** to also pull in
+  pending `heuristic_unreviewed` rows.
+- **Freeze the eval set** with `--freeze-existing-eval`: if an
+  `eval-manifest.csv` already exists, its eval rows are preserved exactly (unless
+  they disappeared from the reviewed index) and train is rebuilt around them; the
+  summary reports `frozen_eval_preserved_count` / `frozen_eval_missing_count`.
+- `--allow-small-label-leak` permits same-domain train/eval overlap when the pool
+  is too small to separate domains.
+
+> The current reviewed pool is tiny (~14 rows). The script still produces
+> manifests, but the summary will warn that this is an **initial small split, not
+> a statistically meaningful dataset** — expect train-only and eval-light labels.
+> This script does NOT train and does NOT mutate the source dataset; it only
+> reads the reviewed index and writes manifests under the gitignored
+> `dev-artifacts/`. Flags: `--reviewed-index`, `--out-dir`, `--seed`,
+> `--eval-ratio`, `--max-per-domain`, `--min-eval-per-label`,
+> `--include-heuristic-unreviewed`, `--freeze-existing-eval`,
+> `--allow-small-label-leak`.
+
 ## Files
 
 | File | Role |
@@ -180,4 +234,5 @@ and no screenshot bytes are stored (frame paths are referenced as strings).
 | `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
 | `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |
 | `hv_vision_export_reviewed_index.py` | Export reviewed human labels as a retraining overlay index (offline/dev-only; does not mutate the dataset) |
+| `hv_vision_build_manifests.py` | Build deliberate, balanced train/eval manifests from the reviewed-label pool (offline/dev-only; does not train or mutate the dataset) |
 | `hv-vision-requirements.txt` | Pinned offline deps |

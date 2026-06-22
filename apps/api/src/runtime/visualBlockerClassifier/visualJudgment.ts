@@ -249,7 +249,7 @@ function normalizeSidecarResult(body: SidecarPredictResponse): VisualJudgmentRes
 // ── Dev-local path resolution (mirrors datasetCapture.ts) ────────────────────
 
 /** Locate the gitignored `dev-artifacts` root from apps/api cwd. */
-function resolveDevArtifactsRoot(): string {
+export function resolveDevArtifactsRoot(): string {
   const candidates = [
     path.resolve(process.cwd(), "dev-artifacts"),
     path.resolve(process.cwd(), "../..", "dev-artifacts"),
@@ -288,7 +288,11 @@ export interface VisualJudgmentReviewEvent {
   trigger_basis: string | null;
   /** Hostname only — never a full URL, path, or query. */
   origin_host: string;
-  /** Dev-local path relative to dev-artifacts, or null when no frame was written. */
+  /**
+   * Dev-local frame path relative to the repo root (includes the `dev-artifacts/`
+   * segment, e.g. `dev-artifacts/hv-vision-runtime-frames/.../frame.png`), or null
+   * when no frame was written. Never absolute; resolvable from the repo root.
+   */
   frame_path: string | null;
   model_predicted_label: string | null;
   model_confidence: number | null;
@@ -402,14 +406,19 @@ export async function evaluateVisualJudgment(
 
     if (shot.ok) {
       // 2. Persist to a gitignored dev-local file so suppressions stay reviewable.
-      const root = seams.frameRoot ?? path.join(resolveDevArtifactsRoot(), "hv-vision-runtime-frames");
+      const devArtifactsRoot = resolveDevArtifactsRoot();
+      const root = seams.frameRoot ?? path.join(devArtifactsRoot, "hv-vision-runtime-frames");
       const rel = path.join(dateDir(now), event_id, "frame.png");
       const abs = path.join(root, rel);
       try {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         fs.writeFileSync(abs, Buffer.from(shot.base64, "base64"));
-        frameRelPath = path.join("hv-vision-runtime-frames", rel);
-        // 3. Ask the sidecar (localhost HTTP; null on any failure).
+        // Repo-root-relative path (includes the dev-artifacts/ segment) so any consumer
+        // resolves the frame from the repo root; round-trips via path.resolve and is
+        // never an absolute path in the JSONL.
+        frameRelPath = path.relative(path.dirname(devArtifactsRoot), abs);
+        // 3. Ask the sidecar with the ACTUAL on-disk absolute path just written above
+        //    (localhost HTTP; null on any failure).
         result = await (seams.callSidecar ?? callVisualJudgmentSidecar)(abs);
       } catch {
         result = null;

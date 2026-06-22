@@ -19,6 +19,7 @@ import {
   HV_WALL_LABEL,
   decideOutcome,
   evaluateVisualJudgment,
+  resolveDevArtifactsRoot,
   __resetVisualJudgmentStatus,
   type EvaluateVisualJudgmentSeams,
 } from "../runtime/visualBlockerClassifier/visualJudgment.js";
@@ -194,6 +195,35 @@ describe("evaluateVisualJudgment — flag on", () => {
     expect(typeof ev.frame_path).toBe("string");
     expect(path.isAbsolute(ev.frame_path as string)).toBe(false);
     expect(fs.existsSync(path.join(frameRoot, "2026-06-22"))).toBe(true);
+  });
+
+  it("the frame path sent to the sidecar exists on disk AND the queued frame_path resolves from repo root", async () => {
+    let sentToSidecar: string | undefined;
+    const { seams, queue } = onSeams({
+      callSidecar: async (absFramePath: string) => {
+        sentToSidecar = absFramePath;
+        return mkResult("cookie_banner", 0.97);
+      },
+    });
+    await evaluateVisualJudgment(
+      { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost: "shop.example.com" },
+      seams,
+    );
+
+    // 1. The runtime passes the ACTUAL on-disk absolute path to the sidecar.
+    expect(typeof sentToSidecar).toBe("string");
+    expect(path.isAbsolute(sentToSidecar as string)).toBe(true);
+    expect(fs.existsSync(sentToSidecar as string)).toBe(true);
+
+    // 2. The queued frame_path is non-absolute and resolves from the repo root to the
+    //    same on-disk file (no dev-artifacts/ prefix drop, no absolute path leak).
+    const ev = readQueue(queue)[0];
+    expect(typeof ev.frame_path).toBe("string");
+    expect(path.isAbsolute(ev.frame_path as string)).toBe(false);
+    const repoRoot = path.dirname(resolveDevArtifactsRoot());
+    const resolved = path.resolve(repoRoot, ev.frame_path as string);
+    expect(resolved).toBe(sentToSidecar);
+    expect(fs.existsSync(resolved)).toBe(true);
   });
 
   it("DRY-RUN: benign verdict is logged but does NOT suppress", async () => {

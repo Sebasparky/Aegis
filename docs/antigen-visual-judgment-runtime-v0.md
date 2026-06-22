@@ -105,7 +105,9 @@ Every invocation appends one JSONL line to
 
 ```
 schema_version, event_id, created_at, session_id, activation_reason,
-trigger_basis, origin_host (hostname only), frame_path (dev-local relative, or null),
+trigger_basis, origin_host (hostname only),
+frame_path (repo-root-relative, includes the dev-artifacts/ segment —
+  e.g. dev-artifacts/hv-vision-runtime-frames/.../frame.png — never absolute, or null),
 model_predicted_label, model_confidence, model_top_3,
 outcome, runtime_action_taken_by_model, human_label (null),
 review_status ("pending"), review_reason

@@ -570,3 +570,75 @@ describe("HV opaque wall → Visual Gesture Capsule (M1H)", () => {
     }
   });
 });
+
+// ── Cached HV marker — stale cross-origin invalidation ────────────────────────
+// Companion to the VGC cross-origin fix: a cached HV marker armed on one origin
+// must not short-circuit a later, unrelated page reached in the same session. The
+// cheap pre-action guard now clears a stale cross-origin marker (current page
+// origin != marker origin) and lets the action proceed; same-origin reuse and the
+// missing-url conservative fail-safe are unchanged.
+describe("cached HV marker — stale cross-origin invalidation", () => {
+  function armMarker(domain: string) {
+    createOrReuseHumanVerificationRequest({
+      user_id: MOCK_USER_ID,
+      delegation_id: DELEGATION_ID,
+      agent_name: "TestHvPreflightAgent",
+      browser_session_id: SESSION_ID,
+      domain,
+      page_url: `https://${domain}/`,
+      challenge_type: "press_and_hold",
+      surface_title: "Access challenge",
+      page_level: true,
+    });
+  }
+
+  it("same-origin cached marker still blocks in the cheap guard (control)", async () => {
+    seedSession(); // current_url = BBW_URL (www.bathandbodyworks.com)
+    seedSnapshot([candidate()]);
+    armMarker("www.bathandbodyworks.com");
+    expect(getActiveHumanVerification(SESSION_ID)).toBeDefined();
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    // Cheap short-circuit — neither the runtime nor the live probe was reached.
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expect(hvWallProbeMock).not.toHaveBeenCalled();
+    expect(getActiveHumanVerification(SESSION_ID)).toBeDefined();
+  });
+
+  it("cross-origin navigation clears the stale marker and does NOT block via the cheap guard", async () => {
+    const session = seedSession();
+    seedSnapshot([candidate()]);
+    // Marker armed on a DIFFERENT origin than the live page.
+    armMarker("www.etsy.com");
+    session.current_url = "https://example.com/";
+    expect(getActiveHumanVerification(SESSION_ID)).toBeDefined();
+
+    const res = await clickStaleProductRef();
+
+    // The cheap marker guard did NOT block — the action proceeded to ref resolution.
+    expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
+    // The stale marker was cleared.
+    expect(getActiveHumanVerification(SESSION_ID)).toBeUndefined();
+    // No real challenge on the new page → the stale ref simply returns 422.
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("ANTIGEN_REF_STALE");
+  });
+
+  it("missing current_url keeps blocking the cached marker (conservative fail-safe)", async () => {
+    const session = seedSession();
+    seedSnapshot([candidate()]);
+    armMarker("www.etsy.com");
+    session.current_url = "";
+    expect(getActiveHumanVerification(SESSION_ID)).toBeDefined();
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(clickKnownBoxMock).not.toHaveBeenCalled();
+    expect(getActiveHumanVerification(SESSION_ID)).toBeDefined();
+  });
+});

@@ -1078,7 +1078,9 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — active VGC guard", () 
   });
 
   it("returns 409 HUMAN_VERIFICATION_REQUIRED + safe capsule view when a VGC is pending", async () => {
-    seedSession();
+    // Same-origin: the live page is the origin the capsule was minted on, so the
+    // reuse guard blocks (cross-origin staleness is covered separately).
+    seedSession({ current_url: "https://www.bathandbodyworks.com/checkout" });
     createVisualGestureCapsule({
       human_verification_request_id: "hvreq_snap_vgc_001",
       browser_session_id: SESSION_ID,
@@ -1110,7 +1112,8 @@ describe("POST /api/agent/v1/runtime/browser-snapshot — active VGC guard", () 
   });
 
   it("never leaks bytes/coords/cdp/session internals in the VGC stop response", async () => {
-    seedSession();
+    // Same-origin live page so the reuse guard produces the VGC stop response.
+    seedSession({ current_url: "https://www.bathandbodyworks.com/checkout" });
     createVisualGestureCapsule({
       human_verification_request_id: "hvreq_snap_vgc_002",
       browser_session_id: SESSION_ID,

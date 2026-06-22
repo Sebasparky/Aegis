@@ -1401,6 +1401,110 @@ describe("human_verification_attribution (always present, every source)", () => 
   });
 });
 
+// ── Stale cross-origin VGC reuse must not poison an unrelated later page ───────
+// Regression for the attribution-QA finding: a capsule minted on one origin (e.g.
+// etsy.com) kept returning 409 vgc_capsule_reuse_guard on a later, unrelated page
+// (e.g. example.com) reached in the SAME browser session. The reuse guard now
+// terminalizes a stale cross-origin capsule (current page origin != minted origin)
+// and lets the new page proceed; same-origin reuse is unchanged.
+describe("VGC reuse guard — stale cross-origin invalidation", () => {
+  function sessionCapsules() {
+    return listActiveVisualGestureCapsules().filter((c) => c.browser_session_id === SESSION_ID);
+  }
+
+  async function mintCapsuleOnPageUrl() {
+    // First snapshot detects an opaque wall on PAGE_URL (www.example-shop.com) and
+    // mints a Visual Gesture Capsule bound to that origin.
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+    const first = await snapshot();
+    expect(first.statusCode).toBe(409);
+    expect(first.json().error.human_verification_attribution.source).toBe(
+      "snapshot_mint_visual_judgment",
+    );
+    expect(sessionCapsules()).toHaveLength(1);
+  }
+
+  it("same-origin reuse still blocks (control)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    await mintCapsuleOnPageUrl();
+
+    // Still on the minting origin — the capsule keeps guarding.
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.human_verification_attribution.source).toBe("vgc_capsule_reuse_guard");
+    expect(sessionCapsules()).toHaveLength(1);
+  });
+
+  it("cross-origin navigation clears the stale capsule and does NOT block the new page", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    const session = seedSession();
+    await mintCapsuleOnPageUrl();
+
+    // The agent navigated to an unrelated origin; the adapter refreshed current_url
+    // before this guard runs. The minted capsule is now stale cross-origin state.
+    session.current_url = "https://www.unrelated-other.com/landing";
+
+    const res = await snapshot();
+    // Not blocked — the snapshot proceeds normally on the new page.
+    expect(res.statusCode).toBe(200);
+    // The stale capsule was terminalized (cancelled) — no active capsule remains.
+    expect(sessionCapsules()).toHaveLength(0);
+  });
+
+  it("missing/unparseable current_url keeps blocking (conservative fail-safe)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    const session = seedSession();
+    await mintCapsuleOnPageUrl();
+
+    // current_url cannot be parsed → cross-origin cannot be proven → keep blocking.
+    session.current_url = "";
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.human_verification_attribution.source).toBe("vgc_capsule_reuse_guard");
+    expect(sessionCapsules()).toHaveLength(1);
+  });
+
+  it("stale cross-origin clear leaks no host/url/path/query in response or debug telemetry", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const session = seedSession();
+      await mintCapsuleOnPageUrl();
+      session.current_url = "https://secret-host.example.org/private/path?token=abc123";
+
+      const res = await snapshot();
+      expect(res.statusCode).toBe(200);
+
+      // The agent-facing response never echoes the live origin's url/path/query.
+      const raw = JSON.stringify(res.json());
+      for (const s of ["secret-host.example.org", "/private/path", "token=abc123"]) {
+        expect(raw, `response leaked "${s}"`).not.toContain(s);
+      }
+
+      // The stale-branch [HvDebug] line carries scalars only — never a host/url.
+      const staleLine = logSpy.mock.calls
+        .map((c) => c.map(String).join(" "))
+        .find((l) => l.includes("[HvDebug]") && l.includes("vgc_reuse_stale_cross_origin"));
+      expect(staleLine).toBeDefined();
+      for (const s of [
+        "secret-host.example.org",
+        "example-shop.com",
+        "/private/path",
+        "token=abc123",
+      ]) {
+        expect(staleLine!, `debug telemetry leaked "${s}"`).not.toContain(s);
+      }
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
 // ── ANTIGEN_VISION_CAPTURE_AND_SKIP: action no-progress never mints a VGC ──────
 //
 // Dataset-gathering / exploration mode. The action no-progress backstop

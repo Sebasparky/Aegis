@@ -1323,7 +1323,9 @@ describe("active VGC guard on browser-click / browser-navigation-state", () => {
   });
 
   it("browser-click fails closed with HUMAN_VERIFICATION_REQUIRED before resolving the ref", async () => {
-    seedSession();
+    // Same-origin live page so the reuse guard blocks (cross-origin staleness is
+    // covered separately in human-verification-preflight-ordering).
+    seedSession({ current_url: "https://www.bathandbodyworks.com/cart" });
     seedSnapshot([candidate({ name: "Ok", box: { x: 1, y: 2, width: 3, height: 4 } })]);
     createVisualGestureCapsule({
       human_verification_request_id: "hvreq_click_vgc_001",

@@ -121,6 +121,7 @@ import {
   recordActionNoProgress,
   hasRecentActionNoProgress,
   clearActionNoProgress,
+  logHvDebug,
 } from "../runtime/humanVerificationState.js";
 // Browser-Check Interstitial Telemetry v1 (ANTIGEN_BROWSER_CHECK_TELEMETRY,
 // default-off): records passive Cloudflare-style "Checking your browser"
@@ -147,6 +148,7 @@ import {
   isVisualGestureCapsuleEnabled,
   getActiveVisualGestureCapsuleForBrowserSession,
   getSafeVisualGestureCapsuleView,
+  transitionVisualGestureCapsule,
   type SafeVisualGestureCapsuleView,
 } from "../runtime/visualGestureCapsule.js";
 import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
@@ -721,16 +723,34 @@ async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
 }
 
 /**
+ * Safe origin hostname for a stored URL, or undefined when absent/unparseable.
+ * Never throws and never returns path/query — used only for same-origin vs
+ * cross-origin comparison of stale VGC/HV state; the hostname itself is never
+ * logged or surfaced.
+ */
+function originHostOf(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Active Visual Gesture Capsule guard. When the VGC flag is on and the session has
  * an active (non-terminal) capsule, fails closed with the canonical
  * HUMAN_VERIFICATION_REQUIRED 409 + safe capsule view BEFORE any generic
  * snapshot/action/navigation-state result. This is the authority that keeps a
  * later zero-element / access-denied / stale-ref / 422 pass from masking a gesture
  * the user still has pending in the Aegis UI. The capsule's lifecycle stays driven
- * by the internal UI gesture/recheck routes + TTL expiry — this guard never mutates
- * it. Returns true when it sent the response. Byte-identical when the flag is off
- * (helper short-circuits). Never leaks bytes/coords/cdp/session ids — the shared
- * sendHumanVerificationRequired + getSafeVisualGestureCapsuleView enforce that.
+ * by the internal UI gesture/recheck routes + TTL expiry — the only mutation this
+ * guard performs is terminalizing a STALE CROSS-ORIGIN capsule (one whose minted
+ * origin no longer matches the live page), which must not keep poisoning unrelated
+ * pages after navigation. Returns true when it sent the response. Byte-identical
+ * when the flag is off (helper short-circuits). Never leaks bytes/coords/cdp/session
+ * ids — the shared sendHumanVerificationRequired + getSafeVisualGestureCapsuleView
+ * enforce that.
  */
 function rejectIfVisualGestureCapsuleActive(
   session: TaskBrowserSession,
@@ -740,6 +760,25 @@ function rejectIfVisualGestureCapsuleActive(
   if (!isVisualGestureCapsuleEnabled()) return false;
   const capsule = getActiveVisualGestureCapsuleForBrowserSession(session.browser_session_id);
   if (!capsule) return false;
+  // Stale cross-origin reuse: the capsule was minted on a different origin than the
+  // live page (current_url is refreshed by the adapter's browser-navigation-state
+  // call before this guard runs). Clear it to terminal and DO NOT block — the page
+  // proceeds to fresh detection. Conservative fail-safe: only when BOTH hosts are
+  // known and the stored domain is a real hostname (never the "unknown" mint
+  // fallback); otherwise same-origin blocking behavior is preserved.
+  const currentHost = originHostOf(session.current_url);
+  if (
+    currentHost &&
+    capsule.domain &&
+    capsule.domain !== "unknown" &&
+    currentHost !== capsule.domain
+  ) {
+    transitionVisualGestureCapsule(capsule.capsule_id, "cancelled", {
+      error: "stale_cross_origin_navigation",
+    });
+    logHvDebug({ scope: "vgc_reuse_stale_cross_origin", tool, cleared: true, blocked: false });
+    return false;
+  }
   const safe = getSafeVisualGestureCapsuleView(capsule);
   // Prefer the linked HV request's live status/type; synthesize a minimal
   // pending_user request when it was GC'd so the stop signal is never lost
@@ -826,6 +865,24 @@ function rejectIfHumanVerificationActive(
     // No active cached marker → let the action proceed to ref resolution. A
     // challenge that appeared after the last snapshot is caught lazily on the
     // stale-ref branch, never here, so the happy path pays no probe cost.
+    recordActionPreflight(session, tool, "ref_resolution_started");
+    return false;
+  }
+
+  // Stale cross-origin reuse: the cached marker was armed on a different origin
+  // than the live page. Clear it and DO NOT block — let the action proceed to
+  // fresh detection. Same conservative fail-safe as the VGC guard: only when BOTH
+  // hosts are known and the stored domain is a real hostname (never "unknown").
+  const currentHost = originHostOf(session.current_url);
+  if (
+    marker &&
+    currentHost &&
+    marker.domain &&
+    marker.domain !== "unknown" &&
+    currentHost !== marker.domain
+  ) {
+    clearActiveHumanVerification(session.browser_session_id);
+    logHvDebug({ scope: "hv_marker_stale_cross_origin", tool, cleared: true, blocked: false });
     recordActionPreflight(session, tool, "ref_resolution_started");
     return false;
   }

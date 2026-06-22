@@ -32,6 +32,11 @@ import {
   isHvVisionDatasetEnabled,
   isManualVisualReviewCaptureEnabled,
 } from "./visualBlockerClassifier/flags.js";
+import {
+  isVisualJudgmentEnabled,
+  isVisualJudgmentDryRun,
+  isVisualJudgmentLivePolicyEnabled,
+} from "./visualBlockerClassifier/visualJudgment.js";
 
 export interface AntigenRuntimeStatus {
   click_verify: boolean;
@@ -76,6 +81,24 @@ export interface AntigenRuntimeStatus {
    * byte-identical.
    */
   manual_visual_review_capture: boolean;
+  /**
+   * Whether ANTIGEN_VISUAL_JUDGMENT_ENABLED is on (default off). Master gate for the
+   * activation-gated visual judgment adapter (redacted frame capture + localhost sidecar
+   * call + review-queue write inside snapshot HV stuck-state handling). Off ⇒ byte-identical.
+   */
+  visual_judgment_enabled: boolean;
+  /**
+   * Whether ANTIGEN_VISUAL_JUDGMENT_DRY_RUN is on. When on, the judgment is computed and
+   * queued but NEVER suppresses a stop — the safe rollout step before live suppression.
+   */
+  visual_judgment_dry_run: boolean;
+  /**
+   * Whether ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY is on (default off). The second, independent
+   * gate that lets `decideVisualLivePolicy` actually suppress a snapshot HV 409 — and only
+   * for an allowlisted origin (ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST) with a confident
+   * benign verdict (≥0.95) and dry-run off. Off ⇒ judgment stays telemetry-only.
+   */
+  visual_judgment_live_policy: boolean;
   fill_state: boolean;
   /**
    * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
@@ -114,6 +137,9 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     hv_vision_classifier: isHvVisionClassifierEnabled(),
     hv_vision_dataset: isHvVisionDatasetEnabled(),
     manual_visual_review_capture: isManualVisualReviewCaptureEnabled(),
+    visual_judgment_enabled: isVisualJudgmentEnabled(),
+    visual_judgment_dry_run: isVisualJudgmentDryRun(),
+    visual_judgment_live_policy: isVisualJudgmentLivePolicyEnabled(),
     fill_state: isFillStateEnabled(),
     keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
@@ -147,6 +173,9 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `hv_vision_classifier=${s.hv_vision_classifier}`,
     `hv_vision_dataset=${s.hv_vision_dataset}`,
     `manual_visual_review_capture=${s.manual_visual_review_capture}`,
+    `visual_judgment_enabled=${s.visual_judgment_enabled}`,
+    `visual_judgment_dry_run=${s.visual_judgment_dry_run}`,
+    `visual_judgment_live_policy=${s.visual_judgment_live_policy}`,
     `fill_state=${s.fill_state}`,
     `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,

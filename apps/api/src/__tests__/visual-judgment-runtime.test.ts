@@ -19,6 +19,8 @@ import {
   HV_WALL_LABEL,
   decideOutcome,
   evaluateVisualJudgment,
+  isOriginAllowedForVisualJudgmentLivePolicy,
+  parseVisualJudgmentLiveAllowlist,
   resolveDevArtifactsRoot,
   __resetVisualJudgmentStatus,
   type EvaluateVisualJudgmentSeams,
@@ -27,6 +29,8 @@ import type { VisualJudgmentResult } from "../runtime/visualBlockerClassifier/ru
 
 const ENABLE = "ANTIGEN_VISUAL_JUDGMENT_ENABLED";
 const DRY = "ANTIGEN_VISUAL_JUDGMENT_DRY_RUN";
+const LIVE = "ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY";
+const ALLOW = "ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST";
 const QUEUE = "ANTIGEN_VISUAL_JUDGMENT_QUEUE";
 const HV_T = "ANTIGEN_VISUAL_JUDGMENT_HV_THRESHOLD";
 const BENIGN_T = "ANTIGEN_VISUAL_JUDGMENT_BENIGN_THRESHOLD";
@@ -53,7 +57,7 @@ function tmpDir(): string {
 const ORIGINAL_ENV = { ...process.env };
 
 afterEach(() => {
-  for (const k of [ENABLE, DRY, QUEUE, HV_T, BENIGN_T]) delete process.env[k];
+  for (const k of [ENABLE, DRY, LIVE, ALLOW, QUEUE, HV_T, BENIGN_T]) delete process.env[k];
   // restore anything the suite may have changed
   for (const [k, v] of Object.entries(ORIGINAL_ENV)) if (process.env[k] === undefined) process.env[k] = v;
   __resetVisualJudgmentStatus();
@@ -172,7 +176,11 @@ describe("evaluateVisualJudgment — flag on", () => {
       .map((l) => JSON.parse(l) as Record<string, unknown>);
   }
 
-  it("high-confidence benign → suppress, frame written, safe review event queued", async () => {
+  it("high-confidence benign + live policy on + allowlisted → suppress, frame written, safe review event queued", async () => {
+    // Suppression now requires the full live-policy gate: ENABLED (set by onSeams) +
+    // LIVE_POLICY + !dry-run + origin in the allowlist + benign ≥ 0.95.
+    process.env[LIVE] = "true";
+    process.env[ALLOW] = "shop.example.com";
     const { seams, frameRoot, queue } = onSeams();
     const out = await evaluateVisualJudgment(
       { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost: "shop.example.com" },
@@ -328,8 +336,10 @@ describe("evaluateVisualJudgment — flag on", () => {
     expect(readQueue(queue)[0].frame_path).toBeNull();
   });
 
-  // ── Live-policy SHADOW telemetry (computed, never acted on this slice) ──────
-  describe("live-policy shadow", () => {
+  // ── Live-policy decision telemetry + runtime suppression authority ──────────
+  // The live policy (`decideVisualLivePolicy`) is now the SOLE source of runtime
+  // suppression. `decideOutcome` is retained only for the review-queue outcome taxonomy.
+  describe("live-policy suppression", () => {
     type Shadow = {
       shadow_only: boolean;
       live_policy_enabled: boolean;
@@ -343,65 +353,49 @@ describe("evaluateVisualJudgment — flag on", () => {
       policy_reason: string;
     };
 
-    async function runWith(over: Partial<EvaluateVisualJudgmentSeams>, originHost = "h.example.com") {
+    /**
+     * Run `evaluateVisualJudgment` with optional live-policy gates. By DEFAULT the live
+     * flag and allowlist are OFF (shadow mode) so the policy can never suppress.
+     */
+    async function runWith(
+      over: Partial<EvaluateVisualJudgmentSeams>,
+      opts: { originHost?: string; live?: boolean; allowlist?: string; dryRun?: boolean } = {},
+    ) {
+      if (opts.live) process.env[LIVE] = "true";
+      if (opts.allowlist !== undefined) process.env[ALLOW] = opts.allowlist;
+      if (opts.dryRun) process.env[DRY] = "true";
       const { seams, queue } = onSeams(over);
       const out = await evaluateVisualJudgment(
-        { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost },
+        {
+          sessionId: "s1",
+          activationReason: "possible_human_verification",
+          cdpUrl: "ws://x",
+          originHost: opts.originHost ?? "h.example.com",
+        },
         seams,
       );
       const ev = readQueue(queue)[0];
       return { out, ev, shadow: ev.live_policy_shadow as unknown as Shadow };
     }
 
-    it("high-confidence benign → shadow visual_benign_suppression_candidate, but NO live-policy runtime action", async () => {
-      // 0.97 ≥ the 0.95 live benign-suppression threshold ⇒ suppression CANDIDATE in shadow.
+    // ── Default flags off (live policy disabled) — the safe default ───────────
+
+    it("live policy OFF (default): high-confidence benign does NOT suppress; shadow records the candidate decision only", async () => {
+      // 0.97 ≥ the 0.95 live benign threshold ⇒ a suppression CANDIDATE — but with the live
+      // flag off the policy returns dry_run_only and nothing is acted on.
       const { out, ev, shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
-      expect(shadow.policy_decision).toBe("visual_benign_suppression_candidate");
-      // Shadow never acts: live policy disabled this slice.
-      expect(shadow.should_suppress_heuristic_stop).toBe(false);
-      expect(shadow.live_policy_runtime_action_taken).toBe(false);
-      // The REAL (existing) behavior is unchanged and still driven solely by decideOutcome:
-      // benign ≥ 0.80 & not dry-run ⇒ the existing path suppresses and sets the top-level flag.
-      expect(out.suppress).toBe(true);
-      expect(ev.runtime_action_taken_by_model).toBe(true);
-    });
-
-    it("high-confidence page_level_hv_wall → shadow visual_hv_confirmed, no suppression", async () => {
-      const { out, shadow } = await runWith({ callSidecar: async () => mkResult(HV_WALL_LABEL, 0.95) });
-      expect(shadow.policy_decision).toBe("visual_hv_confirmed");
-      expect(shadow.should_suppress_heuristic_stop).toBe(false);
-      expect(shadow.live_policy_runtime_action_taken).toBe(false);
-      expect(out.suppress).toBe(false);
-    });
-
-    it("low-confidence page_level_hv_wall → shadow visual_low_confidence_hv, no suppression", async () => {
-      const { out, shadow } = await runWith({ callSidecar: async () => mkResult(HV_WALL_LABEL, 0.7) });
-      expect(shadow.policy_decision).toBe("visual_low_confidence_hv");
-      expect(shadow.live_policy_runtime_action_taken).toBe(false);
-      expect(out.suppress).toBe(false);
-    });
-
-    it("sidecar/model unavailable → shadow visual_runtime_no_action, fail-safe to heuristic", async () => {
-      const { out, shadow } = await runWith({ callSidecar: async () => null });
-      expect(shadow.policy_decision).toBe("visual_runtime_no_action");
-      expect(shadow.live_policy_runtime_action_taken).toBe(false);
-      // Existing heuristic behavior preserved.
-      expect(out.suppress).toBe(false);
-      expect(out.outcome).toBe("uncertain");
-    });
-
-    it("DRY-RUN benign: existing path does not suppress; shadow still records the decision, no live action", async () => {
-      process.env[DRY] = "true";
-      const { out, ev, shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
-      // Existing dry-run behavior unchanged: no suppression.
       expect(out.suppress).toBe(false);
       expect(ev.runtime_action_taken_by_model).toBe(false);
-      // Shadow still surfaces the meaningful decision but takes no live action.
       expect(shadow.policy_decision).toBe("visual_benign_suppression_candidate");
+      expect(shadow.policy_action).toBe("dry_run_only");
+      expect(shadow.live_policy_enabled).toBe(false);
+      expect(shadow.domain_allowed).toBe(false);
+      expect(shadow.should_suppress_heuristic_stop).toBe(false);
       expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      expect(shadow.shadow_only).toBe(true);
     });
 
-    it("shadow block carries the full safe field set with the slice's literal gate values", async () => {
+    it("shadow block carries the full safe field set with default (off) gate values", async () => {
       const { shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
       expect(shadow.shadow_only).toBe(true);
       expect(shadow.live_policy_enabled).toBe(false);
@@ -412,9 +406,185 @@ describe("evaluateVisualJudgment — flag on", () => {
       expect(typeof shadow.policy_reason).toBe("string");
     });
 
+    // ── Live flag on but a gate fails → still no suppression ──────────────────
+
+    it("live flag on + DRY-RUN → no suppression; dry_run_only, no live action", async () => {
+      const { out, ev, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "h.example.com", dryRun: true },
+      );
+      expect(out.suppress).toBe(false);
+      expect(ev.runtime_action_taken_by_model).toBe(false);
+      expect(shadow.policy_action).toBe("dry_run_only");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      expect(shadow.shadow_only).toBe(true);
+    });
+
+    it("live flag on + domain NOT allowlisted → no suppression; allow_heuristic_stop", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "other.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.domain_allowed).toBe(false);
+      expect(shadow.policy_action).toBe("allow_heuristic_stop");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("live flag on + allowlist empty/missing → no suppression (fail-closed)", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true }, // no allowlist set
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.domain_allowed).toBe(false);
+      expect(shadow.policy_action).toBe("allow_heuristic_stop");
+    });
+
+    // ── Fully gated, but the model verdict is not a confident benign ──────────
+
+    it("fully gated + high-confidence page_level_hv_wall → NEVER suppress", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.99) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_hv_confirmed");
+      expect(shadow.policy_action).toBe("allow_heuristic_stop");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("fully gated + low-confidence page_level_hv_wall → no suppression", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.7) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_low_confidence_hv");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("fully gated + sidecar/model unavailable → no suppression, fail-safe", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => null },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(out.outcome).toBe("uncertain");
+      expect(shadow.policy_decision).toBe("visual_runtime_no_action");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("fully gated + benign BELOW 0.95 → no suppression", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.9) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_uncertain");
+      expect(shadow.policy_action).toBe("allow_heuristic_stop");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("fully gated + unknown label → no suppression", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult("something_else", 0.99) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_uncertain");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    // ── The ONE actual suppression case ──────────────────────────────────────
+
+    it("fully gated + confident benign (≥0.95) → SUPPRESS; telemetry marks the live action", async () => {
+      const { out, ev, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      expect(out.suppress).toBe(true);
+      expect(ev.runtime_action_taken_by_model).toBe(true);
+      expect(shadow.policy_action).toBe("suppress_heuristic_stop");
+      expect(shadow.policy_decision).toBe("visual_benign_suppression_candidate");
+      expect(shadow.should_suppress_heuristic_stop).toBe(true);
+      expect(shadow.live_policy_runtime_action_taken).toBe(true);
+      expect(shadow.live_policy_enabled).toBe(true);
+      expect(shadow.domain_allowed).toBe(true);
+      // `shadow_only` is the ONLY event whose live action flips it to false.
+      expect(shadow.shadow_only).toBe(false);
+    });
+
+    it("allowlist matching is exact + case-insensitive; suppression still requires it", async () => {
+      // Uppercase host vs lowercase allowlist entry → still allowed → suppression.
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "shop.example.com", originHost: "SHOP.EXAMPLE.COM" },
+      );
+      expect(out.suppress).toBe(true);
+      expect(shadow.domain_allowed).toBe(true);
+    });
+
+    it("no unsafe fields leak in the live suppression telemetry block", async () => {
+      const { ev } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "h.example.com" },
+      );
+      const shadow = ev.live_policy_shadow as Record<string, unknown>;
+      const allowedShadow = new Set([
+        "shadow_only",
+        "live_policy_enabled",
+        "domain_allowed",
+        "policy_decision",
+        "policy_action",
+        "should_suppress_heuristic_stop",
+        "live_policy_runtime_action_taken",
+        "hv_action_threshold",
+        "benign_suppression_threshold",
+        "policy_reason",
+      ]);
+      for (const k of Object.keys(shadow)) expect(allowedShadow.has(k)).toBe(true);
+      for (const forbidden of ["url", "page_url", "selector", "x", "y", "base64", "png", "cdp_url", "raw_text", "origin_host"]) {
+        expect(shadow[forbidden]).toBeUndefined();
+      }
+    });
+
     it("evaluateVisualJudgment return shape is unchanged (no new top-level return keys)", async () => {
-      const { out } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
+      const { out } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true, allowlist: "h.example.com" },
+      );
       expect(Object.keys(out).sort()).toEqual(["outcome", "ran", "result", "suppress"]);
+    });
+  });
+
+  // ── Allowlist parser + membership helpers (pure) ───────────────────────────
+  describe("live-policy allowlist helpers", () => {
+    it("empty / unset allowlist → no host allowed (fail-closed)", () => {
+      delete process.env[ALLOW];
+      expect(parseVisualJudgmentLiveAllowlist()).toEqual([]);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("www.example.com")).toBe(false);
+      process.env[ALLOW] = "   ";
+      expect(parseVisualJudgmentLiveAllowlist()).toEqual([]);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("www.example.com")).toBe(false);
+    });
+
+    it("parses comma-separated hosts, trimming + lowercasing + dropping blanks", () => {
+      process.env[ALLOW] = " www.HubSpot.com , ,www.example.com ,, www.HCAPTCHA.com ";
+      expect(parseVisualJudgmentLiveAllowlist()).toEqual([
+        "www.hubspot.com",
+        "www.example.com",
+        "www.hcaptcha.com",
+      ]);
+    });
+
+    it("exact, case-insensitive membership; non-members and blanks are not allowed", () => {
+      process.env[ALLOW] = "www.example.com,www.hubspot.com";
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("www.example.com")).toBe(true);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("WWW.EXAMPLE.COM")).toBe(true);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("sub.www.example.com")).toBe(false);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("example.com")).toBe(false);
+      expect(isOriginAllowedForVisualJudgmentLivePolicy("")).toBe(false);
     });
   });
 });

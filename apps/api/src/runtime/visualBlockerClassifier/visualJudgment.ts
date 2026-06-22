@@ -61,6 +61,42 @@ export function isVisualJudgmentDryRun(): boolean {
   return process.env.ANTIGEN_VISUAL_JUDGMENT_DRY_RUN === "true";
 }
 
+/**
+ * LIVE_POLICY: the second, independent gate (on top of ENABLED + !DRY_RUN) that lets
+ * `decideVisualLivePolicy` actually SUPPRESS a heuristic HV stop at the snapshot-mint
+ * path. Default OFF ⇒ the policy stays computed-for-telemetry-only (`dry_run_only`) and
+ * no snapshot 409 is ever suppressed. This is the master switch for the first dev-only
+ * live-suppression experiment; it is intentionally separate from ENABLED so the model can
+ * run + be reviewed in dry-run long before it is ever allowed to change behavior.
+ */
+export function isVisualJudgmentLivePolicyEnabled(): boolean {
+  return process.env.ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY === "true";
+}
+
+/**
+ * Parse `ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST` (comma-separated bare hostnames) into a
+ * trimmed, lowercased, de-blanked list. Empty / unset ⇒ `[]` ⇒ no origin is ever allowed
+ * (fail-closed). No subdomain wildcards in v0 — exact hostname match only.
+ */
+export function parseVisualJudgmentLiveAllowlist(): string[] {
+  const raw = process.env.ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST;
+  if (!raw || !raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0);
+}
+
+/**
+ * Exact, case-insensitive allowlist membership for the live-policy gate. Empty/unset
+ * allowlist ⇒ false (fail-closed) — a missing allowlist must never permit suppression.
+ */
+export function isOriginAllowedForVisualJudgmentLivePolicy(originHost: string): boolean {
+  const host = (originHost ?? "").trim().toLowerCase();
+  if (!host) return false;
+  return parseVisualJudgmentLiveAllowlist().includes(host);
+}
+
 /** Localhost sidecar base URL (runtime → sidecar; never the offline harness). */
 export function getVisualJudgmentSidecarUrl(): string {
   const v = process.env.ANTIGEN_VISUAL_JUDGMENT_SIDECAR_URL;
@@ -282,25 +318,27 @@ function dateDir(d: Date): string {
 // ── Review queue (append-only JSONL; safe metadata only) ─────────────────────
 
 /**
- * Shadow-only record of what the live policy (`decideVisualLivePolicy`) WOULD decide,
- * computed alongside the live `decideOutcome` for offline review. NOTHING here affects
- * runtime behavior in this slice: `live_policy_enabled` is a literal `false`, so the
- * policy fn returns `dry_run_only` with no suppression. It exists purely so the review
- * queue carries the meaningful policy decision before live suppression is ever enabled.
+ * Record of what the live policy (`decideVisualLivePolicy`) decided for this event,
+ * computed alongside `decideOutcome` and written to the offline review queue. The gate
+ * fields now reflect the REAL flags/allowlist used at decision time (not literal false):
+ * when the live-policy experiment is off/dry-run/non-allowlisted the policy returns
+ * `dry_run_only`/`allow_heuristic_stop` and nothing is acted on (`shadow_only:true`,
+ * `live_policy_runtime_action_taken:false`); when fully gated + a confident benign verdict
+ * it returns `suppress_heuristic_stop` and a snapshot 409 is actually suppressed
+ * (`shadow_only:false`, `live_policy_runtime_action_taken:true`).
  * Safe scalars/enums/fixed reason strings only — no URL/path/selector/coordinate/text.
  */
 export interface VisualLivePolicyShadowTelemetry {
-  /** Literal marker: this block records what the live policy WOULD do; nothing was acted on. */
-  shadow_only: true;
-  /** Live-policy flag state for this slice — literal false (ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY not read). */
-  live_policy_enabled: false;
-  /** Allowlist gate for this slice — literal false (shadow only). */
-  domain_allowed: false;
+  /** True when nothing was acted on; false ONLY when live policy actually suppressed a stop. */
+  shadow_only: boolean;
+  /** Real live-policy flag state (ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY). */
+  live_policy_enabled: boolean;
+  /** Real allowlist-membership result for this origin (ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST). */
+  domain_allowed: boolean;
   policy_decision: VisualLivePolicyDecisionLabel;
   policy_action: VisualLivePolicyAction;
-  /** Always false this slice — the policy fn cannot suppress while live_policy_enabled is false. */
   should_suppress_heuristic_stop: boolean;
-  /** Always false this slice — no model-driven runtime action is taken in shadow mode. */
+  /** True ONLY for an actual live suppression. */
   live_policy_runtime_action_taken: boolean;
   hv_action_threshold: number;
   benign_suppression_threshold: number;
@@ -459,15 +497,18 @@ export async function evaluateVisualJudgment(
     result = null;
   }
 
-  // 4. Decide. `decision.suppress` is the ONLY source of the existing runtime behavior.
+  // 4. Outcome taxonomy ONLY. `decideOutcome` is retained for the review queue's
+  //    `outcome` / `review_reason` enums (dataset stability) — it NO LONGER drives runtime
+  //    suppression. The suppression authority is `decideVisualLivePolicy` (step 4b).
   const decision = decideOutcome(result, dryRun);
 
-  // 4b. SHADOW ONLY: compute what the live policy WOULD decide. `live_policy_enabled:false`
-  //     ⇒ the pure fn returns `dry_run_only` with no suppression and
-  //     `runtime_action_taken_by_model:false`, yet still surfaces the meaningful decision
-  //     label for review. This NEVER influences `decision`/`suppress`, HTTP status, or the
-  //     HUMAN_VERIFICATION_REQUIRED path. ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY is a
-  //     FUTURE/disabled flag — intentionally NOT read here.
+  // 4b. LIVE POLICY: the single source of runtime suppression. The gate inputs are now the
+  //     REAL flags/allowlist — not shadow literals. Suppression happens ONLY when this fn
+  //     returns `suppress_heuristic_stop`, which requires ENABLED (we are here) +
+  //     ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY + !dry_run + origin in the allowlist + an
+  //     available model + a benign label at/above the 0.95 benign threshold. Every other
+  //     case (live flag off, dry-run, non-allowlisted, model unavailable, unknown label,
+  //     page_level_hv_wall at any confidence, benign < 0.95) keeps the heuristic stop.
   const livePolicy = decideVisualLivePolicy({
     heuristic_hv_stop: true,
     heuristic_label: args.triggerBasis ?? null,
@@ -477,13 +518,17 @@ export async function evaluateVisualJudgment(
     model_top_3: result?.topLabels ?? [],
     model_available: result !== null,
     visual_judgment_enabled: true, // already inside the enabled flow
-    live_policy_enabled: false, // shadow-only this slice
+    live_policy_enabled: isVisualJudgmentLivePolicyEnabled(),
     dry_run: dryRun,
-    domain_allowed: false, // shadow-only this slice
+    domain_allowed: isOriginAllowedForVisualJudgmentLivePolicy(args.originHost),
     hv_action_threshold: getVisualJudgmentHvThreshold(), // existing HV threshold, default 0.85
-    benign_suppression_threshold: DEFAULT_BENIGN_SUPPRESSION_THRESHOLD, // 0.95 live-shadow (NOT the 0.80 dry-run benign threshold)
+    benign_suppression_threshold: DEFAULT_BENIGN_SUPPRESSION_THRESHOLD, // 0.95 live threshold (NOT the 0.80 outcome-taxonomy threshold)
     origin_host: args.originHost,
   });
+
+  // The ONLY runtime suppression signal. `suppress_heuristic_stop` is the sole action that
+  // sets `runtime_action_taken_by_model:true`; any other action keeps the stop.
+  const suppress = livePolicy.action === "suppress_heuristic_stop";
 
   // 5. ALWAYS append a safe review event (including suppressions and unavailability).
   appendVisualJudgmentReviewEvent({
@@ -499,11 +544,12 @@ export async function evaluateVisualJudgment(
     model_confidence: result?.confidence ?? null,
     model_top_3: result?.topLabels ?? [],
     outcome: decision.outcome,
-    runtime_action_taken_by_model: decision.suppress,
+    runtime_action_taken_by_model: suppress,
     live_policy_shadow: {
-      shadow_only: true,
-      live_policy_enabled: false,
-      domain_allowed: false,
+      // `shadow_only` is false ONLY when the live policy actually suppressed a stop.
+      shadow_only: !livePolicy.runtime_action_taken_by_model,
+      live_policy_enabled: isVisualJudgmentLivePolicyEnabled(),
+      domain_allowed: isOriginAllowedForVisualJudgmentLivePolicy(args.originHost),
       policy_decision: livePolicy.policy_decision,
       policy_action: livePolicy.action,
       should_suppress_heuristic_stop: livePolicy.should_suppress_heuristic_stop,
@@ -525,7 +571,7 @@ export async function evaluateVisualJudgment(
     outcome: decision.outcome,
     model_predicted_label: result?.predictedLabel ?? null,
     model_confidence: result?.confidence ?? null,
-    runtime_action_taken_by_model: decision.suppress,
+    runtime_action_taken_by_model: suppress,
   });
 
   // 7. Safe telemetry — label/confidence/outcome + whether behavior changed. No frame path.
@@ -537,12 +583,15 @@ export async function evaluateVisualJudgment(
     model_confidence: result?.confidence ?? -1,
     outcome: decision.outcome,
     dry_run: dryRun,
-    runtime_behavior_changed: decision.suppress,
+    runtime_behavior_changed: suppress,
+    live_policy_enabled: isVisualJudgmentLivePolicyEnabled(),
+    domain_allowed: isOriginAllowedForVisualJudgmentLivePolicy(args.originHost),
     live_policy_decision: livePolicy.policy_decision,
+    live_policy_action: livePolicy.action,
     live_policy_runtime_action_taken: livePolicy.runtime_action_taken_by_model,
   });
 
-  return { ran: true, suppress: decision.suppress, outcome: decision.outcome, result };
+  return { ran: true, suppress, outcome: decision.outcome, result };
 }
 
 /** Test-only: reset the in-memory last-judgment status map. */

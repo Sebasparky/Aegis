@@ -33,6 +33,8 @@ import {
   classifyNavigationDiscipline,
   navigationBlockMessage,
   sanitizeHostPath,
+  extractSafeHvAttribution,
+  buildHvAttributionText,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -5069,5 +5071,174 @@ describe("P5. withPostFillSummary — fill-handler pass-through", () => {
     assert.ok(!out.post_fill_summary.includes("devvault"), out.post_fill_summary);
     assert.ok(!out.post_fill_summary.includes("tok_secret"), out.post_fill_summary);
     assert.ok(!out.post_fill_summary.includes("?"), out.post_fill_summary);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Safe HV attribution propagation (extractSafeHvAttribution / buildHvAttributionText)
+// The Aegis API attaches `error.human_verification_attribution` to every
+// HUMAN_VERIFICATION_REQUIRED 409. The adapter must surface ONLY the whitelisted
+// scalar fields (incl. the API-sanitized `reason`) to the tool caller — never URLs,
+// frame paths, selectors, refs, coordinates, or nested objects.
+// ---------------------------------------------------------------------------
+describe("Z. extractSafeHvAttribution", () => {
+  const fullErrBody = {
+    error: {
+      code: "HUMAN_VERIFICATION_REQUIRED",
+      human_verification_attribution: {
+        source: "snapshot_mint_visual_judgment",
+        visual_judgment_coverage: "fresh_judgment_possible",
+        fresh_visual_judgment_event_expected: true,
+        reason: "Minted by the snapshot path, where fresh visual judgment runs.",
+        trigger_basis: "scrim_over_preserved_background",
+        visual_judgment_ran: true,
+        visual_judgment_outcome: "blocking_wall",
+        visual_judgment_suppress: false,
+      },
+    },
+  };
+
+  test("full valid attribution → all whitelisted keys preserved", () => {
+    const out = extractSafeHvAttribution(fullErrBody);
+    assert.deepEqual(out, fullErrBody.error.human_verification_attribution);
+  });
+
+  test("unsafe extra keys are dropped, whitelist survives", () => {
+    const out = extractSafeHvAttribution({
+      error: {
+        human_verification_attribution: {
+          source: "vgc_capsule_reuse_guard",
+          visual_judgment_coverage: "not_covered_reused_existing_state",
+          fresh_visual_judgment_event_expected: false,
+          reason: "Reused an existing Visual Gesture Capsule.",
+          // unsafe — must never be copied:
+          frame_path: "/html/body/div[3]/iframe",
+          url: "https://shop.test/checkout?session=tok_secret",
+          page_url: "https://shop.test/checkout",
+          selector: "#challenge button.press-hold",
+          ref_id: "ag_412",
+          x: 640,
+          y: 220,
+          box: { x: 1, y: 2, w: 3, h: 4 },
+          nested: { deep: "value" },
+        },
+      },
+    });
+    assert.deepEqual(out, {
+      source: "vgc_capsule_reuse_guard",
+      visual_judgment_coverage: "not_covered_reused_existing_state",
+      fresh_visual_judgment_event_expected: false,
+      reason: "Reused an existing Visual Gesture Capsule.",
+    });
+    // explicitly assert each unsafe key is absent
+    for (const k of ["frame_path", "url", "page_url", "selector", "ref_id", "x", "y", "box", "nested"]) {
+      assert.ok(!(k in out), `unsafe key leaked: ${k}`);
+    }
+  });
+
+  test("wrong-typed fields are individually dropped", () => {
+    const out = extractSafeHvAttribution({
+      error: {
+        human_verification_attribution: {
+          source: 123, // wrong type → dropped
+          visual_judgment_coverage: "not_covered_action_backstop",
+          fresh_visual_judgment_event_expected: "yes", // wrong type → dropped
+          reason: "Minted by the action no-progress structural-wall backstop.",
+          visual_judgment_ran: 1, // wrong type → dropped
+        },
+      },
+    });
+    assert.deepEqual(out, {
+      visual_judgment_coverage: "not_covered_action_backstop",
+      reason: "Minted by the action no-progress structural-wall backstop.",
+    });
+  });
+
+  test("minimal required-only attribution (no optionals) → present keys only", () => {
+    const out = extractSafeHvAttribution({
+      error: {
+        human_verification_attribution: {
+          source: "cached_hv_marker_guard",
+          visual_judgment_coverage: "not_covered_reused_existing_state",
+          fresh_visual_judgment_event_expected: false,
+          reason: "Reused a cached human-verification marker from a prior snapshot.",
+        },
+      },
+    });
+    assert.deepEqual(out, {
+      source: "cached_hv_marker_guard",
+      visual_judgment_coverage: "not_covered_reused_existing_state",
+      fresh_visual_judgment_event_expected: false,
+      reason: "Reused a cached human-verification marker from a prior snapshot.",
+    });
+  });
+
+  test("missing attribution → null", () => {
+    assert.equal(extractSafeHvAttribution({ error: { code: "SESSION_NOT_FOUND" } }), null);
+  });
+
+  test("empty / non-object error bodies → null", () => {
+    assert.equal(extractSafeHvAttribution({}), null);
+    assert.equal(extractSafeHvAttribution(null), null);
+    assert.equal(extractSafeHvAttribution(undefined), null);
+    assert.equal(extractSafeHvAttribution({ error: null }), null);
+    assert.equal(extractSafeHvAttribution({ error: { human_verification_attribution: "nope" } }), null);
+    assert.equal(extractSafeHvAttribution({ error: { human_verification_attribution: ["a"] } }), null);
+  });
+
+  test("all fields wrong-typed/dropped → null (never {})", () => {
+    const out = extractSafeHvAttribution({
+      error: {
+        human_verification_attribution: {
+          source: 1,
+          fresh_visual_judgment_event_expected: "no",
+          frame_path: "/x/y",
+        },
+      },
+    });
+    assert.equal(out, null);
+  });
+});
+
+describe("Z. buildHvAttributionText", () => {
+  test("null → empty string (byte-identical message)", () => {
+    assert.equal(buildHvAttributionText(null), "");
+    assert.equal(buildHvAttributionText(undefined), "");
+    assert.equal(buildHvAttributionText({}), "");
+  });
+
+  test("valid attribution → safe machine-readable suffix that round-trips", () => {
+    const attribution = {
+      source: "snapshot_mint_visual_judgment",
+      visual_judgment_coverage: "fresh_judgment_possible",
+      fresh_visual_judgment_event_expected: true,
+      reason: "Minted by the snapshot path, where fresh visual judgment runs.",
+    };
+    const text = buildHvAttributionText(attribution);
+    assert.ok(text.startsWith(" human_verification_attribution={"), text);
+    const json = text.slice(" human_verification_attribution=".length);
+    assert.deepEqual(JSON.parse(json), attribution);
+  });
+
+  test("safety: serialized output never carries unsafe tokens", () => {
+    // The whitelist guarantees only safe scalars survive; the rendered suffix must
+    // mirror the API-side safety contract (no URLs, selectors, refs, frame paths).
+    const out = buildHvAttributionText(
+      extractSafeHvAttribution({
+        error: {
+          human_verification_attribution: {
+            source: "snapshot_mint_visual_judgment",
+            visual_judgment_coverage: "fresh_judgment_possible",
+            fresh_visual_judgment_event_expected: true,
+            reason: "Minted by the snapshot path, where fresh visual judgment runs.",
+            url: "https://x.test/p?s=tok",
+            frame_path: "/html/body/iframe",
+            selector: "#a > .b",
+            ref_id: "ag_9",
+          },
+        },
+      }),
+    );
+    assert.doesNotMatch(out, /https?:|:\/\/|<|>|selector|frame_path|\bref_|ag_\d/);
   });
 });

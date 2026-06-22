@@ -870,3 +870,74 @@ export function classifySnapshotApiErrorKind(errCode) {
   if (errCode === "SESSION_NOT_FOUND") return "session_not_found";
   return "generic";
 }
+
+/**
+ * Whitelist-extract the safe `human_verification_attribution` object the Aegis API
+ * attaches to every HUMAN_VERIFICATION_REQUIRED 409 body, so it can be surfaced to
+ * the MCP tool caller. Pure and defensive: copies ONLY the approved scalar fields
+ * (string/boolean), each behind a type guard, and drops everything else — so even
+ * if the API shape changes, no URL, path, query, selector, coordinate, frame path,
+ * ref, raw text, or nested object can leak through this layer. The API already
+ * sanitizes `reason`; we surface that sanitized value as-is and never derive our own.
+ *
+ * Returns `null` when attribution is absent, not an object, or when every field was
+ * dropped (never returns `{}`), so non-HV errors stay byte-identical downstream.
+ *
+ * @param {any} errBody Parsed API error body (`{ error: { ... } }`).
+ * @returns {null | {
+ *   source?: string,
+ *   visual_judgment_coverage?: string,
+ *   fresh_visual_judgment_event_expected?: boolean,
+ *   reason?: string,
+ *   trigger_basis?: string,
+ *   visual_judgment_ran?: boolean,
+ *   visual_judgment_outcome?: string,
+ *   visual_judgment_suppress?: boolean,
+ * }}
+ */
+export function extractSafeHvAttribution(errBody) {
+  const raw = errBody?.error?.human_verification_attribution;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  // Whitelist of approved keys → expected primitive type. Anything not listed here
+  // (frame_path, url, selector, ref ids, boxes, nested objects) is never copied.
+  const stringKeys = [
+    "source",
+    "visual_judgment_coverage",
+    "reason",
+    "trigger_basis",
+    "visual_judgment_outcome",
+  ];
+  const booleanKeys = [
+    "fresh_visual_judgment_event_expected",
+    "visual_judgment_ran",
+    "visual_judgment_suppress",
+  ];
+
+  const out = {};
+  for (const k of stringKeys) {
+    if (typeof raw[k] === "string") out[k] = raw[k];
+  }
+  for (const k of booleanKeys) {
+    if (typeof raw[k] === "boolean") out[k] = raw[k];
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Build the additive, machine-readable suffix appended to a tool-visible error
+ * message when safe HV attribution is present. Returns "" for null/empty so the
+ * message is byte-identical when there is nothing to surface. The serialized object
+ * is a whitelisted scalar-only map (see extractSafeHvAttribution), so the JSON is
+ * safe to hand to the agent.
+ *
+ * @param {ReturnType<typeof extractSafeHvAttribution>} attribution
+ * @returns {string}
+ */
+export function buildHvAttributionText(attribution) {
+  if (!attribution || typeof attribution !== "object" || Object.keys(attribution).length === 0) {
+    return "";
+  }
+  return ` human_verification_attribution=${JSON.stringify(attribution)}`;
+}

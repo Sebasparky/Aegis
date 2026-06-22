@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT, extractSafeHvAttribution, buildHvAttributionText } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -1211,13 +1211,21 @@ function writeSyntheticResponse(requestId, text) {
  * Writes a synthetic MCP tools/call error response to stdout.
  * stdout is MCP protocol only — never write diagnostics here.
  * Never includes: raw text values, cdp_url, cookies, storage, or selectors.
+ *
+ * `attribution` is the optional, whitelisted human_verification_attribution from a
+ * HUMAN_VERIFICATION_REQUIRED 409 (see extractSafeHvAttribution). When present it is
+ * appended as a safe machine-readable suffix; when null/omitted the output is
+ * byte-identical to before (all non-HV errors), preserving existing behavior.
  */
-function writeSyntheticErrorResponse(toolName, requestId, code, message) {
+function writeSyntheticErrorResponse(toolName, requestId, code, message, attribution = null) {
+  const text =
+    `Antigen ${toolName} unavailable: code=${code}; ${message}` +
+    buildHvAttributionText(attribution);
   const response = JSON.stringify({
     jsonrpc: "2.0",
     id: requestId,
     result: {
-      content: [{ type: "text", text: `Antigen ${toolName} unavailable: code=${code}; ${message}` }],
+      content: [{ type: "text", text }],
       isError: true,
     },
   });
@@ -1317,6 +1325,7 @@ async function handleExactSetValue(toolName, msg) {
       requestId,
       errCode,
       errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage(toolName) : errMsg,
+      extractSafeHvAttribution(errBody),
     );
   } catch (_err) {
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=INTERCEPT_ERROR source=${toolName}\n`);
@@ -1502,6 +1511,7 @@ async function handleLine(line) {
         errKind === "session_not_found"
           ? sessionNotFoundMessage("antigen_snapshot")
           : `Antigen snapshot failed (${errCode}).`,
+        extractSafeHvAttribution(errBody),
       );
     } catch (_err) {
       process.stderr.write(
@@ -1687,7 +1697,7 @@ async function handleLine(line) {
           : errCode === "ANTIGEN_SCROLL_FAILED"
           ? "Antigen browser_scroll_to_ref failed: the page could not be scrolled. Take a fresh antigen_snapshot and retry."
           : `Antigen browser_scroll_to_ref failed (${errCode}).`;
-      writeSyntheticErrorResponse("browser_scroll_to_ref", requestId, errCode, scrollErrMsg);
+      writeSyntheticErrorResponse("browser_scroll_to_ref", requestId, errCode, scrollErrMsg, extractSafeHvAttribution(errBody));
     } catch (_err) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=INTERCEPT_ERROR\n`
@@ -1866,6 +1876,7 @@ async function handleLine(line) {
         requestId,
         errCode,
         clickErrMsg,
+        extractSafeHvAttribution(errBody),
       );
     } catch (_err) {
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=INTERCEPT_ERROR\n`);
@@ -1995,6 +2006,7 @@ async function handleLine(line) {
         errCode === "SESSION_NOT_FOUND"
           ? sessionNotFoundMessage("browser_type")
           : `Antigen realistic browser_type failed (${errCode}).`,
+        extractSafeHvAttribution(errBody),
       );
     } catch (_err) {
       process.stderr.write(

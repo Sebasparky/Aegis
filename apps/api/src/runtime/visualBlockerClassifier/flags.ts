@@ -43,3 +43,17 @@ export function isHvVisionDatasetEnabled(): boolean {
 export function isVisionCaptureAndSkipEnabled(): boolean {
   return process.env.ANTIGEN_VISION_CAPTURE_AND_SKIP === "true";
 }
+
+/**
+ * `ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE` enables the dev/QA-only MANUAL capture of
+ * benign hard negatives from NORMAL snapshots. Unlike the dataset/classifier flags,
+ * this path is never automatic and never watches: a capture happens ONLY when the QA
+ * agent explicitly calls the manual-capture tool/endpoint after a normal snapshot.
+ * It runs NO classifier; it just writes a redacted frame and appends one safe event
+ * to the runtime judgment queue (which the existing offline importer folds into the
+ * review pipeline). Default off ⇒ the endpoint/tool is unavailable and no-op,
+ * behavior byte-identical.
+ */
+export function isManualVisualReviewCaptureEnabled(): boolean {
+  return process.env.ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE === "true";
+}

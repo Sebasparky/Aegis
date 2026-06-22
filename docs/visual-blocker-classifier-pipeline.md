@@ -228,6 +228,46 @@ No base64, rects, `src`, or raw text. Trace enums stay enum-gated (no free text 
 - `ANTIGEN_HV_VISION_DATASET` — enable dev-only redacted dataset capture + labeling tool. Default off.
 - Later: per-phase enforcement flag(s) and a model-adapter flag. All registered in `getAntigenRuntimeStatus()` (`antigenRuntimeFlags.ts`).
 
+## Manual hard-negative capture (dev/QA-only)
+
+The activation-gated dataset/judgment seams only record a frame when the snapshot HV
+gate fires. Benign pages that return a **normal** snapshot (ordinary e-commerce /
+search pages) therefore never enter the review/training pipeline — which lets HV bias
+grow and produces dangerous false-HV predictions on harmless pages. Manual capture
+closes that gap by letting a QA operator **explicitly** collect such a page as a hard
+negative, without faking an HV activation.
+
+- **Flag:** `ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE` (default off ⇒ tool/endpoint
+  unavailable and no-op, byte-identical). Registered in `getAntigenRuntimeStatus()`.
+- **Surface:** the dev/QA MCP tool `antigen_capture_visual_review_candidate` (in
+  `examples/antigen-browser-adapter.mjs`) → the flag-gated endpoint
+  `POST /api/agent/v1/runtime/capture-visual-review-candidate`. Call it **only after a
+  normal `antigen_snapshot`**, when you intentionally want to keep the current page as
+  a hard negative. It is never automatic and never watches.
+- **No classifier:** this path collects a redacted frame only; it never predicts a
+  label (`model_*` are null/empty at capture) and never solves/inspects a challenge.
+- **Write path (reuse, no duplication):** `manualVisualReviewCapture.ts` reuses
+  `captureRedactedScreenshot`, writes `frame.png` under
+  `dev-artifacts/hv-vision-runtime-frames/<date>/<event_id>/`, and appends **one** safe
+  event (`source: "manual_visual_review_capture"`, `review_status: "pending"`, empty
+  `label`/`human_label`) to `dev-artifacts/hv-vision-review/runtime-judgment-queue.jsonl`.
+  It does **not** write `dataset-index.csv` or `review-queue.jsonl` directly.
+- **Into the review sheet:** run the existing importer to fold the queue into the
+  dataset index + review queue (dedup by `event_id`, human labels preserved):
+
+  ```
+  python3 scripts/hv_vision_import_runtime_judgments.py
+  python3 scripts/hv_vision_review_sheet.py
+  ```
+
+  Suggested `capture_reason`: `ecommerce_search_hard_negative`. Later label in the
+  review sheet as `false_positive_normal_page` / `false_positive_normal_modal` /
+  `cookie_banner` / `sign_in_drawer` as appropriate, then export/build-manifests/train.
+- **Training stays deliberate:** a manual capture only enters training after a human
+  sets `human_label` + `review_status: reviewed` and it is selected through the manifest
+  pipeline — the export step requires `review_status == "reviewed"` and a non-empty
+  `human_label`.
+
 ## Risks / false-positive safeguards
 
 - **Collapsing the architecture** (the named risk): router output is consumed read-only; the only path to a VGC stays the existing mint flow, reached only via an `enforced` policy decision in a later phase. Shadow phases cannot mint.

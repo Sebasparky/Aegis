@@ -5,6 +5,36 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## Manual Visual-Review Hard-Negative Capture v1 (dev/QA-only) (2026-06-22)
+
+The activation-gated HV-vision seams only record frames when the snapshot HV gate
+fires, so benign pages that return a **normal** snapshot never entered the
+review/training pipeline — letting HV bias grow (dangerous false-HV on ordinary
+e-commerce/search pages). New **explicit, manual** capture path (never automatic, no
+watcher):
+
+- **Flag:** `ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE` (default off ⇒ tool/endpoint
+  unavailable + no-op, byte-identical). In `getAntigenRuntimeStatus()`.
+- **Tool → endpoint:** `antigen_capture_visual_review_candidate`
+  (`examples/antigen-browser-adapter.mjs`) →
+  `POST /api/agent/v1/runtime/capture-visual-review-candidate`. Call **only after a
+  normal `antigen_snapshot`** to collect that page as a hard negative. No classifier
+  run; never solves/inspects a challenge.
+- **Reuse, no duplication:** `manualVisualReviewCapture.ts` reuses
+  `captureRedactedScreenshot`, writes a redacted `frame.png` under
+  `dev-artifacts/hv-vision-runtime-frames/<date>/<event_id>/`, and appends ONE safe
+  event (`source: manual_visual_review_capture`, `review_status: pending`, empty
+  `label`) to `runtime-judgment-queue.jsonl`. It does **not** write `dataset-index.csv`
+  or `review-queue.jsonl` directly.
+- **To review:** `python3 scripts/hv_vision_import_runtime_judgments.py` (folds queue →
+  dataset index + review queue, dedup by `event_id`, preserves human labels) then
+  `python3 scripts/hv_vision_review_sheet.py`. Training only includes it after a human
+  sets `human_label` + `review_status: reviewed` and selects it via the manifest step.
+
+See `docs/visual-blocker-classifier-pipeline.md` → "Manual hard-negative capture".
+
+---
+
 ## Antigen Runtime Flag Diagnostics v1 (2026-06-11)
 
 Smoke runs kept losing time because `ANTIGEN_*` flags were set in the adapter/MCP shell

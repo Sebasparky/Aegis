@@ -63,6 +63,8 @@ DEFAULT_SUMMARY = os.path.join(
 
 # The offline review queue's event shape/version (see hv_vision_review_queue.py).
 REVIEW_SCHEMA_VERSION = "hv-vision-review/v0"
+# Default source for runtime-judgment events. A per-event `source` (e.g. a manual
+# hard-negative capture tagged "manual_visual_review_capture") is preserved when present.
 SOURCE_TAG = "runtime_judgment_queue"
 
 # Exact dataset-index.csv columns (must match hv_vision_train.load_dataset()).
@@ -245,10 +247,12 @@ def run_import(args) -> int:
             "outcome": ev.get("outcome"),
             "runtime_action_taken_by_model": ev.get("runtime_action_taken_by_model"),
             "review_reason": ev.get("review_reason"),
+            # capture_reason is carried for manual hard-negative captures (None otherwise).
+            "capture_reason": ev.get("capture_reason"),
             "label": effective_label,
             "human_label": human_label,
             "review_status": review_status,
-            "source": SOURCE_TAG,
+            "source": ev.get("source") or SOURCE_TAG,
             "imported_at": now,
         }
         if not args.dry_run:
@@ -292,8 +296,10 @@ def run_import(args) -> int:
             "human_label": human_label,
             "review_status": review_status,
             "review_reason": ev.get("review_reason"),
+            # Carried for manual hard-negative captures (None for runtime judgments).
+            "capture_reason": ev.get("capture_reason"),
             "notes": notes,
-            "source": SOURCE_TAG,
+            "source": ev.get("source") or SOURCE_TAG,
         }
 
     # Merge review queue: keep ALL existing rows, upsert the runtime rows.

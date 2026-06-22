@@ -69,7 +69,8 @@ import {
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
 import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
-import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isVisionCaptureAndSkipEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isManualVisualReviewCaptureEnabled, isVisionCaptureAndSkipEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import { captureManualVisualReviewCandidate } from "../runtime/visualBlockerClassifier/manualVisualReviewCapture.js";
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { mapCaptureResultToBlockerStatus, buildVisualBlockerCapturedResponse, type VisualBlockerSkip } from "../runtime/visualBlockerClassifier/captureAndSkip.js";
@@ -7016,6 +7017,98 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     });
 
     return reply.send(responsePayload);
+  });
+
+  // ─── Manual visual-review hard-negative capture (dev/QA-only) ──────────────────
+  // EXPLICIT, FLAG-GATED collection of a benign page that returned a NORMAL snapshot
+  // but is a useful HARD NEGATIVE for the HV vision review pipeline. This path runs NO
+  // classifier and never solves/inspects/interacts with any challenge — it captures a
+  // redacted frame and appends ONE safe event to the runtime judgment queue, which the
+  // offline importer (scripts/hv_vision_import_runtime_judgments.py) folds into the
+  // dataset index + review queue. Off-flag ⇒ 404. There is no watcher and no automatic
+  // per-snapshot capture; the only trigger is this explicit QA call.
+  server.post("/api/agent/v1/runtime/capture-visual-review-candidate", async (req, reply) => {
+    const delegation = await requireAgentToken(req, reply);
+    if (!delegation) return;
+
+    if (!isManualVisualReviewCaptureEnabled()) {
+      return sendError(
+        reply,
+        404,
+        "MANUAL_VISUAL_REVIEW_CAPTURE_DISABLED",
+        "Manual visual-review capture is a dev/QA-only feature and is not enabled.",
+      );
+    }
+
+    const body = (req.body ?? {}) as {
+      browser_runtime_id?: unknown;
+      capture_reason?: unknown;
+      manual_basis?: unknown;
+    };
+    if (!body.browser_runtime_id || typeof body.browser_runtime_id !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "browser_runtime_id is required.");
+    }
+    if (!body.capture_reason || typeof body.capture_reason !== "string") {
+      return sendError(reply, 400, "MISSING_FIELD", "capture_reason is required.");
+    }
+
+    // Sanitize free text to bounded slugs — raw text is never stored.
+    const toSlug = (raw: string): string =>
+      raw.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64);
+    const captureReason = toSlug(body.capture_reason);
+    if (!captureReason) {
+      return sendError(reply, 400, "INVALID_FIELD", "capture_reason must contain alphanumeric characters.");
+    }
+    const manualBasis = typeof body.manual_basis === "string" ? toSlug(body.manual_basis) || null : null;
+
+    // Aegis-mediated only; do NOT rebind a stale id for a capture.
+    const runtimeResolution = resolveReadyRuntimeSession(body.browser_runtime_id, delegation.id, MOCK_USER_ID);
+    if (runtimeResolution.kind === "forbidden") {
+      return sendError(reply, 403, "FORBIDDEN", "This browser session does not belong to your delegation.");
+    }
+    if (runtimeResolution.kind === "starting") {
+      return sendError(reply, 400, "SESSION_NOT_READY", `Session status is '${runtimeResolution.session.status}'; must be 'ready'.`);
+    }
+    if (runtimeResolution.kind === "none" || !runtimeResolution.session.cdp_url) {
+      return sendError(reply, 404, "SESSION_NOT_FOUND", "Browser runtime session not found.");
+    }
+    const session = runtimeResolution.session; // ready | rebound
+
+    // Hostname only — never a full URL, path, or query.
+    let originHost = "";
+    try {
+      originHost = session.current_url ? new URL(session.current_url).hostname : "";
+    } catch {
+      originHost = "";
+    }
+
+    const result = await captureManualVisualReviewCandidate({
+      cdpUrl: session.cdp_url,
+      originHost,
+      captureReason,
+      manualBasis,
+      sessionId: session.browser_session_id,
+    });
+
+    if (!result.captured) {
+      return sendError(
+        reply,
+        502,
+        "MANUAL_VISUAL_REVIEW_CAPTURE_FAILED",
+        `Manual visual-review capture did not complete (${result.skip_reason}).`,
+      );
+    }
+
+    return reply.send({
+      ok: true,
+      data: {
+        event_id: result.event_id,
+        origin_host: result.origin_host,
+        capture_reason: result.capture_reason,
+        source: result.source,
+        created_at: result.created_at,
+      },
+    });
   });
 
   // ─── Redacted Screenshot — vision-channel protection ──────────────────────────

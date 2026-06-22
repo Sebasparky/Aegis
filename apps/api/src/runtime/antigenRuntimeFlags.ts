@@ -27,7 +27,11 @@ import { resolvePointerTimingMode } from "./nativePointerRuntime.js";
 import { traceEnabled } from "./browserRunTrace.js";
 import { timingEnabled } from "./browserTiming.js";
 import { isVisualGestureCapsuleEnabled } from "./visualGestureCapsule.js";
-import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled } from "./visualBlockerClassifier/flags.js";
+import {
+  isHvVisionClassifierEnabled,
+  isHvVisionDatasetEnabled,
+  isManualVisualReviewCaptureEnabled,
+} from "./visualBlockerClassifier/flags.js";
 
 export interface AntigenRuntimeStatus {
   click_verify: boolean;
@@ -63,6 +67,15 @@ export interface AntigenRuntimeStatus {
    * or labeling UI (those are a later phase).
    */
   hv_vision_dataset: boolean;
+  /**
+   * Whether ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE is on (default off). Gates the
+   * dev/QA-only MANUAL capture of benign hard negatives from NORMAL snapshots. Never
+   * automatic and never watches — a capture happens only on an explicit QA call. Runs
+   * NO classifier; writes a redacted frame + one safe runtime-judgment-queue event for
+   * the existing offline importer. Endpoint/tool is unavailable + no-op when off;
+   * byte-identical.
+   */
+  manual_visual_review_capture: boolean;
   fill_state: boolean;
   /**
    * Whether ANTIGEN_INPUT_KEYEVENTS_FULL is on (default true). When on, realistic
@@ -100,6 +113,7 @@ export function getAntigenRuntimeStatus(): AntigenRuntimeStatus {
     visual_gesture_capsule: isVisualGestureCapsuleEnabled(),
     hv_vision_classifier: isHvVisionClassifierEnabled(),
     hv_vision_dataset: isHvVisionDatasetEnabled(),
+    manual_visual_review_capture: isManualVisualReviewCaptureEnabled(),
     fill_state: isFillStateEnabled(),
     keyevents_full: getKeyEventsFullEnabled(),
     pointer_timing: resolvePointerTimingMode() === "native" ? "fast" : "realistic",
@@ -132,6 +146,7 @@ export function formatAntigenRuntimeFlagsLine(): string {
     `visual_gesture_capsule=${s.visual_gesture_capsule}`,
     `hv_vision_classifier=${s.hv_vision_classifier}`,
     `hv_vision_dataset=${s.hv_vision_dataset}`,
+    `manual_visual_review_capture=${s.manual_visual_review_capture}`,
     `fill_state=${s.fill_state}`,
     `keyevents_full=${s.keyevents_full}`,
     `pointer_timing=${s.pointer_timing}`,

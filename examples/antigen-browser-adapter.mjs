@@ -198,6 +198,37 @@ const STATIC_BROWSER_TOOLS = [
     },
   },
   {
+    name: "antigen_capture_visual_review_candidate",
+    description:
+      "DEV/QA ONLY. Capture the CURRENT page as a benign 'hard negative' for the Antigen HV " +
+      "vision review pipeline. Call this ONLY after a normal antigen_snapshot (one that did " +
+      "NOT return a human-verification block) when you, the QA agent, intentionally want to " +
+      "collect this ordinary page (e.g. an e-commerce or search page) as a hard-negative " +
+      "review candidate. It is manual and explicit — never call it automatically on every " +
+      "snapshot. It does NOT run a classifier and NEVER solves, inspects, clicks, or interacts " +
+      "with any challenge. Aegis captures a REDACTED frame and queues one safe, label-empty " +
+      "review event (no URL/coordinates/secrets returned). Disabled (returns an error) unless " +
+      "ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE=true on the API.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_reason: {
+          type: "string",
+          description:
+            "Why this benign page is a useful hard negative, e.g. 'ecommerce_search_hard_negative'. " +
+            "Sanitized to a short slug; do not include URLs or page text.",
+        },
+        manual_basis: {
+          type: "string",
+          description:
+            "Optional short note on the QA basis for capturing. Sanitized to a slug; no URLs/text.",
+        },
+      },
+      required: ["capture_reason"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "browser_navigate",
     description: "Navigate to a URL",
     inputSchema: {
@@ -1332,7 +1363,11 @@ async function handleLine(line) {
   // tool). It still needs a browser runtime, so it routes through ensureRuntime()
   // and is handled locally — never forwarded to @playwright/mcp.
   const isAntigenSnapshot = method === "tools/call" && name === "antigen_snapshot";
-  const needsRuntime = isBrowserToolCall || isAntigenSnapshot;
+  // antigen_capture_visual_review_candidate is also adapter-owned (dev/QA-only manual
+  // hard-negative capture). It needs a browser runtime and is handled locally.
+  const isManualReviewCapture =
+    method === "tools/call" && name === "antigen_capture_visual_review_candidate";
+  const needsRuntime = isBrowserToolCall || isAntigenSnapshot || isManualReviewCapture;
 
   // Emit a diagnostic for every message processed before runtime is ready.
   if (!runtimeInitDone) {
@@ -1478,6 +1513,98 @@ async function handleLine(line) {
         requestId,
         "ANTIGEN_SNAPSHOT_INTERCEPT_ERROR",
         "Antigen snapshot encountered a network error.",
+      );
+    }
+    return;
+  }
+
+  // ── antigen_capture_visual_review_candidate: adapter-owned, dev/QA-only ────────
+  // Explicit MANUAL capture of a benign page (that returned a normal snapshot) as a
+  // hard negative for the HV vision review pipeline. Never forwarded to @playwright/mcp.
+  // Runs no classifier and never touches a challenge. Disabled on the API unless
+  // ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE=true → surfaced as a clear error.
+  if (toolName === "antigen_capture_visual_review_candidate") {
+    const requestId = msg.id;
+    const captureReason = msg?.params?.arguments?.capture_reason ?? "";
+    const manualBasis = msg?.params?.arguments?.manual_basis ?? "";
+
+    if (!browser_runtime_id) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] manual_review_capture_unavailable reason=no_runtime\n`
+      );
+      writeSyntheticErrorResponse(
+        "antigen_capture_visual_review_candidate",
+        requestId,
+        "ANTIGEN_REALISM_UNAVAILABLE",
+        "Manual visual-review capture requires a valid Aegis browser session.",
+      );
+      return;
+    }
+
+    if (typeof captureReason !== "string" || !captureReason.trim()) {
+      writeSyntheticErrorResponse(
+        "antigen_capture_visual_review_candidate",
+        requestId,
+        "MISSING_FIELD",
+        "capture_reason is required (e.g. 'ecommerce_search_hard_negative').",
+      );
+      return;
+    }
+
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] manual_review_capture_attempt\n`
+    );
+
+    try {
+      const apiRes = await antigenRuntimePost(
+        "/api/agent/v1/runtime/capture-visual-review-candidate",
+        { capture_reason: captureReason, manual_basis: manualBasis },
+        { tool: "antigen_capture_visual_review_candidate" },
+      );
+
+      if (apiRes.ok) {
+        const resBody = await apiRes.json().catch(() => ({}));
+        const data = resBody?.data ?? {};
+        process.stderr.write(
+          `[antigen-browser@${ADAPTER_VERSION}] manual_review_capture_success\n`
+        );
+        await noteToolDisposition({ tool: "antigen_capture_visual_review_candidate", surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+        writeSyntheticResponse(
+          requestId,
+          buildSyntheticSuccessText("antigen_capture_visual_review_candidate", {
+            event_id: data.event_id,
+            origin_host: data.origin_host,
+            capture_reason: data.capture_reason,
+            source: data.source,
+            version: ADAPTER_VERSION,
+          }),
+        );
+        return;
+      }
+
+      const errBody = await apiRes.json().catch(() => ({}));
+      const errCode = errBody?.error?.code ?? String(apiRes.status);
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] manual_review_capture_error reason=${errCode}\n`
+      );
+      await noteToolDisposition({ tool: "antigen_capture_visual_review_candidate", surface: "antigen_adapter", disposition: "failed", errorCode: String(errCode) });
+      const captureErrMsg =
+        errCode === "MANUAL_VISUAL_REVIEW_CAPTURE_DISABLED"
+          ? "Manual visual-review capture is dev/QA-only and is not enabled (set ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE=true on the API)."
+          : errCode === "SESSION_NOT_FOUND"
+          ? sessionNotFoundMessage("antigen_capture_visual_review_candidate")
+          : `Manual visual-review capture failed (${errCode}).`;
+      writeSyntheticErrorResponse("antigen_capture_visual_review_candidate", requestId, errCode, captureErrMsg);
+    } catch (_err) {
+      process.stderr.write(
+        `[antigen-browser@${ADAPTER_VERSION}] manual_review_capture_error reason=INTERCEPT_ERROR\n`
+      );
+      await noteToolDisposition({ tool: "antigen_capture_visual_review_candidate", surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_MANUAL_CAPTURE_INTERCEPT_ERROR" });
+      writeSyntheticErrorResponse(
+        "antigen_capture_visual_review_candidate",
+        requestId,
+        "ANTIGEN_MANUAL_CAPTURE_INTERCEPT_ERROR",
+        "Manual visual-review capture encountered a network error.",
       );
     }
     return;

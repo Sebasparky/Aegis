@@ -55,6 +55,45 @@ trains a logistic-regression classifier, prints a report, and writes:
 > training split and go unevaluated. **All metrics are directional, not
 > conclusive**, at this size.
 
+### Train from explicit manifests (deliberate split)
+
+By default the trainer computes its own internal stratified split from
+`dataset-index.csv`. To instead train/eval from **explicit, sampled manifests**
+built by `hv_vision_build_manifests.py` (see "Build sampled train/eval manifests"
+below), pass both manifests:
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_train.py \
+  --train-manifest dev-artifacts/hv-vision-splits/train-manifest.csv \
+  --eval-manifest  dev-artifacts/hv-vision-splits/eval-manifest.csv
+```
+
+In manifest mode the trainer:
+
+- Uses the manifests **exactly** — it performs **no** internal `train_test_split`;
+  the `split` column in each manifest is authoritative.
+- Resolves each image from the manifest `frame_path` (dataset-root-relative) under
+  `dev-artifacts/hv-vision-dataset/`.
+- Takes the label from the manifest `effective_label` column.
+- Writes the same artifacts (`model.joblib`, `label_map.json`, `metrics.json`) to
+  `dev-artifacts/hv-vision-models/`.
+
+`metrics.json` records which source was used so the two modes are never confused:
+
+- internal split → `"training_data_source": "internal_split_dataset_index"`
+- explicit manifests → `"training_data_source": "explicit_train_eval_manifests"`,
+  plus `train_manifest` / `eval_manifest` paths, `train_rows` / `eval_rows` counts,
+  and `label_source_counts` / `selection_reason_counts` (total + per split). The
+  lowest-confidence examples also carry `event_id` and `selection_reason` when present.
+
+Both `--train-manifest` and `--eval-manifest` must be provided together; passing
+only one is a usage error.
+
+> **Reviewed labels are a candidate pool, not the training set.** Training consumes
+> only the explicit sampled manifests produced by `hv_vision_build_manifests.py` —
+> never `reviewed-training-index.csv` directly, and never every new/reviewed capture
+> automatically. This keeps the train/eval split deliberate and reproducible.
+
 ## Predict (single frame)
 
 ```bash

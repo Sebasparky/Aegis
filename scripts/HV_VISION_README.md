@@ -110,6 +110,43 @@ Outputs JSON: `predicted_label`, `confidence`, `top_3`, and `needs_human_review`
 dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_eval.py
 ```
 
+## Error report (high-consequence failure modes)
+
+Turn `metrics.json` into a focused error report that surfaces the classifier's
+dangerous failure modes — above all **false `page_level_hv_wall` predictions**
+(the model claiming a benign page is a human-verification wall, which would
+wrongly gate the agent):
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_error_report.py
+```
+
+Reads `dev-artifacts/hv-vision-models/metrics.json` and, optionally,
+`dev-artifacts/hv-vision-splits/eval-manifest.csv` (joined on `capture_dir`) to
+backfill `event_id` / `selection_reason` for examples that lack them. It sorts
+the lowest-confidence examples into four categories:
+
+1. **`dangerous_false_hv`** — true label is benign but predicted
+   `page_level_hv_wall` (highest risk).
+2. **`missed_hv`** — true label is `page_level_hv_wall` but predicted something
+   else.
+3. **`low_confidence_correct_hv`** — correct HV prediction below
+   `--low-confidence-threshold` (default `0.80`).
+4. **`high_confidence_wrong`** — any wrong prediction above
+   `--high-confidence-threshold` (default `0.75`).
+
+The dangerous-false-HV and missed-HV headline counts come from the **confusion
+matrix** (whole eval set); the per-example lists detail the lowest-confidence
+subset. Writes `dev-artifacts/hv-vision-reports/error-report.json` and
+`error-report.md`, prints a summary (source, eval accuracy, label order, the
+headline counts, and a recommended capture/review focus), and exits.
+
+Flags: `--metrics`, `--eval-manifest`, `--out-dir`, `--low-confidence-threshold`,
+`--high-confidence-threshold`, `--hv-label`. **Stores no screenshot bytes**
+(only string `capture_dir` paths are referenced) and changes **no** runtime
+behavior — it only reads the metrics artifact and writes a report under the
+gitignored `dev-artifacts/`.
+
 ## Feature-group comparison
 
 The extractor (`hv_vision_features.py`) is grayscale-first but keeps color, and
@@ -269,6 +306,7 @@ summary. No rows are duplicated/oversampled.
 | `hv_vision_train.py` | Train + report + save artifacts |
 | `hv_vision_predict.py` | Single-frame prediction CLI |
 | `hv_vision_eval.py` | Re-score a saved model (optional) |
+| `hv_vision_error_report.py` | Focused error report over metrics.json: dangerous false HV predictions, missed walls, confident mistakes (offline/dev-only) |
 | `hv_vision_compare_features.py` | Compare grayscale/color/combined presets → one report |
 | `hv_vision_review_queue.py` | Build/update the shadow human review queue (offline/dev-only) |
 | `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |

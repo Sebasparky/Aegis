@@ -284,6 +284,7 @@ describe("evaluateVisualJudgment — flag on", () => {
       "model_top_3",
       "outcome",
       "runtime_action_taken_by_model",
+      "live_policy_shadow",
       "human_label",
       "review_status",
       "review_reason",
@@ -295,6 +296,25 @@ describe("evaluateVisualJudgment — flag on", () => {
     }
     // origin_host must be a bare hostname, never a URL
     expect(String(ev.origin_host)).not.toContain("/");
+
+    // The shadow block also carries ONLY safe scalar/enum keys.
+    const shadow = ev.live_policy_shadow as Record<string, unknown>;
+    const allowedShadow = new Set([
+      "shadow_only",
+      "live_policy_enabled",
+      "domain_allowed",
+      "policy_decision",
+      "policy_action",
+      "should_suppress_heuristic_stop",
+      "live_policy_runtime_action_taken",
+      "hv_action_threshold",
+      "benign_suppression_threshold",
+      "policy_reason",
+    ]);
+    for (const k of Object.keys(shadow)) expect(allowedShadow.has(k)).toBe(true);
+    for (const forbidden of ["url", "page_url", "selector", "x", "y", "base64", "png", "cdp_url", "raw_text", "origin_host"]) {
+      expect(shadow[forbidden]).toBeUndefined();
+    }
   });
 
   it("no frame captured (cdpUrl null) → uncertain, frame_path null, still queued", async () => {
@@ -306,5 +326,95 @@ describe("evaluateVisualJudgment — flag on", () => {
     expect(out.suppress).toBe(false);
     expect(out.outcome).toBe("uncertain");
     expect(readQueue(queue)[0].frame_path).toBeNull();
+  });
+
+  // ── Live-policy SHADOW telemetry (computed, never acted on this slice) ──────
+  describe("live-policy shadow", () => {
+    type Shadow = {
+      shadow_only: boolean;
+      live_policy_enabled: boolean;
+      domain_allowed: boolean;
+      policy_decision: string;
+      policy_action: string;
+      should_suppress_heuristic_stop: boolean;
+      live_policy_runtime_action_taken: boolean;
+      hv_action_threshold: number;
+      benign_suppression_threshold: number;
+      policy_reason: string;
+    };
+
+    async function runWith(over: Partial<EvaluateVisualJudgmentSeams>, originHost = "h.example.com") {
+      const { seams, queue } = onSeams(over);
+      const out = await evaluateVisualJudgment(
+        { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost },
+        seams,
+      );
+      const ev = readQueue(queue)[0];
+      return { out, ev, shadow: ev.live_policy_shadow as unknown as Shadow };
+    }
+
+    it("high-confidence benign → shadow visual_benign_suppression_candidate, but NO live-policy runtime action", async () => {
+      // 0.97 ≥ the 0.95 live benign-suppression threshold ⇒ suppression CANDIDATE in shadow.
+      const { out, ev, shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
+      expect(shadow.policy_decision).toBe("visual_benign_suppression_candidate");
+      // Shadow never acts: live policy disabled this slice.
+      expect(shadow.should_suppress_heuristic_stop).toBe(false);
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      // The REAL (existing) behavior is unchanged and still driven solely by decideOutcome:
+      // benign ≥ 0.80 & not dry-run ⇒ the existing path suppresses and sets the top-level flag.
+      expect(out.suppress).toBe(true);
+      expect(ev.runtime_action_taken_by_model).toBe(true);
+    });
+
+    it("high-confidence page_level_hv_wall → shadow visual_hv_confirmed, no suppression", async () => {
+      const { out, shadow } = await runWith({ callSidecar: async () => mkResult(HV_WALL_LABEL, 0.95) });
+      expect(shadow.policy_decision).toBe("visual_hv_confirmed");
+      expect(shadow.should_suppress_heuristic_stop).toBe(false);
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      expect(out.suppress).toBe(false);
+    });
+
+    it("low-confidence page_level_hv_wall → shadow visual_low_confidence_hv, no suppression", async () => {
+      const { out, shadow } = await runWith({ callSidecar: async () => mkResult(HV_WALL_LABEL, 0.7) });
+      expect(shadow.policy_decision).toBe("visual_low_confidence_hv");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      expect(out.suppress).toBe(false);
+    });
+
+    it("sidecar/model unavailable → shadow visual_runtime_no_action, fail-safe to heuristic", async () => {
+      const { out, shadow } = await runWith({ callSidecar: async () => null });
+      expect(shadow.policy_decision).toBe("visual_runtime_no_action");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+      // Existing heuristic behavior preserved.
+      expect(out.suppress).toBe(false);
+      expect(out.outcome).toBe("uncertain");
+    });
+
+    it("DRY-RUN benign: existing path does not suppress; shadow still records the decision, no live action", async () => {
+      process.env[DRY] = "true";
+      const { out, ev, shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
+      // Existing dry-run behavior unchanged: no suppression.
+      expect(out.suppress).toBe(false);
+      expect(ev.runtime_action_taken_by_model).toBe(false);
+      // Shadow still surfaces the meaningful decision but takes no live action.
+      expect(shadow.policy_decision).toBe("visual_benign_suppression_candidate");
+      expect(shadow.live_policy_runtime_action_taken).toBe(false);
+    });
+
+    it("shadow block carries the full safe field set with the slice's literal gate values", async () => {
+      const { shadow } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
+      expect(shadow.shadow_only).toBe(true);
+      expect(shadow.live_policy_enabled).toBe(false);
+      expect(shadow.domain_allowed).toBe(false);
+      expect(shadow.policy_action).toBe("dry_run_only");
+      expect(shadow.hv_action_threshold).toBe(0.85);
+      expect(shadow.benign_suppression_threshold).toBe(0.95);
+      expect(typeof shadow.policy_reason).toBe("string");
+    });
+
+    it("evaluateVisualJudgment return shape is unchanged (no new top-level return keys)", async () => {
+      const { out } = await runWith({ callSidecar: async () => mkResult("cookie_banner", 0.97) });
+      expect(Object.keys(out).sort()).toEqual(["outcome", "ran", "result", "suppress"]);
+    });
   });
 });

@@ -38,6 +38,8 @@ import path from "node:path";
 
 import { resolveSnapshotCdpTarget } from "../cdpTargetSelection.js";
 import { captureRedactedScreenshot } from "../screenshotRedaction.js";
+import { DEFAULT_BENIGN_SUPPRESSION_THRESHOLD, decideVisualLivePolicy } from "./livePolicy.js";
+import type { VisualLivePolicyAction, VisualLivePolicyDecisionLabel } from "./livePolicy.js";
 import type {
   VisualJudgmentActivationReason,
   VisualJudgmentLabelScore,
@@ -279,6 +281,33 @@ function dateDir(d: Date): string {
 
 // ── Review queue (append-only JSONL; safe metadata only) ─────────────────────
 
+/**
+ * Shadow-only record of what the live policy (`decideVisualLivePolicy`) WOULD decide,
+ * computed alongside the live `decideOutcome` for offline review. NOTHING here affects
+ * runtime behavior in this slice: `live_policy_enabled` is a literal `false`, so the
+ * policy fn returns `dry_run_only` with no suppression. It exists purely so the review
+ * queue carries the meaningful policy decision before live suppression is ever enabled.
+ * Safe scalars/enums/fixed reason strings only — no URL/path/selector/coordinate/text.
+ */
+export interface VisualLivePolicyShadowTelemetry {
+  /** Literal marker: this block records what the live policy WOULD do; nothing was acted on. */
+  shadow_only: true;
+  /** Live-policy flag state for this slice — literal false (ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY not read). */
+  live_policy_enabled: false;
+  /** Allowlist gate for this slice — literal false (shadow only). */
+  domain_allowed: false;
+  policy_decision: VisualLivePolicyDecisionLabel;
+  policy_action: VisualLivePolicyAction;
+  /** Always false this slice — the policy fn cannot suppress while live_policy_enabled is false. */
+  should_suppress_heuristic_stop: boolean;
+  /** Always false this slice — no model-driven runtime action is taken in shadow mode. */
+  live_policy_runtime_action_taken: boolean;
+  hv_action_threshold: number;
+  benign_suppression_threshold: number;
+  /** Fixed English reason from the pure policy fn — no PII. */
+  policy_reason: string;
+}
+
 export interface VisualJudgmentReviewEvent {
   schema_version: "hv-vision-runtime-judgment/v0";
   event_id: string;
@@ -299,6 +328,8 @@ export interface VisualJudgmentReviewEvent {
   model_top_3: VisualJudgmentLabelScore[];
   outcome: VisualJudgmentOutcome;
   runtime_action_taken_by_model: boolean;
+  /** Shadow-only live-policy decision (computed, never acted on). See type docs. */
+  live_policy_shadow: VisualLivePolicyShadowTelemetry;
   /** Always null at capture — human label slot for offline review. */
   human_label: null;
   review_status: "pending";
@@ -428,8 +459,31 @@ export async function evaluateVisualJudgment(
     result = null;
   }
 
-  // 4. Decide.
+  // 4. Decide. `decision.suppress` is the ONLY source of the existing runtime behavior.
   const decision = decideOutcome(result, dryRun);
+
+  // 4b. SHADOW ONLY: compute what the live policy WOULD decide. `live_policy_enabled:false`
+  //     ⇒ the pure fn returns `dry_run_only` with no suppression and
+  //     `runtime_action_taken_by_model:false`, yet still surfaces the meaningful decision
+  //     label for review. This NEVER influences `decision`/`suppress`, HTTP status, or the
+  //     HUMAN_VERIFICATION_REQUIRED path. ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY is a
+  //     FUTURE/disabled flag — intentionally NOT read here.
+  const livePolicy = decideVisualLivePolicy({
+    heuristic_hv_stop: true,
+    heuristic_label: args.triggerBasis ?? null,
+    trigger_basis: args.triggerBasis ?? null,
+    model_predicted_label: result?.predictedLabel ?? null,
+    model_confidence: result?.confidence ?? null,
+    model_top_3: result?.topLabels ?? [],
+    model_available: result !== null,
+    visual_judgment_enabled: true, // already inside the enabled flow
+    live_policy_enabled: false, // shadow-only this slice
+    dry_run: dryRun,
+    domain_allowed: false, // shadow-only this slice
+    hv_action_threshold: getVisualJudgmentHvThreshold(), // existing HV threshold, default 0.85
+    benign_suppression_threshold: DEFAULT_BENIGN_SUPPRESSION_THRESHOLD, // 0.95 live-shadow (NOT the 0.80 dry-run benign threshold)
+    origin_host: args.originHost,
+  });
 
   // 5. ALWAYS append a safe review event (including suppressions and unavailability).
   appendVisualJudgmentReviewEvent({
@@ -446,6 +500,18 @@ export async function evaluateVisualJudgment(
     model_top_3: result?.topLabels ?? [],
     outcome: decision.outcome,
     runtime_action_taken_by_model: decision.suppress,
+    live_policy_shadow: {
+      shadow_only: true,
+      live_policy_enabled: false,
+      domain_allowed: false,
+      policy_decision: livePolicy.policy_decision,
+      policy_action: livePolicy.action,
+      should_suppress_heuristic_stop: livePolicy.should_suppress_heuristic_stop,
+      live_policy_runtime_action_taken: livePolicy.runtime_action_taken_by_model,
+      hv_action_threshold: livePolicy.hv_action_threshold,
+      benign_suppression_threshold: livePolicy.benign_suppression_threshold,
+      policy_reason: livePolicy.reason,
+    },
     human_label: null,
     review_status: "pending",
     review_reason: decision.review_reason,
@@ -472,6 +538,8 @@ export async function evaluateVisualJudgment(
     outcome: decision.outcome,
     dry_run: dryRun,
     runtime_behavior_changed: decision.suppress,
+    live_policy_decision: livePolicy.policy_decision,
+    live_policy_runtime_action_taken: livePolicy.runtime_action_taken_by_model,
   });
 
   return { ran: true, suppress: decision.suppress, outcome: decision.outcome, result };

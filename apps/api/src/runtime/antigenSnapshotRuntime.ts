@@ -2039,6 +2039,7 @@ export interface AmbiguousVisualObstructionSignals {
 
 export function classifyAmbiguousVisualObstruction(
   s: AmbiguousVisualObstructionSignals | null | undefined,
+  opts: { requireOpaqueBoundary?: boolean } = {},
 ): boolean {
   if (!s || typeof s !== "object") return false;
   const denial = s.denial_text_seen === true;
@@ -2056,6 +2057,16 @@ export function classifyAmbiguousVisualObstruction(
   // overlay / pointer interceptor only ever rides ALONG with a scrim/iframe shape and
   // never mints on its own. (`top_layer_dialog_seen` stays diagnostic-only: a `:modal`
   // is frequently a legit product modal and must not mint.)
+  //
+  // `requireOpaqueBoundary` (set by the action no-progress backstop) drops the weak
+  // `(scrim && stale)` term so a stuck action over a mere dimmer/backdrop — a
+  // newsletter / cookie / promo / sign-in modal — can NEVER mint a human-verification
+  // VGC. Only genuine opaque-boundary / denial evidence remains: a denial wall, or an
+  // inaccessible cross-origin challenge frame (alone with the near-empty shape, or
+  // corroborated by a stuck action). A `viewport_scrim` is NOT an opaque boundary.
+  if (opts.requireOpaqueBoundary === true) {
+    return denial || (nearZero && iframe) || (iframe && stale);
+  }
   return (
     denial ||
     (nearZero && iframe) ||
@@ -2902,6 +2913,7 @@ export interface HumanVerificationDebug {
     | "element_count_too_high_and_no_hint"
     | "probe_returned_null"
     | "classifier_false"
+    | "model_benign_not_suppressed"
     | "helper_failed"
     | "fired";
   ambiguous_element_count?: number;

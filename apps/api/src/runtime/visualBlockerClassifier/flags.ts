@@ -57,3 +57,31 @@ export function isVisionCaptureAndSkipEnabled(): boolean {
 export function isManualVisualReviewCaptureEnabled(): boolean {
   return process.env.ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE === "true";
 }
+
+/**
+ * `ANTIGEN_HV_PROACTIVE_SURFACE` enables PROACTIVE visual judgment on a visibly
+ * dominant centered surface (a centered modal backed by a viewport scrim OR, after the
+ * no-scrim broadening, a centered fixed-overlay surface with no scrim) — BEFORE DOM
+ * phrase/affordance detection or a failed action proves it is a human-verification wall.
+ * It is the fix for the live Bath & Body Works "Press & Hold" gap where the snapshot
+ * returned normal actionable refs (and an action ran behind the wall) because
+ * `no_hv_phrase` left `screenHv.wall` false (and, in the no-scrim case, the scrim-only
+ * gate stayed closed) so the model was never consulted.
+ *
+ * When on (and `ANTIGEN_VISUAL_GESTURE_CAPSULE` on, with a live CDP session), the
+ * snapshot path and the browser-click/type/set-value/scroll preflight run the SAME
+ * visual classifier the no-progress backstop uses on a dominant centered surface
+ * (scrim-backed or no-scrim fixed-overlay). A confident HV verdict mints + fails closed
+ * (409); a confident benign verdict proceeds; an UNCERTAIN verdict over a dominant
+ * surface returns a recoverable non-actionable snapshot state (200, refs withheld) and
+ * HARD-BLOCKS actions (`ACTION_BLOCKED_DOMINANT_SURFACE` 409) without minting (a dominant
+ * surface alone never mints — the `requireOpaqueBoundary` authority is unchanged).
+ *
+ * Default off ⇒ byte-identical: no new trigger, no CDP probe, no model call, no new
+ * response field, no new telemetry, no changed status code. Behavioral effects keyed
+ * on a model verdict additionally require `ANTIGEN_VISUAL_JUDGMENT_ENABLED` (a
+ * disabled model never mints or blocks).
+ */
+export function isHvProactiveSurfaceEnabled(): boolean {
+  return process.env.ANTIGEN_HV_PROACTIVE_SURFACE === "true";
+}

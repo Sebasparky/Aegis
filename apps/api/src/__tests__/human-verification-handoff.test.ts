@@ -361,6 +361,19 @@ describe("safe fields only", () => {
     expect(a).toBeDefined();
     expect(b).toBeUndefined();
   });
+
+  it("release_ready is non-terminal: attention + wait stay TRUE (derived, not caller-supplied)", () => {
+    const u = publishHvHandoffUpdate({
+      browser_session_id: SESSION,
+      source: "visual_gesture_capsule",
+      phase: "release_ready",
+    })!;
+    expect(u.phase).toBe("release_ready");
+    expect(u.requires_user_attention).toBe(true);
+    expect(u.agent_should_wait).toBe(true);
+    assertNoUnsafeFields(u);
+    expect(u.raw_surface_revealed_to_agent).toBe(false);
+  });
 });
 
 // ─── 10. endpoint shape + lazy expiry ────────────────────────────────────────

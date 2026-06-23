@@ -39,6 +39,7 @@ import {
   getVisualGestureCapsuleScreenshotFrame,
   isTerminalVisualGestureStatus,
   markGestureCapsuleCleared,
+  markGestureAttemptRejected,
   mapNormalizedImagePointToViewport,
 } from "./visualGestureCapsule.js";
 import {
@@ -67,12 +68,20 @@ import { renderVgcHoldOverlay } from "./nativePointerRuntime.js";
 import {
   classifyHoldPresenceViaModel,
   type VgcHoldClassifierSeams,
+  type VgcHoldModelVerdict,
 } from "./visualGestureCapsuleHoldClassifier.js";
 import {
   publishHvHandoffUpdate,
   type HvHandoffPhase,
   type HvHandoffPresenceSource,
 } from "./humanVerificationHandoff.js";
+import {
+  isVisualHvHandoffEnabled,
+  startVisualHandoffMonitor,
+  registerVgcHoldReleaseHook,
+  registerVgcHoldActiveProbe,
+  registerVgcHoldAnchorProbe,
+} from "./visualHandoffMonitor.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -231,6 +240,27 @@ export function hasLiveVgcHoldSession(capsuleId: string): boolean {
 }
 
 /**
+ * Resolve the live hold's anchor for the release-ready crop seam: the user's mapped
+ * press point (CSS viewport px) plus the capture viewport, and the coarse `point_bucket`
+ * (the ONLY part safe to log). Returns undefined when no live/unreleased hold exists or
+ * the capture frame's viewport is unavailable. The raw point lives only on the session
+ * and is consumed internally to crop — it never appears in any API response or log.
+ */
+export function getVgcHoldAnchor(
+  capsuleId: string,
+): { point: { x: number; y: number }; viewport: { vw: number; vh: number }; point_bucket: string } | undefined {
+  const hold = vgcHoldSessions.get(capsuleId);
+  if (!hold || hold.released) return undefined;
+  const frame = getVisualGestureCapsuleScreenshotFrame(capsuleId);
+  if (!frame || !(frame.viewport_css_width > 0) || !(frame.viewport_css_height > 0)) return undefined;
+  return {
+    point: { x: hold.point.x, y: hold.point.y },
+    viewport: { vw: frame.viewport_css_width, vh: frame.viewport_css_height },
+    point_bucket: hold.target_point_bucket,
+  };
+}
+
+/**
  * Idempotent, AWAITED release of the browser mouse. Uses client.call so the
  * mouseReleased ack flushes the input pipeline before the connection is torn
  * down — never leaves the button stuck down (the constraint this enforces). The
@@ -267,6 +297,35 @@ function disposeHold(capsuleId: string): void {
     /* best-effort */
   }
 }
+
+/**
+ * Release + dispose any live press-hold for a capsule. The visual handoff monitor
+ * (the model-driven completion authority) invokes this via a registered hook the
+ * instant it confirms a stable visual clear, so the browser mouse is never left
+ * down waiting for the next heartbeat / fail-closed timer. Best-effort, awaited
+ * internally but fire-and-forget from the monitor's perspective.
+ */
+export function forceReleaseActiveHold(capsuleId: string): void {
+  const hold = vgcHoldSessions.get(capsuleId);
+  if (!hold || hold.released) {
+    disposeHold(capsuleId);
+    return;
+  }
+  hold.cleared = true;
+  void releaseHold(hold, "cleared").finally(() => disposeHold(capsuleId));
+}
+
+// Register the release hook so the monitor can release a live hold on completion
+// WITHOUT importing this module (no hold ⇄ monitor import cycle).
+registerVgcHoldReleaseHook(forceReleaseActiveHold);
+
+// Register the active-hold predicate so the monitor's release-ready ("Release now")
+// detector runs ONLY while a live press is active — same seam pattern, no cycle.
+registerVgcHoldActiveProbe(hasLiveVgcHoldSession);
+
+// Register the hold-anchor resolver so the release-ready crop can center on the user's
+// actual press point (the strongest signal for where the control is) — same seam, no cycle.
+registerVgcHoldAnchorProbe(getVgcHoldAnchor);
 
 // ─── In-hold cleared detection (low-frequency) ───────────────────────────────
 
@@ -351,7 +410,7 @@ async function runInHoldProbe(hold: VgcHoldSession): Promise<void> {
 // ─── Public surface ──────────────────────────────────────────────────────────
 
 export type StartVgcHoldResult =
-  | { ok: true; hold_state: "holding" | "challenge_gone" }
+  | { ok: true; hold_state: "holding" | "challenge_gone" | "deferred_clear" }
   | {
       ok: false;
       reason:
@@ -456,16 +515,52 @@ export async function startVgcHoldSession(args: {
     };
   }
 
-  // 8. Presence probe — if the wall already cleared, NEVER credit presence that
-  //    didn't happen: mark cleared and return challenge_gone WITHOUT pressing.
-  const preProbe = await probeOnClient(client);
-  if (preProbe === "absent") {
-    client.close();
-    markGestureCapsuleCleared(args.capsuleId);
-    // Conservative authority confirmed the wall is already gone → `completed`.
-    publishHoldHandoff(args.capsuleId, "completed", { presence_source: "dom_probe" });
-    logHvDebug({ scope: "vgc_hold", hold_event: "challenge_gone_at_start" });
-    return { ok: true, hold_state: "challenge_gone" };
+  // 8. Pre-press gate. When the visual handoff flag is ON, the VISUAL MODEL gates
+  //    the press and the DOM `challenge_gone_at_start` instant-clear is bypassed:
+  //    a DOM "absent" is unreliable for an opaque/cross-origin wall and must never
+  //    complete a visual capsule by itself. The lifecycle monitor (running since
+  //    mint) is the sole completion authority.
+  //
+  //    - model confidently clear  → do NOT press the live site (avoid a stray
+  //      click on the underlying page); publish `looks_complete_checking` and let
+  //      the monitor confirm a STABLE clear before `completed`. Returns
+  //      `deferred_clear` (no press).
+  //    - model wall_present       → relay the user's press (status `still_active`).
+  //    - model uncertain/unavailable → proceed with the user's intended press
+  //      (uncertain ≠ clear; never complete from here), status `holding`.
+  const handoffActive = isVisualHvHandoffEnabled();
+  let pressPhase: HvHandoffPhase = "holding";
+  if (handoffActive) {
+    const gate = await classifyModel({ cdpUrl: args.cdpUrl });
+    const gateModel = {
+      presence_source: "model" as HvHandoffPresenceSource,
+      ...(gate.model_label ? { model_label: gate.model_label } : {}),
+      ...(gate.model_confidence !== undefined ? { model_confidence: gate.model_confidence } : {}),
+    };
+    if (gate.available && gate.verdict === "looks_clear") {
+      // Confidently clear — do not press. The monitor completes on a STABLE clear.
+      client.close();
+      startVisualHandoffMonitor({
+        capsuleId: args.capsuleId,
+        cdpUrl: args.cdpUrl,
+        browserSessionId: capsule.browser_session_id,
+      });
+      publishHoldHandoff(args.capsuleId, "looks_complete_checking", gateModel);
+      logHvDebug({ scope: "vgc_hold", hold_event: "model_gate_deferred_clear" });
+      return { ok: true, hold_state: "deferred_clear" };
+    }
+    pressPhase = gate.available && gate.verdict === "wall_present" ? "still_active" : "holding";
+  } else {
+    // Flag OFF — legacy DOM pre-probe: if the wall already cleared, mark cleared
+    // and return challenge_gone WITHOUT pressing (byte-identical to today).
+    const preProbe = await probeOnClient(client);
+    if (preProbe === "absent") {
+      client.close();
+      markGestureCapsuleCleared(args.capsuleId);
+      publishHoldHandoff(args.capsuleId, "completed", { presence_source: "dom_probe" });
+      logHvDebug({ scope: "vgc_hold", hold_event: "challenge_gone_at_start" });
+      return { ok: true, hold_state: "challenge_gone" };
+    }
   }
 
   // 9. Map the normalized point to CSS viewport coords (server-only geometry).
@@ -529,11 +624,22 @@ export async function startVgcHoldSession(args: {
     }, VGC_HOLD_MAX_DURATION_MS),
   };
   vgcHoldSessions.set(args.capsuleId, hold);
-  // Arm the first in-hold probe only AFTER the minimum hold has elapsed, so a
-  // too-short tap never triggers a clear and the cadence stays low-frequency.
-  hold.probeTimer = setTimeout(() => {
-    void runInHoldProbe(hold);
-  }, Math.max(HOLD_MIN_DURATION_MS, VGC_IN_HOLD_PROBE_INTERVAL_MS));
+  if (handoffActive) {
+    // The lifecycle visual monitor (running since mint) owns polling + completion;
+    // the DOM in-hold probe is NOT armed (DOM is auxiliary/debug only). Ensure the
+    // monitor is running with this known-good cdp_url (idempotent).
+    startVisualHandoffMonitor({
+      capsuleId: args.capsuleId,
+      cdpUrl: args.cdpUrl,
+      browserSessionId: capsule.browser_session_id,
+    });
+  } else {
+    // Flag OFF — arm the first in-hold DOM probe only AFTER the minimum hold has
+    // elapsed, so a too-short tap never triggers a clear and the cadence stays low.
+    hold.probeTimer = setTimeout(() => {
+      void runInHoldProbe(hold);
+    }, Math.max(HOLD_MIN_DURATION_MS, VGC_IN_HOLD_PROBE_INTERVAL_MS));
+  }
 
   logHvDebug({ scope: "vgc_hold", hold_event: "hold_started", target_point_bucket: targetBucket, screenshot_scale_bucket: scaleBucket });
 
@@ -543,9 +649,14 @@ export async function startVgcHoldSession(args: {
   // delay the press/release or alter hold timing. Fire-and-forget / fail-open.
   renderVgcHoldOverlay(client, point.x, point.y);
 
-  // The live press is now mirrored into the browser — publish the `holding`
-  // handoff status (safe-fields-only, best-effort).
-  publishHoldHandoff(args.capsuleId, "holding", { presence_source: "dom_probe" });
+  // The live press is now mirrored into the browser — publish the handoff status.
+  // Flag ON: `still_active`/`holding` from the model gate (presence_source already
+  // set on pressPhase's model). Flag OFF: legacy `holding` (dom_probe). Safe-only.
+  publishHoldHandoff(
+    args.capsuleId,
+    handoffActive ? pressPhase : "holding",
+    { presence_source: handoffActive ? "model" : "dom_probe" },
+  );
 
   return { ok: true, hold_state: "holding" };
 }
@@ -603,6 +714,7 @@ export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldRe
   const cdpUrl = hold.cdp_url;
   const targetId = hold.target_id;
   const recheck = hold.recheck;
+  const classifyModel = hold.classifyModel;
   const heldBucket = holdDurationBucket(heldMs);
 
   // The held client is single-purpose; recheck opens its own connection.
@@ -618,6 +730,35 @@ export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldRe
   if (heldMs < HOLD_MIN_DURATION_MS) {
     logHvDebug({ scope: "vgc_hold", hold_event: "hold_ended", hold_duration_bucket: heldBucket, end_outcome: "too_short" });
     return { ok: true, hold_state: "too_short" };
+  }
+
+  // Visual handoff flag ON: a SINGLE post-release VISUAL model check, for guided
+  // attempt-ladder accounting ONLY — it NEVER completes (the lifecycle monitor is
+  // the sole completion authority, on a stable visual clear). DOM is never the
+  // completer here.
+  //   - model confidently clear → no burn; report `unknown` and let the monitor
+  //     confirm a STABLE clear and publish `completed`.
+  //   - model wall_present      → burn one attempt (steps 5s→10s→15s→manual), `still_present`.
+  //   - uncertain/unavailable   → burn one attempt (fail-closed step-up), `inconclusive`.
+  if (isVisualHvHandoffEnabled()) {
+    let verdict: VgcHoldModelVerdict = "uncertain";
+    try {
+      const r = await classifyModel({ cdpUrl });
+      verdict = r.available ? r.verdict : "uncertain";
+    } catch {
+      verdict = "uncertain";
+    }
+    if (verdict === "looks_clear") {
+      logHvDebug({ scope: "vgc_hold", hold_event: "hold_ended", hold_duration_bucket: heldBucket, end_outcome: "model_clear_pending" });
+      return { ok: true, hold_state: "unknown" };
+    }
+    const burned = markGestureAttemptRejected(capsuleId);
+    publishHoldHandoff(capsuleId, "still_active", { presence_source: "model" });
+    const endOutcome = verdict === "wall_present" ? "still_present" : "inconclusive";
+    logHvDebug({ scope: "vgc_hold", hold_event: "hold_ended", hold_duration_bucket: heldBucket, end_outcome: endOutcome });
+    // A failed state update still never completes — report unknown (no burn credited).
+    if (!burned.ok) return { ok: true, hold_state: "unknown" };
+    return { ok: true, hold_state: endOutcome };
   }
 
   // Definitive post-release recheck. The post-release SETTLE, the structural-HV

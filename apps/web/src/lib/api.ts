@@ -1550,6 +1550,7 @@ export type HvHandoffPhase =
   | "user_interaction_required"
   | "holding"
   | "still_active"
+  | "release_ready"
   | "looks_complete_checking"
   | "completed"
   | "resumed"

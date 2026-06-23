@@ -242,6 +242,14 @@ Before making any changes:
 - Sensitive snapshot fields expose ONLY `present`/`length`/flags — never `text`, `selected_value`, `selected_text`, or `validation_message`. Redaction is enforced in three layers: the page IIFE, `sanitizeValueMeta` (TS), and `toExternalAntigenSnapshotElement` (external view). `classifySensitivity` reuses the `agentSafeObservation.ts` patterns and reads property OR attribute.
 - Do not rebuild: Exact Form-Fill v1 (snapshot value visibility + browser_set_value/browser_clear + setFieldValueKnownBox).
 
+**Antigen QA tool-surface invariants (Claude Code must route browser interaction through Antigen only):**
+
+- Claude Code QA for Antigen must NOT expose raw Playwright/browser tools. All browser interaction must route through Antigen tools only.
+- The `antigen-browser` MCP server (`examples/antigen-browser-adapter.mjs`) is the ONLY browser surface — there is no standalone `playwright`/`browser` MCP server. The adapter wraps `@playwright/mcp` but must never expose it directly to the agent.
+- The advertised QA surface is exactly the Antigen-mediated set: `antigen_snapshot`, `antigen_capture_visual_review_candidate`, `browser_navigate`, `browser_click`, `browser_scroll_to_ref`, `browser_type`, `browser_fill`, `browser_set_value`, `browser_clear`, `browser_take_screenshot`. `ANTIGEN_OWNED_TOOL_NAMES` (derived from `STATIC_BROWSER_TOOLS`) is the single source of truth; `tools/list` advertises exactly these.
+- Raw passthrough tools (`browser_evaluate`, `browser_run_code_unsafe`, `browser_fill_form`, `browser_select_option`, `browser_snapshot`, `browser_network_request(s)`, `browser_handle_dialog`, `browser_file_upload`, `browser_tabs`, `browser_close`, `browser_navigate_back`, `browser_press_key`, `browser_hover`, `browser_drag`, `browser_drop`, `browser_wait_for`, `browser_resize`, `browser_console_messages`) must NOT be advertised and must NOT reach the `@playwright/mcp` child. The adapter's terminal catch-all fails closed with `ANTIGEN_TOOL_REQUIRED` for any non-owned `browser_*` call. `.claude/settings.json` additionally denies them as a second config-layer guard.
+- Do not re-add raw browser tools to `STATIC_BROWSER_TOOLS`, the `.claude/settings.json` allow list, or any `.mcp.json`/MCP config.
+
 **Authenticated session boundary invariants:**
 
 - Authenticated session boundary is **experimental/secondary** — primary login path for agent-controlled browsers is `request_secret_field_injection`

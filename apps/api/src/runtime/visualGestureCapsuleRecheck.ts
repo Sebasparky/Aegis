@@ -43,6 +43,7 @@ import {
   publishHvHandoffUpdate,
   type HvHandoffPhase,
 } from "./humanVerificationHandoff.js";
+import { isVisualHvHandoffEnabled } from "./visualHandoffMonitor.js";
 
 /**
  * Publish a safe handoff status from the recheck (the conservative completion
@@ -543,10 +544,25 @@ export async function recheckVisualGestureCapsule(args: {
   });
 
   if (decision === "absent") {
+    // VISUAL HANDOFF FLAG ON: the DOM is auxiliary/debug only — a DOM "absent"
+    // (unreliable for an opaque/cross-origin wall) must NEVER complete a visual
+    // capsule by itself. Demote to `unknown` (no clear, no attempt burn): the
+    // lifecycle visual monitor is the sole completion authority, on a STABLE
+    // visual clear. The DOM `completed` publish path stays for flag-OFF only.
+    if (isVisualHvHandoffEnabled()) {
+      logHvDebug({ scope: "vgc_recheck", recheck_outcome: "dom_absent_demoted_visual_handoff" });
+      return {
+        ok: true,
+        capsule_id: args.capsuleId,
+        outcome: "unknown",
+        status: capsule.status,
+        attempt_count: capsule.attempt_count,
+      };
+    }
     const cleared = markGestureCapsuleCleared(args.capsuleId);
     if (!cleared.ok || !cleared.capsule) return { ok: false, reason: "state_update_failed" };
-    // Conservative authority: the ONLY place (besides the in-hold DOM probe) that
-    // publishes `completed` / lets the agent resume.
+    // Conservative authority (flag OFF): the ONLY place (besides the in-hold DOM
+    // probe) that publishes `completed` / lets the agent resume.
     publishRecheckHandoff(args.capsuleId, "completed");
     return {
       ok: true,

@@ -76,6 +76,17 @@ vi.mock("../runtime/visualGestureCapsuleCapture.js", async () => {
   return { ...actual, captureVisualGestureCapsuleScreenshotFrame: vgcCaptureMock };
 });
 
+// evaluateVisualJudgment is the single seam that injects the model verdict on the
+// no-progress backstop. Defaulted to the flag-off shape in beforeEach so every
+// existing test runs the byte-identical (model-unavailable) uncertain branch.
+const evalVisualJudgmentMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/visualBlockerClassifier/visualJudgment.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../runtime/visualBlockerClassifier/visualJudgment.js")
+  >("../runtime/visualBlockerClassifier/visualJudgment.js");
+  return { ...actual, evaluateVisualJudgment: evalVisualJudgmentMock };
+});
+
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
@@ -307,6 +318,8 @@ beforeEach(() => {
   ambiguousProbeMock.mockResolvedValue(null);
   clickKnownBoxMock.mockResolvedValue({ success: false, error: "ANTIGEN_REF_STALE" });
   bundleMock.mockResolvedValue({ candidates: [], hvWallHint: false });
+  // Default: model unavailable (flag-off shape) → DOM geometry stays the authority.
+  evalVisualJudgmentMock.mockResolvedValue({ ran: false, suppress: false, hvConfirmed: false });
 });
 
 afterEach(() => {
@@ -422,6 +435,57 @@ describe("classifyAmbiguousVisualObstruction — pure verdict", () => {
         repeated_stale: true,
       }),
     ).toBe(false);
+  });
+
+  // ── requireOpaqueBoundary (the action no-progress backstop policy) ──
+  // Drops the weak `(scrim && stale)` fire path so a stuck action over a mere dimmer
+  // (newsletter / cookie / promo / sign-in modal) can NEVER mint. Only genuine
+  // opaque-boundary / denial evidence remains.
+  it("requireOpaqueBoundary: scrim + repeated stale does NOT fire (the core invariant)", () => {
+    expect(
+      classifyAmbiguousVisualObstruction(
+        { viewport_scrim_seen: true, repeated_stale: true },
+        { requireOpaqueBoundary: true },
+      ),
+    ).toBe(false);
+    // …and scrim under a centered overlay (the newsletter/B&BW-hero shape) also stays off.
+    expect(
+      classifyAmbiguousVisualObstruction(
+        {
+          large_centered_overlay_seen: true,
+          viewport_scrim_seen: true,
+          repeated_stale: true,
+        },
+        { requireOpaqueBoundary: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("requireOpaqueBoundary: denial / nearZero+iframe / iframe+stale STILL fire (strong opaque boundary)", () => {
+    expect(
+      classifyAmbiguousVisualObstruction({ denial_text_seen: true }, { requireOpaqueBoundary: true }),
+    ).toBe(true);
+    expect(
+      classifyAmbiguousVisualObstruction(
+        { near_zero_interactive: true, visible_inaccessible_iframe_seen: true },
+        { requireOpaqueBoundary: true },
+      ),
+    ).toBe(true);
+    expect(
+      classifyAmbiguousVisualObstruction(
+        { visible_inaccessible_iframe_seen: true, repeated_stale: true },
+        { requireOpaqueBoundary: true },
+      ),
+    ).toBe(true);
+  });
+
+  it("default (no opts) still fires on scrim + stale — the pure default rule set is unchanged", () => {
+    // NOTE: the SNAPSHOT endpoint now opts into requireOpaqueBoundary (so scrim + stale no
+    // longer mints there); this asserts only the pure-function default rule set is intact
+    // for any caller that does not require an opaque boundary.
+    expect(
+      classifyAmbiguousVisualObstruction({ viewport_scrim_seen: true, repeated_stale: true }),
+    ).toBe(true);
   });
 });
 
@@ -676,13 +740,15 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
-  it("(3) REALISTIC_CLICK_FAILED + large centered overlay WITH a dimmer/scrim (DOM-textless) + VGC ON mints a VGC (live B&BW shape)", async () => {
+  it("(3) CORE INVARIANT: REALISTIC_CLICK_FAILED + scrim + centered overlay (DOM-textless, no opaque boundary) does NOT mint a VGC", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
-    // Many refs still extractable — the modal text is NOT in the accessible DOM, so
-    // denial_text/iframe/near_zero are all false. The real B&BW press-and-hold wall is
-    // a centered overlay OVER A FULL-VIEWPORT DIMMER, so viewport_scrim_seen is the
-    // obstructive corroborator that distinguishes it from a benign marketing hero.
+    // A full-viewport dimmer under a centered overlay is exactly the shape a benign
+    // newsletter / cookie / promo / sign-in modal produces. A stuck action over a mere
+    // scrim is NOT an opaque boundary and must NEVER mint a human-verification VGC from
+    // the no-progress backstop (the visual classifier, when enabled, is the authority
+    // that promotes a real press-and-hold wall here). With visual judgment off, the
+    // backstop requires STRONG opaque-boundary evidence — scrim + stuck is not it.
     seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
     clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
     ambiguousProbeMock.mockResolvedValueOnce({
@@ -694,19 +760,13 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
       pointer_interceptor_seen: false,
       top_layer_dialog_seen: false,
     });
-    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
 
     const res = await clickStaleProductRef();
 
-    expect(res.statusCode).toBe(409);
-    const body = res.json();
-    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
-    expect(body.error.user_presence_required).toBe(true);
-    expect(body.error.purchase_authorized).toBe(false);
-    expect(body.error.visual_gesture_capsule.available).toBe(true);
-    expect(ambiguousProbeMock).toHaveBeenCalledTimes(1);
-    expect(hvWallProbeMock).toHaveBeenCalledTimes(1); // structural probe ran first and ruled out
-    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
   it("(3b) REALISTIC_CLICK_FAILED + benign marketing hero (large centered overlay, NO scrim/iframe/top-layer/broad-occlusion) does NOT mint a VGC", async () => {
@@ -764,9 +824,13 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
-  it("(4) viewport scrim alone (no overlay/iframe/denial) + click no-progress mints a VGC", async () => {
+  it("(4) CORE INVARIANT: viewport scrim alone (no overlay/iframe/denial) + click no-progress does NOT mint a VGC", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
+    // The reported live bug: a promo/email/newsletter banner paints a backdrop scrim,
+    // the action fails to progress, and the backstop used to mint a human-verification
+    // VGC from `(scrim && stale)` alone — with presence_source=none and no visual
+    // confirmation. No-progress / stuck / scrim alone must NEVER mint.
     seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
     clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
     ambiguousProbeMock.mockResolvedValueOnce({
@@ -778,14 +842,13 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
       pointer_interceptor_seen: false,
       top_layer_dialog_seen: false,
     });
-    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
 
     const res = await clickStaleProductRef();
 
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
-    expect(res.json().error.visual_gesture_capsule.available).toBe(true);
-    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
   it("(5) top-layer dialog ONLY (legit modal, no overlay/scrim/interceptor) does NOT mint a VGC", async () => {
@@ -813,15 +876,18 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
-  it("(6) geometry-fired 409 body leaks no bytes/coords/viewport/cdp/strategy/session keys", async () => {
+  it("(6) opaque-boundary-fired 409 body leaks no bytes/coords/viewport/cdp/strategy/session keys", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
     seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 })]);
     clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    // An inaccessible cross-origin iframe is STRONG opaque-boundary evidence, so this
+    // mints via `(iframe && stale)` even under requireOpaqueBoundary → a real 409 body
+    // to assert the no-leak contract on.
     ambiguousProbeMock.mockResolvedValueOnce({
       denial_text_seen: false,
       near_zero_interactive: false,
-      visible_inaccessible_iframe_seen: false,
+      visible_inaccessible_iframe_seen: true,
       large_centered_overlay_seen: true,
       viewport_scrim_seen: true,
       pointer_interceptor_seen: true,
@@ -830,6 +896,7 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
 
     const res = await clickStaleProductRef();
+    expect(res.statusCode).toBe(409);
     assertNoLeak(res.json());
   });
 
@@ -846,6 +913,91 @@ describe("ambiguous fallback — no-progress (non-stale) action backstop", () =>
     expect(hvWallProbeMock).not.toHaveBeenCalled();
     expect(ambiguousProbeMock).not.toHaveBeenCalled();
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+});
+
+// ── No-progress backstop with the visual classifier as the mint authority ─────
+//
+// The no-progress / stuck signal only ACTIVATES the classifier; the classifier
+// decides. Confident benign suppresses (no mint); confident page-level HV is
+// promoted to a mint even when DOM geometry is inconclusive.
+describe("ambiguous fallback — no-progress backstop, visual classifier authority", () => {
+  it("confident BENIGN verdict suppresses the mint even when scrim + stuck are present", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    // The newsletter/cookie/promo shape: scrim + centered overlay. The model is the
+    // authority and confidently calls it benign → never mint.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+    evalVisualJudgmentMock.mockResolvedValueOnce({
+      ran: true,
+      suppress: true,
+      hvConfirmed: false,
+      outcome: "confident_false_positive_or_benign",
+    });
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe("REALISTIC_CLICK_FAILED");
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("confident HV verdict PROMOTES a mint even when the DOM probe is inconclusive", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    seedSnapshot([candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 })]);
+    clickKnownBoxMock.mockResolvedValueOnce({ success: false, error: "REALISTIC_CLICK_FAILED" });
+    // Inconclusive DOM probe (classifyAmbiguousVisualObstruction would decline) — the
+    // mint is purely the model's authority (the B&BW opaque press-and-hold shape).
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: false,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: false,
+      top_layer_dialog_seen: false,
+    });
+    evalVisualJudgmentMock.mockResolvedValueOnce({
+      ran: true,
+      suppress: false,
+      hvConfirmed: true,
+      outcome: "confident_human_needed",
+      result: {
+        predictedLabel: "page_level_hv_wall",
+        confidence: 0.93,
+        topLabels: [{ label: "page_level_hv_wall", confidence: 0.93 }],
+        needsHumanReview: false,
+        advisoryOnly: true,
+        source: "model",
+      },
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await clickStaleProductRef();
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(body.error.visual_gesture_capsule.available).toBe(true);
+    expect(body.error.human_verification_attribution).toMatchObject({
+      source: "action_no_progress_visual_judgment_hv",
+      visual_judgment_coverage: "fresh_judgment_possible",
+      fresh_visual_judgment_event_expected: true,
+    });
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+    assertNoLeak(body);
   });
 });
 
@@ -1008,6 +1160,95 @@ describe("ambiguous fallback — snapshot endpoint", () => {
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
   });
 
+  // ── Model-authority rule on the snapshot ambiguous path ───────────────────────
+  it("(benign-snap) CONFIDENT-BENIGN model (outcome benign, suppress:false dry-run) suppresses the ambiguous fallback even with scrim + no-progress → 200, no capsule", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // A scrim shape that WOULD trip the legacy (scrim && stale) path — but the model is
+    // confidently benign, and even with the live suppression policy off (suppress:false)
+    // its benign outcome is authoritative: never mint, never fall through.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+    evalVisualJudgmentMock.mockResolvedValueOnce({
+      ran: true,
+      suppress: false,
+      hvConfirmed: false,
+      outcome: "confident_false_positive_or_benign",
+      result: {
+        predictedLabel: "cookie_banner",
+        confidence: 0.97,
+        topLabels: [{ label: "cookie_banner", confidence: 0.97 }],
+        needsHumanReview: false,
+        advisoryOnly: true,
+        source: "model",
+      },
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  it("(hv-snap) CONFIDENT-HV model PROMOTES a snapshot mint even when the DOM probe is inconclusive (no opaque boundary)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    // Inconclusive geometry (no denial, no iframe, no scrim) — only the model authority
+    // can mint here, which is the PerimeterX/HUMAN press-and-hold shape geometry misses.
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: false,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+    evalVisualJudgmentMock.mockResolvedValueOnce({
+      ran: true,
+      suppress: false,
+      hvConfirmed: true,
+      outcome: "confident_human_needed",
+      result: {
+        predictedLabel: "page_level_hv_wall",
+        confidence: 0.93,
+        topLabels: [{ label: "page_level_hv_wall", confidence: 0.93 }],
+        needsHumanReview: false,
+        advisoryOnly: true,
+        source: "model",
+      },
+    });
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(listActiveVisualGestureCapsules()).toHaveLength(1);
+    const dbg = res.json().error.hv_debug;
+    expect(dbg.reason).toBe("visual_judgment_promoted_hv");
+    expect(dbg.visual_judgment_promoted).toBe(true);
+  });
+
   // ── Structural page-level wall at snapshot time (the full-page denied fix) ─────
   it("(structural-snap) page-level wall at snapshot mints a VGC + fails closed with 409 (ambiguous probe not consulted)", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
@@ -1101,10 +1342,12 @@ describe("ambiguous fallback — snapshot endpoint", () => {
 // Detection behavior is unchanged — these assert ONLY the added telemetry and that
 // it is absent / byte-identical when the flag is off, with no raw leaks.
 describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
-  // A real obstruction shape: high-element page + a lingering no-progress marker
-  // (synthetic repeated_stale) + a dimmer/backdrop scrim. The telemetry must name it:
-  // ambiguous_fired, repeated_stale_source=no_progress_marker, geometry_strength=strong.
-  it("attributes a real scrim-backed ambiguous mint when the flag is on", async () => {
+  // CORE INVARIANT (the live-QA regression): high-element page + a lingering no-progress
+  // marker (synthetic repeated_stale) + a dimmer/backdrop scrim, with NO opaque boundary
+  // (no denial, no inaccessible iframe) and NO model promotion, must NOT mint. A no-progress
+  // marker / scrim is an activation/context signal only — never mint authority. The snapshot
+  // path now opts into requireOpaqueBoundary, so the weak (scrim && stale) path is dropped.
+  it("scrim + no-progress marker, no opaque boundary, no model promotion → 200, no capsule (the snapshot ambiguous_fired regression)", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     process.env.ANTIGEN_HV_DEBUG = "true";
     seedSession();
@@ -1113,12 +1356,41 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
       hvWallHint: false,
     });
-    // A full-viewport dimmer/backdrop over a preserved page — the obstruction marker
-    // that distinguishes a real wall from a benign hero. Fires via the scrim path.
+    // A full-viewport dimmer/backdrop over a preserved page — exactly the benign-modal /
+    // healthy-cart shape that used to false-positive via the scrim path. Now suppressed.
     ambiguousProbeMock.mockResolvedValueOnce({
       denial_text_seen: false,
       near_zero_interactive: false,
       visible_inaccessible_iframe_seen: false,
+      large_centered_overlay_seen: true,
+      viewport_scrim_seen: true,
+      pointer_interceptor_seen: true,
+      top_layer_dialog_seen: false,
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(200);
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  // The opaque-boundary fallback survives: a genuine inaccessible cross-origin challenge
+  // frame corroborated by a stalled action still mints (iframe && stale under
+  // requireOpaqueBoundary) and self-attributes as ambiguous_fired.
+  it("attributes an opaque-boundary (iframe + no-progress) ambiguous mint when the flag is on", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    recordActionNoProgress(SESSION_ID);
+    bundleMock.mockResolvedValueOnce({
+      candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
+      hvWallHint: false,
+    });
+    ambiguousProbeMock.mockResolvedValueOnce({
+      denial_text_seen: false,
+      near_zero_interactive: false,
+      visible_inaccessible_iframe_seen: true,
       large_centered_overlay_seen: true,
       viewport_scrim_seen: true,
       pointer_interceptor_seen: true,
@@ -1140,11 +1412,10 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       created_capsule: true,
       no_progress_signal: true,
       repeated_stale_source: "no_progress_marker",
-      geometry_strength: "strong",
-      viewport_scrim_seen: true,
-      denial_text_seen: false,
-      visible_inaccessible_iframe_seen: false,
+      visible_inaccessible_iframe_seen: true,
     });
+    // The retired conservative attribution must never appear.
+    expect(dbg).not.toHaveProperty("conservative_ambiguous_promoted");
     // Bucket, never a raw count.
     expect(dbg.element_count_bucket).toBe("4-20");
     expect(dbg).not.toHaveProperty("element_count");
@@ -1250,10 +1521,12 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
       candidates: [candidate(), candidate({ index: 1 }), candidate({ index: 2 }), candidate({ index: 3 }), candidate({ index: 4 })],
       hvWallHint: false,
     });
+    // Opaque-boundary shape (inaccessible iframe + no-progress) so the mint survives
+    // requireOpaqueBoundary and we can assert the 409 hv_debug body stays leak-free.
     ambiguousProbeMock.mockResolvedValueOnce({
       denial_text_seen: false,
       near_zero_interactive: false,
-      visible_inaccessible_iframe_seen: false,
+      visible_inaccessible_iframe_seen: true,
       large_centered_overlay_seen: true,
       viewport_scrim_seen: true,
       pointer_interceptor_seen: true,
@@ -1324,10 +1597,11 @@ describe("human_verification_attribution (always present, every source)", () => 
     assertNoLeak(res.json());
   });
 
-  it("ambiguous no-progress backstop (click) → source action_no_progress_ambiguous_backstop", async () => {
+  it("opaque-boundary no-progress backstop (click) → source action_no_progress_opaque_boundary_backstop", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     seedSession();
     seedSnapshot([candidate()]);
+    // Visual judgment off → uncertain branch → STRONG opaque-boundary (denial) mints.
     ambiguousProbeMock.mockResolvedValueOnce({
       denial_text_seen: true,
       near_zero_interactive: true,
@@ -1339,7 +1613,7 @@ describe("human_verification_attribution (always present, every source)", () => 
 
     expect(res.statusCode).toBe(409);
     expect(res.json().error.human_verification_attribution).toMatchObject({
-      source: "action_no_progress_ambiguous_backstop",
+      source: "action_no_progress_opaque_boundary_backstop",
       visual_judgment_coverage: "not_covered_action_backstop",
       fresh_visual_judgment_event_expected: false,
     });

@@ -440,6 +440,168 @@ export async function computeBlockerCropBox(params: {
   });
 }
 
+// Rect-only probe for a SMALLER, centered challenge-control candidate INSIDE a known
+// dominant surface — the release-ready crop fallback used only when no live hold anchor
+// exists. Kept as a SEPARATE expression from BLOCKER_CROP_PROBE_EXPR ON PURPOSE (that
+// one is shared with dataset capture and must stay behavior-identical). Raw JS string
+// IIFE (the Node tsconfig has no DOM lib). Receives the dominant box as numeric literals
+// `__DX/__DY/__DW/__DH` (substituted by the caller) so candidates can be scoped to that
+// surface. Returns NUMBERS ONLY — no text, selectors, src, or values ever leave the page.
+const INNER_CONTROL_PROBE_EXPR_TEMPLATE = `(function(){
+  try {
+    var vw = window.innerWidth||0, vh = window.innerHeight||0;
+    if(!(vw>0&&vh>0)) return { ok:false, count:0 };
+    var DX=__DX, DY=__DY, DW=__DW, DH=__DH;
+    function visRect(el){
+      var r=null; try{ r=el.getBoundingClientRect(); }catch(e){ return null; }
+      if(!r||!(r.width>0&&r.height>0)) return null;
+      var cs=null; try{ cs=window.getComputedStyle?window.getComputedStyle(el):null; }catch(e){ cs=null; }
+      if(cs){
+        if(cs.display==='none'||cs.visibility==='hidden'||cs.visibility==='collapse') return null;
+        if(String(cs.opacity)==='0') return null;
+      }
+      return r;
+    }
+    function onScreen(r){ return r.left<vw&&(r.left+r.width)>0&&r.top<vh&&(r.top+r.height)>0; }
+    function inDom(cx,cy){
+      // No dominant box → accept anything on-screen. Else require the candidate center
+      // to fall inside the dominant surface (with a small slack for sub-pixel rounding).
+      if(!(DW>0&&DH>0)) return true;
+      return cx>=DX-2&&cx<=DX+DW+2&&cy>=DY-2&&cy<=DY+DH+2;
+    }
+    // Likely press-and-hold controls: real interactive elements + a same-origin iframe
+    // (a common challenge host whose element rect IS visible even when its content is
+    // cross-origin) + a few class/aria hints. Generic + bounded; no site hardcode.
+    var sel = 'button,[role="button"],[role="slider"],canvas,input[type="button"],input[type="submit"],a[role="button"],iframe,[class*="press"],[class*="hold"],[class*="slider"],[class*="challenge"],[class*="captcha"],[class*="verify"],[aria-label]';
+    var nodes=document.querySelectorAll(sel);
+    var count=0, best=null, bestScore=Infinity;
+    var cxv=vw/2, cyv=vh/2;
+    for(var i=0;i<nodes.length&&i<600;i++){
+      var r=visRect(nodes[i]); if(!r||!onScreen(r)) continue;
+      var w=r.width, h=r.height, frac=(w*h)/(vw*vh);
+      // Compact control gate: not the scrim/modal itself, not pixel noise.
+      if(frac<0.0008||frac>=0.6) continue;
+      if(w<32||h<16) continue;
+      var ccx=r.left+w/2, ccy=r.top+h/2;
+      if(!inDom(ccx,ccy)) continue;
+      count++;
+      // Prefer compact + centered: smaller distance-to-center AND smaller area win.
+      var dist=Math.hypot((ccx-cxv)/vw,(ccy-cyv)/vh);
+      var score=dist+frac;
+      if(score<bestScore){ bestScore=score; best=r; }
+    }
+    if(!best) return { ok:false, count:count };
+    return { ok:true, x:best.left, y:best.top, w:best.width, h:best.height, vw:vw, vh:vh, count:count };
+  } catch(e){ return { ok:false, count:0 }; }
+})()`;
+
+/** Internal-only inner-control crop result. `best` geometry is NEVER logged/returned. */
+export interface InnerControlCropResult {
+  best: BlockerCropBox | null;
+  /** Coarse number of in-surface candidates considered (for bucketed telemetry only). */
+  candidate_count: number;
+}
+
+/**
+ * Locate a smaller, centered challenge-control candidate INSIDE the given dominant
+ * `within` box (release-ready fallback for an oversized dominant crop). Returns the best
+ * candidate's box + the live viewport, plus a candidate count, or `{ best:null, count:0 }`
+ * on ANY failure (transport, attach, no candidate, non-finite). Geometry stays internal:
+ * the box is consumed by the local crop and discarded; only the count buckets into a log.
+ * Fail-safe: never throws, never logs the box. Separate from `computeBlockerCropBox`.
+ */
+export async function computeInnerControlCropBox(params: {
+  browserWsUrl: string;
+  pageTargetId: string;
+  within: { x: number; y: number; w: number; h: number };
+}): Promise<InnerControlCropResult> {
+  const { browserWsUrl, pageTargetId, within } = params;
+  const numOrZero = (v: number): string => (Number.isFinite(v) ? String(v) : "0");
+  const expression = INNER_CONTROL_PROBE_EXPR_TEMPLATE.replace("__DX", numOrZero(within.x))
+    .replace("__DY", numOrZero(within.y))
+    .replace("__DW", numOrZero(within.w))
+    .replace("__DH", numOrZero(within.h));
+  return await new Promise<InnerControlCropResult>((resolve) => {
+    const ws = new WebSocket(browserWsUrl);
+    let msgId = 1;
+    let settled = false;
+    const pending = new Map<number, (r: Record<string, unknown> | undefined, e?: unknown) => void>();
+    const finish = (r: InnerControlCropResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      resolve(r);
+    };
+    const fail = () => finish({ best: null, candidate_count: 0 });
+    const timer = setTimeout(fail, 8_000);
+
+    const send = (
+      method: string,
+      p: Record<string, unknown> = {},
+      sid?: string,
+    ): Promise<Record<string, unknown> | undefined> =>
+      new Promise((res, rej) => {
+        const id = msgId++;
+        pending.set(id, (result, error) => (error ? rej(error) : res(result)));
+        const message: Record<string, unknown> = { id, method, params: p };
+        if (sid) message.sessionId = sid;
+        ws.send(JSON.stringify(message));
+      });
+
+    const run = async () => {
+      const attach = await send("Target.attachToTarget", { targetId: pageTargetId, flatten: true });
+      const sessionId = (attach?.sessionId as string) ?? null;
+      if (!sessionId) return fail();
+      const res = await send(
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+        sessionId,
+      );
+      const val = (res?.result as Record<string, unknown> | undefined)?.value as
+        | { ok?: boolean; x?: number; y?: number; w?: number; h?: number; vw?: number; vh?: number; count?: number }
+        | undefined;
+      const count = typeof val?.count === "number" && Number.isFinite(val.count) ? val.count : 0;
+      if (!val?.ok) return finish({ best: null, candidate_count: count });
+      const nums = [val.x, val.y, val.w, val.h, val.vw, val.vh];
+      if (nums.some((v) => typeof v !== "number" || !Number.isFinite(v))) {
+        return finish({ best: null, candidate_count: count });
+      }
+      return finish({
+        best: {
+          box: { x: val.x as number, y: val.y as number, w: val.w as number, h: val.h as number },
+          viewport: { vw: val.vw as number, vh: val.vh as number },
+        },
+        candidate_count: count,
+      });
+    };
+
+    ws.on("open", () => {
+      run().catch(fail);
+    });
+    ws.on("message", (raw) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const id = msg.id as number | undefined;
+      if (id === undefined) return;
+      const cb = pending.get(id);
+      if (!cb) return;
+      pending.delete(id);
+      if (msg.error) cb(undefined, msg.error);
+      else cb(msg.result as Record<string, unknown> | undefined);
+    });
+    ws.on("error", fail);
+  });
+}
+
 export async function captureRedactedScreenshot(
   params: CaptureRedactedScreenshotParams,
 ): Promise<CaptureRedactedScreenshotResult> {

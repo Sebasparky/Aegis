@@ -58,6 +58,7 @@ const HANDOFF_PHASE_COPY: Record<HvHandoffPhase, string> = {
   user_interaction_required: "Please complete the verification.",
   holding: "Keep holding…",
   still_active: "Verification still active — keep holding…",
+  release_ready: "Release now",
   looks_complete_checking: "Looks complete — checking…",
   completed: "All done — the agent can resume.",
   resumed: "All done — the agent resumed.",
@@ -826,26 +827,34 @@ export default function HumanVerificationPage() {
               {holding &&
                 (() => {
                   const looksDone = handoff?.phase === "looks_complete_checking";
+                  // A full progress bar (release_ready) is NOT completion — it just
+                  // tells the user to let go. The capsule only clears after the wall
+                  // visually clears post-release.
+                  const releaseReady = handoff?.phase === "release_ready";
                   const elapsedS = (holdElapsedMs / 1000).toFixed(0);
                   const copy =
-                    handoff && (handoff.phase === "still_active" || handoff.phase === "looks_complete_checking")
+                    handoff &&
+                    (handoff.phase === "still_active" ||
+                      handoff.phase === "release_ready" ||
+                      handoff.phase === "looks_complete_checking")
                       ? HANDOFF_PHASE_COPY[handoff.phase]
                       : "Keep holding…";
+                  const tone = releaseReady
+                    ? "border-amber-600 bg-amber-950/40 text-amber-200"
+                    : looksDone
+                      ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
+                      : "border-indigo-700 bg-indigo-950/40 text-indigo-200";
+                  const dot = releaseReady
+                    ? "bg-amber-400"
+                    : looksDone
+                      ? "bg-emerald-400"
+                      : "bg-indigo-400";
                   return (
-                    <div
-                      className={`mt-3 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
-                        looksDone
-                          ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
-                          : "border-indigo-700 bg-indigo-950/40 text-indigo-200"
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-2 w-2 animate-pulse rounded-full ${
-                          looksDone ? "bg-emerald-400" : "bg-indigo-400"
-                        }`}
-                      />
+                    <div className={`mt-3 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${tone}`}>
+                      <span className={`inline-block h-2 w-2 animate-pulse rounded-full ${dot}`} />
                       <span>
-                        {copy} <span className="text-gray-500">({elapsedS}s)</span>
+                        {releaseReady ? <strong>{copy}</strong> : copy}{" "}
+                        <span className="text-gray-500">({elapsedS}s)</span>
                       </span>
                     </div>
                   );

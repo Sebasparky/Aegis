@@ -43,6 +43,7 @@ export type HvHandoffPhase =
   | "user_interaction_required"
   | "holding"
   | "still_active"
+  | "release_ready"
   | "looks_complete_checking"
   | "completed"
   | "resumed"
@@ -120,6 +121,9 @@ const PHASE_FLAGS: Record<
   user_interaction_required: { requires_user_attention: true, agent_should_wait: true },
   holding: { requires_user_attention: true, agent_should_wait: true },
   still_active: { requires_user_attention: true, agent_should_wait: true },
+  // A full progress bar is NOT completion — it only means the user should release.
+  // NON-TERMINAL: keeps the agent waiting; only the conservative authority clears.
+  release_ready: { requires_user_attention: true, agent_should_wait: true },
   looks_complete_checking: { requires_user_attention: true, agent_should_wait: true },
   completed: { requires_user_attention: false, agent_should_wait: false },
   resumed: { requires_user_attention: false, agent_should_wait: false },

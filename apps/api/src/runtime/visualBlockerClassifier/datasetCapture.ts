@@ -153,22 +153,100 @@ function fullViewportFallback(fullBase64: string): CropResolution {
 }
 
 /**
- * Validate, pad, and clamp the blocker rect (viewport CSS px). Returns a safe crop
- * rect, or null when the geometry is missing/invalid, too tight to satisfy the min
- * size, or so broad that the crop is effectively the whole viewport — every null
- * routes to a full_viewport fallback. No coordinate ever leaves this module.
+ * Closed enum describing why `validateAndPadCrop` rejected (or accepted) a hint.
+ * Diagnostic-only — never affects the crop decision; safe to log. `ok` means a crop
+ * was produced. Each non-`ok` value maps 1:1 to a `null`-return path below.
  */
-export function validateAndPadCrop(
-  hint: VisualDatasetCropHint,
-): { x: number; y: number; w: number; h: number } | null {
+export type CropInvalidReason =
+  | "ok"
+  | "invalid_dimensions" // viewport or box non-finite, or box.w/h <= 0
+  | "box_outside_viewport" // box fully off-screen
+  | "no_intersection" // post-pad/clamp width or height collapsed to <= 0
+  | "box_too_small" // still under MIN_CROP_PX where the viewport could satisfy it
+  | "box_too_large"; // crop ≈ whole viewport (>= MAX_CROP_VIEWPORT_FRACTION)
+
+/**
+ * Coarse, safe geometry buckets for diagnostics. All values are fixed enums — never
+ * raw coordinates, dimensions, or fractions. Computed from the raw hint regardless of
+ * whether the crop succeeds.
+ */
+export interface CropBuckets {
+  box_size_bucket: "tiny" | "small" | "medium" | "large" | "full_viewport" | "oversized" | "unknown";
+  box_position_bucket: "center" | "edge" | "partial_offscreen" | "offscreen" | "unknown";
+  viewport_size_bucket: "mobile" | "desktop" | "large" | "unknown";
+  box_source_bucket: "active_vgc" | "center_modal" | "dominant_surface" | "iframe" | "fallback" | "unknown";
+}
+
+/** Box area as a fraction of the viewport → coarse size bucket. */
+function cropSizeBucket(box: { w: number; h: number }, vp: { vw: number; vh: number }): CropBuckets["box_size_bucket"] {
+  const { w, h } = box;
+  const { vw, vh } = vp;
+  if (![w, h, vw, vh].every((v) => Number.isFinite(v)) || w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return "unknown";
+  const frac = (w * h) / (vw * vh);
+  if (frac < 0.02) return "tiny";
+  if (frac < 0.1) return "small";
+  if (frac < 0.35) return "medium";
+  if (frac < 0.75) return "large";
+  if (frac < MAX_CROP_VIEWPORT_FRACTION) return "full_viewport";
+  return "oversized";
+}
+
+/** Box center / edge-clipping relative to the viewport → coarse position bucket. */
+function cropPositionBucket(
+  box: { x: number; y: number; w: number; h: number },
+  vp: { vw: number; vh: number },
+): CropBuckets["box_position_bucket"] {
+  const { x, y, w, h } = box;
+  const { vw, vh } = vp;
+  if (![x, y, w, h, vw, vh].every((v) => Number.isFinite(v)) || vw <= 0 || vh <= 0) return "unknown";
+  // Fully off-screen.
+  if (x >= vw || y >= vh || x + w <= 0 || y + h <= 0) return "offscreen";
+  // Any edge clipped by the viewport.
+  if (x < 0 || y < 0 || x + w > vw || y + h > vh) return "partial_offscreen";
+  const cx = (x + w / 2) / vw;
+  const cy = (y + h / 2) / vh;
+  if (Math.abs(cx - 0.5) <= 0.15 && Math.abs(cy - 0.5) <= 0.15) return "center";
+  return "edge";
+}
+
+/** Viewport CSS width → coarse device-class bucket. */
+function viewportSizeBucket(vw: number): CropBuckets["viewport_size_bucket"] {
+  if (!Number.isFinite(vw) || vw <= 0) return "unknown";
+  if (vw < 768) return "mobile";
+  if (vw < 1440) return "desktop";
+  return "large";
+}
+
+/**
+ * Reason-returning core of `validateAndPadCrop`. Same geometry rules, no threshold
+ * changes — it additionally tags each outcome with a `CropInvalidReason` and coarse
+ * `CropBuckets` for diagnostics. `validateAndPadCrop` is a thin wrapper over this, so
+ * existing callers stay behavior-identical. No coordinate ever leaves this module.
+ */
+export function validateAndPadCropWithReason(hint: VisualDatasetCropHint): {
+  crop: { x: number; y: number; w: number; h: number } | null;
+  reason: CropInvalidReason;
+  buckets: CropBuckets;
+} {
   const { box, viewport } = hint;
   const { vw, vh } = viewport;
-  if (!(vw > 0 && vh > 0) || !Number.isFinite(vw) || !Number.isFinite(vh)) return null;
+  // The current probe yields a single dominant blocking surface with no kind label.
+  // Enriching this would require changing BLOCKER_CROP_PROBE_EXPR (out of scope for a
+  // diagnostic patch), so map the only known source to "dominant_surface".
+  const buckets: CropBuckets = {
+    box_size_bucket: cropSizeBucket(box, viewport),
+    box_position_bucket: cropPositionBucket(box, viewport),
+    viewport_size_bucket: viewportSizeBucket(vw),
+    box_source_bucket: hint.source === "capture_reprobe" ? "dominant_surface" : "unknown",
+  };
+  const fail = (reason: CropInvalidReason) => ({ crop: null, reason, buckets });
+
+  if (!(vw > 0 && vh > 0) || !Number.isFinite(vw) || !Number.isFinite(vh)) return fail("invalid_dimensions");
   const vals = [box.x, box.y, box.w, box.h];
-  if (vals.some((v) => typeof v !== "number" || !Number.isFinite(v))) return null;
-  if (box.w <= 0 || box.h <= 0) return null;
+  if (vals.some((v) => typeof v !== "number" || !Number.isFinite(v))) return fail("invalid_dimensions");
+  if (box.w <= 0 || box.h <= 0) return fail("invalid_dimensions");
   // Fully off-screen → no usable crop.
-  if (box.x >= vw || box.y >= vh || box.x + box.w <= 0 || box.y + box.h <= 0) return null;
+  if (box.x >= vw || box.y >= vh || box.x + box.w <= 0 || box.y + box.h <= 0) return fail("box_outside_viewport");
 
   const pad = Math.max(CROP_PAD_MIN_PX, Math.round(CROP_PAD_FRACTION * Math.max(box.w, box.h)));
   let x0 = Math.max(0, Math.min(vw, box.x - pad));
@@ -177,7 +255,7 @@ export function validateAndPadCrop(
   let y1 = Math.max(0, Math.min(vh, box.y + box.h + pad));
   let w = x1 - x0;
   let h = y1 - y0;
-  if (w <= 0 || h <= 0) return null;
+  if (w <= 0 || h <= 0) return fail("no_intersection");
 
   // Grow toward the minimum edge where the viewport has room.
   if (w < MIN_CROP_PX && vw >= MIN_CROP_PX) {
@@ -191,12 +269,25 @@ export function validateAndPadCrop(
     h = y1 - y0;
   }
   // Still under min where the viewport could have satisfied it → unreliable, fall back.
-  if ((w < MIN_CROP_PX && vw >= MIN_CROP_PX) || (h < MIN_CROP_PX && vh >= MIN_CROP_PX)) return null;
+  if ((w < MIN_CROP_PX && vw >= MIN_CROP_PX) || (h < MIN_CROP_PX && vh >= MIN_CROP_PX)) return fail("box_too_small");
 
   // Crop ≈ whole viewport → adds nothing over the full frame.
-  if ((w * h) / (vw * vh) >= MAX_CROP_VIEWPORT_FRACTION) return null;
+  if ((w * h) / (vw * vh) >= MAX_CROP_VIEWPORT_FRACTION) return fail("box_too_large");
 
-  return { x: x0, y: y0, w, h };
+  return { crop: { x: x0, y: y0, w, h }, reason: "ok", buckets };
+}
+
+/**
+ * Validate, pad, and clamp the blocker rect (viewport CSS px). Returns a safe crop
+ * rect, or null when the geometry is missing/invalid, too tight to satisfy the min
+ * size, or so broad that the crop is effectively the whole viewport — every null
+ * routes to a full_viewport fallback. Thin wrapper over `validateAndPadCropWithReason`;
+ * behavior-identical to the prior implementation. No coordinate ever leaves this module.
+ */
+export function validateAndPadCrop(
+  hint: VisualDatasetCropHint,
+): { x: number; y: number; w: number; h: number } | null {
+  return validateAndPadCropWithReason(hint).crop;
 }
 
 /**

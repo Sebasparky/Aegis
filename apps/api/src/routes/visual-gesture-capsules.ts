@@ -39,6 +39,7 @@ import {
   endVgcHoldSession,
   cancelVgcHoldSession,
 } from "../runtime/visualGestureCapsuleHold.js";
+import { stopVisualHandoffMonitor } from "../runtime/visualHandoffMonitor.js";
 import { getTaskBrowserSessionCdpUrl } from "../runtime/taskBrowserSessions.js";
 
 // Resolve the CDP base for a capsule's gesture/recheck/recapture call. The UI
@@ -303,6 +304,10 @@ export async function visualGestureCapsuleRoutes(server: FastifyInstance): Promi
       // the 1.2s fail-closed timer — the UI cancels a hold this way rather than
       // relying on fail-closed. Best-effort + idempotent (no-op without a session).
       await cancelVgcHoldSession(req.params.id);
+
+      // Stop the lifecycle visual monitor promptly (it also self-stops on the
+      // terminal `cancelled` transition below). Idempotent / no-op when absent.
+      stopVisualHandoffMonitor(req.params.id);
 
       const result = cancelVisualGestureCapsule(req.params.id);
       // Already-terminal capsules return their current safe view (idempotent from

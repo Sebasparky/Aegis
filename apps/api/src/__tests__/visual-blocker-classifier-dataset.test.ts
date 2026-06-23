@@ -19,6 +19,7 @@ import {
   decideDatasetCapture,
   resolveCrop,
   validateAndPadCrop,
+  validateAndPadCropWithReason,
   __resetVisionDatasetThrottle,
   type DatasetScreenshot,
   type VisualDatasetCropHint,
@@ -399,6 +400,98 @@ describe("resolveCrop / validateAndPadCrop", () => {
       expect(rect.y).toBeGreaterThanOrEqual(0);
       expect(rect.x + rect.w).toBeLessThanOrEqual(300);
       expect(rect.y + rect.h).toBeLessThanOrEqual(300);
+    }
+  });
+});
+
+describe("validateAndPadCropWithReason diagnostics", () => {
+  const vp = { vw: 1000, vh: 800 };
+  const hint = (box: { x: number; y: number; w: number; h: number }): VisualDatasetCropHint => ({
+    box,
+    viewport: vp,
+    source: "capture_reprobe",
+  });
+
+  const REASONS = new Set([
+    "ok",
+    "invalid_dimensions",
+    "box_outside_viewport",
+    "no_intersection",
+    "box_too_small",
+    "box_too_large",
+  ]);
+  const SIZE = new Set(["tiny", "small", "medium", "large", "full_viewport", "oversized", "unknown"]);
+  const POS = new Set(["center", "edge", "partial_offscreen", "offscreen", "unknown"]);
+  const VP = new Set(["mobile", "desktop", "large", "unknown"]);
+  const SRC = new Set(["active_vgc", "center_modal", "dominant_surface", "iframe", "fallback", "unknown"]);
+
+  it("non-finite geometry → invalid_dimensions", () => {
+    expect(validateAndPadCropWithReason(hint({ x: NaN, y: 0, w: 10, h: 10 })).reason).toBe("invalid_dimensions");
+    expect(validateAndPadCropWithReason(hint({ x: 0, y: 0, w: -5, h: 10 })).reason).toBe("invalid_dimensions");
+    expect(
+      validateAndPadCropWithReason({ box: { x: 0, y: 0, w: 10, h: 10 }, viewport: { vw: 0, vh: 0 }, source: "capture_reprobe" }).reason,
+    ).toBe("invalid_dimensions");
+  });
+
+  it("fully off-screen box → box_outside_viewport + offscreen position", () => {
+    const out = validateAndPadCropWithReason(hint({ x: 5000, y: 5000, w: 10, h: 10 }));
+    expect(out.reason).toBe("box_outside_viewport");
+    expect(out.crop).toBeNull();
+    expect(out.buckets.box_position_bucket).toBe("offscreen");
+  });
+
+  it("tiny box in a small viewport → coarse tiny size bucket", () => {
+    // Behavior note: the post-growth `box_too_small` path is unreachable (growth sets
+    // the edge to exactly MIN_CROP_PX), so this small box resolves to a valid crop; the
+    // diagnostic still reports a `tiny` size bucket.
+    const out = validateAndPadCropWithReason({
+      box: { x: 0, y: 0, w: 4, h: 4 },
+      viewport: { vw: 1000, vh: 800 },
+      source: "capture_reprobe",
+    });
+    expect(out.buckets.box_size_bucket).toBe("tiny");
+  });
+
+  it("near-full box → box_too_large + oversized/full_viewport size", () => {
+    const out = validateAndPadCropWithReason(hint({ x: 0, y: 0, w: 1000, h: 800 }));
+    expect(out.reason).toBe("box_too_large");
+    expect(["full_viewport", "oversized"]).toContain(out.buckets.box_size_bucket);
+  });
+
+  it("valid centered box → ok + non-null crop + center position", () => {
+    const out = validateAndPadCropWithReason(hint({ x: 400, y: 300, w: 200, h: 160 }));
+    expect(out.reason).toBe("ok");
+    expect(out.crop).not.toBeNull();
+    expect(out.buckets.box_position_bucket).toBe("center");
+    expect(out.buckets.viewport_size_bucket).toBe("desktop");
+    expect(out.buckets.box_source_bucket).toBe("dominant_surface");
+  });
+
+  it("validateAndPadCrop stays behavior-compatible (=== .crop)", () => {
+    const cases = [
+      hint({ x: 400, y: 300, w: 200, h: 160 }),
+      hint({ x: 5000, y: 5000, w: 10, h: 10 }),
+      hint({ x: 0, y: 0, w: 1000, h: 800 }),
+    ];
+    for (const h of cases) {
+      expect(validateAndPadCrop(h)).toEqual(validateAndPadCropWithReason(h).crop);
+    }
+  });
+
+  it("every reason/bucket is a value from its closed set (no leaks)", () => {
+    const samples = [
+      hint({ x: 400, y: 300, w: 200, h: 160 }),
+      hint({ x: 5000, y: 5000, w: 10, h: 10 }),
+      hint({ x: 0, y: 0, w: 1000, h: 800 }),
+      hint({ x: NaN, y: 0, w: 10, h: 10 }),
+    ];
+    for (const h of samples) {
+      const { reason, buckets } = validateAndPadCropWithReason(h);
+      expect(REASONS.has(reason)).toBe(true);
+      expect(SIZE.has(buckets.box_size_bucket)).toBe(true);
+      expect(POS.has(buckets.box_position_bucket)).toBe(true);
+      expect(VP.has(buckets.viewport_size_bucket)).toBe(true);
+      expect(SRC.has(buckets.box_source_bucket)).toBe(true);
     }
   });
 });

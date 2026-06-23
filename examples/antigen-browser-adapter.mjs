@@ -164,15 +164,24 @@ fetch(`${BASE}/api/agent/v1/me`, { headers: { Authorization: `Bearer ${TOKEN}` }
     );
   });
 
-// ─── Static browser tool list (served without spawning a child) ───────────────
+// ─── Antigen-owned QA tool surface (served without spawning a child) ──────────
+// SECURITY INVARIANT (Antigen QA tool surface): Claude Code QA may ONLY drive the
+// browser through Antigen-mediated tools. Every tool in this list has an explicit
+// handler in handleLine() that routes through the Aegis runtime
+// (/api/agent/v1/runtime/*) or fails closed — none fall through to the raw
+// @playwright/mcp child. tools/list advertises EXACTLY these tools, and the
+// terminal catch-all in handleLine() refuses any other browser_* call with
+// ANTIGEN_TOOL_REQUIRED instead of forwarding it to @playwright/mcp.
+// Do NOT re-add raw passthrough tools here (browser_snapshot, browser_evaluate,
+// browser_run_code_unsafe, browser_fill_form, browser_select_option,
+// browser_network_request(s), browser_handle_dialog, browser_file_upload,
+// browser_tabs, browser_close, browser_navigate_back, browser_press_key,
+// browser_hover, browser_drag, browser_drop, browser_wait_for, browser_resize,
+// browser_console_messages) — use antigen_snapshot and the Antigen-mediated set.
+//
 // Schemas approximate @playwright/mcp@latest. The child validates actual args;
 // these schemas exist so Claude generates correct tool calls before runtime init.
 const STATIC_BROWSER_TOOLS = [
-  {
-    name: "browser_snapshot",
-    description: "Capture accessibility snapshot of the current page, this is better than screenshot",
-    inputSchema: { type: "object", properties: {} },
-  },
   {
     name: "antigen_snapshot",
     description:
@@ -236,11 +245,6 @@ const STATIC_BROWSER_TOOLS = [
       properties: { url: { type: "string", description: "The URL to navigate to" } },
       required: ["url"],
     },
-  },
-  {
-    name: "browser_navigate_back",
-    description: "Go back to the previous page",
-    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "browser_click",
@@ -325,102 +329,6 @@ const STATIC_BROWSER_TOOLS = [
     },
   },
   {
-    name: "browser_press_key",
-    description: "Press a keyboard key",
-    inputSchema: {
-      type: "object",
-      properties: {
-        key: { type: "string", description: "Name of the key to press, e.g. 'ArrowLeft', 'Enter', 'Tab'" },
-      },
-      required: ["key"],
-    },
-  },
-  {
-    name: "browser_hover",
-    description: "Hover mouse over an element on the page",
-    inputSchema: {
-      type: "object",
-      properties: {
-        element: { type: "string", description: "Human-readable element description" },
-        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-      },
-    },
-  },
-  {
-    name: "browser_drag",
-    description: "Drag and drop an element to another location",
-    inputSchema: {
-      type: "object",
-      properties: {
-        startElement: { type: "string", description: "Human-readable source element description" },
-        startRef: { type: "string", description: "Exact source element reference from the page snapshot" },
-        endElement: { type: "string", description: "Human-readable target element description" },
-        endRef: { type: "string", description: "Exact target element reference from the page snapshot" },
-      },
-    },
-  },
-  {
-    name: "browser_drop",
-    description: "Drop data or files onto an element",
-    inputSchema: {
-      type: "object",
-      properties: {
-        element: { type: "string", description: "Human-readable target element description" },
-        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-      },
-    },
-  },
-  {
-    name: "browser_select_option",
-    description: "Select an option in a dropdown list",
-    inputSchema: {
-      type: "object",
-      properties: {
-        element: { type: "string", description: "Human-readable element description" },
-        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-        values: {
-          type: "array",
-          items: { type: "string" },
-          description: "Values to select in the dropdown",
-        },
-      },
-      required: ["values"],
-    },
-  },
-  {
-    name: "browser_fill_form",
-    description: "Fill out multiple form fields at once",
-    inputSchema: {
-      type: "object",
-      properties: {
-        formData: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              ref: { type: "string", description: "Element reference from snapshot" },
-              value: { type: "string", description: "Value to fill" },
-            },
-          },
-          description: "Array of field references and their values",
-        },
-      },
-      required: ["formData"],
-    },
-  },
-  {
-    name: "browser_handle_dialog",
-    description: "Handle a dialog box (alert, confirm, prompt)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        accept: { type: "boolean", description: "Whether to accept the dialog" },
-        promptText: { type: "string", description: "Text to enter in prompt dialog" },
-      },
-      required: ["accept"],
-    },
-  },
-  {
     name: "browser_take_screenshot",
     description: "Take a screenshot of the current page",
     inputSchema: {
@@ -431,104 +339,14 @@ const STATIC_BROWSER_TOOLS = [
       },
     },
   },
-  {
-    name: "browser_evaluate",
-    description: "Evaluate a JavaScript expression in the browser context",
-    inputSchema: {
-      type: "object",
-      properties: {
-        function: { type: "string", description: "A JavaScript function body to evaluate" },
-      },
-      required: ["function"],
-    },
-  },
-  {
-    name: "browser_console_messages",
-    description: "Get browser console messages from the current page",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "browser_network_requests",
-    description: "Get all network requests made since page load",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "browser_network_request",
-    description: "Make an HTTP network request from the browser context",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "URL for the request" },
-        method: { type: "string", description: "HTTP method (GET, POST, etc.)" },
-        headers: { type: "object", description: "Request headers" },
-        body: { type: "string", description: "Request body" },
-      },
-      required: ["url"],
-    },
-  },
-  {
-    name: "browser_wait_for",
-    description: "Wait for an element or text to appear on the page",
-    inputSchema: {
-      type: "object",
-      properties: {
-        text: { type: "string", description: "Text to wait for on the page" },
-        textGone: { type: "string", description: "Text to wait until it disappears" },
-        time: { type: "number", description: "Time to wait in milliseconds" },
-      },
-    },
-  },
-  {
-    name: "browser_resize",
-    description: "Resize the browser viewport",
-    inputSchema: {
-      type: "object",
-      properties: {
-        width: { type: "number", description: "New viewport width in pixels" },
-        height: { type: "number", description: "New viewport height in pixels" },
-      },
-      required: ["width", "height"],
-    },
-  },
-  {
-    name: "browser_tabs",
-    description: "List or manage browser tabs",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "browser_close",
-    description: "Close the page",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "browser_run_code_unsafe",
-    description: "Execute JavaScript code in the browser context (unsafe — use with caution)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        code: { type: "string", description: "JavaScript code to execute" },
-      },
-      required: ["code"],
-    },
-  },
-  {
-    name: "browser_file_upload",
-    description: "Upload files to a file input element",
-    inputSchema: {
-      type: "object",
-      properties: {
-        element: { type: "string", description: "Human-readable element description" },
-        ref: { type: "string", description: "Exact target element reference from the page snapshot" },
-        paths: {
-          type: "array",
-          items: { type: "string" },
-          description: "File paths to upload",
-        },
-      },
-      required: ["paths"],
-    },
-  },
 ];
+
+// Single source of truth for the advertised + catch-all-allowed browser surface.
+// Derived from STATIC_BROWSER_TOOLS so the two can never drift: any tool the
+// adapter advertises is Antigen-mediated, and any browser_* tools/call whose name
+// is NOT in this Set is refused by the terminal catch-all (never forwarded to the
+// raw @playwright/mcp child).
+const ANTIGEN_OWNED_TOOL_NAMES = new Set(STATIC_BROWSER_TOOLS.map((t) => t.name));
 
 // ─── Lazy runtime state ────────────────────────────────────────────────────────
 let child = null;
@@ -2301,6 +2119,46 @@ async function handleLine(line) {
     return;
   }
 
-  // All other browser tools (or interception disabled): forward to @playwright/mcp unchanged.
+  // ── Terminal catch-all — fail-closed against raw @playwright/mcp ───────────────
+  // Every Antigen-owned tool above handles its own request and returns; the only
+  // legitimate child forwards (browser_navigate allow-path, pre-/post-init
+  // pass-through) all happen earlier in this function. Anything that reaches here is
+  // a browser_* tools/call with NO Antigen handler — by construction a non-owned raw
+  // tool (browser_evaluate, browser_run_code_unsafe, browser_fill_form,
+  // browser_select_option, browser_snapshot, browser_network_request, …). Refuse it
+  // fail-closed and NEVER forward it to the raw @playwright/mcp child. This is the
+  // durable backstop behind the curated tools/list: even a hand-crafted call to a
+  // non-advertised raw tool cannot bypass Antigen.
+  if (typeof name === "string" && name.startsWith("browser_") && !ANTIGEN_OWNED_TOOL_NAMES.has(name)) {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] raw_browser_tool_blocked tool=${name} reason=ANTIGEN_TOOL_REQUIRED\n`
+    );
+    await noteToolDisposition({ tool: name, surface: "antigen_adapter", disposition: "blocked_by_antigen_required", errorCode: "ANTIGEN_TOOL_REQUIRED" });
+    writeSyntheticErrorResponse(
+      name,
+      msg.id,
+      "ANTIGEN_TOOL_REQUIRED",
+      `${name} is a raw browser tool and is not available in Antigen QA. Use antigen_snapshot and the Antigen-mediated browser tools (browser_click, browser_type, browser_fill, browser_set_value, browser_clear, browser_navigate, browser_scroll_to_ref, browser_take_screenshot) so every action routes through Aegis.`,
+    );
+    return;
+  }
+
+  // An Antigen-owned browser_* tool that reached here means its handler did not
+  // return (a bug) — fail closed rather than forward a raw call to @playwright/mcp.
+  if (typeof name === "string" && name.startsWith("browser_")) {
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] owned_browser_tool_unhandled tool=${name} reason=ANTIGEN_TOOL_REQUIRED\n`
+    );
+    await noteToolDisposition({ tool: name, surface: "antigen_adapter", disposition: "failed", errorCode: "ANTIGEN_OWNED_TOOL_UNHANDLED" });
+    writeSyntheticErrorResponse(
+      name,
+      msg.id,
+      "ANTIGEN_TOOL_REQUIRED",
+      `${name} could not be handled by the Antigen runtime and will not be forwarded to a raw browser. Take a fresh antigen_snapshot and retry.`,
+    );
+    return;
+  }
+
+  // Non-browser passthrough (defensive; non-tool traffic is handled earlier).
   child.stdin.write(line);
 }

@@ -30,6 +30,7 @@ import {
   type HvHandoffTriggerBasis,
   type HvHandoffVisualPolicyDecision,
 } from "./humanVerificationHandoff.js";
+import { startVisualHandoffMonitor } from "./visualHandoffMonitor.js";
 
 export interface CreateVgcForOpaqueHvInput {
   /** The owning HV request — links the capsule back to the user-presence stop state. */
@@ -136,6 +137,19 @@ export async function createVisualGestureCapsuleForOpaqueHv(
     ...(input.modelConfidence !== undefined ? { model_confidence: input.modelConfidence } : {}),
     ...(input.visualPolicyDecision ? { visual_policy_decision: input.visualPolicyDecision } : {}),
     ...(input.triggerBasis ? { trigger_basis: input.triggerBasis } : {}),
+  });
+
+  // 5b. Start the lifecycle visual handoff monitor (no-op unless
+  //     ANTIGEN_HV_VISUAL_HANDOFF + the visual judgment model are enabled). While
+  //     the capsule is active it polls the visual model ~500ms and is the SOLE
+  //     completion authority (stable visual clear), with the DOM demoted to
+  //     auxiliary/debug. Best-effort; never affects the HV-required response.
+  //     TODO(ui-start-gate): once the Antigen UI exposes a "Start verification"
+  //     button, move this polling START from mint-time to Start-click time.
+  startVisualHandoffMonitor({
+    capsuleId: capsule.capsule_id,
+    cdpUrl: input.cdpUrl,
+    browserSessionId: capsule.browser_session_id,
   });
 
   // 6. Safe view only — `screenshot_available` is re-derived from the live frame

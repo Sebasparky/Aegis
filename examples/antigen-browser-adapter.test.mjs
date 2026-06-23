@@ -366,14 +366,42 @@ describe("E. Pre-init gate", () => {
       .find((m) => m?.id === 2);
     assert.ok(toolsResponse, "adapter should respond to tools/list with id=2");
     assert.ok(Array.isArray(toolsResponse?.result?.tools), "result.tools should be an array");
-    assert.ok(
-      toolsResponse.result.tools.some((t) => t.name === "browser_snapshot"),
-      "tools list should include browser_snapshot",
-    );
-    assert.ok(
-      toolsResponse.result.tools.some((t) => t.name === "browser_navigate"),
-      "tools list should include browser_navigate",
-    );
+
+    // The advertised QA surface must be EXACTLY the Antigen-mediated set — no raw
+    // @playwright/mcp passthrough tools.
+    const advertised = toolsResponse.result.tools.map((t) => t.name).sort();
+    const expected = [
+      "antigen_capture_visual_review_candidate",
+      "antigen_snapshot",
+      "browser_clear",
+      "browser_click",
+      "browser_fill",
+      "browser_navigate",
+      "browser_scroll_to_ref",
+      "browser_set_value",
+      "browser_take_screenshot",
+      "browser_type",
+    ];
+    assert.deepEqual(advertised, expected, `tools/list must advertise exactly the Antigen-owned set, got: ${advertised.join(",")}`);
+
+    // Raw passthrough tools must NOT be advertised — especially arbitrary-JS and bulk-fill.
+    for (const raw of [
+      "browser_snapshot",
+      "browser_evaluate",
+      "browser_run_code_unsafe",
+      "browser_fill_form",
+      "browser_select_option",
+      "browser_network_request",
+      "browser_network_requests",
+      "browser_handle_dialog",
+      "browser_file_upload",
+      "browser_navigate_back",
+    ]) {
+      assert.ok(
+        !advertised.includes(raw),
+        `tools/list must NOT include raw passthrough tool ${raw}`,
+      );
+    }
 
     adapter.kill("SIGTERM");
     mockServer.close();
@@ -1228,6 +1256,88 @@ describe("G. browser_type adapter-owned — no Playwright fallthrough", () => {
 
     assert.ok(!stdoutBuf.includes('"path":["target"]'), `Zod target error leaked to stdout`);
     assert.ok(!stdoutBuf.includes("table"), `raw text value leaked to stdout`);
+  });
+
+  test("catch-all fails closed: a non-Antigen-owned browser_* call is refused with ANTIGEN_TOOL_REQUIRED and never forwarded", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({});
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    // browser_evaluate is a raw @playwright/mcp passthrough tool — it is NOT advertised
+    // and NOT Antigen-owned, so the terminal catch-all must refuse it fail-closed.
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 71, method: "tools/call",
+      params: { name: "browser_evaluate", arguments: { function: "() => document.title" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 71);
+    assert.ok(resp, `expected response for id=71, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_TOOL_REQUIRED"), `expected ANTIGEN_TOOL_REQUIRED in: ${text}`);
+    // The fake @playwright/mcp child only answers "initialize"; getting the synthetic
+    // Antigen error for id=71 proves the call was refused, not forwarded to the child.
+    assert.ok(!text.includes("document.title"), `raw evaluate body leaked to stdout`);
+  });
+
+  test("catch-all fails closed: browser_run_code_unsafe is refused with ANTIGEN_TOOL_REQUIRED", { timeout: 7000 }, async () => {
+    const { server, port } = await createMockApiServer({});
+    const { binPath, cleanup } = createFakeMcpBin();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${port}`,
+        AEGIS_AGENT_TOKEN: "test_token",
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: 72, method: "tools/call",
+      params: { name: "browser_run_code_unsafe", arguments: { code: "window.__pwned = 1" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    adapter.kill("SIGTERM");
+    server.close();
+    cleanup();
+
+    const resp = parseMcpResponse(stdoutBuf, 72);
+    assert.ok(resp, `expected response for id=72, stdout was: ${stdoutBuf}`);
+    assert.equal(resp.result?.isError, true, `expected isError:true, got: ${JSON.stringify(resp.result)}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes("ANTIGEN_TOOL_REQUIRED"), `expected ANTIGEN_TOOL_REQUIRED in: ${text}`);
+    assert.ok(!text.includes("__pwned"), `raw code body leaked to stdout`);
   });
 
   test("INTERCEPTION_ENABLED=true, API success: returns synthetic success text with no raw text", { timeout: 7000 }, async () => {
@@ -3189,8 +3299,9 @@ describe("K. antigen_snapshot adapter tool", () => {
     assert.ok("max_candidates" in props, "schema should expose max_candidates");
     assert.ok("viewport_only" in props, "schema should expose viewport_only");
     assert.ok(!("browser_runtime_id" in props), "agent-facing schema must NOT expose browser_runtime_id");
-    // browser_snapshot remains advertised (additive — not replaced)
-    assert.ok(tools.some((t) => t.name === "browser_snapshot"), "browser_snapshot must remain in tools list");
+    // browser_snapshot is the raw @playwright/mcp accessibility tool — it must NOT be
+    // advertised; antigen_snapshot replaces it so refs/actions stay Antigen-mediated.
+    assert.ok(!tools.some((t) => t.name === "browser_snapshot"), "browser_snapshot must NOT be in the Antigen QA tools list");
 
     adapter.kill("SIGTERM");
     mockServer.close();

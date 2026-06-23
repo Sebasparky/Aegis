@@ -68,13 +68,16 @@ import {
   type ScreenHvWallSignals,
 } from "../runtime/antigenSnapshotRuntime.js";
 import type { AntigenSnapshotCandidate } from "../runtime/antigenSnapshotRuntime.js";
-import { classifySurfaceBoundary, type SurfaceBoundarySignals } from "../runtime/surfaceBoundary.js";
-import { isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isManualVisualReviewCaptureEnabled, isVisionCaptureAndSkipEnabled } from "../runtime/visualBlockerClassifier/flags.js";
+import {
+  classifySurfaceBoundary,
+  type SurfaceBoundarySignals,
+} from "../runtime/surfaceBoundary.js";
+import { isHvProactiveSurfaceEnabled, isHvVisionClassifierEnabled, isHvVisionDatasetEnabled, isManualVisualReviewCaptureEnabled, isVisionCaptureAndSkipEnabled } from "../runtime/visualBlockerClassifier/flags.js";
 import { captureManualVisualReviewCandidate } from "../runtime/visualBlockerClassifier/manualVisualReviewCapture.js";
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { mapCaptureResultToBlockerStatus, buildVisualBlockerCapturedResponse, type VisualBlockerSkip } from "../runtime/visualBlockerClassifier/captureAndSkip.js";
-import { evaluateVisualJudgment, HV_WALL_LABEL, type VisualJudgmentEvaluation } from "../runtime/visualBlockerClassifier/visualJudgment.js";
+import { evaluateVisualJudgment, isVisualJudgmentEnabled, HV_WALL_LABEL, type VisualJudgmentEvaluation } from "../runtime/visualBlockerClassifier/visualJudgment.js";
 import { publishHvHandoffUpdate, type HvHandoffTriggerBasis, type HvHandoffVisualPolicyDecision } from "../runtime/humanVerificationHandoff.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
@@ -601,8 +604,19 @@ type HumanVerificationAttribution = {
     | "snapshot_mint_visual_judgment"
     | "vgc_capsule_reuse_guard"
     | "cached_hv_marker_guard"
-    | "action_no_progress_ambiguous_backstop"
-    | "action_no_progress_structural_backstop";
+    // Action no-progress backstop, ambiguous branch. The no-progress signal is an
+    // ACTIVATION signal only; the visual classifier is the mint authority. A capsule
+    // is minted only when the classifier CONFIRMED a page-level HV wall
+    // (`_visual_judgment_hv`) or, when the classifier was uncertain/unavailable, on
+    // STRONG opaque-boundary evidence (`_opaque_boundary_backstop`). Scrim + stuck
+    // alone never mints.
+    | "action_no_progress_visual_judgment_hv"
+    | "action_no_progress_opaque_boundary_backstop"
+    | "action_no_progress_structural_backstop"
+    // Proactive action preflight (ANTIGEN_HV_PROACTIVE_SURFACE): the visual classifier
+    // confirmed a page-level HV wall over a dominant scrim+modal surface BEFORE pointer
+    // dispatch, so the action fails closed instead of running behind the wall.
+    | "action_preflight_visual_judgment_hv";
   visual_judgment_coverage:
     | "fresh_judgment_possible"
     | "not_covered_reused_existing_state"
@@ -723,12 +737,27 @@ async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
   domain: string;
   pageUrl: string;
   signals: AmbiguousVisualObstructionSignals;
+  /**
+   * When true, the classifier drops the weak `(scrim && stale)` fire path so a stuck
+   * action over a mere dimmer/backdrop (newsletter/cookie/promo/sign-in modal) can
+   * never mint. Set by BOTH the action no-progress backstop AND the snapshot ambiguous
+   * fallback: a no-progress marker / scrim / repeated-stale is an activation/context
+   * signal only — it must never be the sole mint authority. Only genuine opaque-boundary
+   * evidence (denial wall, inaccessible cross-origin iframe) or a model-confirmed HV
+   * verdict may mint a human-verification VGC.
+   */
+  requireOpaqueBoundary?: boolean;
 }): Promise<
   | { request: HumanVerificationRequest; vgc: { available: true; capsule: SafeVisualGestureCapsuleView } }
   | undefined
 > {
   if (!isVisualGestureCapsuleEnabled() || !input.session.cdp_url) return undefined;
-  if (!classifyAmbiguousVisualObstruction(input.signals)) return undefined;
+  if (
+    !classifyAmbiguousVisualObstruction(input.signals, {
+      requireOpaqueBoundary: input.requireOpaqueBoundary === true,
+    })
+  )
+    return undefined;
   try {
     const request = createOrReuseHumanVerificationRequest({
       user_id: MOCK_USER_ID,
@@ -1144,16 +1173,68 @@ async function rejectNoProgressActionAsHumanVerification(
           } catch {
             /* keep "unknown" */
           }
-          // repeated_stale is corroborating-only in the classifier (never fires
-          // alone) — safe to set on this action-failure branch. A concrete STATIC
-          // signal (denial text or an inaccessible visible iframe) is still required.
-          const fallback = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
-            session,
-            delegation,
-            domain: ambiguousDomain,
-            pageUrl: session.current_url ?? "",
-            signals: { ...probe, repeated_stale: true },
+
+          // The no-progress / repeated-stale / scrim signal is an ACTIVATION signal
+          // ONLY — it must never itself be the VGC authority. Run the SAME visual
+          // classifier the snapshot path uses and let IT decide. evaluateVisualJudgment
+          // self-guards: when ANTIGEN_VISUAL_JUDGMENT is off it returns
+          // {ran:false,suppress:false,hvConfirmed:false} (no capture, no sidecar).
+          // Three outcomes:
+          //   • confident benign (newsletter/cookie/promo/sign-in/modal) → never mint.
+          //   • confident page-level HV (hvConfirmed) → mint via the model authority.
+          //   • uncertain / unavailable / disabled → mint ONLY on STRONG opaque-boundary
+          //     evidence (requireOpaqueBoundary drops the weak `(scrim && stale)` path,
+          //     so a stuck action over a mere dimmer can never mint).
+          const judgment = await evaluateVisualJudgment({
+            sessionId: session.browser_session_id,
+            activationReason: "possible_human_verification",
+            cdpUrl: session.cdp_url,
+            originHost: ambiguousDomain,
+            triggerBasis: "unreadable_dominant_surface",
           });
+
+          let fallback:
+            | {
+                request: HumanVerificationRequest;
+                vgc: { available: true; capsule: SafeVisualGestureCapsuleView };
+              }
+            | undefined;
+          // Safe fixed-enum decision reason (telemetry only — no URLs/selectors/coords/text).
+          let noProgressVgcDecision:
+            | "benign_suppressed"
+            | "model_hv_confirmed"
+            | "strong_opaque_boundary_fallback"
+            | "no_strong_opaque_boundary";
+          if (judgment.suppress) {
+            // Confident benign — return the normal no-progress result, no VGC.
+            noProgressVgcDecision = "benign_suppressed";
+          } else if (judgment.hvConfirmed) {
+            fallback = await maybeCreateVisualGestureCapsuleForVisualJudgmentHv({
+              session,
+              delegation,
+              domain: ambiguousDomain,
+              pageUrl: session.current_url ?? "",
+              judgment,
+              triggerBasis: "unreadable_dominant_surface",
+            });
+            noProgressVgcDecision = "model_hv_confirmed";
+          } else {
+            // Uncertain / unavailable / disabled. repeated_stale corroborates an opaque
+            // cross-origin frame (`iframe && stale`); requireOpaqueBoundary drops
+            // `(scrim && stale)` so scrim + stuck alone can never mint.
+            fallback = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+              session,
+              delegation,
+              domain: ambiguousDomain,
+              pageUrl: session.current_url ?? "",
+              signals: { ...probe, repeated_stale: true },
+              requireOpaqueBoundary: true,
+            });
+            noProgressVgcDecision = fallback
+              ? "strong_opaque_boundary_fallback"
+              : "no_strong_opaque_boundary";
+          }
+
           // Surface-Boundary Router SHADOW decision — computed ONLY when HV debug is
           // on (otherwise byte-identical, no overhead). This path is the repeated-
           // stale / no-progress backstop, so the trigger basis marks fallback origin.
@@ -1165,6 +1246,11 @@ async function rejectNoProgressActionAsHumanVerification(
             tool,
             structural_wall_seen: false,
             ambiguous_considered: true,
+            // Safe fixed-enum: WHY a capsule was or was not minted from no-progress.
+            no_progress_vgc_decision: noProgressVgcDecision,
+            visual_judgment_ran: judgment.ran,
+            visual_judgment_suppressed: judgment.suppress,
+            visual_judgment_hv_confirmed: judgment.hvConfirmed,
             denial_text_seen: probe.denial_text_seen,
             near_zero_interactive: probe.near_zero_interactive,
             visible_inaccessible_iframe_seen: probe.visible_inaccessible_iframe_seen,
@@ -1188,21 +1274,32 @@ async function rejectNoProgressActionAsHumanVerification(
               : {}),
           });
           if (fallback) {
+            const modelPromoted = noProgressVgcDecision === "model_hv_confirmed";
             sendHumanVerificationRequired(
               session,
               reply,
               tool,
               fallback.request,
-              {
-                source: "action_no_progress_ambiguous_backstop",
-                visual_judgment_coverage: "not_covered_action_backstop",
-                fresh_visual_judgment_event_expected: false,
-                reason:
-                  "Minted by the action no-progress ambiguous-obstruction backstop; no fresh visual judgment ran.",
-                // sb is computed only under ANTIGEN_HV_DEBUG; include a safe enum
-                // trigger_basis when available, otherwise omit (still always present).
-                ...(sb ? { trigger_basis: sb.trigger_basis } : {}),
-              },
+              modelPromoted
+                ? {
+                    source: "action_no_progress_visual_judgment_hv",
+                    visual_judgment_coverage: "fresh_judgment_possible",
+                    fresh_visual_judgment_event_expected: true,
+                    reason:
+                      "Minted by the action no-progress backstop after the visual classifier confirmed a page-level human-verification wall.",
+                    visual_judgment_ran: true,
+                    visual_judgment_suppress: false,
+                    ...(sb ? { trigger_basis: sb.trigger_basis } : {}),
+                  }
+                : {
+                    source: "action_no_progress_opaque_boundary_backstop",
+                    visual_judgment_coverage: "not_covered_action_backstop",
+                    fresh_visual_judgment_event_expected: false,
+                    reason:
+                      "Minted by the action no-progress backstop on strong opaque-boundary evidence; the visual classifier did not confidently confirm or suppress.",
+                    visual_judgment_ran: judgment.ran,
+                    ...(sb ? { trigger_basis: sb.trigger_basis } : {}),
+                  },
               fallback.vgc,
             );
             return true;
@@ -1297,6 +1394,213 @@ async function rejectNoProgressActionAsHumanVerification(
     vgc,
   );
   return true;
+}
+
+/**
+ * Proactive visual-blocker action preflight (ANTIGEN_HV_PROACTIVE_SURFACE).
+ *
+ * Runs in browser-click/type/set-value/scroll IMMEDIATELY AFTER the cheap
+ * rejectIfHumanVerificationActive marker/VGC guard and BEFORE any ref resolution or
+ * pointer/type/value dispatch. It is the server-side enforcement half of the
+ * dominant-surface invariant: an action must NOT execute behind a visibly dominant,
+ * unverified scrim+modal surface merely because no VGC exists yet (the live B&BW
+ * "Press & Hold" gap, where DOM phrase detection failed and the wall was only caught
+ * AFTER a failed click).
+ *
+ * Cost discipline + byte-identity: short-circuits to false (zero CDP) unless the
+ * proactive flag AND the VGC flag are on with a live CDP session. Two-stage probe —
+ * a cheap value-free obstruction probe first; the screenshot+sidecar model
+ * (evaluateVisualJudgment) runs ONLY when a dominant surface is actually present, so
+ * benign/clean pages never capture a frame. evaluateVisualJudgment self-guards on
+ * ANTIGEN_VISUAL_JUDGMENT_ENABLED (disabled ⇒ ran:false ⇒ never blocks/mints here).
+ *
+ * Three outcomes on a dominant surface:
+ *   • confident benign  → proceed (return false). Cookie/newsletter/sign-in modals.
+ *   • confident HV      → mint a VGC via the model authority + fail closed 409
+ *                         HUMAN_VERIFICATION_REQUIRED (same shape as the snapshot/
+ *                         no-progress mints) BEFORE pointer dispatch.
+ *   • uncertain         → conservative HARD BLOCK 409 ACTION_BLOCKED_DOMINANT_SURFACE
+ *                         with NO mint (scrim alone never mints — req #6 preserved).
+ *                         The agent must re-snapshot; if it persists, human presence.
+ *
+ * Returns true when a 409 was already sent (caller must return). Fail-open on any
+ * throw — never 500 the action.
+ */
+async function preflightProactiveVisualBlocker(
+  session: TaskBrowserSession,
+  reply: any,
+  tool: string,
+  delegation: { id: string; agent_name?: string },
+): Promise<boolean> {
+  // Byte-identical when off: the dedicated flag gates the whole path (no CDP probe,
+  // no model call). The VGC flag + a live CDP session are also required. When the
+  // model master flag is off there is nothing to gain (a disabled model can never
+  // confirm or block), so skip the probe too.
+  if (
+    !isHvProactiveSurfaceEnabled() ||
+    !isVisualGestureCapsuleEnabled() ||
+    !isVisualJudgmentEnabled() ||
+    !session.cdp_url
+  ) {
+    return false;
+  }
+  // ANTIGEN_VISION_CAPTURE_AND_SKIP exploration mode never mints/blocks from a
+  // proactive preflight — a durable capsule/block would poison the run. Defer to the
+  // snapshot capture-and-skip path.
+  if (isVisionCaptureAndSkipEnabled()) return false;
+  try {
+    const resolved = await resolveSnapshotCdpTarget(session.cdp_url);
+    const resolvedTarget = resolved
+      ? { browserWsUrl: resolved.browserWsUrl, pageTarget: { id: resolved.target.id, url: resolved.target.url } }
+      : undefined;
+    if (!resolvedTarget) return false;
+    // Stage 1 — cheap value-free obstruction probe. A dominant surface is a large
+    // centered overlay or a :modal top-layer dialog. No-scrim broadening: the live B&BW
+    // wall is a centered fixed-overlay card over a PRESERVED background with NO scrim, so
+    // the scrim requirement is dropped — dominance evidence (large centered overlay /
+    // top-layer dialog) alone qualifies. An ordinary inspectable menu/dropdown is neither
+    // a large centered overlay nor a :modal top-layer dialog, so it still never trips this.
+    const probe = await detectAmbiguousVisualObstructionViaCDP({
+      cdpUrl: session.cdp_url,
+      resolvedTarget,
+    });
+    const dominant =
+      !!probe &&
+      (probe.large_centered_overlay_seen === true || probe.top_layer_dialog_seen === true);
+    // Attribution: the dominant surface qualified WITHOUT a viewport scrim.
+    const noScrimDominant = dominant && probe!.viewport_scrim_seen !== true;
+    if (!dominant) {
+      // Skip-reason telemetry only when no dominant overlay candidate exists (the model
+      // was never consulted). Booleans/enums only; no-op when ANTIGEN_HV_DEBUG is off.
+      logHvActionDebug({
+        scope: "proactive_action_preflight",
+        tool,
+        dominant_surface_seen: false,
+        skip_reason: "no_dominant_overlay_candidate",
+      });
+      return false;
+    }
+
+    let domain = "unknown";
+    try {
+      if (session.current_url) domain = new URL(session.current_url).hostname;
+    } catch {
+      /* keep "unknown" */
+    }
+    // Stage 2 — ask the classifier ONLY now that a dominant surface is confirmed.
+    const judgment = await evaluateVisualJudgment({
+      sessionId: session.browser_session_id,
+      activationReason: "possible_human_verification",
+      cdpUrl: session.cdp_url,
+      originHost: domain,
+      triggerBasis: "unreadable_dominant_surface",
+    });
+
+    // Confident benign → proceed. The model's benign read (cookie/newsletter/sign-in)
+    // is authoritative whether or not the live suppression policy left suppress true.
+    if (judgment.suppress || judgment.outcome === "confident_false_positive_or_benign") {
+      logHvActionDebug({
+        scope: "proactive_action_preflight",
+        tool,
+        dominant_surface_seen: true,
+        no_scrim_dominant_overlay: noScrimDominant,
+        visual_judgment_ran: judgment.ran,
+        visual_judgment_outcome: judgment.outcome ?? "uncertain",
+        visual_judgment_hv_confirmed: false,
+        created_capsule: false,
+        returned_409: false,
+        block_code: "none",
+      });
+      return false;
+    }
+
+    // Confident HV → mint via the model authority and fail closed BEFORE dispatch.
+    if (judgment.hvConfirmed) {
+      const minted = await maybeCreateVisualGestureCapsuleForVisualJudgmentHv({
+        session,
+        delegation,
+        domain,
+        pageUrl: session.current_url ?? "",
+        judgment,
+        triggerBasis: "unreadable_dominant_surface",
+      });
+      if (minted) {
+        logHvActionDebug({
+          scope: "proactive_action_preflight",
+          tool,
+          dominant_surface_seen: true,
+          no_scrim_dominant_overlay: noScrimDominant,
+          visual_judgment_ran: true,
+          visual_judgment_outcome: judgment.outcome ?? "confident_human_needed",
+          visual_judgment_hv_confirmed: true,
+          created_capsule: true,
+          returned_409: true,
+          block_code: "none",
+        });
+        sendHumanVerificationRequired(
+          session,
+          reply,
+          tool,
+          minted.request,
+          {
+            source: "action_preflight_visual_judgment_hv",
+            visual_judgment_coverage: "fresh_judgment_possible",
+            fresh_visual_judgment_event_expected: true,
+            reason:
+              "Minted by the proactive action preflight after the visual classifier confirmed a page-level human-verification wall before pointer dispatch.",
+            visual_judgment_ran: true,
+            visual_judgment_suppress: false,
+          },
+          minted.vgc,
+        );
+        return true;
+      }
+      // Mint declined → fall through to the conservative hard block (never act).
+    }
+
+    // Uncertain (or hvConfirmed-but-mint-declined) over a dominant surface →
+    // conservative HARD BLOCK, NO mint. scrim alone never mints (req #6). Only when
+    // the model actually ran — a disabled/unavailable model yields no verdict and
+    // must not block. The agent re-snapshots to recover.
+    if (judgment.ran) {
+      recordBrowserTraceEvent(session.browser_session_id, {
+        event_type: "browser_tool_rejected",
+        browser_runtime_id: session.browser_session_id,
+        tool,
+        error_code: "ACTION_BLOCKED_DOMINANT_SURFACE",
+      });
+      logHvActionDebug({
+        scope: "proactive_action_preflight",
+        tool,
+        dominant_surface_seen: true,
+        no_scrim_dominant_overlay: noScrimDominant,
+        visual_judgment_ran: true,
+        visual_judgment_outcome: judgment.outcome ?? "uncertain",
+        visual_judgment_hv_confirmed: judgment.hvConfirmed,
+        created_capsule: false,
+        returned_409: true,
+        block_code: "ACTION_BLOCKED_DOMINANT_SURFACE",
+      });
+      reply.status(409).send({
+        ok: false,
+        error: {
+          code: "ACTION_BLOCKED_DOMINANT_SURFACE",
+          message:
+            "A dominant unverified surface is covering the page. Take a fresh antigen_snapshot before acting; if it persists, human presence may be required.",
+          surface_present: true,
+          surface_trusted: false,
+          surface_resolution: "unverified",
+          user_presence_required: false,
+          next_action: "antigen_snapshot",
+        },
+      });
+      return true;
+    }
+    return false;
+  } catch {
+    // Fail-open to existing behavior — a preflight throw must never 500 the action.
+    return false;
+  }
 }
 
 export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
@@ -4589,6 +4893,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
     const session = runtimeResolution.session; // ready
     if (rejectIfHumanVerificationActive(session, reply, "browser_click")) return;
+    if (await preflightProactiveVisualBlocker(session, reply, "browser_click", delegation)) return;
 
     // Antigen exact-ref path (Phase 4A): when ref is an Antigen ref (ag_<n>),
     // resolve the exact element box from the latest active snapshot for this
@@ -5313,6 +5618,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
     const session = runtimeResolution.session; // ready
     if (rejectIfHumanVerificationActive(session, reply, "browser_scroll_to_ref")) return;
+    if (await preflightProactiveVisualBlocker(session, reply, "browser_scroll_to_ref", delegation)) return;
 
     const refRaw = typeof body.ref === "string" ? body.ref : undefined;
     if (!refRaw || !/^ag_\d+$/.test(refRaw)) {
@@ -5468,6 +5774,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
     const session = runtimeResolution.session; // ready
     if (rejectIfHumanVerificationActive(session, reply, "browser_type")) return;
+    if (await preflightProactiveVisualBlocker(session, reply, "browser_type", delegation)) return;
 
     const submitFlag = body.submit === true;
 
@@ -5777,6 +6084,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
     const session = runtimeResolution.session; // ready
     if (rejectIfHumanVerificationActive(session, reply, "browser_set_value")) return;
+    if (await preflightProactiveVisualBlocker(session, reply, "browser_set_value", delegation)) return;
 
     const resolution = resolveAntigenRefForSession(session.browser_session_id, MOCK_USER_ID, refRaw);
     if (resolution.status === "no_snapshot" || resolution.status === "ref_not_found") {
@@ -6251,6 +6559,14 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // exact branch (structural_page_level_wall vs ambiguous_fired) and the signal
     // combination that fired. Booleans / enums / buckets only — never refs/coords.
     let snapshotHvDebug: Record<string, string | number | boolean> | undefined;
+    // Proactive-surface conservative state (ANTIGEN_HV_PROACTIVE_SURFACE). Set when a
+    // visibly dominant scrim+centered surface is present, the visual classifier RAN
+    // but was UNCERTAIN, and no capsule minted (scrim alone never mints — req #6). The
+    // snapshot then returns a recoverable 200 that withholds ref actionability +
+    // surfaces a blocked_attention block, instead of pretending the page is clear. The
+    // hard enforcement is the action preflight; this is the advisory snapshot half.
+    let snapshotAttentionBlocked = false;
+    let snapshotAttentionOutcome: string | undefined;
     // Set when the detected challenge is a page-level full-page denial wall whose
     // control is inside a cross-origin iframe (zero candidate elements). Drives a
     // synthesized blocking active surface + manual-completion guidance.
@@ -6320,6 +6636,35 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         isVisualGestureCapsuleEnabled() &&
         !isVisionCaptureAndSkipEnabled() &&
         !!session.cdp_url;
+      // ── Proactive dominant-surface activation (ANTIGEN_HV_PROACTIVE_SURFACE) ──────
+      // A visibly dominant scrim + centered modal that may be an opaque HV boundary,
+      // independent of element count, hvWallHint, or any no-progress marker. This is
+      // the always-available discriminator the live B&BW "Press & Hold" wall trips
+      // (screen scrim + centered card) even when DOM phrase/affordance detection fails
+      // (`no_hv_phrase` ⇒ screenHv.wall stays false). Deliberately NARROW: requires a
+      // viewport scrim AND a centered modal (a bare top-layer dropdown/menu without a
+      // scrim is NOT dominant and must not trigger a model call). When set, it widens
+      // the ambiguous gate below so the SAME memoized visual classifier runs and
+      // decides — confident HV mints + 409, confident benign continues, uncertain
+      // returns the conservative non-actionable state. Byte-identical when the flag is
+      // off (predicate is hard-false ⇒ gate, probe, and model call are unchanged).
+      //
+      // No-scrim broadening: the live B&BW wall is a centered fixed-overlay card over a
+      // PRESERVED background with NO viewport scrim (screen_viewport_scrim_seen=false,
+      // surface_dominant_visible_surface_kind=fixed_overlay), which the old scrim-only
+      // predicate skipped (ambiguous_gate_open=false, action ran behind the wall). The
+      // anchor stays a centered modal; the scrim requirement widens to "scrim OR a
+      // dominant visible surface". The model remains the sole authority — uncertain over
+      // such a surface quarantines (non-actionable 200) and NEVER mints; benign proceeds.
+      const dominantSurfaceMaybeOpaque =
+        isHvProactiveSurfaceEnabled() &&
+        !hvMember &&
+        isVisualGestureCapsuleEnabled() &&
+        !isVisionCaptureAndSkipEnabled() &&
+        !!session.cdp_url &&
+        screenHv?.centered_modal_seen === true &&
+        (screenHv?.viewport_scrim_seen === true ||
+          screenHv?.dominant_visible_surface_seen === true);
       const screenHvJudgment = screenHvWallCandidate
         ? await snapshotVisualJudgment("page_level_hv_wall")
         : undefined;
@@ -6609,7 +6954,13 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           isVisualGestureCapsuleEnabled() &&
           // capture-and-skip exploration mode wins over VGC minting (see above).
           !isVisionCaptureAndSkipEnabled() &&
-          (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || noProgressSignal);
+          // Proactive surface (flag-gated): a dominant scrim+centered surface opens the
+          // gate even on an element-rich page with no hint/no-progress marker — the
+          // preserved-background B&BW "Press & Hold" shape. The model is the authority.
+          (hvWallHint ||
+            elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS ||
+            noProgressSignal ||
+            dominantSurfaceMaybeOpaque);
         let ambiguousProbe: Awaited<ReturnType<typeof detectAmbiguousVisualObstructionViaCDP>> = null;
         let ambiguousSkipReason: HumanVerificationDebug["ambiguous_skip_reason"];
         // Dev-only: true when the mint came from the model-promotion path (visual
@@ -6631,19 +6982,35 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                 /* keep "unknown" */
               }
               // Visual Judgment v0: an ambiguous visual obstruction would mint here →
-              // ask the classifier first. Three outcomes drive the mint decision:
-              //   • model-confident BENIGN (suppress)  → never mint (false-positive kill).
-              //   • model-confident HV   (hvConfirmed)  → PROMOTE a mint even when the
+              // ask the classifier first. The mint-authority rule is strict:
+              //   • model-confident BENIGN → never mint. This covers BOTH the live-policy
+              //     suppress (suppress:true) AND a confident-benign outcome the live
+              //     suppression policy left unsuppressed (dry-run / policy-off →
+              //     suppress:false, outcome:"confident_false_positive_or_benign"). The
+              //     model's benign read is authoritative — do NOT fall through.
+              //   • model-confident HV (hvConfirmed) → PROMOTE a mint even when the
               //     DOM/geometry heuristic is inconclusive — the B&BW PerimeterX/HUMAN
               //     press-and-hold case classifyAmbiguousVisualObstruction misses.
-              //   • uncertain / unavailable / low-confidence → fall back to the existing
-              //     DOM/geometry classifier (byte-identical to today; this is also the
-              //     flag-off and live-policy-off path, where hvConfirmed is always false).
+              //   • uncertain / unavailable → fall back to the DOM/geometry classifier,
+              //     but require STRONG opaque-boundary evidence (denial wall / inaccessible
+              //     cross-origin iframe). A no-progress marker / scrim / repeated-stale /
+              //     centered modal is an activation/context signal ONLY and never the sole
+              //     mint authority (the retired conservative-blocker false-positive shape).
               const ambiguousJudgment = session.cdp_url
                 ? await snapshotVisualJudgment("unreadable_dominant_surface")
                 : undefined;
               if (ambiguousJudgment?.suppress) {
+                // Confident benign, live suppression policy on.
                 ambiguous = undefined;
+                ambiguousSkipReason = "classifier_false";
+              } else if (
+                ambiguousJudgment?.outcome === "confident_false_positive_or_benign"
+              ) {
+                // Confident benign, but the live suppression policy is off/dry-run, so
+                // suppress stayed false. The model verdict is still authoritative: never
+                // mint, and never fall through to the opaque-boundary / no-progress path.
+                ambiguous = undefined;
+                ambiguousSkipReason = "model_benign_not_suppressed";
               } else if (ambiguousJudgment?.hvConfirmed) {
                 ambiguous = await maybeCreateVisualGestureCapsuleForVisualJudgmentHv({
                   session,
@@ -6653,28 +7020,38 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                   judgment: ambiguousJudgment,
                   triggerBasis: "unreadable_dominant_surface",
                 });
+                ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
               } else {
+                // Uncertain / unavailable. Require strong opaque-boundary evidence:
+                // requireOpaqueBoundary drops the weak (scrim && stale) fire path, so a
+                // benign centered modal over a dimmer with a lingering no-progress marker
+                // can NEVER mint. repeated_stale is corroborating-only — with the opaque
+                // boundary it contributes solely to (iframe && stale), the genuine opaque
+                // cross-origin challenge frame shape, never to scrim alone.
                 ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
                   session,
                   delegation,
                   domain: ambiguousDomain,
                   pageUrl: snapshot.url ?? "",
-                  // The authoritative interactive count is the extracted element_count.
-                  // repeated_stale is corroborating-only (never fires alone): set it
-                  // ONLY when a recent no-progress marker corroborates a high-element
-                  // overlay — the low-element path stays byte-identical.
                   signals: {
                     ...ambiguousProbe,
                     near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
                     ...(noProgressSignal ? { repeated_stale: true } : {}),
                   },
+                  requireOpaqueBoundary: true,
                 });
+                ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
+                // Proactive conservative state (ANTIGEN_HV_PROACTIVE_SURFACE): a
+                // dominant scrim+centered surface is present, the model RAN but was
+                // UNCERTAIN, and no opaque-boundary mint fired. Do NOT mint (scrim alone
+                // never mints — req #6); instead withhold ref actionability via the
+                // recoverable blocked_attention 200 below so the agent does not act as
+                // if the page is clear. The action preflight is the hard enforcement.
+                if (!ambiguous && dominantSurfaceMaybeOpaque && ambiguousJudgment?.ran === true) {
+                  snapshotAttentionBlocked = true;
+                  snapshotAttentionOutcome = ambiguousJudgment.outcome ?? "uncertain";
+                }
               }
-              // classifier_false here covers "obstruction classifier declined", "visual
-              // judgment suppressed as benign", and "model-positive mint failed" — all
-              // mean: do not mint. "fired" covers BOTH the DOM-geometry mint and the
-              // model-promoted mint.
-              ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
               // Dev-only marker so QA can tell the model-promoted mint apart from the
               // DOM-geometry mint. Boolean only; never affects behavior or attribution.
               ambiguousModelPromoted = ambiguousJudgment?.hvConfirmed === true && !!ambiguous;
@@ -6770,8 +7147,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             scope: "snapshot_hv",
             tool: "antigen_snapshot",
             returned_409: true,
-            // "visual_judgment_promoted_hv" when the model authority minted (DOM
-            // geometry inconclusive); "ambiguous_fired" for the DOM-geometry mint.
+            // Two-way attribution: "visual_judgment_promoted_hv" when the model
+            // authority minted (DOM geometry inconclusive); "ambiguous_fired" for the
+            // opaque-boundary DOM-geometry classifier mint (denial wall / inaccessible
+            // cross-origin iframe — requireOpaqueBoundary, so scrim/no-progress alone can
+            // never reach here). The retired conservative-blocker path no longer mints.
             reason: ambiguousModelPromoted ? "visual_judgment_promoted_hv" : "ambiguous_fired",
             visual_judgment_promoted: ambiguousModelPromoted,
             structural_wall_seen: false,
@@ -7011,6 +7391,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           screen_top_layer_dialog_seen: screenHv?.top_layer_dialog_seen === true,
           page_wall_attempted: pageWallAttempted,
           ambiguous_gate_open: hvDebug?.ambiguous_fallback_considered === true,
+          // No-scrim broadening attribution: the proactive gate opened on a dominant
+          // centered surface that had NO viewport scrim (the live B&BW fixed-overlay shape).
+          no_scrim_but_dominant_overlay_candidate:
+            dominantSurfaceMaybeOpaque === true && screenHv?.viewport_scrim_seen !== true,
           element_count_bucket: hvElementCountBucket(elements.length),
           returned_409: !!snapshotMintedHv,
           created_capsule: !!snapshotMintedHv,
@@ -7044,6 +7428,11 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         // on, never mints a VGC, never returns a 409, never mutates the response body.
         // It emits safe booleans/enums/buckets/ids telemetry and a stub policy with
         // enforced:false. Independent of hv_debug.
+        //
+        // (The conservative no-progress blocker that previously promoted its
+        // misclassified frame into the HV vision set was retired — a scrim + centered
+        // modal + no-progress shape with no opaque boundary is a false-positive source,
+        // so it no longer mints and no longer feeds the dataset here.)
         if (
           isHvVisionClassifierEnabled() &&
           surfaceDecision.route_decided === "visual_classifier_candidate"
@@ -7180,11 +7569,29 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         : ext;
       // Background-behind-blocking-surface annotation (flag-gated, boolean only):
       // tells the agent this ref is likely unclickable/churning while a blocking
-      // surface is up, so it prefers the surface's recommended actions instead.
-      return likelyBlockedRefs.has(el.ref)
+      // surface is up, so it prefers the surface's recommended actions instead. Also
+      // set for EVERY ref under the proactive conservative state (a dominant unverified
+      // surface is up): advisory only — the action preflight is the hard enforcement.
+      return snapshotAttentionBlocked || likelyBlockedRefs.has(el.ref)
         ? { ...base, likely_blocked_by_overlay: true as const }
         : base;
     });
+
+    // Proactive conservative-state telemetry (booleans / enums only — never refs,
+    // text, URLs, selectors, coordinates, or frame paths). Emitted only when the
+    // recoverable non-actionable 200 is being returned.
+    if (snapshotAttentionBlocked) {
+      logHvActionDebug({
+        scope: "snapshot_dominant_surface_blocked",
+        tool: "antigen_snapshot",
+        dominant_surface_seen: true,
+        visual_judgment_outcome: snapshotAttentionOutcome ?? "uncertain",
+        created_capsule: false,
+        returned_409: false,
+        attention_required: true,
+        element_count_bucket: hvElementCountBucket(elements.length),
+      });
+    }
 
     const evidence = {
       snapshot_id: snapshot.snapshot_id,
@@ -7303,6 +7710,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         // Visual Gesture Capsule (ambiguous visual-obstruction fallback only):
         // safe view ONLY — { available, capsule } with no bytes/coords/cdp/geometry.
         ...(vgcSnapshotInfo ? { visual_gesture_capsule: vgcSnapshotInfo } : {}),
+        // Proactive conservative state (ANTIGEN_HV_PROACTIVE_SURFACE): a dominant
+        // unverified scrim+modal surface is present and the classifier was uncertain.
+        // Recoverable, non-minting: the agent must NOT act on the (now overlay-flagged)
+        // background refs; it should re-snapshot. `surface_trusted:false` /
+        // `surface_resolution:"unverified"` mean "not trusted/actionable until
+        // classified" — never a claim about DOM inspectability. Enums/booleans only.
+        ...(snapshotAttentionBlocked
+          ? {
+              attention_required: true as const,
+              blocked_attention: {
+                code: "DOMINANT_SURFACE_UNVERIFIED" as const,
+                surface_present: true as const,
+                surface_trusted: false as const,
+                surface_resolution: "unverified" as const,
+                actionable_refs_withheld: true as const,
+                recommended_action: "resnapshot_or_request_human_presence" as const,
+              },
+            }
+          : {}),
         action_hints: pageMap.action_hints,
         elements: externalElements,
         // Dev-only HV diagnostic — present only when BOTH ANTIGEN_HUMAN_VERIFICATION

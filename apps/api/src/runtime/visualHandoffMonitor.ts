@@ -62,10 +62,13 @@ import {
   type BlockerCropBox,
 } from "./screenshotRedaction.js";
 import {
-  estimateProgressFillRatio,
   type ProgressFillEstimate,
   type ReleaseReadyBand,
 } from "./visualReleaseReadyDetector.js";
+import {
+  estimateReleaseReadyWithWholeCropFallback,
+  clearWholeCropProgress,
+} from "./visualReleaseReadyWholeCrop.js";
 
 // ─── Flag ─────────────────────────────────────────────────────────────────────
 
@@ -554,7 +557,9 @@ async function defaultReleaseReadyProbe(cdpUrl: string, capsuleId: string): Prom
       return { found: false };
     }
     logHvDebug({ scope: "vgc_release_ready_probe", stage: "detector_invoked" });
-    return estimateProgressFillRatio(cropped);
+    // Per-shape detector first; only a `hold_anchor` crop with no sub-candidate falls
+    // back to the conservative whole-crop temporal read (strict source gate inside).
+    return estimateReleaseReadyWithWholeCropFallback(capsuleId, cropped, selection.source);
   } catch {
     logHvDebug({ scope: "vgc_release_ready_probe", stage: "probe_threw" });
     return { found: false };
@@ -881,14 +886,19 @@ export function stopVisualHandoffMonitor(capsuleId: string): void {
   entry.stopped = true;
   if (entry.timer) clearTimeout(entry.timer);
   monitors.delete(capsuleId);
+  // Single choke point for every real teardown (terminal/expiry/cancel, completion,
+  // external cancel route, manual stop): drop the per-capsule whole-crop pixel state.
+  clearWholeCropProgress(capsuleId);
   logHvDebug({ scope: "vgc_handoff_monitor", monitor_event: "stopped" });
 }
 
 /** Test-only: stop + drop all monitors between cases. */
 export function clearVisualHandoffMonitorsForTests(): void {
-  for (const [, entry] of monitors) {
+  for (const [capsuleId, entry] of monitors) {
     entry.stopped = true;
     if (entry.timer) clearTimeout(entry.timer);
+    // The test path bypasses stopVisualHandoffMonitor's body — clear state per entry.
+    clearWholeCropProgress(capsuleId);
   }
   monitors.clear();
 }

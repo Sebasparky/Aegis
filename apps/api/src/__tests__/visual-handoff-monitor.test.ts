@@ -41,6 +41,7 @@ import {
   type VisualHandoffMonitorDeps,
 } from "../runtime/visualHandoffMonitor.js";
 import { cropPng } from "../runtime/screenshotRedaction.js";
+import { WHOLE_CROP_BAND } from "../runtime/visualReleaseReadyWholeCrop.js";
 import { PNG as PngImage } from "pngjs";
 import {
   createVisualGestureCapsule,
@@ -533,6 +534,43 @@ describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {
     await vi.advanceTimersByTimeAsync(1500);
     expect(probe).not.toHaveBeenCalled();
     expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).not.toBe("release_ready");
+  });
+
+  // ── Whole-crop active-hold fallback shape (the temporal "Release now" read) ─────
+  // The fallback returns a full estimate carrying the CONSTANT WHOLE_CROP_BAND. It must
+  // flow through the unchanged streak machine exactly like a bar/ring read: fire
+  // `release_ready` (non-terminal) after 2 stable frames, and never probe with no hold.
+  const WHOLE_CROP_FULL = { found: true as const, fill_ratio: 1, band: WHOLE_CROP_BAND };
+
+  it("no active hold → never probes (whole-crop fallback unreachable), stays still_active", async () => {
+    const c = seedCapsule();
+    const m = makeModel([r("wall_present")]);
+    const probe = vi.fn(async () => WHOLE_CROP_FULL);
+    startVisualHandoffMonitor({ capsuleId: c.capsule_id, cdpUrl: CDP }, rrDeps(m, probe, false));
+    await vi.advanceTimersByTimeAsync(1500);
+    // skip_no_active_hold short-circuits before any capture/detect/fallback.
+    expect(probe).not.toHaveBeenCalled();
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
+  });
+
+  it("whole-crop full (2 stable frames) → release_ready, agent still waits, NOT completed", async () => {
+    const c = seedCapsule();
+    const m = makeModel([r("wall_present")]);
+    const probe = vi.fn(async () => WHOLE_CROP_FULL);
+    const release = vi.fn();
+    startVisualHandoffMonitor(
+      { capsuleId: c.capsule_id, cdpUrl: CDP },
+      { ...rrDeps(m, probe, true), releaseHold: release },
+    );
+    await vi.advanceTimersByTimeAsync(1500); // ≥2 still_active ticks → 2 full reads
+    const u = getLatestHvHandoffUpdate(BASE.browser_session_id);
+    expect(u?.phase).toBe("release_ready");
+    expect(u?.agent_should_wait).toBe(true);
+    expect(u?.requires_user_attention).toBe(true);
+    // Strictly non-terminal: the firing never completes, clears, or releases the hold.
+    expect(getVisualGestureCapsule(c.capsule_id)?.status).not.toBe("cleared");
+    expect(release).not.toHaveBeenCalled();
+    expect(hasActiveVisualHandoffMonitor(c.capsule_id)).toBe(true);
   });
 });
 

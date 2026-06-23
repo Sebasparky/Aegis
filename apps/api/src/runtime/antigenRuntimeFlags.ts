@@ -94,9 +94,10 @@ export interface AntigenRuntimeStatus {
   visual_judgment_dry_run: boolean;
   /**
    * Whether ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY is on (default off). The second, independent
-   * gate that lets `decideVisualLivePolicy` actually suppress a snapshot HV 409 — and only
-   * for an allowlisted origin (ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST) with a confident
-   * benign verdict (≥0.95) and dry-run off. Off ⇒ judgment stays telemetry-only.
+   * gate that lets `decideVisualLivePolicy` actually suppress a snapshot HV 409 — for a
+   * confident benign surface verdict (≥0.95) with dry-run off. There is NO domain allowlist:
+   * suppression rests solely on the current rendered-surface classification. Off ⇒ judgment
+   * stays telemetry-only.
    */
   visual_judgment_live_policy: boolean;
   fill_state: boolean;

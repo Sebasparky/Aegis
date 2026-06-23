@@ -8,8 +8,9 @@ import {
 } from "../runtime/visualBlockerClassifier/livePolicy.js";
 
 /**
- * Base: fully live, allowed, model available. Each test overrides what it exercises.
+ * Base: fully live, model available. Each test overrides what it exercises.
  * Defaults to a benign suppression candidate so suppression-path tests are explicit.
+ * There is no domain gate — suppression rests on the surface classification alone.
  */
 function baseInput(overrides: Partial<VisualLivePolicyInput> = {}): VisualLivePolicyInput {
   return {
@@ -22,7 +23,6 @@ function baseInput(overrides: Partial<VisualLivePolicyInput> = {}): VisualLivePo
     visual_judgment_enabled: true,
     live_policy_enabled: true,
     dry_run: false,
-    domain_allowed: true,
     origin_host: "www.example.com",
     ...overrides,
   };
@@ -56,12 +56,14 @@ describe("decideVisualLivePolicy", () => {
     expect(d.runtime_action_taken_by_model).toBe(false);
   });
 
-  it("4. domain not allowed → allow_heuristic_stop, no suppress, reason mentions allowlist", () => {
-    const d = decideVisualLivePolicy(baseInput({ domain_allowed: false }));
-    expect(d.action).toBe("allow_heuristic_stop");
-    expect(d.should_suppress_heuristic_stop).toBe(false);
-    expect(d.runtime_action_taken_by_model).toBe(false);
-    expect(d.reason.toLowerCase()).toContain("allowlist");
+  it("4. any host is eligible (no domain gate) → confident benign suppresses regardless of origin", () => {
+    const d = decideVisualLivePolicy(
+      baseInput({ origin_host: "deep.checkout.some-unlisted-site.example" }),
+    );
+    expect(d.action).toBe("suppress_heuristic_stop");
+    expect(d.policy_decision).toBe("visual_benign_suppression_candidate");
+    expect(d.should_suppress_heuristic_stop).toBe(true);
+    expect(d.runtime_action_taken_by_model).toBe(true);
   });
 
   it("5. model unavailable → allow_heuristic_stop, no suppress, visual_runtime_no_action", () => {

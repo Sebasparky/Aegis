@@ -1,8 +1,18 @@
 # Antigen HV Visual Judgment Progress
 
 Internal engineering memo. Branch: `feature/vgc-live-press-hold-relay`.
-Status as of this milestone: dev-only live suppression v0 has landed behind
-explicit gates on an exact-host allowlist.
+Status as of this milestone: dev-only live suppression v0 is gated by flags +
+strict confidence thresholds and decides on the **current rendered surface
+classification** alone. The earlier exact-host allowlist has been removed.
+
+> **Product principle: Antigen does not trust domains; it trusts the current
+> rendered surface classification.** A hostname is not a reliable safety
+> boundary — the same site can show a benign marketing/modal surface on one page
+> and a real human-verification wall deeper in checkout, login, or account
+> flows. The exact-host allowlist was acceptable as first-blast-radius
+> scaffolding for the very first live experiment, but it must not become
+> architecture, so it has been removed. Live suppression remains dev-only and
+> explicit through the flags below.
 
 ---
 
@@ -94,8 +104,23 @@ The capability was built up in the following progression:
    - `decideOutcome(...)` remains **only** for review taxonomy (it uses a
      separate `0.8` benign threshold for labeling; it does **not** gate live
      suppression),
+   - the first cut was gated by an exact-host allowlist
+     (`ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST`),
    - the snapshot-mint path can return a normal `200` instead of a `409` only
      when **all** gates pass.
+
+7. **Allowlist removed — surface-based v0** (this slice)
+   - the domain allowlist gate (`ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST`,
+     `parseVisualJudgmentLiveAllowlist`, `isOriginAllowedForVisualJudgmentLivePolicy`,
+     the `domain_allowed` policy input + telemetry field) has been **deleted**,
+   - suppression now rests **only** on the current rendered-surface
+     classification — no host is special-cased, and no host is excluded,
+   - live suppression stays **dev-only and explicit** through the
+     enable/live-policy/dry-run flags + the strict `≥ 0.95` benign threshold,
+   - telemetry `domain_allowed` is replaced by `policy_scope: "global_dev"`,
+   - shadow / dry-run telemetry should now flow **broadly** across all
+     activation-gated HV candidates (every origin), not just a handful of
+     allowlisted hosts — this is the data we need before any wider promotion.
 
 ---
 
@@ -106,19 +131,20 @@ Suppression occurs **only** when every one of these holds:
 - `ANTIGEN_VISUAL_JUDGMENT_ENABLED=true`
 - `ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY=true`
 - `ANTIGEN_VISUAL_JUDGMENT_DRY_RUN=false`
-- `ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST=<exact-hosts>`
 - model available (sidecar reachable),
-- domain **exactly** allowlisted,
-- predicted label is **benign**,
+- predicted label is **benign** (and **not** `page_level_hv_wall`, **not**
+  unknown / uncertain),
 - confidence is **≥ 0.95**.
+
+There is **no domain allowlist** — eligibility is decided per-snapshot by the
+rendered-surface classification, not by hostname.
 
 ### Default fail-closed cases (no suppression — existing 409 stands)
 
 - live flag absent / off,
 - dry-run true,
-- allowlist empty / missing,
-- domain not allowlisted,
-- sidecar / model unavailable,
+- visual judgment disabled,
+- sidecar / model unavailable (null result),
 - unknown label,
 - `page_level_hv_wall` at **any** confidence,
 - benign confidence `< 0.95`,
@@ -156,14 +182,18 @@ queue. Interpret it as follows.
 - `should_suppress_heuristic_stop = true`
 - `live_policy_runtime_action_taken = true`
 - `shadow_only = false`
-- `domain_allowed = true`
 - `live_policy_enabled = true`
+- `policy_scope = "global_dev"` (always — there is no per-domain field)
 
 **No suppression happened when:**
 
 - `policy_action = dry_run_only` or `allow_heuristic_stop`
 - `live_policy_runtime_action_taken = false`
 - `shadow_only = true`
+
+> The former `domain_allowed` field has been removed from `live_policy_shadow`
+> and is replaced by the constant `policy_scope: "global_dev"`. Do not read or
+> assert on `domain_allowed` — it no longer exists.
 
 ### Telemetry safety
 
@@ -200,11 +230,13 @@ ANTIGEN_HV_DEBUG=true \
 ANTIGEN_VISUAL_JUDGMENT_ENABLED=true \
 ANTIGEN_VISUAL_JUDGMENT_DRY_RUN=false \
 ANTIGEN_VISUAL_JUDGMENT_LIVE_POLICY=true \
-ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST=www.hubspot.com,www.hcaptcha.com,www.example.com \
 ANTIGEN_VISUAL_JUDGMENT_SIDECAR_URL=http://127.0.0.1:8782 \
 ANTIGEN_VISUAL_REVIEW_MANUAL_CAPTURE=true \
 npm run dev
 ```
+
+> Note: there is **no** `ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST` anymore — it has
+> been removed. Setting it has no effect.
 
 **Runtime status check:**
 
@@ -220,7 +252,8 @@ Expected:
 
 ### Manual QA matrix
 
-- **Live policy enabled + allowlist:**
+- **Live policy enabled (no allowlist):** any false-positive surface should
+  suppress when the model predicts benign at `≥ 0.95`, regardless of host:
   - hcaptcha.com → normal `200`, live suppression telemetry
   - hubspot.com → normal `200`, live suppression telemetry
   - example.com → normal `200`, live suppression telemetry
@@ -228,7 +261,8 @@ Expected:
   - HubSpot returns `409` again with attribution `snapshot_mint_visual_judgment`
   - attribution remains present
   - `visual_judgment_suppress = false`
-- **True HV walls** should remain `409`.
+- **True HV walls** should remain `409` (model predicts `page_level_hv_wall`,
+  which never suppresses at any confidence).
 - If a true wall is not reproduced live, **unit tests still cover**
   `page_level_hv_wall` → no suppression.
 
@@ -279,8 +313,13 @@ Each had:
 - `should_suppress_heuristic_stop = true`
 - `live_policy_runtime_action_taken = true`
 - `shadow_only = false`
-- `domain_allowed = true`
 - `live_policy_enabled = true`
+
+> This run predates the allowlist removal (it used
+> `ANTIGEN_VISUAL_JUDGMENT_LIVE_ALLOWLIST`). The behavior under the new
+> surface-based gate is identical for these benign surfaces — they suppress
+> because the model predicted benign at `≥ 0.95`, not because the host was
+> listed. A fresh allowlist-free QA pass should be recorded here next.
 
 **Run with live policy disabled:**
 
@@ -293,23 +332,33 @@ Each had:
 
 ## Remaining known limitations
 
-- Live suppression is still **dev-only**.
-- Allowlist is **exact-host only** — no wildcard / subdomain expansion.
+- Live suppression is still **dev-only** (behind the enable/live-policy flags +
+  dry-run-off).
+- Suppression now applies to **any** host when the surface verdict is confident
+  benign — there is no per-host blast-radius cap. The safety boundary is the
+  classifier's accuracy on `page_level_hv_wall` vs. benign, not a hostname.
 - True-wall live manual QA depends on reproducing a live wall; tests cover the
   safety invariant (`page_level_hv_wall` → no suppression) when a live wall is
   not reproduced.
 - Benign **subclass** accuracy is not perfect; the current **HV-vs-benign**
   gating metrics are the critical safety metric, and those were clean
   post-training.
-- This should **not** be promoted beyond the dev allowlist without more
-  broad-domain shadow telemetry and another review/training loop.
+- This should **not** be promoted out of dev (broader users / always-on) without
+  much wider shadow telemetry across many origins and another review/training
+  loop.
 
 ---
 
 ## Next recommended steps
 
-1. Run a wider allowlisted dev QA batch on known benign false-positive surfaces.
-2. Keep importing / reviewing runtime judgment events.
-3. Add an operator checklist for promoting a domain into the live allowlist.
-4. Only after repeated clean QA, consider a very small private beta allowlist.
-5. Do **not** generalize live suppression beyond allowlisted hosts yet.
+1. Run a **broad, allowlist-free** dev QA / shadow batch across many origins
+   (benign false-positive surfaces *and* real walls) to measure HV-vs-benign
+   gating accuracy at scale.
+2. Keep importing / reviewing runtime judgment events — now from every
+   activation-gated HV candidate, not just a few hosts.
+3. Add an operator checklist for promoting the feature out of dev (e.g. enabling
+   live policy for a wider audience), framed around classifier accuracy
+   thresholds, not domain lists.
+4. Only after repeated clean broad-domain QA, consider a small private beta.
+5. Do **not** weaken the `≥ 0.95` benign threshold or broaden where visual
+   judgment runs (it stays activation-gated, snapshot-mint only).

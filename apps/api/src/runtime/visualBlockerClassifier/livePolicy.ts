@@ -11,8 +11,16 @@
  * This file is imported by NOTHING in runtime. It does not capture screenshots,
  * call the sidecar, read env, touch the filesystem, log, mutate any session, or
  * change any API route. All inputs are passed as arguments. It is fully testable in
- * isolation. Wiring into `snapshotVisualJudgment` is a later, separately-reviewed
- * slice behind both flags and a domain allowlist.
+ * isolation. Wiring into `snapshotVisualJudgment` lives behind the ENABLED +
+ * LIVE_POLICY flags and dry-run-off — there is NO domain allowlist gate.
+ *
+ * ── WHY NO DOMAIN ALLOWLIST ─────────────────────────────────────────────────
+ * A hostname is not a reliable guarantee of safety: the same site can render a
+ * benign marketing/modal surface on one page and a real human-verification wall
+ * deeper in checkout/login/account flows. Antigen does NOT trust domains — it
+ * trusts the current rendered surface classification. An exact-host allowlist was
+ * acceptable as first-blast-radius scaffolding but must not become architecture,
+ * so it has been removed. Live suppression remains dev-only via the flags above.
  *
  * ── INVARIANTS (do not weaken) ──────────────────────────────────────────────
  * - Stop/routing is the DEFAULT failure mode. Any unmet/ambiguous/unavailable
@@ -97,8 +105,6 @@ export interface VisualLivePolicyInput {
   live_policy_enabled: boolean;
   /** Gate: dry-run — compute + report, never suppress. */
   dry_run: boolean;
-  /** Gate: domain allowlist / dev-experiment result for this origin. */
-  domain_allowed: boolean;
 
   /** Threshold overrides; defaults applied when omitted. */
   hv_action_threshold?: number;
@@ -195,9 +201,10 @@ function classifyModelOutput(
 
 /**
  * Decide whether an activation-gated heuristic HV stop should be kept or suppressed.
- * Pure: no I/O, no env, no mutation. Gating (flags/dry-run/allowlist/availability) is
- * applied on top of the model classification; suppression is permitted ONLY when fully
- * live, allowed, and the model is a confident benign-suppression candidate.
+ * Pure: no I/O, no env, no mutation. Gating (flags/dry-run/availability) is applied on
+ * top of the model classification; suppression is permitted ONLY when fully live and the
+ * model is a confident benign-suppression candidate. There is NO domain gate — the
+ * current rendered-surface classification is the sole trust signal.
  */
 export function decideVisualLivePolicy(input: VisualLivePolicyInput): VisualLivePolicyDecision {
   const hvThreshold = input.hv_action_threshold ?? DEFAULT_HV_ACTION_THRESHOLD;
@@ -257,18 +264,7 @@ export function decideVisualLivePolicy(input: VisualLivePolicyInput): VisualLive
     };
   }
 
-  if (!input.domain_allowed) {
-    return {
-      ...base,
-      action: "allow_heuristic_stop",
-      policy_decision: classification.policy_decision,
-      should_suppress_heuristic_stop: false,
-      runtime_action_taken_by_model: false,
-      reason: "Origin outside the live-policy allowlist / dev experiment; keep the heuristic stop.",
-    };
-  }
-
-  // Fully live + allowed. Only a confident benign-suppression candidate may suppress.
+  // Fully live (no domain gate). Only a confident benign-suppression candidate may suppress.
   if (classification.policy_decision === "visual_benign_suppression_candidate") {
     return {
       ...base,

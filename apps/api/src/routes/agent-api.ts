@@ -761,6 +761,71 @@ async function maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock(input: {
 }
 
 /**
+ * Visual-judgment-authority VGC mint for the ambiguous snapshot path.
+ *
+ * Unlike maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock (which gates on the
+ * DOM/geometry heuristic `classifyAmbiguousVisualObstruction`), this mints when the
+ * VISION MODEL has CONFIRMED a page-level human-verification wall
+ * (`judgment.hvConfirmed === true`) even though DOM geometry is inconclusive — the
+ * DOM-opaque cross-origin press-and-hold case (PerimeterX/HUMAN, e.g. Bath & Body
+ * Works) that the geometry classifier misses. Visual judgment is the authority here;
+ * no DOM/geometry signal is required or consulted.
+ *
+ * Same fail-safe contract as its DOM sibling: never throws, returns undefined on any
+ * decline/failure, and routes through the SAME orchestrator so the initial `detected`
+ * handoff update + the safe model metadata (label/confidence/policy-decision/trigger)
+ * are published identically. The caller only reaches this branch when the live policy
+ * already promoted the verdict, so the `hvConfirmed` re-check here is a defensive guard.
+ */
+async function maybeCreateVisualGestureCapsuleForVisualJudgmentHv(input: {
+  session: TaskBrowserSession;
+  delegation: { id: string; agent_name?: string };
+  domain: string;
+  pageUrl: string;
+  judgment: VisualJudgmentEvaluation;
+  triggerBasis: HvHandoffTriggerBasis;
+}): Promise<
+  | { request: HumanVerificationRequest; vgc: { available: true; capsule: SafeVisualGestureCapsuleView } }
+  | undefined
+> {
+  if (!isVisualGestureCapsuleEnabled() || !input.session.cdp_url) return undefined;
+  // Defensive: only a model-promoted (confident page-level HV, live policy on, not
+  // dry-run) verdict may mint here. Anything else falls back to the DOM path upstream.
+  if (!input.judgment.hvConfirmed) return undefined;
+  try {
+    const request = createOrReuseHumanVerificationRequest({
+      user_id: MOCK_USER_ID,
+      delegation_id: input.delegation.id,
+      agent_name: input.delegation.agent_name,
+      browser_session_id: input.session.browser_session_id,
+      domain: input.domain,
+      page_url: input.pageUrl,
+      challenge_type: "unknown_human_verification",
+      // Safe user-facing copy only — the shared HUMAN_VERIFICATION_REQUIRED top-level
+      // message stays byte-identical. page_level: true mirrors the model's page-level
+      // verdict (the control is opaque) and matches the screen-HV / structural mints.
+      surface_title: "User presence required. Antigen captured a redacted view for review.",
+      page_level: true,
+    });
+    const created = await createVisualGestureCapsuleForOpaqueHv({
+      humanVerificationRequestId: request.request_id,
+      browserSessionId: input.session.browser_session_id,
+      domain: input.domain,
+      cdpUrl: input.session.cdp_url,
+      pageUrl: input.pageUrl,
+      delegationId: input.delegation.id,
+      userId: MOCK_USER_ID,
+      reason: "visual_judgment_confirmed_hv",
+      ...vgcModelFieldsFromJudgment(input.judgment, input.triggerBasis),
+    });
+    if (!created.ok) return undefined;
+    return { request, vgc: { available: true, capsule: created.capsule } };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Safe origin hostname for a stored URL, or undefined when absent/unparseable.
  * Never throws and never returns path/query — used only for same-origin vs
  * cross-origin comparison of stale VGC/HV state; the hostname itself is never
@@ -6547,6 +6612,9 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           (hvWallHint || elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS || noProgressSignal);
         let ambiguousProbe: Awaited<ReturnType<typeof detectAmbiguousVisualObstructionViaCDP>> = null;
         let ambiguousSkipReason: HumanVerificationDebug["ambiguous_skip_reason"];
+        // Dev-only: true when the mint came from the model-promotion path (visual
+        // judgment hvConfirmed) rather than the DOM/geometry classifier. Telemetry only.
+        let ambiguousModelPromoted = false;
         if (ambiguousGateOpen) {
           // Fail-safe: a probe/create throw must never fail the snapshot — it
           // degrades to the existing clear-state path (ambiguous stays undefined).
@@ -6563,31 +6631,53 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
                 /* keep "unknown" */
               }
               // Visual Judgment v0: an ambiguous visual obstruction would mint here →
-              // ask the classifier first. A high-confidence benign verdict (not dry-run)
-              // declines the mint (no capsule, no HV request) so the flow continues.
+              // ask the classifier first. Three outcomes drive the mint decision:
+              //   • model-confident BENIGN (suppress)  → never mint (false-positive kill).
+              //   • model-confident HV   (hvConfirmed)  → PROMOTE a mint even when the
+              //     DOM/geometry heuristic is inconclusive — the B&BW PerimeterX/HUMAN
+              //     press-and-hold case classifyAmbiguousVisualObstruction misses.
+              //   • uncertain / unavailable / low-confidence → fall back to the existing
+              //     DOM/geometry classifier (byte-identical to today; this is also the
+              //     flag-off and live-policy-off path, where hvConfirmed is always false).
               const ambiguousJudgment = session.cdp_url
                 ? await snapshotVisualJudgment("unreadable_dominant_surface")
                 : undefined;
-              ambiguous = ambiguousJudgment?.suppress
-                ? undefined
-                : await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
-                    session,
-                    delegation,
-                    domain: ambiguousDomain,
-                    pageUrl: snapshot.url ?? "",
-                    // The authoritative interactive count is the extracted element_count.
-                    // repeated_stale is corroborating-only (never fires alone): set it
-                    // ONLY when a recent no-progress marker corroborates a high-element
-                    // overlay — the low-element path stays byte-identical.
-                    signals: {
-                      ...ambiguousProbe,
-                      near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
-                      ...(noProgressSignal ? { repeated_stale: true } : {}),
-                    },
-                  });
-              // classifier_false here covers both "obstruction classifier declined" and
-              // "visual judgment suppressed as benign" — both mean: do not mint.
+              if (ambiguousJudgment?.suppress) {
+                ambiguous = undefined;
+              } else if (ambiguousJudgment?.hvConfirmed) {
+                ambiguous = await maybeCreateVisualGestureCapsuleForVisualJudgmentHv({
+                  session,
+                  delegation,
+                  domain: ambiguousDomain,
+                  pageUrl: snapshot.url ?? "",
+                  judgment: ambiguousJudgment,
+                  triggerBasis: "unreadable_dominant_surface",
+                });
+              } else {
+                ambiguous = await maybeCreateVisualGestureCapsuleForAmbiguousVisualBlock({
+                  session,
+                  delegation,
+                  domain: ambiguousDomain,
+                  pageUrl: snapshot.url ?? "",
+                  // The authoritative interactive count is the extracted element_count.
+                  // repeated_stale is corroborating-only (never fires alone): set it
+                  // ONLY when a recent no-progress marker corroborates a high-element
+                  // overlay — the low-element path stays byte-identical.
+                  signals: {
+                    ...ambiguousProbe,
+                    near_zero_interactive: elements.length <= PAGE_HV_PROBE_MAX_ELEMENTS,
+                    ...(noProgressSignal ? { repeated_stale: true } : {}),
+                  },
+                });
+              }
+              // classifier_false here covers "obstruction classifier declined", "visual
+              // judgment suppressed as benign", and "model-positive mint failed" — all
+              // mean: do not mint. "fired" covers BOTH the DOM-geometry mint and the
+              // model-promoted mint.
               ambiguousSkipReason = ambiguous ? "fired" : "classifier_false";
+              // Dev-only marker so QA can tell the model-promoted mint apart from the
+              // DOM-geometry mint. Boolean only; never affects behavior or attribution.
+              ambiguousModelPromoted = ambiguousJudgment?.hvConfirmed === true && !!ambiguous;
             } else {
               ambiguousSkipReason = "probe_returned_null";
             }
@@ -6680,7 +6770,10 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             scope: "snapshot_hv",
             tool: "antigen_snapshot",
             returned_409: true,
-            reason: "ambiguous_fired",
+            // "visual_judgment_promoted_hv" when the model authority minted (DOM
+            // geometry inconclusive); "ambiguous_fired" for the DOM-geometry mint.
+            reason: ambiguousModelPromoted ? "visual_judgment_promoted_hv" : "ambiguous_fired",
+            visual_judgment_promoted: ambiguousModelPromoted,
             structural_wall_seen: false,
             ambiguous_considered: true,
             created_capsule: true,

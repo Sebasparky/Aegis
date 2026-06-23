@@ -137,7 +137,7 @@ describe("evaluateVisualJudgment — flag off (byte-identical)", () => {
       { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost: "example.com" },
       seams,
     );
-    expect(out).toEqual({ ran: false, suppress: false });
+    expect(out).toEqual({ ran: false, suppress: false, hvConfirmed: false });
     expect(captured).toBe(false);
     expect(asked).toBe(false);
     expect(fs.existsSync(queue)).toBe(false);
@@ -529,12 +529,69 @@ describe("evaluateVisualJudgment — flag on", () => {
       }
     });
 
-    it("evaluateVisualJudgment return shape is unchanged (no new top-level return keys)", async () => {
+    it("evaluateVisualJudgment return shape carries the safe scalar keys (incl. hvConfirmed)", async () => {
       const { out } = await runWith(
         { callSidecar: async () => mkResult("cookie_banner", 0.97) },
         { live: true },
       );
-      expect(Object.keys(out).sort()).toEqual(["outcome", "ran", "result", "suppress"]);
+      expect(Object.keys(out).sort()).toEqual(["hvConfirmed", "outcome", "ran", "result", "suppress"]);
+    });
+
+    // ── Model-positive PROMOTION authority (hvConfirmed) ──────────────────────
+    // Symmetric to suppression: hvConfirmed is true ONLY for a confident page-level
+    // HV wall under live policy ON + not dry-run. It NEVER coincides with suppress.
+
+    it("live + high-confidence page_level_hv_wall → hvConfirmed:true (promotion), suppress:false", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.95) },
+        { live: true },
+      );
+      expect(out.hvConfirmed).toBe(true);
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_hv_confirmed");
+      expect(shadow.policy_action).toBe("allow_heuristic_stop");
+    });
+
+    it("live policy OFF + high-confidence page_level_hv_wall → hvConfirmed:false (byte-identical/shadow)", async () => {
+      const { out, shadow } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.99) },
+        // live omitted → live policy disabled
+      );
+      expect(out.hvConfirmed).toBe(false);
+      expect(out.suppress).toBe(false);
+      expect(shadow.policy_decision).toBe("visual_hv_confirmed");
+      expect(shadow.policy_action).toBe("dry_run_only");
+    });
+
+    it("live + DRY-RUN + high-confidence HV → hvConfirmed:false (no runtime promotion)", async () => {
+      const { out } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.99) },
+        { live: true, dryRun: true },
+      );
+      expect(out.hvConfirmed).toBe(false);
+      expect(out.suppress).toBe(false);
+    });
+
+    it("live + LOW-confidence page_level_hv_wall → hvConfirmed:false", async () => {
+      const { out } = await runWith(
+        { callSidecar: async () => mkResult(HV_WALL_LABEL, 0.7) },
+        { live: true },
+      );
+      expect(out.hvConfirmed).toBe(false);
+    });
+
+    it("live + sidecar/model unavailable → hvConfirmed:false (fail-safe)", async () => {
+      const { out } = await runWith({ callSidecar: async () => null }, { live: true });
+      expect(out.hvConfirmed).toBe(false);
+    });
+
+    it("live + confident benign → hvConfirmed:false (suppress path, never promotes)", async () => {
+      const { out } = await runWith(
+        { callSidecar: async () => mkResult("cookie_banner", 0.97) },
+        { live: true },
+      );
+      expect(out.hvConfirmed).toBe(false);
+      expect(out.suppress).toBe(true);
     });
   });
 });

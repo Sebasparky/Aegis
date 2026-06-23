@@ -429,6 +429,18 @@ export interface VisualJudgmentEvaluation {
   ran: boolean;
   /** Runtime should skip the HV escalation (mint/409) for this snapshot when true. */
   suppress: boolean;
+  /**
+   * Model-positive PROMOTION signal: the live policy CONFIRMED a page-level HV wall
+   * (`page_level_hv_wall` at/above the HV action threshold) with live policy ON and
+   * NOT dry-run. When true, the ambiguous snapshot path may MINT a Visual Gesture
+   * Capsule even though the DOM/geometry heuristic (`classifyAmbiguousVisualObstruction`)
+   * is inconclusive — the DOM-opaque cross-origin press-and-hold case (PerimeterX/HUMAN)
+   * the geometry classifier misses. Mutually exclusive with `suppress`. Always `false`
+   * on flag-off, dry-run, live-policy-off, benign, uncertain, low-confidence HV, or a
+   * model-unavailable result — so behavior stays byte-identical unless the model is
+   * genuinely confident the surface is a human-verification wall.
+   */
+  hvConfirmed: boolean;
   outcome?: VisualJudgmentOutcome;
   result?: VisualJudgmentResult | null;
 }
@@ -446,7 +458,7 @@ export async function evaluateVisualJudgment(
   args: EvaluateVisualJudgmentArgs,
   seams: EvaluateVisualJudgmentSeams = {},
 ): Promise<VisualJudgmentEvaluation> {
-  if (!isVisualJudgmentEnabled()) return { ran: false, suppress: false };
+  if (!isVisualJudgmentEnabled()) return { ran: false, suppress: false, hvConfirmed: false };
 
   const now = seams.now ? seams.now() : new Date();
   const event_id = randomUUID();
@@ -519,6 +531,17 @@ export async function evaluateVisualJudgment(
   // sets `runtime_action_taken_by_model:true`; any other action keeps the stop.
   const suppress = livePolicy.action === "suppress_heuristic_stop";
 
+  // Model-positive PROMOTION signal (symmetric counterpart to `suppress`). True ONLY when
+  // the live policy classified a confident page-level HV wall (`visual_hv_confirmed`) AND
+  // emitted `allow_heuristic_stop` — which `decideVisualLivePolicy` returns only with
+  // visual judgment ENABLED + live policy ENABLED + NOT dry-run + a non-benign label.
+  // (Live-policy-off / dry-run downgrade the action to `dry_run_only`, so this stays false
+  // and the caller's behavior is byte-identical to today.) This lets the ambiguous snapshot
+  // path mint when DOM/geometry is inconclusive but the model is confident it is a wall.
+  const hvConfirmed =
+    livePolicy.policy_decision === "visual_hv_confirmed" &&
+    livePolicy.action === "allow_heuristic_stop";
+
   // 5. ALWAYS append a safe review event (including suppressions and unavailability).
   appendVisualJudgmentReviewEvent({
     schema_version: "hv-vision-runtime-judgment/v0",
@@ -580,7 +603,7 @@ export async function evaluateVisualJudgment(
     live_policy_runtime_action_taken: livePolicy.runtime_action_taken_by_model,
   });
 
-  return { ran: true, suppress, outcome: decision.outcome, result };
+  return { ran: true, suppress, hvConfirmed, outcome: decision.outcome, result };
 }
 
 /** Test-only: reset the in-memory last-judgment status map. */

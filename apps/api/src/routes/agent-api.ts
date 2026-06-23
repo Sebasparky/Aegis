@@ -74,7 +74,8 @@ import { captureManualVisualReviewCandidate } from "../runtime/visualBlockerClas
 import { runVisualBlockerClassifierPipeline } from "../runtime/visualBlockerClassifier/pipeline.js";
 import { captureVisionDatasetRecord } from "../runtime/visualBlockerClassifier/datasetCapture.js";
 import { mapCaptureResultToBlockerStatus, buildVisualBlockerCapturedResponse, type VisualBlockerSkip } from "../runtime/visualBlockerClassifier/captureAndSkip.js";
-import { evaluateVisualJudgment, type VisualJudgmentEvaluation } from "../runtime/visualBlockerClassifier/visualJudgment.js";
+import { evaluateVisualJudgment, HV_WALL_LABEL, type VisualJudgmentEvaluation } from "../runtime/visualBlockerClassifier/visualJudgment.js";
+import { publishHvHandoffUpdate, type HvHandoffTriggerBasis, type HvHandoffVisualPolicyDecision } from "../runtime/humanVerificationHandoff.js";
 import { createAntigenSnapshotRecord, toExternalAntigenSnapshotElement, resolveAntigenRefForSession, refreshAntigenSnapshotLease, ANTIGEN_SNAPSHOT_TTL_MS } from "../runtime/antigenSnapshotStore.js";
 import { buildAntigenPageMap, buildActiveSurfaces, isActiveSurfacesEnabled, buildPostClickState, buildPostFillState, POST_CLICK_CHANGES } from "../runtime/antigenSnapshotPageMap.js";
 import { isFillStateEnabled, runPostFillProbe } from "../runtime/postFillProbe.js";
@@ -221,6 +222,43 @@ import { classifyLoginOutcome, storeDiagnostic } from "../lib/loginDiagnostics.j
 import { normalizeAccountDomain, accountCreationNextAction, accountCreationPassIdForAgent } from "./account-creation.js";
 import { createAndStoreVaultPass } from "./vault-passes.js";
 import { logInjectionLifecycle, logAuthLifecycle } from "../lib/injectionLifecycleLog.js";
+
+/**
+ * Map an activation-gated visual judgment to the SAFE model fields the VGC
+ * orchestrator echoes into the initial `detected` handoff status update. Status
+ * metadata only — it never gates the mint or the 409. Absent/null judgment (flag
+ * off, classifier unavailable) → undefined (no model fields published).
+ */
+function vgcModelFieldsFromJudgment(
+  evaluation: VisualJudgmentEvaluation | undefined,
+  triggerBasis: HvHandoffTriggerBasis,
+):
+  | {
+      modelLabel?: string;
+      modelConfidence?: number;
+      visualPolicyDecision: HvHandoffVisualPolicyDecision;
+      triggerBasis: HvHandoffTriggerBasis;
+    }
+  | undefined {
+  if (!evaluation || !evaluation.ran) return undefined;
+  const result = evaluation.result ?? null;
+  let decision: HvHandoffVisualPolicyDecision;
+  if (evaluation.outcome === "confident_human_needed") {
+    decision = "visual_hv_confirmed";
+  } else if (result?.predictedLabel === HV_WALL_LABEL) {
+    decision = "visual_low_confidence_hv"; // HV label but below the conservative threshold
+  } else if (evaluation.outcome === "uncertain") {
+    decision = "visual_uncertain";
+  } else {
+    decision = "visual_runtime_no_action";
+  }
+  return {
+    ...(typeof result?.predictedLabel === "string" ? { modelLabel: result.predictedLabel } : {}),
+    ...(typeof result?.confidence === "number" ? { modelConfidence: result.confidence } : {}),
+    visualPolicyDecision: decision,
+    triggerBasis,
+  };
+}
 
 const ALLOWED_DOMAINS = new Set(["en.wikipedia.org", "localhost", "test.aegis.local"]);
 
@@ -6264,6 +6302,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
           delegationId: delegation.id,
           userId: MOCK_USER_ID,
           reason: "screen_hv_visible_wall",
+          ...vgcModelFieldsFromJudgment(screenHvJudgment, "page_level_hv_wall"),
         });
         if (created.ok) {
           screenHvMinted = true;
@@ -6461,6 +6500,7 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
             delegationId: delegation.id,
             userId: MOCK_USER_ID,
             reason: "opaque_hv_no_control_box",
+            ...vgcModelFieldsFromJudgment(structuralPageLevelJudgment, "page_level_hv_wall"),
           });
           if (created.ok) {
             vgcSnapshotInfo = { available: true, capsule: created.capsule };
@@ -6683,6 +6723,17 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
               r.resumed_at = new Date().toISOString();
               humanVerificationRequests.set(r.request_id, r);
               schedulePersist();
+              // Publish the confirming `resumed` handoff status. `completed` (set by
+              // the conservative authority) already cleared agent_should_wait; this
+              // is confirmation on the first clean snapshot. Safe-fields-only.
+              publishHvHandoffUpdate({
+                browser_session_id: r.browser_session_id,
+                source: "visual_gesture_capsule",
+                phase: "resumed",
+                human_verification_request_id: r.request_id,
+                domain: r.domain,
+                presence_source: "dom_probe",
+              });
             }
           }
         }

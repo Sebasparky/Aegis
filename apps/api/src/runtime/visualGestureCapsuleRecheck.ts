@@ -39,6 +39,29 @@ import {
 import { openCdpPageClient, buildHumanVerificationProbeExpr } from "./humanPresenceRelay.js";
 import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
 import { logHvDebug } from "./humanVerificationState.js";
+import {
+  publishHvHandoffUpdate,
+  type HvHandoffPhase,
+} from "./humanVerificationHandoff.js";
+
+/**
+ * Publish a safe handoff status from the recheck (the conservative completion
+ * authority). `completed` is published ONLY from the `cleared` decision here (and
+ * the in-hold DOM probe) — never from the advisory model path. Best-effort.
+ */
+function publishRecheckHandoff(capsuleId: string, phase: HvHandoffPhase): void {
+  const capsule = getVisualGestureCapsule(capsuleId);
+  if (!capsule) return;
+  publishHvHandoffUpdate({
+    browser_session_id: capsule.browser_session_id,
+    source: "visual_gesture_capsule",
+    phase,
+    capsule_id: capsule.capsule_id,
+    human_verification_request_id: capsule.human_verification_request_id,
+    domain: capsule.domain,
+    presence_source: "dom_probe",
+  });
+}
 
 // ─── Post-release settle tunables ────────────────────────────────────────────
 
@@ -522,6 +545,9 @@ export async function recheckVisualGestureCapsule(args: {
   if (decision === "absent") {
     const cleared = markGestureCapsuleCleared(args.capsuleId);
     if (!cleared.ok || !cleared.capsule) return { ok: false, reason: "state_update_failed" };
+    // Conservative authority: the ONLY place (besides the in-hold DOM probe) that
+    // publishes `completed` / lets the agent resume.
+    publishRecheckHandoff(args.capsuleId, "completed");
     return {
       ok: true,
       capsule_id: args.capsuleId,
@@ -534,6 +560,7 @@ export async function recheckVisualGestureCapsule(args: {
   if (decision === "present") {
     const rejected = markGestureAttemptRejected(args.capsuleId);
     if (!rejected.ok || !rejected.capsule) return { ok: false, reason: "state_update_failed" };
+    publishRecheckHandoff(args.capsuleId, "still_active");
     return {
       ok: true,
       capsule_id: args.capsuleId,
@@ -552,6 +579,7 @@ export async function recheckVisualGestureCapsule(args: {
     // present" (and never "presence confirmed").
     const rejected = markGestureAttemptRejected(args.capsuleId);
     if (!rejected.ok || !rejected.capsule) return { ok: false, reason: "state_update_failed" };
+    publishRecheckHandoff(args.capsuleId, "still_active");
     return {
       ok: true,
       capsule_id: args.capsuleId,

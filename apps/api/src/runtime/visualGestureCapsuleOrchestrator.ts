@@ -25,6 +25,11 @@ import {
   type SafeVisualGestureCapsuleView,
 } from "./visualGestureCapsule.js";
 import { captureVisualGestureCapsuleScreenshotFrame } from "./visualGestureCapsuleCapture.js";
+import {
+  publishHvHandoffUpdate,
+  type HvHandoffTriggerBasis,
+  type HvHandoffVisualPolicyDecision,
+} from "./humanVerificationHandoff.js";
 
 export interface CreateVgcForOpaqueHvInput {
   /** The owning HV request — links the capsule back to the user-presence stop state. */
@@ -50,6 +55,16 @@ export interface CreateVgcForOpaqueHvInput {
   reason?: "opaque_hv_no_control_box" | "oopif_hv_no_dom_target" | string;
   /** Injectable for tests; defaults to the real redacted-capture helper. */
   capture?: typeof captureVisualGestureCapsuleScreenshotFrame;
+  /**
+   * OPTIONAL safe visual-judgment context (from the snapshot HV gate's model
+   * result) to echo into the initial `detected` handoff status update. Status
+   * metadata only — never gates anything. Absent on the no-progress backstop
+   * (no model consulted there).
+   */
+  modelLabel?: string;
+  modelConfidence?: number;
+  visualPolicyDecision?: HvHandoffVisualPolicyDecision;
+  triggerBasis?: HvHandoffTriggerBasis;
 }
 
 export type CreateVgcForOpaqueHvResult =
@@ -105,7 +120,25 @@ export async function createVisualGestureCapsuleForOpaqueHv(
     screenshotAvailable = false;
   }
 
-  // 5. Safe view only — `screenshot_available` is re-derived from the live frame
+  // 5. Publish the initial `detected` handoff status (advisory, safe-fields-only).
+  //    Best-effort: a publish failure never affects the HV-required response. This
+  //    runs ONLY when a capsule was actually minted (i.e. NOT on benign
+  //    suppression, which never reaches the orchestrator).
+  publishHvHandoffUpdate({
+    browser_session_id: capsule.browser_session_id,
+    source: "visual_gesture_capsule",
+    phase: "detected",
+    capsule_id: capsule.capsule_id,
+    human_verification_request_id: capsule.human_verification_request_id,
+    domain: capsule.domain,
+    presence_source: input.modelLabel ? "model" : "none",
+    ...(input.modelLabel ? { model_label: input.modelLabel } : {}),
+    ...(input.modelConfidence !== undefined ? { model_confidence: input.modelConfidence } : {}),
+    ...(input.visualPolicyDecision ? { visual_policy_decision: input.visualPolicyDecision } : {}),
+    ...(input.triggerBasis ? { trigger_basis: input.triggerBasis } : {}),
+  });
+
+  // 6. Safe view only — `screenshot_available` is re-derived from the live frame
   //    store inside the safe view, so it is authoritative regardless of the path.
   return {
     ok: true,

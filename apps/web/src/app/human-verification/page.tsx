@@ -28,8 +28,11 @@ import {
   startVisualGestureCapsuleHold,
   sendVisualGestureCapsuleHeartbeat,
   endVisualGestureCapsuleHold,
+  listHvHandoffUpdates,
   type VisualGestureCapsuleView,
   type VisualGestureKind,
+  type HvHandoffUpdate,
+  type HvHandoffPhase,
 } from "@/lib/api";
 import { normalizePointInRect } from "@/lib/normalizePoint";
 
@@ -39,16 +42,28 @@ const POLL_MS = 2500;
 const HEARTBEAT_INTERVAL_MS = 300;
 const ELAPSED_TICK_MS = 100;
 
-// Guided fixed-duration attempts. The duration ladder (generic Antigen timing —
-// NOT tied to any provider) lives server-side and arrives as `recommended_hold_ms`
-// on each capsule view: attempt 1 asks for a 5s hold, attempt 2 a longer 10s hold,
-// attempt 3 a 15s hold; after the ladder is exhausted the user is sent to the
-// visible browser (manual_fallback). The user always releases physically once
-// prompted — Antigen never extends or replays the hold past release.
-const DEFAULT_HOLD_MS = 5000;
-function holdTargetMs(view: { recommended_hold_ms?: number } | null | undefined): number {
-  return view?.recommended_hold_ms ?? DEFAULT_HOLD_MS;
-}
+// The server still carries a guided hold duration (`recommended_hold_ms`) as an
+// INTERNAL safety backstop + max-duration ceiling, but it is NO LONGER shown to
+// the user as a "hold for N seconds" countdown (that number was an educated
+// guess). The live status is PHASE-BASED instead: the user holds until the status
+// reaches "All done", driven by the conservative probe/recheck and informed by
+// the visual classifier.
+
+// Phase → user-facing live status copy. The model may INFORM
+// `looks_complete_checking` ("looks complete — checking…") but the conservative
+// authority owns `completed` ("all done"). Never shows a hardcoded countdown.
+const HANDOFF_PHASE_COPY: Record<HvHandoffPhase, string> = {
+  detected: "Human verification detected.",
+  presenting_to_user: "Please complete the verification.",
+  user_interaction_required: "Please complete the verification.",
+  holding: "Keep holding…",
+  still_active: "Verification still active — keep holding…",
+  looks_complete_checking: "Looks complete — checking…",
+  completed: "All done — the agent can resume.",
+  resumed: "All done — the agent resumed.",
+  expired: "This verification request expired.",
+  cancelled: "This verification request was cancelled.",
+};
 
 // Dev-only affordance gate. Next.js inlines process.env.NODE_ENV in client code;
 // the backend smoke route is itself NODE_ENV-gated, so this only hides the button.
@@ -138,7 +153,13 @@ export default function HumanVerificationPage() {
   // gesture body; it is never sent anywhere extra and is gated behind IS_DEV.
   const [markerPoint, setMarkerPoint] = useState<{ fx: number; fy: number } | null>(null);
 
+  // Live HV handoff status, keyed by capsule_id. Polled independently of the
+  // capsule list (and NOT paused during a hold) so the phase-based status —
+  // "keep holding" → "looks complete, checking" → "all done" — updates live.
+  const [handoffByCapsule, setHandoffByCapsule] = useState<Record<string, HvHandoffUpdate>>({});
+
   const selected = capsules.find((c) => c.capsule_id === selectedId) ?? null;
+  const handoff = selectedId ? handoffByCapsule[selectedId] ?? null : null;
 
   // ── Poll active capsules ────────────────────────────────────────────────────
   useEffect(() => {
@@ -159,6 +180,32 @@ export default function HumanVerificationPage() {
     }
     poll();
     const id = setInterval(poll, POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // ── Poll live HV handoff status (runs during the hold too) ──────────────────
+  // Correlation is by capsule_id (the UI never sees a browser_session_id). A
+  // faster cadence than the capsule list so the phase status feels live.
+  useEffect(() => {
+    let active = true;
+    async function pollHandoff() {
+      try {
+        const res = await listHvHandoffUpdates();
+        if (!active) return;
+        const next: Record<string, HvHandoffUpdate> = {};
+        for (const u of res.data) {
+          if (u.capsule_id) next[u.capsule_id] = u;
+        }
+        setHandoffByCapsule(next);
+      } catch {
+        /* handoff status is best-effort; never block the panel */
+      }
+    }
+    pollHandoff();
+    const id = setInterval(pollHandoff, 1500);
     return () => {
       active = false;
       clearInterval(id);
@@ -234,7 +281,7 @@ export default function HumanVerificationPage() {
       if (res.recheck === "inconclusive") {
         // Weak/ambiguous — NOT cleared. Prompt a longer hold; never claim presence.
         setStatusMsg(
-          `Couldn't confirm it cleared — try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold. (attempt ${res.attempt_count}/${selected?.max_attempts ?? "?"})`,
+          `Couldn't confirm it cleared — keep holding a little longer. (attempt ${res.attempt_count}/${selected?.max_attempts ?? "?"})`,
         );
         setHint("The frame may have changed — recapture to see the current view.");
         await loadScreenshot(capsuleId);
@@ -381,24 +428,16 @@ export default function HumanVerificationPage() {
           setStatusMsg("Cleared — presence confirmed. The agent can resume.");
           setHint(null);
         } else if (res.hold_state === "too_short") {
-          // No attempt burned — guide the user to redo the same attempt fully.
-          setStatusMsg(
-            `That was too short — hold for the full ${Math.round(holdTargetMs(res.data) / 1000)} seconds.`,
-          );
+          // No attempt burned — guide the user to redo the attempt and hold longer.
+          setStatusMsg("That was too short — press and hold a little longer.");
           setHint(null);
         } else if (res.hold_state === "still_present") {
-          // res.data is post-recheck, so recommended_hold_ms is the longer next rung.
-          setStatusMsg(
-            `Still present. Try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold.`,
-          );
+          setStatusMsg("Still present. Keep holding a little longer.");
           setHint("The frame may have changed — recapture to see the current view.");
           await loadScreenshot(capsuleId);
         } else if (res.hold_state === "inconclusive") {
           // Couldn't confirm the wall cleared — do NOT claim presence confirmed.
-          // res.data is post-recheck, so recommended_hold_ms is the longer next rung.
-          setStatusMsg(
-            `Couldn't confirm it cleared — try a longer ${Math.round(holdTargetMs(res.data) / 1000)}-second hold.`,
-          );
+          setStatusMsg("Couldn't confirm it cleared — keep holding a little longer.");
           setHint("The frame may have changed — recapture to see the current view.");
           await loadScreenshot(capsuleId);
         } else {
@@ -456,7 +495,6 @@ export default function HumanVerificationPage() {
     if (IS_DEV) setMarkerPoint({ fx: pt.fx, fy: pt.fy });
 
     const capsuleId = selected.capsule_id;
-    const targetMs = holdTargetMs(selected);
     // Capture the pointer so release/leave outside the image still ends the hold.
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -483,7 +521,7 @@ export default function HumanVerificationPage() {
         holdStartMsRef.current = Date.now();
         setHoldElapsedMs(0);
         setStatusMsg(null);
-        setHint(`Hold for ${Math.round(targetMs / 1000)} seconds.`);
+        setHint("Keep holding until the status says it's done.");
         heartbeatTimerRef.current = setInterval(() => void heartbeatTick(capsuleId), HEARTBEAT_INTERVAL_MS);
         elapsedTimerRef.current = setInterval(
           () => setHoldElapsedMs(Date.now() - holdStartMsRef.current),
@@ -780,35 +818,52 @@ export default function HumanVerificationPage() {
                 </div>
               )}
 
-              {/* Live hold timer — guides a fixed-duration attempt: hold to the
-                  target, then release on the prompt. The browser mouse is down
-                  only while the user physically holds. */}
+              {/* Live PHASE-BASED hold status — no hardcoded countdown. The copy
+                  is driven by the live handoff phase (informed by the visual
+                  classifier + the conservative probe). The user keeps holding
+                  until the status reaches "All done"; the model can say "looks
+                  complete — checking…" but never resumes the agent on its own. */}
               {holding &&
                 (() => {
-                  const targetMs = holdTargetMs(selected);
-                  const reached = holdElapsedMs >= targetMs;
-                  const remainingS = Math.max(0, Math.ceil((targetMs - holdElapsedMs) / 1000));
+                  const looksDone = handoff?.phase === "looks_complete_checking";
+                  const elapsedS = (holdElapsedMs / 1000).toFixed(0);
+                  const copy =
+                    handoff && (handoff.phase === "still_active" || handoff.phase === "looks_complete_checking")
+                      ? HANDOFF_PHASE_COPY[handoff.phase]
+                      : "Keep holding…";
                   return (
                     <div
                       className={`mt-3 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
-                        reached
+                        looksDone
                           ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
                           : "border-indigo-700 bg-indigo-950/40 text-indigo-200"
                       }`}
                     >
                       <span
                         className={`inline-block h-2 w-2 animate-pulse rounded-full ${
-                          reached ? "bg-emerald-400" : "bg-indigo-400"
+                          looksDone ? "bg-emerald-400" : "bg-indigo-400"
                         }`}
                       />
                       <span>
-                        {reached
-                          ? "Release now — checking…"
-                          : `Hold for ${Math.round(targetMs / 1000)} seconds — ${remainingS}s left.`}
+                        {copy} <span className="text-gray-500">({elapsedS}s)</span>
                       </span>
                     </div>
                   );
                 })()}
+
+              {/* Live handoff status when NOT actively holding (detected / still
+                  active / all done / resumed). Phase-based, safe-fields-only. */}
+              {!holding && handoff && (
+                <div
+                  className={`mt-3 flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+                    handoff.phase === "completed" || handoff.phase === "resumed"
+                      ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
+                      : "border-gray-700 bg-gray-900 text-gray-300"
+                  }`}
+                >
+                  <span>{HANDOFF_PHASE_COPY[handoff.phase]}</span>
+                </div>
+              )}
 
               {/* Status + hint */}
               {statusMsg && <div className="mt-3 text-sm text-gray-300">{statusMsg}</div>}

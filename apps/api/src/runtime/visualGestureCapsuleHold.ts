@@ -64,6 +64,15 @@ import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js
 import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
 import { logHvDebug } from "./humanVerificationState.js";
 import { renderVgcHoldOverlay } from "./nativePointerRuntime.js";
+import {
+  classifyHoldPresenceViaModel,
+  type VgcHoldClassifierSeams,
+} from "./visualGestureCapsuleHoldClassifier.js";
+import {
+  publishHvHandoffUpdate,
+  type HvHandoffPhase,
+  type HvHandoffPresenceSource,
+} from "./humanVerificationHandoff.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -78,6 +87,44 @@ export const VGC_HOLD_MAX_DURATION_MS = 20_000;
 
 /** In-hold cleared-probe cadence. LOW-frequency, armed only after the min hold. */
 export const VGC_IN_HOLD_PROBE_INTERVAL_MS = 1_000;
+
+/**
+ * Minimum spacing between ADVISORY model status judgments during a hold. The DOM
+ * presence probe (the release authority) runs every tick; the model status
+ * enrichment runs at most this often so a hold makes only a handful of sidecar
+ * calls (≤ ~7 over the 20s ceiling) — cheap, and active ONLY during a live hold.
+ */
+export const VGC_HOLD_MODEL_STATUS_INTERVAL_MS = 3_000;
+
+/**
+ * Publish a safe handoff status update for a capsule, resolving the safe
+ * correlation metadata (browser session / domain / HV request id) from the
+ * capsule record. Best-effort; a missing capsule simply skips the publish. Never
+ * throws into the hold path.
+ */
+function publishHoldHandoff(
+  capsuleId: string,
+  phase: HvHandoffPhase,
+  extra?: {
+    presence_source?: HvHandoffPresenceSource;
+    model_label?: string;
+    model_confidence?: number;
+  },
+): void {
+  const capsule = getVisualGestureCapsule(capsuleId);
+  if (!capsule) return;
+  publishHvHandoffUpdate({
+    browser_session_id: capsule.browser_session_id,
+    source: "visual_gesture_capsule",
+    phase,
+    capsule_id: capsule.capsule_id,
+    human_verification_request_id: capsule.human_verification_request_id,
+    domain: capsule.domain,
+    ...(extra?.presence_source ? { presence_source: extra.presence_source } : {}),
+    ...(extra?.model_label ? { model_label: extra.model_label } : {}),
+    ...(extra?.model_confidence !== undefined ? { model_confidence: extra.model_confidence } : {}),
+  });
+}
 
 // ─── Injectable dependency seam (production defaults below) ───────────────────
 
@@ -133,6 +180,15 @@ export interface VgcHoldDeps {
   recheck?: typeof recheckVisualGestureCapsule;
   /** In-hold presence probe against the held client (defaults to the union probe). */
   probeOnClient?: (client: Pick<CdpPageClient, "evaluate">) => Promise<VgcHoldPresence>;
+  /**
+   * ADVISORY model presence classifier for live status enrichment (defaults to
+   * classifyHoldPresenceViaModel). NEVER an authority — informs status text only.
+   * Returns `{ available:false }` when the visual-judgment flag is off.
+   */
+  classifyModel?: (args: {
+    cdpUrl: string;
+    seams?: VgcHoldClassifierSeams;
+  }) => ReturnType<typeof classifyHoldPresenceViaModel>;
 }
 
 // ─── Hold sessions (memory-only, one per capsule) ────────────────────────────
@@ -151,6 +207,9 @@ interface VgcHoldSession {
   screenshot_scale_bucket: ReturnType<typeof screenshotScaleBucket>;
   recheck: NonNullable<VgcHoldDeps["recheck"]>;
   probeOnClient: NonNullable<VgcHoldDeps["probeOnClient"]>;
+  classifyModel: NonNullable<VgcHoldDeps["classifyModel"]>;
+  /** Last advisory model status judgment time (cadence-limits the sidecar calls). */
+  last_model_probe_ms?: number;
   started_at_ms: number;
   released_at_ms?: number;
   released: boolean;
@@ -230,6 +289,8 @@ async function runInHoldProbe(hold: VgcHoldSession): Promise<void> {
   hold.probe_in_flight = true;
   let presence: VgcHoldPresence = "unknown";
   try {
+    // CONSERVATIVE AUTHORITY: the DOM union probe alone decides release. The model
+    // (below) never releases — it only enriches the advisory status text.
     presence = await hold.probeOnClient(hold.client);
   } catch {
     presence = "unknown";
@@ -238,13 +299,51 @@ async function runInHoldProbe(hold: VgcHoldSession): Promise<void> {
   }
   if (hold.released) return;
   if (presence === "absent") {
-    // Wall cleared mid-hold: release, mark cleared, leave the session resolved.
+    // Wall cleared mid-hold: release, mark cleared, publish the authoritative
+    // `completed` (the conservative DOM probe is the sole completion authority).
     await releaseHold(hold, "cleared");
     const cleared = markGestureCapsuleCleared(hold.capsule_id);
     hold.cleared = cleared.ok;
+    publishHoldHandoff(hold.capsule_id, "completed", { presence_source: "dom_probe" });
     logHvDebug({ scope: "vgc_hold", hold_event: "in_hold_cleared" });
     return;
   }
+
+  // ADVISORY model status enrichment (best-effort, NON-blocking on release). Runs
+  // at most every VGC_HOLD_MODEL_STATUS_INTERVAL_MS and ONLY while the hold is
+  // live, so a hold makes only a handful of sidecar calls and there is NO model
+  // call outside an active handoff. A `looks_clear` verdict publishes the ADVISORY
+  // `looks_complete_checking` (agent_should_wait stays true — never a release);
+  // `wall_present` publishes `still_active`. `uncertain`/unavailable publishes
+  // nothing (the DOM-driven status stands). The model is never the authority.
+  try {
+    const nowMs = Date.now();
+    const due =
+      hold.last_model_probe_ms === undefined ||
+      nowMs - hold.last_model_probe_ms >= VGC_HOLD_MODEL_STATUS_INTERVAL_MS;
+    if (due) {
+      hold.last_model_probe_ms = nowMs;
+      const verdict = await hold.classifyModel({ cdpUrl: hold.cdp_url });
+      if (!hold.released && verdict.available) {
+        const extra = {
+          presence_source: "model" as HvHandoffPresenceSource,
+          ...(verdict.model_label ? { model_label: verdict.model_label } : {}),
+          ...(verdict.model_confidence !== undefined
+            ? { model_confidence: verdict.model_confidence }
+            : {}),
+        };
+        if (verdict.verdict === "looks_clear") {
+          publishHoldHandoff(hold.capsule_id, "looks_complete_checking", extra);
+        } else if (verdict.verdict === "wall_present") {
+          publishHoldHandoff(hold.capsule_id, "still_active", extra);
+        }
+      }
+    }
+  } catch {
+    /* advisory only — never affects the hold */
+  }
+  if (hold.released) return;
+
   // present / unknown → keep holding; re-arm the next low-frequency tick.
   armInHoldProbe(hold);
 }
@@ -312,6 +411,7 @@ export async function startVgcHoldSession(args: {
   const readLiveViewport = deps.readLiveViewport ?? defaultVgcReadViewport;
   const recheck = deps.recheck ?? recheckVisualGestureCapsule;
   const probeOnClient = deps.probeOnClient ?? probeHoldPresenceOnClient;
+  const classifyModel = deps.classifyModel ?? classifyHoldPresenceViaModel;
 
   // Coarse, value-free debug base reused by every log below. Never fx/fy, coords,
   // dims, or PNG width. No-op unless ANTIGEN_HV_DEBUG is set.
@@ -362,6 +462,8 @@ export async function startVgcHoldSession(args: {
   if (preProbe === "absent") {
     client.close();
     markGestureCapsuleCleared(args.capsuleId);
+    // Conservative authority confirmed the wall is already gone → `completed`.
+    publishHoldHandoff(args.capsuleId, "completed", { presence_source: "dom_probe" });
     logHvDebug({ scope: "vgc_hold", hold_event: "challenge_gone_at_start" });
     return { ok: true, hold_state: "challenge_gone" };
   }
@@ -414,6 +516,7 @@ export async function startVgcHoldSession(args: {
     screenshot_scale_bucket: scaleBucket,
     recheck,
     probeOnClient,
+    classifyModel,
     started_at_ms: nowMs,
     released: false,
     cleared: false,
@@ -439,6 +542,10 @@ export async function startVgcHoldSession(args: {
   // no pointer dispatch — and invoked AFTER the press succeeded, so it can never block or
   // delay the press/release or alter hold timing. Fire-and-forget / fail-open.
   renderVgcHoldOverlay(client, point.x, point.y);
+
+  // The live press is now mirrored into the browser — publish the `holding`
+  // handoff status (safe-fields-only, best-effort).
+  publishHoldHandoff(args.capsuleId, "holding", { presence_source: "dom_probe" });
 
   return { ok: true, hold_state: "holding" };
 }
@@ -538,6 +645,7 @@ export async function cancelVgcHoldSession(capsuleId: string): Promise<void> {
   if (!hold) return;
   await releaseHold(hold, "cancelled");
   disposeHold(capsuleId);
+  publishHoldHandoff(capsuleId, "cancelled");
 }
 
 /** Test-only: release + drop all hold sessions between cases. */

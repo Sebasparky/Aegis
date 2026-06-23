@@ -1541,6 +1541,47 @@ export const listVisualGestureCapsules = () =>
     `/api/internal/visual-gesture-capsules`,
   );
 
+/** Safe HV handoff status — mirrors the backend HumanVerificationHandoffUpdate.
+ *  No cdp_url / browser_session is rendered; correlation is by `capsule_id`. The
+ *  phase drives the live status copy ("keep holding" → "all done"). */
+export type HvHandoffPhase =
+  | "detected"
+  | "presenting_to_user"
+  | "user_interaction_required"
+  | "holding"
+  | "still_active"
+  | "looks_complete_checking"
+  | "completed"
+  | "resumed"
+  | "expired"
+  | "cancelled";
+
+export interface HvHandoffUpdate {
+  type: "human_verification_handoff_update";
+  browser_session_id: string;
+  capsule_id?: string;
+  human_verification_request_id?: string;
+  domain?: string;
+  source: "visual_judgment" | "visual_gesture_capsule";
+  phase: HvHandoffPhase;
+  requires_user_attention: boolean;
+  agent_should_wait: boolean;
+  model_label?: string;
+  model_confidence?: number;
+  visual_policy_decision?: string;
+  trigger_basis?: string;
+  presence_source?: "model" | "dom_probe" | "none";
+  release_authority: "conservative_probe";
+  raw_surface_revealed_to_agent: false;
+  created_at: string;
+  expires_at: string;
+}
+
+export const listHvHandoffUpdates = () =>
+  vgcRequest<{ ok: true; data: HvHandoffUpdate[] }>(
+    `/api/internal/human-verification-handoff`,
+  );
+
 export const getVisualGestureCapsuleScreenshot = (capsuleId: string) =>
   vgcRequest<{ ok: true } & VisualGestureCapsuleScreenshot>(
     `/api/internal/visual-gesture-capsules/${capsuleId}/screenshot`,

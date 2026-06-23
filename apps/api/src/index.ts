@@ -60,6 +60,7 @@ import {
 } from "./runtime/taskBrowserSessions.js";
 import { securityChallengeRoutes } from "./routes/security-challenges.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
+import { humanVerificationHandoffRoutes } from "./routes/human-verification-handoff.js";
 import { visualGestureCapsuleRoutes } from "./routes/visual-gesture-capsules.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
@@ -168,6 +169,7 @@ async function main() {
   await server.register(taskBrowserSessionRoutes);
   await server.register(securityChallengeRoutes);
   await server.register(humanVerificationRoutes);
+  await server.register(humanVerificationHandoffRoutes);
   await server.register(visualGestureCapsuleRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);

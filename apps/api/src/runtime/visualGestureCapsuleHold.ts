@@ -35,6 +35,7 @@
 
 import {
   isVisualGestureCapsuleEnabled,
+  isVgcFrameAutoRefreshEnabled,
   getVisualGestureCapsule,
   getVisualGestureCapsuleScreenshotFrame,
   isTerminalVisualGestureStatus,
@@ -42,6 +43,8 @@ import {
   markGestureAttemptRejected,
   mapNormalizedImagePointToViewport,
 } from "./visualGestureCapsule.js";
+import { resolveSnapshotCdpTarget } from "./cdpTargetSelection.js";
+import { isAntigenPageChanged } from "./antigenSnapshotStore.js";
 import {
   openCdpPageClient,
   buildHumanVerificationProbeExpr,
@@ -55,6 +58,7 @@ import {
   targetPointBucket,
   screenshotScaleBucket,
   readPngWidthPx,
+  type FrameStaleKind,
 } from "./visualGestureCapsuleRelay.js";
 import {
   recheckVisualGestureCapsule,
@@ -62,7 +66,11 @@ import {
   geometryObstructionStrength,
 } from "./visualGestureCapsuleRecheck.js";
 import { buildAmbiguousVisualObstructionExpr } from "./antigenSnapshotRuntime.js";
-import { defaultVgcReadViewport, type VgcReadViewportFn } from "./visualGestureCapsuleCapture.js";
+import {
+  defaultVgcReadViewport,
+  captureVisualGestureCapsuleScreenshotFrame,
+  type VgcReadViewportFn,
+} from "./visualGestureCapsuleCapture.js";
 import { logHvDebug } from "./humanVerificationState.js";
 import { renderVgcHoldOverlay } from "./nativePointerRuntime.js";
 import {
@@ -203,6 +211,13 @@ export interface VgcHoldDeps {
     cdpUrl: string;
     seams?: VgcHoldClassifierSeams;
   }) => ReturnType<typeof classifyHoldPresenceViaModel>;
+  /**
+   * Injectable seams for the stale-frame safe auto-refresh (target resolve / page
+   * compare / recapture). The hold's `readLiveViewport` is always forwarded to the
+   * refresh's re-validation; these override the rest. Defaults are the production
+   * primitives — only set in tests to avoid real CDP.
+   */
+  frameRefreshDeps?: VgcFrameRefreshDeps;
 }
 
 // ─── Hold sessions (memory-only, one per capsule) ────────────────────────────
@@ -415,7 +430,7 @@ async function runInHoldProbe(hold: VgcHoldSession): Promise<void> {
 // ─── Public surface ──────────────────────────────────────────────────────────
 
 export type StartVgcHoldResult =
-  | { ok: true; hold_state: "holding" | "challenge_gone" | "deferred_clear" }
+  | { ok: true; hold_state: "holding" | "challenge_gone" | "deferred_clear" | "frame_refreshed" }
   | {
       ok: false;
       reason:
@@ -432,6 +447,137 @@ export type StartVgcHoldResult =
         | "cdp_failed"
         | "pointer_dispatch_failed";
     };
+
+// ─── Stale-frame safe auto-refresh (ANTIGEN_VGC_FRAME_AUTO_REFRESH) ───────────
+//
+// When a hold-start finds the screenshot frame stale BEFORE pressing (the page
+// settled / a scrollbar appeared / a small layout nudge), the capsule + handoff are
+// still valid — only the frame is out of date. Rather than forcing a MANUAL
+// recapture, this re-captures the frame IN PLACE on the SAME capsule so the user can
+// hold again immediately. It NEVER presses, releases, completes, or bypasses HV: on
+// success the caller returns `frame_refreshed` (no press); on any unsafe condition it
+// fails closed and the caller falls through to the existing manual-recapture path.
+// All telemetry is bucketed enum only (ANTIGEN_HV_DEBUG-gated) — never URLs, coords,
+// dims, or bytes. At most one refresh per hold-start (no loop).
+
+/** Bucketed reason a safe auto-refresh declined — telemetry-safe enum only. */
+export type VgcFrameRefreshFailReason =
+  | "no_active_capsule" // capsule missing / terminal / manual_fallback at refresh time
+  | "wall_not_present" // existing presence probe says the wall is gone (let the monitor own clearing)
+  | "page_changed" // live target URL no longer matches the capsule's page
+  | "screenshot_failed" // target resolve / capture / redaction / store failed
+  | "viewport_mismatch_persisted" // re-read viewport still stale (or unreadable) vs the NEW frame
+  | "unknown";
+
+export type VgcFrameRefreshResult = { refreshed: true } | { refreshed: false; reason: VgcFrameRefreshFailReason };
+
+/** Injectable seams for the refresh helper (defaults are the production primitives). */
+export interface VgcFrameRefreshDeps {
+  /** Live CDP page-target resolver (for the page-change URL compare). */
+  resolveTarget?: (cdpUrl: string) => Promise<{ url: string } | null>;
+  /** Live-URL change compare (defaults to the snapshot store's guard). */
+  pageChangedCompare?: (expected: string | null, live: string | null) => boolean;
+  /** In-place recapture (defaults to the M1C capture helper). */
+  capture?: typeof captureVisualGestureCapsuleScreenshotFrame;
+  /** Live viewport reader for the post-recapture re-validation. */
+  readLiveViewport?: VgcReadViewportFn;
+}
+
+/**
+ * Attempt a SAFE in-place frame refresh for a still-active capsule. Reuses the
+ * already-open hold client for the presence probe and existing primitives for
+ * target resolution / page-change compare / capture / re-validation — it introduces
+ * NO new HV detection. Returns `{ refreshed: true }` only when the wall is still
+ * present, the page is unchanged, the recapture succeeds, AND the live viewport now
+ * matches the fresh frame. Every other path fails closed with a bucketed reason.
+ */
+export async function attemptVgcFrameAutoRefresh(args: {
+  capsuleId: string;
+  cdpUrl: string;
+  targetId?: string;
+  /** Already-open hold client — used ONLY for the read-only presence probe. */
+  client: Pick<CdpPageClient, "evaluate">;
+  /** Whether the visual HV handoff flag is on (selects model-gate vs DOM probe). */
+  handoffActive: boolean;
+  probeOnClient: (client: Pick<CdpPageClient, "evaluate">) => Promise<VgcHoldPresence>;
+  classifyModel: (a: {
+    cdpUrl: string;
+    seams?: VgcHoldClassifierSeams;
+  }) => ReturnType<typeof classifyHoldPresenceViaModel>;
+  deps?: VgcFrameRefreshDeps;
+}): Promise<VgcFrameRefreshResult> {
+  const resolveTarget =
+    args.deps?.resolveTarget ??
+    (async (u: string) => {
+      const r = await resolveSnapshotCdpTarget(u);
+      return r ? { url: r.target.url } : null;
+    });
+  const pageChangedCompare = args.deps?.pageChangedCompare ?? isAntigenPageChanged;
+  const capture = args.deps?.capture ?? captureVisualGestureCapsuleScreenshotFrame;
+  const readLiveViewport = args.deps?.readLiveViewport ?? defaultVgcReadViewport;
+
+  try {
+    // 1. Capsule must still be a live, non-terminal waiting capsule.
+    const capsule = getVisualGestureCapsule(args.capsuleId);
+    if (!capsule || isTerminalVisualGestureStatus(capsule.status) || capsule.status === "manual_fallback") {
+      return { refreshed: false, reason: "no_active_capsule" };
+    }
+
+    // 2. Page-change guard — never refresh a frame onto a different page. A missing
+    //    live target means we cannot safely confirm the page → treat as capture failure.
+    const resolved = await resolveTarget(args.cdpUrl);
+    if (!resolved) return { refreshed: false, reason: "screenshot_failed" };
+    if (pageChangedCompare(capsule.page_url ?? null, resolved.url ?? null)) {
+      return { refreshed: false, reason: "page_changed" };
+    }
+
+    // 3. Wall-presence reuse (calls existing detection; does NOT change it). If the
+    //    wall is confidently gone, do NOT refresh — the lifecycle monitor remains the
+    //    sole completion authority. Present / uncertain / unknown → proceed.
+    if (args.handoffActive) {
+      const verdict = await args.classifyModel({ cdpUrl: args.cdpUrl });
+      if (verdict.available && verdict.verdict === "looks_clear") {
+        return { refreshed: false, reason: "wall_not_present" };
+      }
+    } else {
+      const presence = await args.probeOnClient(args.client);
+      if (presence === "absent") return { refreshed: false, reason: "wall_not_present" };
+    }
+
+    // 4. Re-capture IN PLACE — replaces the frame on the SAME capsule (recapture
+    //    discipline enforced by the store), preserving capsule/handoff identity.
+    const recap = await capture({
+      capsuleId: args.capsuleId,
+      cdpUrl: args.cdpUrl,
+      ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
+      ...(capsule.page_url !== undefined ? { expectedUrl: capsule.page_url } : {}),
+    });
+    if (!recap.ok) return { refreshed: false, reason: "screenshot_failed" };
+
+    // 5. Re-validate: the live viewport must now match the FRESH frame. A still-stale
+    //    (or unreadable) read means the page is actively moving — fail closed.
+    const newFrame = getVisualGestureCapsuleScreenshotFrame(args.capsuleId);
+    if (!newFrame) return { refreshed: false, reason: "screenshot_failed" };
+    const live = await readLiveViewport({
+      cdpUrl: args.cdpUrl,
+      ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
+    });
+    if (!live) return { refreshed: false, reason: "viewport_mismatch_persisted" };
+    const stale = isFrameStale(live, {
+      width: newFrame.viewport_css_width,
+      height: newFrame.viewport_css_height,
+      scroll_x: newFrame.scroll_x,
+      scroll_y: newFrame.scroll_y,
+      layout_w: newFrame.layout_w,
+      layout_h: newFrame.layout_h,
+    });
+    if (stale.stale) return { refreshed: false, reason: "viewport_mismatch_persisted" };
+
+    return { refreshed: true };
+  } catch {
+    return { refreshed: false, reason: "unknown" };
+  }
+}
 
 /**
  * Begin mirroring a live user hold at a normalized screenshot point. Every
@@ -498,22 +644,52 @@ export async function startVgcHoldSession(args: {
     cdpUrl: args.cdpUrl,
     ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
   });
-  if (!liveViewport) {
-    client.close();
-    logHvDebug({ scope: "vgc_hold", hold_event: "frame_stale", stale_kind: "viewport" });
-    return { ok: false, reason: "viewport_drifted" };
-  }
-  const stale = isFrameStale(liveViewport, {
-    width: frame.viewport_css_width,
-    height: frame.viewport_css_height,
-    scroll_x: frame.scroll_x,
-    scroll_y: frame.scroll_y,
-    layout_w: frame.layout_w,
-    layout_h: frame.layout_h,
-  });
+  // An unreadable live viewport is treated as a `viewport` stale (point scaling
+  // would be wrong); otherwise compare geometry against the captured frame.
+  const stale: { stale: true; kind: FrameStaleKind } | { stale: false } = !liveViewport
+    ? { stale: true, kind: "viewport" }
+    : isFrameStale(liveViewport, {
+        width: frame.viewport_css_width,
+        height: frame.viewport_css_height,
+        scroll_x: frame.scroll_x,
+        scroll_y: frame.scroll_y,
+        layout_w: frame.layout_w,
+        layout_h: frame.layout_h,
+      });
   if (stale.stale) {
-    client.close();
     logHvDebug({ scope: "vgc_hold", hold_event: "frame_stale", stale_kind: stale.kind });
+
+    // SAFE AUTO-REFRESH (flag-gated). Try to re-capture the frame in place — reusing
+    // the still-open client for the presence probe — instead of forcing a manual
+    // recapture. On success: return `frame_refreshed` (NO press, NO completion) so the
+    // UI reloads the fresh frame and the user holds again. On any unsafe condition:
+    // fail closed and fall through to the existing manual-recapture path below.
+    if (isVgcFrameAutoRefreshEnabled()) {
+      logHvDebug({ scope: "vgc_hold", hold_event: "frame_stale_auto_refresh_attempted" });
+      const refresh = await attemptVgcFrameAutoRefresh({
+        capsuleId: args.capsuleId,
+        cdpUrl: args.cdpUrl,
+        ...(args.targetId !== undefined ? { targetId: args.targetId } : {}),
+        client,
+        handoffActive: isVisualHvHandoffEnabled(),
+        probeOnClient,
+        classifyModel,
+        deps: { readLiveViewport, ...(deps.frameRefreshDeps ?? {}) },
+      });
+      if (refresh.refreshed) {
+        client.close();
+        logHvDebug({ scope: "vgc_hold", hold_event: "frame_stale_auto_refresh_succeeded" });
+        return { ok: true, hold_state: "frame_refreshed" };
+      }
+      logHvDebug({
+        scope: "vgc_hold",
+        hold_event: "frame_stale_auto_refresh_failed",
+        reason: refresh.reason,
+      });
+      // fall through — manual recapture required
+    }
+
+    client.close();
     return {
       ok: false,
       reason: stale.kind === "viewport" ? "viewport_drifted" : stale.kind === "scroll" ? "scroll_drifted" : "layout_drifted",

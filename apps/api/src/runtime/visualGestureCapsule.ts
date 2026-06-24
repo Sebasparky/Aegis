@@ -26,6 +26,20 @@ export function isVisualGestureCapsuleEnabled(): boolean {
   return process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE === "true";
 }
 
+/**
+ * VGC hold-start stale-frame SAFE AUTO-REFRESH flag — strictly opt-in; default off
+ * is byte-identical. When on, a frame that goes stale BEFORE the user starts holding
+ * (harmless viewport/screenshot drift) is re-captured in place on the same capsule so
+ * the user can hold again without a manual recapture. The refresh never presses,
+ * releases, completes, or bypasses HV — it only refreshes the screenshot frame, and it
+ * fails closed (manual recapture) when the wall is gone, the page changed, or the
+ * target can't be safely refreshed. Separate kill switch from the VGC flag itself so it
+ * can be toggled independently during live testing.
+ */
+export function isVgcFrameAutoRefreshEnabled(): boolean {
+  return process.env.ANTIGEN_VGC_FRAME_AUTO_REFRESH === "true";
+}
+
 /** Gestures supported in v1. Type stays open for drag/slider/grid later. */
 export type VisualGestureKind = "tap" | "press_hold";
 

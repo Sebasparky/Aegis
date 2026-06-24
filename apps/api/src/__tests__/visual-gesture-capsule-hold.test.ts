@@ -51,6 +51,7 @@ import {
   createVisualGestureCapsule,
   storeVisualGestureCapsuleScreenshotFrame,
   getVisualGestureCapsule,
+  getVisualGestureCapsuleScreenshotFrame,
   isTerminalVisualGestureStatus,
   clearVisualGestureCapsulesForTests,
   MAX_GESTURE_ATTEMPTS,
@@ -482,5 +483,173 @@ describe("probeHoldPresenceOnClient (in-hold / pre-press clear discipline)", () 
       probeClient({ present: false }, { ...NO_OBSTRUCTION, large_centered_overlay_seen: true }),
     );
     expect(res).toBe("absent");
+  });
+});
+
+// ─── Stale-frame SAFE AUTO-REFRESH (ANTIGEN_VGC_FRAME_AUTO_REFRESH) ───────────────
+//
+// When the frame is stale BEFORE the user presses, a flag-on hold-start tries to
+// re-capture the frame in place (same capsule) instead of forcing a manual recapture.
+// On success it returns `frame_refreshed` with NO press and NO completion; on any
+// unsafe condition it fails closed to the existing viewport_drifted manual path.
+//
+// Model: the OLD frame is (VW, VH); the live viewport reads as DRIFTED (1480, 800),
+// so the initial Step-7 check is stale. A successful recapture stores a FRESH frame
+// matching the live viewport, so the helper's re-validation passes.
+
+describe("startVgcHoldSession — stale-frame safe auto-refresh", () => {
+  const DRIFTED_VW = 1480; // |1480-1280| = 200 > max(2, 2% of 1280) → viewport stale
+  const PAGE_URL = BASE.page_url;
+  const driftedViewport = async () => ({ width: DRIFTED_VW, height: VH });
+
+  /** A capture seam that stores a fresh frame with the given viewport + records calls. */
+  function makeCaptureStub(frameVw: number) {
+    const calls = { n: 0 };
+    const capture = (async (input: { capsuleId: string }) => {
+      calls.n += 1;
+      const stored = storeVisualGestureCapsuleScreenshotFrame(input.capsuleId, {
+        png_base64: decodablePng(180),
+        viewport_css_width: frameVw,
+        viewport_css_height: VH,
+      });
+      if (!stored.ok) return { ok: false as const, reason: "store_failed" as const };
+      return {
+        ok: true as const,
+        capsule_id: input.capsuleId,
+        screenshot_available: true as const,
+        screenshot_captured_at: stored.frame.captured_at,
+        screenshot_expires_at: stored.frame.expires_at,
+      };
+    }) as unknown as NonNullable<VgcHoldDeps["frameRefreshDeps"]>["capture"];
+    return { capture, calls };
+  }
+
+  /** Build a hold deps bundle wired for the refresh path (DOM-probe presence gate). */
+  function makeRefreshDeps(opts: {
+    presences?: VgcHoldPresence[];
+    resolveUrl?: string | null;
+    captureFrameVw?: number; // viewport the recapture stores (default: matches live → passes)
+    captureOk?: boolean;
+  }) {
+    const { client, order } = makeRecordingClient();
+    const presences = opts.presences ?? ["present"];
+    let i = 0;
+    const probeOnClient = vi.fn(async () => {
+      const v = presences[Math.min(i, presences.length - 1)];
+      i += 1;
+      return v;
+    });
+    const captureStub = makeCaptureStub(opts.captureFrameVw ?? DRIFTED_VW);
+    const capture =
+      opts.captureOk === false
+        ? ((async () => ({ ok: false, reason: "capture_failed" })) as unknown as NonNullable<
+            VgcHoldDeps["frameRefreshDeps"]
+          >["capture"])
+        : captureStub.capture;
+    const deps: VgcHoldDeps = {
+      openCdpClient: (async () => ({ ok: true, client, target: { id: "T" } })) as unknown as VgcHoldDeps["openCdpClient"],
+      readLiveViewport: driftedViewport,
+      probeOnClient,
+      frameRefreshDeps: {
+        resolveTarget: async () => ({
+          url: opts.resolveUrl === undefined ? PAGE_URL : (opts.resolveUrl as string),
+        }),
+        capture,
+      },
+    };
+    return { deps, order, captureCalls: () => captureStub.calls.n, probeCalls: () => probeOnClient.mock.calls.length };
+  }
+
+  beforeEach(() => {
+    process.env.ANTIGEN_VGC_FRAME_AUTO_REFRESH = "true";
+  });
+  afterEach(() => {
+    delete process.env.ANTIGEN_VGC_FRAME_AUTO_REFRESH;
+  });
+
+  it("harmless stale + wall present + same page → frame_refreshed, NO press, fresh frame stored", async () => {
+    const capsule = seedWithFrame();
+    const { deps, order, captureCalls } = makeRefreshDeps({ presences: ["present"], captureFrameVw: DRIFTED_VW });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: true, hold_state: "frame_refreshed" });
+    // NO press happened — the frame was only refreshed.
+    expect(order).not.toContain("mousePressed");
+    // No live hold armed, capsule stays active, attempt NOT burned.
+    expect(hasLiveVgcHoldSession(capsule.capsule_id)).toBe(false);
+    const after = getVisualGestureCapsule(capsule.capsule_id);
+    expect(after?.status).toBe("awaiting_user_gesture");
+    expect(after?.attempt_count).toBe(0);
+    // The frame was actually replaced (recapture ran once) and now matches the live viewport.
+    expect(captureCalls()).toBe(1);
+    expect(getVisualGestureCapsuleScreenshotFrame(capsule.capsule_id)?.viewport_css_width).toBe(DRIFTED_VW);
+  });
+
+  it("wall gone during refresh (probe absent) → wall_not_present → fail closed (viewport_drifted), NO recapture, NO press", async () => {
+    const capsule = seedWithFrame();
+    const { deps, order, captureCalls } = makeRefreshDeps({ presences: ["absent"] });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: false, reason: "viewport_drifted" });
+    expect(order).not.toContain("mousePressed");
+    expect(captureCalls()).toBe(0); // bailed before recapture
+    // Conservative: a wall_not_present during refresh does NOT complete the capsule here.
+    expect(getVisualGestureCapsule(capsule.capsule_id)?.status).toBe("awaiting_user_gesture");
+  });
+
+  it("page changed → page_changed → fail closed, NO recapture, NO press", async () => {
+    const capsule = seedWithFrame();
+    const { deps, order, captureCalls } = makeRefreshDeps({
+      presences: ["present"],
+      resolveUrl: "https://example.com/somewhere-else",
+    });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: false, reason: "viewport_drifted" });
+    expect(order).not.toContain("mousePressed");
+    expect(captureCalls()).toBe(0);
+  });
+
+  it("recapture still stale (page actively moving) → viewport_mismatch_persisted → fail closed", async () => {
+    const capsule = seedWithFrame();
+    // Recapture stores a frame that still does NOT match the drifted live viewport.
+    const { deps, order } = makeRefreshDeps({ presences: ["present"], captureFrameVw: VW });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: false, reason: "viewport_drifted" });
+    expect(order).not.toContain("mousePressed");
+  });
+
+  it("recapture failed → screenshot_failed → fail closed", async () => {
+    const capsule = seedWithFrame();
+    const { deps, order } = makeRefreshDeps({ presences: ["present"], captureOk: false });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: false, reason: "viewport_drifted" });
+    expect(order).not.toContain("mousePressed");
+  });
+
+  it("flag OFF → byte-identical: stale returns viewport_drifted and the refresh seam is never invoked", async () => {
+    delete process.env.ANTIGEN_VGC_FRAME_AUTO_REFRESH;
+    const capsule = seedWithFrame();
+    const { deps, order, captureCalls, probeCalls } = makeRefreshDeps({ presences: ["present"] });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+
+    expect(res).toEqual({ ok: false, reason: "viewport_drifted" });
+    expect(order).not.toContain("mousePressed");
+    expect(captureCalls()).toBe(0);
+    expect(probeCalls()).toBe(0); // no auto-refresh presence probe when flag off
+  });
+
+  it("frame_refreshed result leaks no geometry — exactly { ok, hold_state }", async () => {
+    const capsule = seedWithFrame();
+    const { deps } = makeRefreshDeps({ presences: ["present"], captureFrameVw: DRIFTED_VW });
+    const res = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.123, fy: 0.456, deps });
+    expect(Object.keys(res).sort()).toEqual(["hold_state", "ok"]);
+    const blob = JSON.stringify(res);
+    expect(blob).not.toContain("0.123");
+    expect(blob).not.toContain("0.456");
+    expect(blob).not.toContain(CDP);
+    expect(blob).not.toContain(String(DRIFTED_VW));
   });
 });

@@ -1663,9 +1663,13 @@ export const acknowledgeDominantSurfaceReview = (reviewId: string) =>
 // after release. Only the normalized press point (fx, fy) leaves the client at
 // hold-start; heartbeat and hold-end carry no geometry. Taps still use /gesture.
 
-/** hold-start: holding (mouse down) or challenge_gone (wall already cleared). */
+/**
+ * hold-start: holding (mouse down), challenge_gone (wall already cleared), or
+ * frame_refreshed (the frame was stale before the press and Aegis safely re-captured
+ * it in place — NO press happened; reload the screenshot and hold again).
+ */
 export interface VisualGestureHoldStartResult {
-  hold_state: "holding" | "challenge_gone";
+  hold_state: "holding" | "challenge_gone" | "frame_refreshed";
   data: VisualGestureCapsuleView;
 }
 

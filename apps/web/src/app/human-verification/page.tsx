@@ -518,6 +518,15 @@ export default function HumanVerificationPage() {
           setStatusMsg("The challenge already cleared. The agent can resume.");
           return;
         }
+        if (res.hold_state === "frame_refreshed") {
+          // The frame was stale before the press; Aegis safely re-captured it in place
+          // (same request — no press happened). Reload the fresh view and let the user
+          // hold again without a manual recapture.
+          await loadScreenshot(capsuleId);
+          setStatusMsg("View updated automatically — press and hold again.");
+          setHint(null);
+          return;
+        }
         // Holding: arm heartbeat + elapsed timer.
         holdingRef.current = true;
         heldCapsuleIdRef.current = capsuleId;

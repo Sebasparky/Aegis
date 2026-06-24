@@ -76,6 +76,17 @@ vi.mock("../runtime/visualBlockerClassifier/visualJudgment.js", async () => {
   return { ...actual, evaluateVisualJudgment: evalVisualJudgmentMock };
 });
 
+// The dominant-surface-review path captures a redacted frame via this primitive.
+// Mock it so the uncertain-block tests never open a real CDP WebSocket (hermetic +
+// fast); the review record itself is created by the REAL dominantSurfaceReview module.
+const captureRedactedScreenshotMock = vi.hoisted(() => vi.fn());
+vi.mock("../runtime/screenshotRedaction.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/screenshotRedaction.js")>(
+    "../runtime/screenshotRedaction.js",
+  );
+  return { ...actual, captureRedactedScreenshot: captureRedactedScreenshotMock };
+});
+
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import type { TaskBrowserSession } from "@aegis/types";
@@ -101,6 +112,10 @@ import {
   clearHvHandoffUpdatesForTests,
   getLatestHvHandoffUpdate,
 } from "../runtime/humanVerificationHandoff.js";
+import {
+  listActiveDominantSurfaceReviews,
+  clearDominantSurfaceReviewsForTests,
+} from "../runtime/dominantSurfaceReview.js";
 
 const BEARER = "Bearer tok_vpa_001";
 const DELEGATION_ID = "del_vpa_001";
@@ -304,6 +319,7 @@ beforeEach(() => {
   clearAllActionNoProgressForTests();
   clearVisualGestureCapsulesForTests();
   clearHvHandoffUpdatesForTests();
+  clearDominantSurfaceReviewsForTests();
   humanVerificationRequests.clear();
   // resetAllMocks (not clearAllMocks): flag-off / model-disabled cases queue
   // mockResolvedValueOnce values that are never consumed; reset clears the once-queue
@@ -325,6 +341,14 @@ beforeEach(() => {
   });
   typeKnownBoxMock.mockResolvedValue({ success: true });
   evalVisualJudgmentMock.mockResolvedValue(uncertainVerdict());
+  // Default: a successful redacted-frame capture for the dominant-surface review.
+  captureRedactedScreenshotMock.mockResolvedValue({
+    ok: true,
+    base64:
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    mimeType: "image/png",
+    redacted_field_count: 0,
+  });
 });
 
 afterEach(() => {
@@ -349,7 +373,21 @@ describe("proactive action preflight — click", () => {
     expect(body.error.surface_trusted).toBe(false);
     expect(body.error.surface_resolution).toBe("unverified");
     expect(body.error.next_action).toBe("antigen_snapshot");
-    // Blocked BEFORE the realistic pointer runtime ran, and nothing minted.
+    // NOT human verification — the response says so, and the user gets a visible,
+    // non-HV review item (not a VGC) so the hard block is never invisible.
+    expect(body.error.confirmed_human_verification).toBe(false);
+    expect(body.error.user_presence_required).toBe(false);
+    expect(typeof body.error.review_id).toBe("string");
+    expect(body.error.review_id).toMatch(/^dsr_/);
+    const reviews = listActiveDominantSurfaceReviews();
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0].review_id).toBe(body.error.review_id);
+    expect(reviews[0].outcome).toBe("uncertain");
+    expect(reviews[0].confirmed_human_verification).toBe(false);
+    // The agent-facing message must NOT claim an HV handoff exists.
+    expect(body.error.message).toContain("not confirmed human verification");
+    expect(body.error.message).not.toMatch(/human[- ]verification handoff/i);
+    // Blocked BEFORE the realistic pointer runtime ran, and NO VGC minted.
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
     const raw = JSON.stringify(body);
@@ -386,6 +424,8 @@ describe("proactive action preflight — click", () => {
     expect(res.statusCode).toBe(200);
     expect(clickKnownBoxMock).toHaveBeenCalledTimes(1);
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+    // A benign surface is neither HV nor a blocked review — no attention item.
+    expect(listActiveDominantSurfaceReviews()).toHaveLength(0);
   });
 
   it("(4) NON-dominant surface (no scrim) → model never consulted, action proceeds", async () => {
@@ -469,8 +509,12 @@ describe("proactive action preflight — no-scrim dominant overlay", () => {
     const res = await clickRef();
 
     expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe("ACTION_BLOCKED_DOMINANT_SURFACE");
+    const body = res.json();
+    expect(body.error.code).toBe("ACTION_BLOCKED_DOMINANT_SURFACE");
+    expect(body.error.review_id).toMatch(/^dsr_/);
     expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+    // The block is visible to the user as a non-HV review item.
+    expect(listActiveDominantSurfaceReviews()).toHaveLength(1);
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
   });
 

@@ -1616,6 +1616,45 @@ export const cancelVisualGestureCapsule = (capsuleId: string) =>
     { method: "POST", body: JSON.stringify({}) },
   );
 
+// ─── Dominant surface reviews (NON-HV uncertain blocked surfaces) ─────────────
+// Mirrors the backend SafeDominantSurfaceReviewView. This is NOT human
+// verification: there is no gesture, no hold, no resume. `confirmed_human_verification`
+// is always false. The user inspects the redacted screenshot and acknowledges.
+export type DominantSurfaceReviewStatus = "pending_review" | "acknowledged" | "expired";
+
+export interface DominantSurfaceReviewView {
+  review_id: string;
+  status: DominantSurfaceReviewStatus;
+  domain: string;
+  model_label?: string;
+  model_confidence?: number;
+  trigger_basis?: string;
+  outcome: "uncertain";
+  confirmed_human_verification: false;
+  raw_surface_revealed_to_agent: false;
+  screenshot_available: boolean;
+  screenshot_captured_at?: string;
+  screenshot_expires_at?: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export const listDominantSurfaceReviews = () =>
+  vgcRequest<{ ok: true; data: DominantSurfaceReviewView[] }>(
+    `/api/internal/dominant-surface-reviews`,
+  );
+
+export const getDominantSurfaceReviewScreenshot = (reviewId: string) =>
+  vgcRequest<{ ok: true } & VisualGestureCapsuleScreenshot>(
+    `/api/internal/dominant-surface-reviews/${reviewId}/screenshot`,
+  );
+
+export const acknowledgeDominantSurfaceReview = (reviewId: string) =>
+  vgcRequest<{ ok: true; data: DominantSurfaceReviewView }>(
+    `/api/internal/dominant-surface-reviews/${reviewId}/acknowledge`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+
 // ─── Live guided press-and-hold (hold-start → heartbeat → hold-end) ───────────
 //
 // The live counterpart to submitVisualGestureCapsuleGesture's single-shot

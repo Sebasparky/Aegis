@@ -62,6 +62,7 @@ import { securityChallengeRoutes } from "./routes/security-challenges.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { humanVerificationHandoffRoutes } from "./routes/human-verification-handoff.js";
 import { visualGestureCapsuleRoutes } from "./routes/visual-gesture-capsules.js";
+import { dominantSurfaceReviewRoutes } from "./routes/dominant-surface-reviews.js";
 import { emailChallengeResolverRoutes } from "./routes/email-challenge-resolver.js";
 import { sensitiveReceiptsRouter } from "./routes/sensitive-receipts.js";
 import { browserRunTraceRoutes } from "./routes/browser-run-trace.js";
@@ -171,6 +172,7 @@ async function main() {
   await server.register(humanVerificationRoutes);
   await server.register(humanVerificationHandoffRoutes);
   await server.register(visualGestureCapsuleRoutes);
+  await server.register(dominantSurfaceReviewRoutes);
   await server.register(emailChallengeResolverRoutes);
   await server.register(sensitiveReceiptsRouter);
   await server.register(browserRunTraceRoutes);

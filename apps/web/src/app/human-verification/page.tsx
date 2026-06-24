@@ -29,6 +29,10 @@ import {
   sendVisualGestureCapsuleHeartbeat,
   endVisualGestureCapsuleHold,
   listHvHandoffUpdates,
+  listDominantSurfaceReviews,
+  getDominantSurfaceReviewScreenshot,
+  acknowledgeDominantSurfaceReview,
+  type DominantSurfaceReviewView,
   type VisualGestureCapsuleView,
   type VisualGestureKind,
   type HvHandoffUpdate,
@@ -901,6 +905,121 @@ export default function HumanVerificationPage() {
           )}
         </div>
       )}
+
+      <DominantSurfaceReviewsSection />
+    </div>
+  );
+}
+
+// ─── Needs review (uncertain surface) — NON-HV attention items ────────────────
+//
+// Self-contained panel for the proactive preflight's UNCERTAIN dominant-surface
+// blocks (409 ACTION_BLOCKED_DOMINANT_SURFACE). This is NOT human verification:
+// there is no gesture, no hold, no resume. The user inspects the redacted
+// screenshot and acknowledges; the agent recovers by re-running antigen_snapshot
+// once the surface clears. Kept separate from the VGC logic above on purpose.
+function DominantSurfaceReviewsSection() {
+  const [reviews, setReviews] = useState<DominantSurfaceReviewView[]>([]);
+  const [shots, setShots] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function poll() {
+      try {
+        const res = await listDominantSurfaceReviews();
+        if (!active) return;
+        setReviews(res.data);
+      } catch {
+        /* best-effort — this is an advisory panel */
+      }
+    }
+    poll();
+    const id = setInterval(poll, POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // Fetch each review's redacted screenshot once (bytes only ever feed an <img>).
+  useEffect(() => {
+    let active = true;
+    for (const r of reviews) {
+      if (!r.screenshot_available || shots[r.review_id]) continue;
+      getDominantSurfaceReviewScreenshot(r.review_id)
+        .then((res) => {
+          if (active) setShots((prev) => ({ ...prev, [r.review_id]: `data:${res.mime_type};base64,${res.png_base64}` }));
+        })
+        .catch(() => {
+          /* frame may have expired — leave it out */
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [reviews, shots]);
+
+  async function acknowledge(id: string) {
+    setBusyId(id);
+    try {
+      await acknowledgeDominantSurfaceReview(id);
+      setReviews((prev) => prev.filter((r) => r.review_id !== id));
+    } catch {
+      /* will fall off on next poll */
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (reviews.length === 0) return null;
+
+  return (
+    <div className="mt-8">
+      <h2 className="text-lg font-semibold text-white">Needs review (uncertain surface)</h2>
+      <div className="mt-2 rounded-md border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+        ⚠ Not confirmed human verification. Antigen blocked the agent on an unverified surface it
+        could not classify. Inspect it below — the agent will re-check and continue once the surface
+        clears. Acknowledging only dismisses this notice; it does not resume the agent or mark the
+        surface safe.
+      </div>
+      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+        {reviews.map((r) => (
+          <div key={r.review_id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="font-mono text-sm text-gray-200">{r.domain}</span>
+              <span className="rounded-md border border-amber-800 bg-amber-950 px-2 py-0.5 text-[11px] text-amber-300">
+                uncertain
+              </span>
+            </div>
+            {r.model_label && (
+              <div className="mb-2 text-xs text-gray-500">
+                model: {r.model_label}
+                {typeof r.model_confidence === "number" ? ` · ${r.model_confidence.toFixed(2)}` : ""}
+              </div>
+            )}
+            {shots[r.review_id] ? (
+              <div className="overflow-hidden rounded-md border border-gray-700">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={shots[r.review_id]} alt="Redacted view of the blocked surface" className="block max-w-full" />
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed border-gray-700 bg-gray-950 px-3 py-6 text-center text-xs text-gray-500">
+                {r.screenshot_available ? "Loading redacted view…" : "No redacted view available."}
+              </div>
+            )}
+            <div className="mt-3 flex justify-end">
+              <button
+                className={btnDefault}
+                onClick={() => acknowledge(r.review_id)}
+                disabled={busyId === r.review_id}
+              >
+                Acknowledge
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

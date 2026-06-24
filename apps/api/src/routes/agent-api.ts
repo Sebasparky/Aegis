@@ -156,6 +156,7 @@ import {
   type SafeVisualGestureCapsuleView,
 } from "../runtime/visualGestureCapsule.js";
 import { createVisualGestureCapsuleForOpaqueHv } from "../runtime/visualGestureCapsuleOrchestrator.js";
+import { createOrReuseDominantSurfaceReview } from "../runtime/dominantSurfaceReview.js";
 import { geometryObstructionStrength } from "../runtime/visualGestureCapsuleRecheck.js";
 import { executeSecretInjectionViaCDP } from "../runtime/secretInjection.js";
 import { resolveSecretInjectionCdpEndpoint } from "../runtime/cdpEndpointResolver.js";
@@ -1563,6 +1564,19 @@ async function preflightProactiveVisualBlocker(
     // the model actually ran — a disabled/unavailable model yields no verdict and
     // must not block. The agent re-snapshots to recover.
     if (judgment.ran) {
+      // The block is NOT human verification, but it must NOT be invisible to the
+      // user: create (or reuse) a clearly-non-HV "dominant surface review" record
+      // carrying a redacted screenshot the user can inspect in the Antigen UI. This
+      // is best-effort and NEVER mints a VGC — the agent stays blocked and recovers
+      // only by re-running antigen_snapshot once the surface clears.
+      const review = await createOrReuseDominantSurfaceReview({
+        browser_session_id: session.browser_session_id,
+        domain,
+        model_label: judgment.result?.predictedLabel ?? undefined,
+        model_confidence: judgment.result?.confidence ?? undefined,
+        trigger_basis: "unreadable_dominant_surface",
+        resolved_target: { browserWsUrl: resolvedTarget.browserWsUrl, pageTargetId: resolvedTarget.pageTarget.id },
+      });
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_tool_rejected",
         browser_runtime_id: session.browser_session_id,
@@ -1578,6 +1592,7 @@ async function preflightProactiveVisualBlocker(
         visual_judgment_outcome: judgment.outcome ?? "uncertain",
         visual_judgment_hv_confirmed: judgment.hvConfirmed,
         created_capsule: false,
+        created_review: !!review,
         returned_409: true,
         block_code: "ACTION_BLOCKED_DOMINANT_SURFACE",
       });
@@ -1586,11 +1601,13 @@ async function preflightProactiveVisualBlocker(
         error: {
           code: "ACTION_BLOCKED_DOMINANT_SURFACE",
           message:
-            "A dominant unverified surface is covering the page. Take a fresh antigen_snapshot before acting; if it persists, human presence may be required.",
+            "Dominant surface is blocked pending user review. This is not confirmed human verification. Do not retry or click through. A review item is available in the Antigen UI; re-check with antigen_snapshot after it clears.",
           surface_present: true,
           surface_trusted: false,
           surface_resolution: "unverified",
           user_presence_required: false,
+          confirmed_human_verification: false,
+          ...(review ? { review_id: review.review_id } : {}),
           next_action: "antigen_snapshot",
         },
       });

@@ -128,6 +128,15 @@ Before making any changes:
 - Aegis Workspaces v0; Workspace Effective Permissions v1
 - Workspace Manifest + 409 Recovery Hints v1
 - Collar-Routing Trial seed; Concurrent Real-Agent Trial
+- VGC Live Press-Hold Relay milestone (see `docs/antigen-vgc-live-press-hold-relay.md`)
+
+**VGC Live Press-Hold Relay invariants** (working dev milestone — full detail in `docs/antigen-vgc-live-press-hold-relay.md`):
+
+- Antigen detects / surfaces / routes human verification; it does NOT bypass CAPTCHA, 2FA, or any human-presence check — never claim it is solved or production-ready, and do not claim it generalizes beyond B&BW press-and-hold walls yet
+- `release_ready` is a non-terminal UI sub-state and UI guidance ONLY — it must never clear the VGC, complete the handoff, release the user's hold, or resume the agent; the agent keeps waiting (`agent_should_wait: true`) until a consecutive `looks_clear` streak completes the handoff
+- The whole-crop release-ready fallback (`visualReleaseReadyWholeCrop.ts`) runs ONLY for `cropSource === "hold_anchor"` (strict positive equality gate) — never for `dominant_surface`, `inner_control`, `center_region`, or any future/unknown crop source
+- Pixel grids/crops are memory-only and never agent-visible; release-ready telemetry stays bucketed/enum-only and debug-flag-gated
+- Known follow-up: shared handoff ring is last-writer-wins, so `release_ready` can still briefly downgrade to `still_active` before `hold_ended` despite the monitor-local sticky pin — revisit with publisher ownership / phase-priority / non-downgrade semantics
 
 ## Login and Secret Injection Rules
 

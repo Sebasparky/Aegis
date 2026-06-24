@@ -186,3 +186,10 @@ All items below are complete and protected under the do-not-rebuild list in CLAU
 - Challenge detection (2FA, CAPTCHA, passkey) → `manual_step_required` — no bypass
 - Same-domain navigation only; KMS audit event recorded with `run_id: "authsession:<sessionId>"`
 - `examples/authenticated-session-boundary-demo.mjs` is the reference demo
+
+## VGC Live Press-Hold Relay — working dev milestone 2026-06-23 (branch `feature/vgc-live-press-hold-relay`)
+- Verified end-to-end human-verification flow against live Bath & Body Works "Press & Hold" walls, driven by the user through the Antigen UI
+- Model-promoted HV wall detection mints a Visual Gesture Capsule / handoff; user presses-and-holds via the Antigen surface (live hold-start / heartbeat / hold-end relay)
+- Release-ready detection uses the hold-anchor crop first, with a hold-anchor-only whole-crop temporal fallback; completion still requires a consecutive stable visual-clear streak after release
+- `release_ready` is UI guidance only — never clears, completes, releases, or resumes; agent stays blocked until completion. Not a CAPTCHA solve/bypass, not production-ready, not yet generalized beyond B&BW
+- Full detail (status, invariants, constants, live evidence, known follow-ups) in `docs/antigen-vgc-live-press-hold-relay.md`

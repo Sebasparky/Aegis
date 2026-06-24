@@ -5,6 +5,27 @@ Read this before starting any new session. Update it when the baseline changes.
 
 ---
 
+## VGC Live Press-Hold Relay — working dev milestone (2026-06-23)
+
+Verified end-to-end human-verification slice on live Bath & Body Works "Press & Hold" walls
+(branch `feature/vgc-live-press-hold-relay`). Model-promoted HV wall detection mints a Visual
+Gesture Capsule / handoff; the user presses-and-holds through the Antigen UI (live hold-start /
+heartbeat / hold-end relay). Release-ready detection uses the hold-anchor crop first, with a
+**hold-anchor-only** whole-crop temporal fallback; completion still requires a consecutive stable
+visual-clear streak after release, and the agent stays blocked until then.
+
+`release_ready` is **UI guidance only** — it never clears the VGC, completes the handoff, releases
+the hold, or resumes the agent. **Not** a CAPTCHA solve/bypass, not production-ready, not yet
+generalized beyond B&BW. **Known follow-up:** the shared handoff ring is last-writer-wins, so
+`release_ready` can still briefly downgrade to `still_active` before `hold_ended` despite the
+monitor-local sticky pin — revisit with publisher ownership / phase-priority / non-downgrade
+semantics.
+
+Full detail (status, invariants, constants, live evidence, follow-ups):
+`docs/antigen-vgc-live-press-hold-relay.md`.
+
+---
+
 ## Manual Visual-Review Hard-Negative Capture v1 (dev/QA-only) (2026-06-22)
 
 The activation-gated HV-vision seams only record frames when the snapshot HV gate

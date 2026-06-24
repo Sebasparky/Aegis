@@ -6668,12 +6668,21 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       const screenHvJudgment = screenHvWallCandidate
         ? await snapshotVisualJudgment("page_level_hv_wall")
         : undefined;
-      if (screenHvWallCandidate && screenHvJudgment?.suppress) {
+      // Confident-benign veto (same doctrine as the structural page-level gate below):
+      // a benign OUTCOME below the live-suppress threshold (suppress:false) must still
+      // veto the screen-level mint. The model's benign read is authoritative.
+      if (
+        screenHvWallCandidate &&
+        (screenHvJudgment?.suppress ||
+          screenHvJudgment?.outcome === "confident_false_positive_or_benign")
+      ) {
         snapshotHvDebug = {
           scope: "snapshot_screen_hv",
           tool: "antigen_snapshot",
           returned_409: false,
-          reason: "visual_judgment_benign_suppressed",
+          reason: screenHvJudgment.suppress
+            ? "visual_judgment_benign_suppressed"
+            : "visual_judgment_benign_outcome_not_suppressed",
           visual_judgment_outcome: screenHvJudgment.outcome ?? "uncertain",
           screen_hv_detected: true,
           element_count_bucket: hvElementCountBucket(elements.length),
@@ -6840,12 +6849,27 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         session.cdp_url
           ? await snapshotVisualJudgment("page_level_hv_wall")
           : undefined;
-      if (structuralPageLevelJudgment?.suppress) {
+      // Confident-benign veto: the model's benign read is authoritative whether or not
+      // the live suppression policy (0.95 threshold) left `suppress` true. A benign
+      // OUTCOME (≥0.80 taxonomy threshold) below the stricter live-suppress threshold
+      // (suppress:false) must STILL veto the structural-wall mint — otherwise a benign
+      // billing/payment page whose cross-origin payment iframe looks like the opaque
+      // press-and-hold shape gets a false HUMAN_VERIFICATION_REQUIRED. This mirrors the
+      // proactive action preflight (`judgment.suppress || outcome === benign`) and the
+      // ambiguous path's `model_benign_not_suppressed` branch. A real wall is unaffected
+      // because it yields outcome `confident_human_needed`, never benign.
+      if (
+        structuralPageLevelJudgment?.suppress ||
+        structuralPageLevelJudgment?.outcome === "confident_false_positive_or_benign"
+      ) {
         snapshotHvDebug = {
           scope: "snapshot_hv",
           tool: "antigen_snapshot",
           returned_409: false,
-          reason: "visual_judgment_benign_suppressed",
+          // Two-way attribution: live-policy suppression vs. benign-outcome veto.
+          reason: structuralPageLevelJudgment.suppress
+            ? "visual_judgment_benign_suppressed"
+            : "visual_judgment_benign_outcome_not_suppressed",
           visual_judgment_outcome: structuralPageLevelJudgment.outcome ?? "uncertain",
           structural_wall_seen: true,
           page_level: true,

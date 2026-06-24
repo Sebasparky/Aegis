@@ -1471,6 +1471,67 @@ describe("snapshot HV 409 attribution (ANTIGEN_HV_DEBUG)", () => {
     });
   });
 
+  // Billing-step regression: a benign billing/payment page whose cross-origin payment
+  // iframe trips the structural page-level-wall probe must NOT become a false
+  // HUMAN_VERIFICATION_REQUIRED when the model confidently reads it as benign. The
+  // benign OUTCOME (≥0.80 taxonomy threshold) vetoes the mint even though the live
+  // suppression policy (0.95 threshold) left suppress:false. Mirrors the proactive /
+  // ambiguous benign-authority doctrine.
+  it("confident-benign OUTCOME (suppress:false) vetoes the structural page-level wall mint → 200, no capsule (Billing-step regression)", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    // Structural wall probe fires (the payment-iframe-looks-like-a-wall shape) …
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    // … but the model is confidently benign below the 0.95 live-suppress threshold:
+    // outcome benign, suppress:false (live policy left it unsuppressed).
+    evalVisualJudgmentMock.mockResolvedValue({
+      ran: true,
+      suppress: false,
+      hvConfirmed: false,
+      outcome: "confident_false_positive_or_benign",
+    });
+
+    const res = await snapshot();
+
+    // Without the fix the forced structural wall probe would mint a 409 + capsule;
+    // the benign-outcome veto turns it into a normal actionable 200 with no capsule.
+    expect(res.statusCode).toBe(200);
+    expect(vgcCaptureMock).not.toHaveBeenCalled();
+    expect(listActiveVisualGestureCapsules()).toHaveLength(0);
+  });
+
+  // Guard the safety direction: a REAL wall (outcome confident_human_needed, never
+  // benign) must still mint — the benign-outcome veto must not bypass real HV.
+  it("real wall (outcome confident_human_needed) still mints the structural page-level wall → 409", async () => {
+    process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
+    process.env.ANTIGEN_HV_DEBUG = "true";
+    seedSession();
+    bundleMock.mockResolvedValueOnce({ candidates: [], hvWallHint: false });
+    hvWallProbeMock.mockResolvedValueOnce(PRESS_AND_HOLD_WALL);
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+    // Model ran and is NOT benign — a genuine wall verdict. suppress:false here means
+    // "do not suppress", and the benign-outcome veto must not trigger.
+    evalVisualJudgmentMock.mockResolvedValue({
+      ran: true,
+      suppress: false,
+      hvConfirmed: false,
+      outcome: "confident_human_needed",
+    });
+
+    const res = await snapshot();
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.hv_debug).toMatchObject({
+      scope: "snapshot_hv",
+      reason: "structural_page_level_wall",
+      structural_wall_seen: true,
+      page_level: true,
+      created_capsule: true,
+    });
+  });
+
   it("attributes the pre-extract reuse guard on the SECOND snapshot", async () => {
     process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE = "true";
     process.env.ANTIGEN_HV_DEBUG = "true";

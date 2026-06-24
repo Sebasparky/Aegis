@@ -450,11 +450,11 @@ describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {
     expect(hasActiveVisualHandoffMonitor(c.capsule_id)).toBe(true);
   });
 
-  it("sticky survives another publisher clobbering the ring to still_active mid-hold", async () => {
-    // Live regression: after release_ready, the hold's in-hold model advisory publishes
-    // still_active into the SAME handoff ring (clobbering its latest) while the hold is still
-    // live (no hold_ended). The monitor must keep release_ready — its sticky memory is private,
-    // not read back from the ring.
+  it("the ring non-downgrade latch blocks another publisher clobbering release_ready mid-hold", async () => {
+    // Live regression fix: after release_ready, the hold's in-hold model advisory publishes
+    // still_active into the SAME handoff ring while the hold is still live (no hold_ended). With
+    // the non-downgrade latch, an UNMARKED still_active no longer clobbers the ring — release_ready
+    // stays put. Only an explicit hold-end / regression marker may downgrade it.
     const c = seedCapsule();
     const m = makeModel([r("wall_present")]); // always a wall
     let calls = 0;
@@ -469,20 +469,23 @@ describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {
     await vi.advanceTimersByTimeAsync(1000); // 2 ticks → release_ready
     expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
 
-    // Another publisher (the hold's in-hold advisory) clobbers the ring to still_active.
-    publishHvHandoffUpdate({
+    // Another publisher (the hold's in-hold advisory) tries to clobber the ring to still_active
+    // WITHOUT the downgrade marker → the latch suppresses it; the ring stays release_ready.
+    const blocked = publishHvHandoffUpdate({
       browser_session_id: BASE.browser_session_id,
       source: "visual_gesture_capsule",
       phase: "still_active",
     });
-    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
+    expect(blocked).toBeUndefined();
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
 
     // Next wall_present ticks: probe returns found:false, but the hold is still live (no
-    // hold_ended) → the monitor re-pins release_ready (the old ring-read guard downgraded here).
+    // hold_ended) → the monitor keeps re-pinning release_ready.
     await vi.advanceTimersByTimeAsync(1000);
     expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
 
-    // Durable hold ends (hold_ended) → sticky lifts → still_active is allowed again.
+    // Durable hold ends → the monitor's else branch publishes still_active WITH the marker →
+    // the latch allows the legitimate downgrade.
     holdLive = false;
     await vi.advanceTimersByTimeAsync(500);
     expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");

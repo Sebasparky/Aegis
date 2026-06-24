@@ -376,6 +376,73 @@ describe("safe fields only", () => {
   });
 });
 
+// ─── release_ready non-downgrade latch (phase-clobber fix) ───────────────────
+// Once "Release now" surfaces during a live hold, a stray still_active publish (the
+// last-writer-wins cross-publisher clobber) must NOT flip the UI back to "Keep holding".
+// Only an explicit hold-end / regression marker may make that transition.
+describe("release_ready non-downgrade latch", () => {
+  const S = "tbs_nondowngrade_001";
+
+  it("a still_active publish WITHOUT the marker does NOT downgrade a live release_ready", () => {
+    expect(
+      publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "release_ready" }),
+    ).toBeDefined();
+    const blocked = publishHvHandoffUpdate({
+      browser_session_id: S,
+      source: "visual_gesture_capsule",
+      phase: "still_active",
+    });
+    expect(blocked).toBeUndefined(); // suppressed by the latch
+    expect(getLatestHvHandoffUpdate(S)?.phase).toBe("release_ready");
+  });
+
+  it("a still_active publish WITH allow_release_ready_downgrade is allowed (genuine hold-end / regression)", () => {
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "release_ready" });
+    const allowed = publishHvHandoffUpdate({
+      browser_session_id: S,
+      source: "visual_gesture_capsule",
+      phase: "still_active",
+      allow_release_ready_downgrade: true,
+    });
+    expect(allowed).toBeDefined();
+    expect(getLatestHvHandoffUpdate(S)?.phase).toBe("still_active");
+  });
+
+  it("completed and looks_complete_checking are NEVER suppressed by the latch", () => {
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "release_ready" });
+    // Advisory forward transition is always allowed.
+    expect(
+      publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "looks_complete_checking" }),
+    ).toBeDefined();
+    expect(getLatestHvHandoffUpdate(S)?.phase).toBe("looks_complete_checking");
+    // Re-surface release_ready, then a terminal completed always wins and resumes the agent.
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "release_ready" });
+    expect(
+      publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "completed" }),
+    ).toBeDefined();
+    const latest = getLatestHvHandoffUpdate(S)!;
+    expect(latest.phase).toBe("completed");
+    expect(latest.agent_should_wait).toBe(false);
+  });
+
+  it("the latch is narrow: still_active from a non-release_ready phase is unguarded", () => {
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "holding" });
+    expect(
+      publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "still_active" }),
+    ).toBeDefined();
+    expect(getLatestHvHandoffUpdate(S)?.phase).toBe("still_active");
+  });
+
+  it("under the latch release_ready stays UI-only: agent keeps waiting; never completes", () => {
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "release_ready" });
+    publishHvHandoffUpdate({ browser_session_id: S, source: "visual_gesture_capsule", phase: "still_active" }); // suppressed
+    const latest = getLatestHvHandoffUpdate(S)!;
+    expect(latest.phase).toBe("release_ready");
+    expect(latest.agent_should_wait).toBe(true); // completion still requires post-release looks_clear
+    expect(latest.requires_user_attention).toBe(true);
+  });
+});
+
 // ─── 10. endpoint shape + lazy expiry ────────────────────────────────────────
 
 describe("handoff endpoint", () => {

@@ -26,6 +26,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { PNG as PngCodec } from "pngjs";
+
+import {
+  evaluateWholeCropProgress,
+  wholeCropStateKindForTests,
+  clearWholeCropProgressForTests,
+} from "../runtime/visualReleaseReadyWholeCrop.js";
 
 import {
   startVgcHoldSession,
@@ -140,11 +147,25 @@ beforeEach(() => {
 afterEach(() => {
   clearVgcHoldSessionsForTests();
   clearVisualGestureCapsulesForTests();
+  clearWholeCropProgressForTests();
   vi.useRealTimers();
   delete process.env.ANTIGEN_VISUAL_GESTURE_CAPSULE;
   delete process.env.ANTIGEN_HV_DEBUG;
+  delete process.env.ANTIGEN_HV_VISUAL_HANDOFF;
+  delete process.env.ANTIGEN_VISUAL_JUDGMENT_ENABLED;
   vi.restoreAllMocks();
 });
+
+/** A small decodable PNG so evaluateWholeCropProgress creates real per-capsule state. */
+function decodablePng(gray = 200): string {
+  const png = new PngCodec({ width: 8, height: 8 });
+  for (let i = 0; i < 8 * 8; i++) {
+    const o = i << 2;
+    png.data[o] = png.data[o + 1] = png.data[o + 2] = gray;
+    png.data[o + 3] = 255;
+  }
+  return PngCodec.sync.write(png).toString("base64");
+}
 
 // ─── 1. start presses and holds (no release yet) ─────────────────────────────────
 
@@ -314,6 +335,39 @@ describe("max-duration ceiling", () => {
     expect(after?.attempt_count).toBe(MAX_GESTURE_ATTEMPTS);
     // manual_fallback is non-terminal → the agent-side guard keeps the agent blocked.
     expect(isTerminalVisualGestureStatus(after!.status)).toBe(false);
+  });
+});
+
+// ─── retry poisoning fix: a failed hold-end resets whole-crop release-ready state ──
+describe("failed hold-end resets whole-crop release-ready state", () => {
+  it("a still_present hold-end clears the per-capsule whole-crop baseline/streak", async () => {
+    // Live visual-handoff path (where the monitor accumulates whole-crop temporal state).
+    process.env.ANTIGEN_HV_VISUAL_HANDOFF = "true";
+    process.env.ANTIGEN_VISUAL_JUDGMENT_ENABLED = "true";
+    const capsule = seedWithFrame();
+    const { client } = makeRecordingClient();
+    const deps: VgcHoldDeps = {
+      openCdpClient: (async () => ({ ok: true, client, target: { id: "T" } })) as unknown as VgcHoldDeps["openCdpClient"],
+      readLiveViewport: matchingViewport,
+      probeOnClient: async () => "present",
+      // wall_present at the start gate (so it presses) AND at the post-release check (still_present).
+      classifyModel: (async () => ({ available: true, verdict: "wall_present" as const })) as unknown as VgcHoldDeps["classifyModel"],
+    };
+    const start = await startVgcHoldSession({ capsuleId: capsule.capsule_id, cdpUrl: CDP, fx: 0.5, fy: 0.5, deps });
+    expect(start.ok).toBe(true);
+
+    // Simulate the in-hold monitor having accumulated whole-crop baseline/progress.
+    evaluateWholeCropProgress(capsule.capsule_id, decodablePng());
+    expect(wholeCropStateKindForTests(capsule.capsule_id)).toBe("tracking");
+
+    // A real-length hold whose wall is STILL present after release → still_present (attempt burned).
+    vi.setSystemTime(new Date(Date.now() + 2000));
+    const end = await endVgcHoldSession(capsule.capsule_id);
+    expect(end.hold_state).toBe("still_present");
+
+    // The failed attempt's baseline / prev-frame / relaxed streak must NOT carry into the retry:
+    // the next hold re-baselines from a fresh frame instead of mis-firing "Release now".
+    expect(wholeCropStateKindForTests(capsule.capsule_id)).toBe("none");
   });
 });
 

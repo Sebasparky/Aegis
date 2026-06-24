@@ -243,6 +243,69 @@ describe("evaluateWholeCropProgress — strict plateau + relaxed sustained accel
   });
 });
 
+// ── Test 1c: MODERATE strict plateau (the 3_5 bucket) must NOT single-frame fire. ──
+// This is the B&BW regression: a strict plateau at only 3–5% cumulative change means
+// "progress paused", NOT site acceptance. It stays found:true but temporally_confirmed:false,
+// so the outer streak still demands a second consecutive full frame before "Release now".
+describe("evaluateWholeCropProgress — moderate strict plateau needs the outer streak (premature-fire fix)", () => {
+  it("cumulative in [3%,5%) plateaus found:true but temporally_confirmed:false", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    // recent 0.04 (vs blank) — still changing → not strong, relaxed streak stays 0.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.04)).found).toBe(false);
+    // Identical 4% frame: cumulative 0.04 (≥3% strict floor, <5% very-strong floor),
+    // recent ~0 (plateaued) → STRICT strong, but MODERATE → not temporally confirmed.
+    const moderate = evaluateWholeCropProgress(CAP, filledLeft(0.04));
+    expect(moderate.found).toBe(true);
+    expect(moderate.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    expect(moderate.temporally_confirmed).toBe(false);
+  });
+
+  it("a moderate strict plateau fires ONLY after the normal 2-frame outer streak", () => {
+    evaluateWholeCropProgress(CAP, blank()); // baseline
+    evaluateWholeCropProgress(CAP, filledLeft(0.04)); // recent 0.04 → not strong
+    const m1 = evaluateWholeCropProgress(CAP, filledLeft(0.04)); // strict, moderate
+    expect(m1.found).toBe(true);
+    expect(m1.temporally_confirmed).toBe(false);
+    // First full-but-unconfirmed frame: streak 1, NO fire (needs VGC_RELEASE_READY_CONSECUTIVE).
+    const a1 = advanceReleaseReady(0, undefined, m1);
+    expect(a1.fire).toBe(false);
+    expect(a1.consecutiveFull).toBe(1);
+    // Second consecutive moderate-strong frame → the streak completes and fires.
+    const m2 = evaluateWholeCropProgress(CAP, filledLeft(0.04));
+    expect(m2.found).toBe(true);
+    expect(m2.temporally_confirmed).toBe(false);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, m2);
+    expect(a2.fire).toBe(true);
+    expect(a2.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+  });
+});
+
+// ── Test 1d: VERY-STRONG strict plateau (the ge5 bucket) still single-frame fires. ──
+describe("evaluateWholeCropProgress — very-strong strict plateau still single-frame fires", () => {
+  it("cumulative ≥ 5% (ge5) plateau is temporally confirmed and fires on the first strong frame", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.06)).found).toBe(false); // recent 0.06
+    // Identical 6% frame: cumulative 0.06 ≥ 5% very-strong floor, recent ~0 → temporally confirmed.
+    const vs = evaluateWholeCropProgress(CAP, filledLeft(0.06));
+    expect(vs.found).toBe(true);
+    expect(vs.temporally_confirmed).toBe(true);
+    const a = advanceReleaseReady(0, undefined, vs);
+    expect(a.fire).toBe(true);
+    expect(a.consecutiveFull).toBe(1);
+  });
+
+  it("relaxed sustained (3 consecutive relaxed-ok frames) is temporally confirmed regardless of strict strength", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false); // recent 0.1
+    // Each step +0.015 → recent 1.5% (> strict 1.2%, ≤ relaxed 1.8%); cumulative grows ≥ 3%.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.115)).found).toBe(false); // relaxed count 1
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.13)).found).toBe(false); // relaxed count 2
+    const r3 = evaluateWholeCropProgress(CAP, filledLeft(0.145)); // relaxed count 3 → strong
+    expect(r3.found).toBe(true);
+    expect(r3.temporally_confirmed).toBe(true);
+  });
+});
+
 // ── Test 2: hold-anchor + no sub-candidate + weak/no progress ⇒ no fire. ──────────
 describe("evaluateWholeCropProgress — weak / non-plateaued progress never fires", () => {
   it("a static crop (nothing fills) never reads strong", () => {

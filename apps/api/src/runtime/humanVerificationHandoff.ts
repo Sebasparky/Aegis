@@ -170,6 +170,14 @@ export interface PublishHvHandoffInput {
   visual_policy_decision?: HvHandoffVisualPolicyDecision;
   trigger_basis?: HvHandoffTriggerBasis;
   presence_source?: HvHandoffPresenceSource;
+  /**
+   * Explicit "this still_active is a genuine hold-end / regression" marker. Without it, a
+   * `still_active` publish is SUPPRESSED while the latest phase is `release_ready` (see the
+   * non-downgrade latch in publishHvHandoffUpdate). Only the legitimate downgrade sites — the
+   * monitor's durable-end/regression branch and the post-release hold-end publish — set this.
+   * Never affects any other phase, the flags table, or completion/terminal transitions.
+   */
+  allow_release_ready_downgrade?: boolean;
 }
 
 /**
@@ -198,6 +206,30 @@ export function publishHvHandoffUpdate(
     const existing = handoffBySession.get(input.browser_session_id);
     // Publish only on phase change to avoid ring spam.
     if (existing && existing.latest.phase === input.phase) return undefined;
+
+    // NON-DOWNGRADE LATCH. Once "Release now" (`release_ready`) is the latest phase, a stray
+    // `still_active` publish (the documented last-writer-wins clobber) must NOT downgrade it
+    // mid-hold — the nudge is easy to miss and the cross-publisher race flips the UI back to
+    // "Keep holding". Only a publisher that passes the explicit `allow_release_ready_downgrade`
+    // marker (a genuine hold-end / regression signal) may make this transition. NARROW by design:
+    // this guards ONLY release_ready→still_active. `completed`, `resumed`, `looks_complete_checking`,
+    // `expired`, and `cancelled` are never suppressed; release_ready stays UI-only (agent_should_wait
+    // is still derived from PHASE_FLAGS and completion still requires a post-release looks_clear).
+    if (
+      existing &&
+      existing.latest.phase === "release_ready" &&
+      input.phase === "still_active" &&
+      input.allow_release_ready_downgrade !== true
+    ) {
+      logHvDebug({
+        scope: "hv_handoff",
+        phase: "release_ready",
+        source: input.source,
+        non_downgrade_suppressed: "still_active",
+        presence_source: input.presence_source ?? "none",
+      });
+      return undefined;
+    }
 
     const flags = PHASE_FLAGS[input.phase];
     const now = Date.now();

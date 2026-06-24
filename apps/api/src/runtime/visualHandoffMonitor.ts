@@ -655,6 +655,7 @@ function publishMonitorHandoff(
   capsuleId: string,
   phase: HvHandoffPhase,
   model?: { model_label?: string; model_confidence?: number },
+  opts?: { allowReleaseReadyDowngrade?: boolean },
 ): void {
   const capsule = getVisualGestureCapsule(capsuleId);
   if (!capsule) return;
@@ -668,6 +669,7 @@ function publishMonitorHandoff(
     presence_source: "model",
     ...(model?.model_label ? { model_label: model.model_label } : {}),
     ...(model?.model_confidence !== undefined ? { model_confidence: model.model_confidence } : {}),
+    ...(opts?.allowReleaseReadyDowngrade ? { allow_release_ready_downgrade: true } : {}),
   });
 }
 
@@ -783,7 +785,12 @@ async function runTick(entry: MonitorEntry): Promise<void> {
       publishMonitorHandoff(entry.capsule_id, "release_ready", model);
     } else {
       entry.release_ready_sticky = false; // hold ended durably, or release_ready never reached
-      publishMonitorHandoff(entry.capsule_id, "still_active", model);
+      // Durable end / regression: the hold is no longer active here (the sticky guard above
+      // already failed), so this still_active is a LEGITIMATE downgrade — pass the explicit
+      // marker so the non-downgrade latch lets it through.
+      publishMonitorHandoff(entry.capsule_id, "still_active", model, {
+        allowReleaseReadyDowngrade: true,
+      });
     }
   } else if (advanced.action === "checking") {
     // looks_clear / checking supersedes the "Release now" nudge — lift the sticky pin.

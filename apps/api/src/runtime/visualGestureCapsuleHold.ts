@@ -82,6 +82,7 @@ import {
   registerVgcHoldActiveProbe,
   registerVgcHoldAnchorProbe,
 } from "./visualHandoffMonitor.js";
+import { clearWholeCropProgress } from "./visualReleaseReadyWholeCrop.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,8 @@ function publishHoldHandoff(
     presence_source?: HvHandoffPresenceSource;
     model_label?: string;
     model_confidence?: number;
+    /** Genuine hold-end / regression — lets a still_active publish through the non-downgrade latch. */
+    allowReleaseReadyDowngrade?: boolean;
   },
 ): void {
   const capsule = getVisualGestureCapsule(capsuleId);
@@ -132,6 +135,7 @@ function publishHoldHandoff(
     ...(extra?.presence_source ? { presence_source: extra.presence_source } : {}),
     ...(extra?.model_label ? { model_label: extra.model_label } : {}),
     ...(extra?.model_confidence !== undefined ? { model_confidence: extra.model_confidence } : {}),
+    ...(extra?.allowReleaseReadyDowngrade ? { allow_release_ready_downgrade: true } : {}),
   });
 }
 
@@ -753,7 +757,17 @@ export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldRe
       return { ok: true, hold_state: "unknown" };
     }
     const burned = markGestureAttemptRejected(capsuleId);
-    publishHoldHandoff(capsuleId, "still_active", { presence_source: "model" });
+    // Genuine hold-end downgrade — pass the explicit marker so the non-downgrade latch lets this
+    // still_active through even if "Release now" was the latest phase.
+    publishHoldHandoff(capsuleId, "still_active", {
+      presence_source: "model",
+      allowReleaseReadyDowngrade: true,
+    });
+    // RETRY RESET. This attempt did not clear; drop the per-capsule whole-crop temporal state so
+    // the next hold re-baselines from the retry's initial frame. Otherwise the failed attempt's
+    // baseline / prev-frame / relaxed-sustained streak poisons the next attempt's release-ready
+    // read (a partially-filled-then-rejected first hold could mis-fire "Release now" on retry).
+    clearWholeCropProgress(capsuleId);
     const endOutcome = verdict === "wall_present" ? "still_present" : "inconclusive";
     logHvDebug({ scope: "vgc_hold", hold_event: "hold_ended", hold_duration_bucket: heldBucket, end_outcome: endOutcome });
     // A failed state update still never completes — report unknown (no burn credited).

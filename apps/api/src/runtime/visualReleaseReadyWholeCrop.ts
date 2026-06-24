@@ -26,13 +26,15 @@
 //   whole-crop read. Enforced with an explicit `=== "hold_anchor"` check (not a
 //   negation) so any future SelectedCropSource value defaults to the safe no-fallback path.
 // - FAIL CLOSED. No baseline yet / dims mismatch / weak cumulative / not-plateaued ⇒
-//   `{ found:false }` (= keep holding). A strong frame here is ALREADY a multi-frame
-//   temporal read (cumulative vs baseline + recent plateau vs previous, or 3 consecutive
-//   relaxed frames), so it carries `temporally_confirmed:true` and the outer streak
-//   (advanceReleaseReady) fires it on the FIRST strong frame — re-requiring a second
-//   consecutive frame would double-count temporal confirmation and (observed on live
-//   B&BW walls) misses the "Release now" window before the user lets go. The
-//   instantaneous per-shape detector keeps the 2-consecutive-frame requirement.
+//   `{ found:false }` (= keep holding). A strong frame returns `found:true`, but
+//   SINGLE-FRAME firing (`temporally_confirmed:true`, outer streak == 1) is reserved for
+//   reads whose temporal stability is itself strong: the relaxed-sustained path (already 3
+//   consecutive relaxed-ok frames) or a VERY strong strict plateau (cumulative ≥ the `ge5`
+//   bucket). A MODERATE strict plateau (the `3_5` bucket: only 3–5% changed) is "progress
+//   paused", NOT site acceptance — observed firing too early on live B&BW walls, so the
+//   user released before the site accepted ("Please try again"). It is therefore
+//   `temporally_confirmed:false` and must earn the normal outer 2-frame streak, exactly
+//   like the instantaneous per-shape detector.
 // - SAFE OUTPUT ONLY. Returns the same `ProgressFillEstimate` shape the detector does;
 //   the band is a CONSTANT whole-crop descriptor (never raw coords). Pixel grids live
 //   only in this module's memory-only state Map and never leave it. Telemetry is coarse
@@ -54,6 +56,15 @@ import type { SelectedCropSource } from "./visualHandoffMonitor.js";
 const CHANGE_LUMA_DELTA = 30;
 /** Min fraction of crop pixels that must differ from the BASELINE before "a lot has filled". */
 const CUMULATIVE_STRONG_MIN = 0.03;
+/**
+ * Min cumulative-change fraction (the `ge5` bucket boundary) for a STRICT-plateau frame to be
+ * trusted as a SINGLE-FRAME (`temporally_confirmed`) release-ready read. A strict plateau at
+ * moderate cumulative (the `3_5` bucket: 3–5% changed) only means "some progress paused" — NOT
+ * site acceptance — so it must still earn the normal outer 2-frame streak. Only a very strong
+ * strict plateau (≥5% changed) or the relaxed-sustained path (already 3 consecutive frames) may
+ * fire on the first full frame. Bias is hard AGAINST premature "Release now".
+ */
+const CUMULATIVE_VERY_STRONG_MIN = 0.05;
 /**
  * Max fraction of crop pixels allowed to differ from the PREVIOUS frame to read "plateaued"
  * via the STRICT condition. Raised from 0.006 → 0.012: real press-and-hold widgets keep tiny
@@ -211,10 +222,11 @@ export function wholeCropStateKindForTests(
  * Stateful per-capsule whole-crop evaluator. First call (or after a dims change) captures
  * the BASELINE + previous and returns `{found:false}` (cannot compare yet). Subsequent
  * calls compute the cumulative/recent change signals and return a STRONG estimate
- * (`found:true, fill_ratio:1, band: WHOLE_CROP_BAND, temporally_confirmed:true`) only on a
- * plateaued-full frame — otherwise `{found:false}`. The strong read is itself a multi-frame
- * plateau, so `temporally_confirmed` lets the outer streak fire it on the first strong frame.
- * Never throws; any decode failure fails closed to `{found:false}`.
+ * (`found:true, fill_ratio:1, band: WHOLE_CROP_BAND`) only on a plateaued-full frame —
+ * otherwise `{found:false}`. `temporally_confirmed` (single-frame outer-streak fire) is set
+ * only for a relaxed-sustained read or a VERY strong strict plateau (cumulative ≥ the `ge5`
+ * bucket); a moderate strict plateau is `temporally_confirmed:false` and must earn the normal
+ * outer streak. Never throws; any decode failure fails closed to `{found:false}`.
  */
 export function evaluateWholeCropProgress(
   capsuleId: string,
@@ -274,6 +286,17 @@ export function evaluateWholeCropProgress(
 
   const strong = strict || relaxedSustained;
 
+  // SINGLE-FRAME gate. A strong read is `found:true` so the outer streak can build, but it may
+  // fire on the FIRST full frame (temporally_confirmed) only when the evidence is itself a strong
+  // multi-frame plateau:
+  //   • relaxedSustained — already required RELAXED_STRONG_MIN_CONSECUTIVE consecutive relaxed-ok
+  //     frames, so its temporal stability is established internally.
+  //   • a VERY strong strict plateau (cumulative ≥ CUMULATIVE_VERY_STRONG_MIN, the `ge5` bucket).
+  // A moderate strict plateau (the `3_5` bucket) is "progress paused", not acceptance, so it is
+  // found:true but temporally_confirmed:false and must earn the normal outer 2-frame streak.
+  const strictVeryStrong = strict && cumulative_change_ratio >= CUMULATIVE_VERY_STRONG_MIN;
+  const temporallyConfirmed = relaxedSustained || strictVeryStrong;
+
   // Advance the previous frame (baseline stays fixed for the whole hold).
   prior.prevLum = decoded.L;
 
@@ -286,6 +309,11 @@ export function evaluateWholeCropProgress(
     recent_bucket: ratioBucket(recent_change_ratio),
     sustained_bucket: sustainedBucket(prior.relaxedSustainedCount),
     strong,
+    // Bucketed strictness of the strict-plateau read: moderate `3_5` reads no longer single-frame
+    // fire, only `very_strong` (`ge5`) reads do. enum-only, debug-gated.
+    strict_strength: strict ? (strictVeryStrong ? "very_strong" : "moderate") : "none",
+    // Whether this frame is eligible for the single-frame (outer-streak == 1) fire.
+    temporally_confirmed: temporallyConfirmed,
     // The outer streak owns the real fire (and logs it) — a single strong frame never fires.
     fired: false,
   });
@@ -295,9 +323,9 @@ export function evaluateWholeCropProgress(
         found: true,
         fill_ratio: STRONG_FILL_RATIO,
         band: WHOLE_CROP_BAND,
-        // A strong whole-crop read is itself a multi-frame plateau — let the outer streak
-        // fire it on the first strong frame (no double-counting of temporal confirmation).
-        temporally_confirmed: true,
+        // Only a relaxed-sustained or very-strong strict plateau carries single-frame temporal
+        // confirmation; a moderate strict plateau still demands the normal outer streak.
+        temporally_confirmed: temporallyConfirmed,
       }
     : { found: false };
 }

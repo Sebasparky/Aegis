@@ -61,6 +61,9 @@ function publishRecheckHandoff(capsuleId: string, phase: HvHandoffPhase): void {
     human_verification_request_id: capsule.human_verification_request_id,
     domain: capsule.domain,
     presence_source: "dom_probe",
+    // The recheck runs POST-RELEASE (the hold has ended), so any still_active here is a genuine
+    // hold-ended downgrade — let it through the non-downgrade latch.
+    ...(phase === "still_active" ? { allow_release_ready_downgrade: true } : {}),
   });
 }
 

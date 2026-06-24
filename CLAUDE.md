@@ -358,6 +358,23 @@ Before making any changes:
 - Agent A / Agent B are demo labels only — the real model is collar-specific delegations, open tasks, and artifact handoff.
 - Do not rebuild workspace endpoints, manifest, eligibility, readiness queue, collar-routing seed, or runbook trials. See `docs/WORKSPACE_TRIAL_RUNBOOK.md` for runbook and trial results.
 
+## Agent Operating Contract: Protected Checkout Fields
+
+Antigen is a trust/safety layer, **not a blocker**. When Antigen refuses raw access to a sensitive field (password, card number, CVV, expiry, verification code, identity value), that is a **protected boundary, not a task failure**. The checkout/login flow is not blocked — the agent should keep going and let Antigen handle the sensitive field through secure fill, guarded handoff, or user approval.
+
+**Correct behavior when shopping / checking out / logging in:**
+
+1. Continue all ordinary browsing / cart / shipping / contact steps.
+2. Use Antigen-mediated browser tools only — never raw Playwright.
+3. When a password / card / CVV / expiry / verification / identity field is reached, do **not** ask the user for the raw value in chat.
+4. Request or wait for the Antigen protected path: `request_secret_field_injection` (credential/identity), `request_payment_card_fill` (payment cards), or the challenge relay (`report_security_challenge` → `wait_for_security_challenge` → `inject_security_challenge_code`) for verification codes. Aegis fills the value via CDP; the raw value is never revealed to the agent.
+5. Continue checkout after Antigen completes the protected step.
+6. Stop before the final purchase / place-order / submit-payment action. The final commit is user-owned and goes through `request_purchase_confirmation` — never click the pay/place-order button directly.
+
+**Wording.** Avoid: "I can't continue because Antigen blocks sensitive fields", "Please send me your card number / CVV / password", "I can place the order for you." Prefer: "This is a protected Antigen field — I'll let Antigen / the user handoff handle it and continue once it's completed", "I can continue checkout up to the final confirmation step", "I will stop before placing the order."
+
+This contract does not weaken any boundary: raw credentials/payment data are never exposed to the agent, card/CVV/password fills go only through the protected path, and final place-order/submit-payment always requires user confirmation. Antigen never bypasses CAPTCHA, HV, 2FA, or passkeys.
+
 ## Terminology — Always Use
 
 | Term | Meaning |

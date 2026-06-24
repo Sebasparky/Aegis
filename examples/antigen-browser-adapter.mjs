@@ -290,7 +290,7 @@ const STATIC_BROWSER_TOOLS = [
   {
     name: "browser_fill",
     description:
-      "Set a form field to an EXACT value (replaces existing content; does NOT append). Idempotent: if the field already equals the value it is left unchanged (changed=false). Use this for contact/address/checkout/profile fields where the final value is known. Before filling, inspect the snapshot's `value` for the ref and SKIP fields already correct. After filling, the response includes `actual_value`, `changed`, and `verified` — confirm `verified` before proceeding. Sensitive fields (password/card/CVV/identity) are refused here — use the Aegis credential injection path instead. Requires an ag_* ref from the latest antigen_snapshot.",
+      "Set a form field to an EXACT value (replaces existing content; does NOT append). Idempotent: if the field already equals the value it is left unchanged (changed=false). Use this for contact/address/checkout/profile fields where the final value is known. Before filling, inspect the snapshot's `value` for the ref and SKIP fields already correct. After filling, the response includes `actual_value`, `changed`, and `verified` — confirm `verified` before proceeding. Sensitive fields (password/card/CVV/identity) are refused here — this is a protected boundary, not a task failure. Do NOT ask the user to paste the raw value; route it through the Aegis protected-fill path (request_secret_field_injection for credential/identity, request_payment_card_fill for payment cards), or wait for the user handoff, then continue the non-sensitive steps. Requires an ag_* ref from the latest antigen_snapshot.",
     inputSchema: {
       type: "object",
       properties: {
@@ -304,7 +304,7 @@ const STATIC_BROWSER_TOOLS = [
   {
     name: "browser_set_value",
     description:
-      "Set a form field to an EXACT value (alias of browser_fill — exact replacement, not append). Idempotent and verified: clears the field, sets the requested value via the native setter (React/Vue-safe), reads back, and returns `actual_value`/`changed`/`verified`. Use for known form values; skip fields the snapshot shows are already correct. Sensitive fields are refused. Requires an ag_* ref.",
+      "Set a form field to an EXACT value (alias of browser_fill — exact replacement, not append). Idempotent and verified: clears the field, sets the requested value via the native setter (React/Vue-safe), reads back, and returns `actual_value`/`changed`/`verified`. Use for known form values; skip fields the snapshot shows are already correct. Sensitive fields (password/card/CVV/identity) are refused — this is a protected boundary, not a task failure. Do NOT ask the user to paste the raw value; route it through the Aegis protected-fill path (request_secret_field_injection / request_payment_card_fill) or wait for the user handoff, then continue the non-sensitive steps. Requires an ag_* ref.",
     inputSchema: {
       type: "object",
       properties: {

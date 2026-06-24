@@ -292,13 +292,13 @@ function sensitiveFieldRefusal(sensitivity: string | null | undefined): { code: 
     return {
       code: "SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL",
       message:
-        "This is a payment card field. Aegis does not fill it through generic browser tools — use request_payment_card_fill so the saved card is filled through the protected, approval-gated path. Raw card values are never revealed to the agent.",
+        "This is a payment card field. Aegis does not fill it through generic browser tools — use request_payment_card_fill so the saved card is filled through the protected, approval-gated path. Raw card values are never revealed to the agent. This is a protected boundary, not a task failure: do NOT ask the user to paste a card number, CVV, or expiry into chat. Fill it via request_payment_card_fill (or wait for the user handoff), then continue the rest of checkout. Stop before the final purchase/place-order — that requires request_purchase_confirmation and remains user-confirmed.",
     };
   }
   return {
     code: "SENSITIVE_FIELD_REQUIRES_INJECTION",
     message:
-      "This field is sensitive (credential/identity). Aegis does not fill it through generic browser tools — use request_secret_field_injection / the Aegis injection path instead.",
+      "This field is sensitive (credential/identity). Aegis does not fill it through generic browser tools — use request_secret_field_injection / the Aegis injection path instead. This is a protected boundary, not a task failure: do NOT ask the user to paste the raw credential/identity value into chat. Fill it via request_secret_field_injection (or wait for the user handoff), then continue the non-sensitive steps once Antigen completes it.",
   };
 }
 

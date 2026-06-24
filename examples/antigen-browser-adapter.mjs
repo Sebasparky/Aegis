@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT, extractSafeHvAttribution, buildHvAttributionText } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT, extractSafeHvAttribution, buildHvAttributionText, extractSafeHvHandoff, buildHvHandoffText } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -181,13 +181,29 @@ fetch(`${BASE}/api/agent/v1/me`, { headers: { Authorization: `Bearer ${TOKEN}` }
 //
 // Schemas approximate @playwright/mcp@latest. The child validates actual args;
 // these schemas exist so Claude generates correct tool calls before runtime init.
+// Shared guidance appended to every tool that can surface a blocking visual boundary,
+// so the agent contract is identical across tools. HUMAN_VERIFICATION_REQUIRED is an
+// Antigen-OWNED handoff (the agent waits, never improvises a manual workaround);
+// ACTION_BLOCKED_DOMINANT_SURFACE is a DIFFERENT, uncertain visual review.
+const HV_HANDOFF_GUIDANCE =
+  " If this returns HUMAN_VERIFICATION_REQUIRED, Antigen has taken ownership of a confirmed " +
+  "Human Verification handoff (press-and-hold / not-a-robot / captcha): the response carries " +
+  "handoff_owner=antigen, confirmed_human_verification=true, agent_should_wait=true, and a " +
+  "capsule_id/request_id. Do NOT click, hold, retry, solve, or bypass it, and do NOT tell the " +
+  "user to solve it outside Antigen or claim you need a manual workaround because a tool is not " +
+  "loaded. The user completes it in the Antigen UI. Wait: if wait_for_human_verification is " +
+  "available, call it with the request_id; otherwise simply wait and take a fresh antigen_snapshot " +
+  "only after Antigen reports completion or the user confirms Antigen shows it cleared. " +
+  "ACTION_BLOCKED_DOMINANT_SURFACE (carries review_id) is DIFFERENT — an uncertain visual review, " +
+  "NOT a confirmed HV handoff: do not call it human verification; re-check with antigen_snapshot after it clears.";
+
 const STATIC_BROWSER_TOOLS = [
   {
     name: "antigen_snapshot",
     description:
       "Take an Antigen-owned DOM snapshot of the current browser page. Returns safe semantic " +
       "elements with Antigen refs (ag_*) that Antigen can later resolve. Does not expose " +
-      "coordinates, boxes, cookies, storage, raw DOM, or secrets.",
+      "coordinates, boxes, cookies, storage, raw DOM, or secrets." + HV_HANDOFF_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {
@@ -248,8 +264,7 @@ const STATIC_BROWSER_TOOLS = [
   },
   {
     name: "browser_click",
-    description:
-      "Click left mouse button on an element on the page. If this returns HUMAN_VERIFICATION_REQUIRED, a blocking human-verification challenge (press-and-hold / not-a-robot / captcha) is on the page: do NOT retry, click the challenge, or try to bypass it — tell the user to open the Aegis UI under 'Human verification', call wait_for_human_verification with the request_id from the error, and after status='completed' take a fresh antigen_snapshot before any other action.",
+    description: "Click left mouse button on an element on the page." + HV_HANDOFF_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {
@@ -274,7 +289,7 @@ const STATIC_BROWSER_TOOLS = [
   {
     name: "browser_type",
     description:
-      "APPEND keystrokes into a field (human-style typing). Use ONLY for search boxes, keyboard shortcuts, and natural typing where appending is intended — NOT for filling form fields with a known value. browser_type does not clear the field first, so typing into a prefilled field DUPLICATES its content. To set a form field (contact/address/checkout) to an exact value, use browser_fill / browser_set_value instead.",
+      "APPEND keystrokes into a field (human-style typing). Use ONLY for search boxes, keyboard shortcuts, and natural typing where appending is intended — NOT for filling form fields with a known value. browser_type does not clear the field first, so typing into a prefilled field DUPLICATES its content. To set a form field (contact/address/checkout) to an exact value, use browser_fill / browser_set_value instead." + HV_HANDOFF_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {
@@ -290,7 +305,7 @@ const STATIC_BROWSER_TOOLS = [
   {
     name: "browser_fill",
     description:
-      "Set a form field to an EXACT value (replaces existing content; does NOT append). Idempotent: if the field already equals the value it is left unchanged (changed=false). Use this for contact/address/checkout/profile fields where the final value is known. Before filling, inspect the snapshot's `value` for the ref and SKIP fields already correct. After filling, the response includes `actual_value`, `changed`, and `verified` — confirm `verified` before proceeding. Sensitive fields (password/card/CVV/identity) are refused here — this is a protected boundary, not a task failure. Do NOT ask the user to paste the raw value; route it through the Aegis protected-fill path (request_secret_field_injection for credential/identity, request_payment_card_fill for payment cards), or wait for the user handoff, then continue the non-sensitive steps. Requires an ag_* ref from the latest antigen_snapshot.",
+      "Set a form field to an EXACT value (replaces existing content; does NOT append). Idempotent: if the field already equals the value it is left unchanged (changed=false). Use this for contact/address/checkout/profile fields where the final value is known. Before filling, inspect the snapshot's `value` for the ref and SKIP fields already correct. After filling, the response includes `actual_value`, `changed`, and `verified` — confirm `verified` before proceeding. Sensitive fields (password/card/CVV/identity) are refused here — this is a protected boundary, not a task failure. Do NOT ask the user to paste the raw value; route it through the Aegis protected-fill path (request_secret_field_injection for credential/identity, request_payment_card_fill for payment cards), or wait for the user handoff, then continue the non-sensitive steps. Requires an ag_* ref from the latest antigen_snapshot." + HV_HANDOFF_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {
@@ -1031,14 +1046,18 @@ function writeSyntheticResponse(requestId, text) {
  * Never includes: raw text values, cdp_url, cookies, storage, or selectors.
  *
  * `attribution` is the optional, whitelisted human_verification_attribution from a
- * HUMAN_VERIFICATION_REQUIRED 409 (see extractSafeHvAttribution). When present it is
- * appended as a safe machine-readable suffix; when null/omitted the output is
- * byte-identical to before (all non-HV errors), preserving existing behavior.
+ * HUMAN_VERIFICATION_REQUIRED 409 (see extractSafeHvAttribution). `handoff` is the
+ * optional, whitelisted ownership block (handoff_owner/confirmed_human_verification/
+ * agent_should_wait/capsule_id…) from a confirmed HV 409 (see extractSafeHvHandoff),
+ * so the agent's tool result carries a machine-readable "Antigen owns this; wait"
+ * signal. Both are appended as safe machine-readable suffixes; when null/omitted the
+ * output is byte-identical to before (all non-HV errors), preserving existing behavior.
  */
-function writeSyntheticErrorResponse(toolName, requestId, code, message, attribution = null) {
+function writeSyntheticErrorResponse(toolName, requestId, code, message, attribution = null, handoff = null) {
   const text =
     `Antigen ${toolName} unavailable: code=${code}; ${message}` +
-    buildHvAttributionText(attribution);
+    buildHvAttributionText(attribution) +
+    buildHvHandoffText(handoff);
   const response = JSON.stringify({
     jsonrpc: "2.0",
     id: requestId,
@@ -1144,6 +1163,7 @@ async function handleExactSetValue(toolName, msg) {
       errCode,
       errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage(toolName) : errMsg,
       extractSafeHvAttribution(errBody),
+      extractSafeHvHandoff(errBody),
     );
   } catch (_err) {
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=INTERCEPT_ERROR source=${toolName}\n`);
@@ -1330,6 +1350,7 @@ async function handleLine(line) {
           ? sessionNotFoundMessage("antigen_snapshot")
           : `Antigen snapshot failed (${errCode}).`,
         extractSafeHvAttribution(errBody),
+        extractSafeHvHandoff(errBody),
       );
     } catch (_err) {
       process.stderr.write(
@@ -1515,7 +1536,7 @@ async function handleLine(line) {
           : errCode === "ANTIGEN_SCROLL_FAILED"
           ? "Antigen browser_scroll_to_ref failed: the page could not be scrolled. Take a fresh antigen_snapshot and retry."
           : `Antigen browser_scroll_to_ref failed (${errCode}).`;
-      writeSyntheticErrorResponse("browser_scroll_to_ref", requestId, errCode, scrollErrMsg, extractSafeHvAttribution(errBody));
+      writeSyntheticErrorResponse("browser_scroll_to_ref", requestId, errCode, scrollErrMsg, extractSafeHvAttribution(errBody), extractSafeHvHandoff(errBody));
     } catch (_err) {
       process.stderr.write(
         `[antigen-browser@${ADAPTER_VERSION}] browser_scroll_to_ref_error reason=INTERCEPT_ERROR\n`
@@ -1695,6 +1716,7 @@ async function handleLine(line) {
         errCode,
         clickErrMsg,
         extractSafeHvAttribution(errBody),
+        extractSafeHvHandoff(errBody),
       );
     } catch (_err) {
       process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] browser_click_error reason=INTERCEPT_ERROR\n`);
@@ -1825,6 +1847,7 @@ async function handleLine(line) {
           ? sessionNotFoundMessage("browser_type")
           : `Antigen realistic browser_type failed (${errCode}).`,
         extractSafeHvAttribution(errBody),
+        extractSafeHvHandoff(errBody),
       );
     } catch (_err) {
       process.stderr.write(

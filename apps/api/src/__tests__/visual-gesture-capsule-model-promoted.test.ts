@@ -523,6 +523,38 @@ describe("model-promoted ambiguous mint — visual judgment as a creation author
     });
   });
 
+  it("(8b) the confirmed-HV 409 is self-describing as an Antigen-OWNED handoff the agent must wait on", async () => {
+    seedElementRichBbwShape();
+    ambiguousProbeMock.mockResolvedValueOnce({ ...INCONCLUSIVE_PROBE });
+    evalVisualJudgmentMock.mockResolvedValueOnce(confidentHvVerdict());
+    vgcCaptureMock.mockImplementationOnce(captureOkStoringFrame());
+
+    const res = await snapshot();
+    expect(res.statusCode).toBe(409);
+    const err = res.json().error;
+
+    // Ownership / wait contract — always-present, scalar-only.
+    expect(err.code).toBe("HUMAN_VERIFICATION_REQUIRED");
+    expect(err.handoff_owner).toBe("antigen");
+    expect(err.handoff_type).toBe("human_verification");
+    expect(err.confirmed_human_verification).toBe(true);
+    expect(err.agent_should_wait).toBe(true);
+    expect(err.requires_user_attention).toBe(true);
+    expect(err.agent_must_not_solve).toBe(true);
+    expect(err.next_action).toBe("wait_for_antigen_handoff_or_retry_antigen_snapshot_after_user_clear");
+    expect(err.next_action).toContain("antigen_snapshot");
+
+    // The minted capsule id is lifted to the top level (and still inside the capsule).
+    expect(err.capsule_id).toMatch(/^vgc_/);
+    expect(err.capsule_id).toBe(err.visual_gesture_capsule.capsule.capsule_id);
+
+    // The message — the channel that actually flows through the adapter — reads as
+    // Antigen-owned and must not imply the user solves it outside Antigen.
+    expect(err.message).toContain("Antigen has created a Human Verification handoff");
+    expect(err.message).toMatch(/Do not click/i);
+    expect(err.message).not.toMatch(/solve it (yourself|outside)/i);
+  });
+
   it("(9) DOM-geometry mint (uncertain verdict) marks visual_judgment_promoted:false in hv_debug", async () => {
     process.env.ANTIGEN_HV_DEBUG = "true";
     seedSession();

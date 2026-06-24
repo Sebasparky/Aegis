@@ -941,3 +941,70 @@ export function buildHvAttributionText(attribution) {
   }
   return ` human_verification_attribution=${JSON.stringify(attribution)}`;
 }
+
+/**
+ * Extracts the safe, agent-facing OWNERSHIP fields from a confirmed
+ * HUMAN_VERIFICATION_REQUIRED 409 so the agent's tool result carries a
+ * machine-readable signal — not just prose — that Antigen owns the handoff and the
+ * agent must wait. Mirrors extractSafeHvAttribution: a strict scalar whitelist, so
+ * no value, coordinate, selector, ref, raw text, or nested object can leak. The API
+ * already builds these fields; we surface them as-is.
+ *
+ * Returns `null` when none are present (e.g. non-HV errors, or the uncertain
+ * ACTION_BLOCKED_DOMINANT_SURFACE review which is intentionally NOT a handoff), so
+ * downstream output stays byte-identical for those paths.
+ *
+ * @param {any} errBody Parsed API error body (`{ error: { ... } }`).
+ * @returns {null | {
+ *   handoff_owner?: string,
+ *   handoff_type?: string,
+ *   confirmed_human_verification?: boolean,
+ *   agent_should_wait?: boolean,
+ *   agent_must_not_solve?: boolean,
+ *   requires_user_attention?: boolean,
+ *   capsule_id?: string,
+ *   request_id?: string,
+ * }}
+ */
+export function extractSafeHvHandoff(errBody) {
+  const raw = errBody?.error;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  // Only emit a handoff block for a CONFIRMED HV handoff. The uncertain
+  // dominant-surface review sets confirmed_human_verification === false and must
+  // never be surfaced as an Antigen-owned HV handoff.
+  if (raw.confirmed_human_verification !== true) return null;
+
+  const stringKeys = ["handoff_owner", "handoff_type", "capsule_id", "request_id"];
+  const booleanKeys = [
+    "confirmed_human_verification",
+    "agent_should_wait",
+    "agent_must_not_solve",
+    "requires_user_attention",
+  ];
+
+  const out = {};
+  for (const k of stringKeys) {
+    if (typeof raw[k] === "string") out[k] = raw[k];
+  }
+  for (const k of booleanKeys) {
+    if (typeof raw[k] === "boolean") out[k] = raw[k];
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Build the additive, machine-readable suffix for confirmed HV handoff ownership.
+ * Returns "" for null/empty so the message is byte-identical when there is nothing
+ * to surface. The serialized object is a whitelisted scalar-only map (see
+ * extractSafeHvHandoff), so the JSON is safe to hand to the agent.
+ *
+ * @param {ReturnType<typeof extractSafeHvHandoff>} handoff
+ * @returns {string}
+ */
+export function buildHvHandoffText(handoff) {
+  if (!handoff || typeof handoff !== "object" || Object.keys(handoff).length === 0) {
+    return "";
+  }
+  return ` human_verification_handoff=${JSON.stringify(handoff)}`;
+}

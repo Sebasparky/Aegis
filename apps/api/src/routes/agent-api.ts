@@ -667,14 +667,33 @@ function sendHumanVerificationRequired(
     error: {
       code: "HUMAN_VERIFICATION_REQUIRED",
       message:
-        "A human-verification challenge is blocking this page. It requires live user presence via the Aegis UI — do not attempt to click, type, or bypass it.",
+        "Antigen has created a Human Verification handoff for the user. This is a confirmed human-verification boundary. " +
+        "Do not click, hold, retry, or attempt to solve it. Wait while the user completes the handoff in the Antigen UI, " +
+        "then retry antigen_snapshot after Antigen reports completion or after the user confirms Antigen shows it cleared.",
       request_id: request.request_id,
       status: request.status,
       challenge_type: request.challenge_type,
       domain: request.domain,
       user_presence_required: true,
       purchase_authorized: false,
-      next_action: humanVerificationAgentNextAction(request as any),
+      // Always-present ownership fields (NOT flag-gated), mirroring
+      // human_verification_attribution: they make every confirmed-HV 409
+      // self-describing as an Antigen-OWNED handoff so the agent pauses instead of
+      // improvising a manual workaround. Enums/booleans/ids only — never a value,
+      // coordinate, selector, screenshot, or page text. `agent_should_wait` /
+      // `requires_user_attention` reuse the HumanVerificationHandoffUpdate vocabulary.
+      handoff_owner: "antigen",
+      handoff_type: "human_verification",
+      confirmed_human_verification: true,
+      agent_should_wait: true,
+      requires_user_attention: true,
+      agent_must_not_solve: true,
+      // Stable enum the agent can branch on. Per-status prose still flows through the
+      // snapshot human_verification block (humanVerificationAgentNextAction).
+      next_action: "wait_for_antigen_handoff_or_retry_antigen_snapshot_after_user_clear",
+      // Lift the minted capsule id to the top level so ownership is obvious without
+      // traversal. Absent when no VGC was minted → payload otherwise unchanged.
+      ...(visualGestureCapsule ? { capsule_id: visualGestureCapsule.capsule.capsule_id } : {}),
       // ALWAYS present (not flag-gated) — identifies which 409 return path produced
       // this response and whether a fresh visual judgment event is expected. Safe
       // enums/booleans/short reason strings only; observability, not behavior.

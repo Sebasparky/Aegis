@@ -35,6 +35,8 @@ import {
   sanitizeHostPath,
   extractSafeHvAttribution,
   buildHvAttributionText,
+  extractSafeHvHandoff,
+  buildHvHandoffText,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -401,6 +403,46 @@ describe("E. Pre-init gate", () => {
         !advertised.includes(raw),
         `tools/list must NOT include raw passthrough tool ${raw}`,
       );
+    }
+
+    adapter.kill("SIGTERM");
+    mockServer.close();
+  });
+
+  test("HV-capable tool descriptions teach the Antigen-owned handoff vs uncertain review", { timeout: 5000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMockServer();
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: "test_token" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 300));
+
+    const toolsResponse = stdoutBuf.split("\n").filter((l) => l.trim())
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m) => m?.id === 2);
+    assert.ok(toolsResponse, "adapter should respond to tools/list with id=2");
+    const byName = Object.fromEntries(toolsResponse.result.tools.map((t) => [t.name, t.description]));
+
+    // Every tool that can surface a blocking visual boundary must teach the contract.
+    for (const name of ["browser_click", "browser_type", "browser_fill", "antigen_snapshot"]) {
+      const desc = byName[name] || "";
+      assert.match(desc, /HUMAN_VERIFICATION_REQUIRED/, `${name} must mention HUMAN_VERIFICATION_REQUIRED`);
+      assert.match(desc, /Antigen has taken ownership/i, `${name} must frame HV as an Antigen-owned handoff`);
+      assert.match(desc, /handoff_owner=antigen/, `${name} must name the ownership signal`);
+      // Confirmed HV is distinct from the uncertain dominant-surface review.
+      assert.match(desc, /ACTION_BLOCKED_DOMINANT_SURFACE/, `${name} must mention the uncertain review code`);
+      assert.match(desc, /review_id/, `${name} must reference review_id for the uncertain path`);
+      assert.match(desc, /NOT a confirmed HV handoff/i, `${name} must distinguish review from HV`);
+      // Must explicitly forbid the manual-workaround / solve-it-outside narration.
+      assert.match(desc, /do NOT tell the\s+user to solve it outside Antigen/i, `${name} must forbid solving outside Antigen`);
+      assert.match(desc, /manual workaround/i, `${name} must forbid claiming a manual workaround`);
     }
 
     adapter.kill("SIGTERM");
@@ -5351,5 +5393,140 @@ describe("Z. buildHvAttributionText", () => {
       }),
     );
     assert.doesNotMatch(out, /https?:|:\/\/|<|>|selector|frame_path|\bref_|ag_\d/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Confirmed-HV handoff OWNERSHIP propagation (extractSafeHvHandoff /
+// buildHvHandoffText). On a confirmed HUMAN_VERIFICATION_REQUIRED 409 the API
+// attaches always-present ownership scalars (handoff_owner, agent_should_wait,
+// capsule_id…). The adapter surfaces ONLY those whitelisted scalars so the agent's
+// tool result carries a machine-readable "Antigen owns this; wait" signal — and
+// NEVER surfaces them for the uncertain dominant-surface review.
+// ---------------------------------------------------------------------------
+describe("Z. extractSafeHvHandoff", () => {
+  const confirmedHvBody = {
+    error: {
+      code: "HUMAN_VERIFICATION_REQUIRED",
+      handoff_owner: "antigen",
+      handoff_type: "human_verification",
+      confirmed_human_verification: true,
+      agent_should_wait: true,
+      agent_must_not_solve: true,
+      requires_user_attention: true,
+      capsule_id: "vgc_abc123",
+      request_id: "hvr_def456",
+    },
+  };
+
+  test("confirmed HV → all whitelisted ownership scalars preserved", () => {
+    assert.deepEqual(extractSafeHvHandoff(confirmedHvBody), {
+      handoff_owner: "antigen",
+      handoff_type: "human_verification",
+      capsule_id: "vgc_abc123",
+      request_id: "hvr_def456",
+      confirmed_human_verification: true,
+      agent_should_wait: true,
+      agent_must_not_solve: true,
+      requires_user_attention: true,
+    });
+  });
+
+  test("unsafe extra keys are dropped, ownership whitelist survives", () => {
+    const out = extractSafeHvHandoff({
+      error: {
+        confirmed_human_verification: true,
+        handoff_owner: "antigen",
+        agent_should_wait: true,
+        capsule_id: "vgc_x",
+        // unsafe — must never be copied:
+        page_url: "https://shop.test/checkout?session=tok_secret",
+        message: "Antigen has created a Human Verification handoff…",
+        selector: "#challenge button.press-hold",
+        x: 640,
+        y: 220,
+        visual_gesture_capsule: { capsule: { capsule_id: "vgc_x", screenshot_captured_at: "t" } },
+      },
+    });
+    assert.deepEqual(out, {
+      confirmed_human_verification: true,
+      handoff_owner: "antigen",
+      agent_should_wait: true,
+      capsule_id: "vgc_x",
+    });
+    for (const k of ["page_url", "message", "selector", "x", "y", "visual_gesture_capsule"]) {
+      assert.ok(!(k in out), `unsafe key leaked: ${k}`);
+    }
+  });
+
+  test("uncertain dominant-surface review (confirmed_human_verification:false) → null (never an HV handoff)", () => {
+    assert.equal(
+      extractSafeHvHandoff({
+        error: {
+          code: "ACTION_BLOCKED_DOMINANT_SURFACE",
+          confirmed_human_verification: false,
+          review_id: "dsr_123",
+          surface_trusted: false,
+        },
+      }),
+      null,
+    );
+  });
+
+  test("non-HV / missing / empty error bodies → null", () => {
+    assert.equal(extractSafeHvHandoff({ error: { code: "SESSION_NOT_FOUND" } }), null);
+    assert.equal(extractSafeHvHandoff({}), null);
+    assert.equal(extractSafeHvHandoff(null), null);
+    assert.equal(extractSafeHvHandoff(undefined), null);
+    assert.equal(extractSafeHvHandoff({ error: null }), null);
+  });
+
+  test("wrong-typed ownership fields are individually dropped", () => {
+    const out = extractSafeHvHandoff({
+      error: {
+        confirmed_human_verification: true,
+        handoff_owner: 1, // wrong type → dropped
+        agent_should_wait: "yes", // wrong type → dropped
+        capsule_id: "vgc_ok",
+      },
+    });
+    assert.deepEqual(out, { confirmed_human_verification: true, capsule_id: "vgc_ok" });
+  });
+});
+
+describe("Z. buildHvHandoffText", () => {
+  test("null/empty → empty string (byte-identical message)", () => {
+    assert.equal(buildHvHandoffText(null), "");
+    assert.equal(buildHvHandoffText(undefined), "");
+    assert.equal(buildHvHandoffText({}), "");
+  });
+
+  test("valid ownership block → safe machine-readable suffix that round-trips", () => {
+    const handoff = {
+      handoff_owner: "antigen",
+      confirmed_human_verification: true,
+      agent_should_wait: true,
+      capsule_id: "vgc_abc",
+    };
+    const text = buildHvHandoffText(handoff);
+    assert.ok(text.startsWith(" human_verification_handoff={"), text);
+    const json = text.slice(" human_verification_handoff=".length);
+    assert.deepEqual(JSON.parse(json), handoff);
+  });
+
+  test("safety: serialized output never carries unsafe tokens", () => {
+    const out = buildHvHandoffText(
+      extractSafeHvHandoff({
+        error: {
+          confirmed_human_verification: true,
+          handoff_owner: "antigen",
+          agent_should_wait: true,
+          capsule_id: "vgc_z",
+          page_url: "https://x.test/p?s=tok",
+          selector: "#a > .b",
+        },
+      }),
+    );
+    assert.doesNotMatch(out, /https?:|:\/\/|selector|page_url|tok/);
   });
 });

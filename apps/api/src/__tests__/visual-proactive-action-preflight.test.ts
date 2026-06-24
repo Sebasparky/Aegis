@@ -409,6 +409,11 @@ describe("proactive action preflight — click", () => {
     const body = res.json();
     expect(body.error.code).toBe("HUMAN_VERIFICATION_REQUIRED");
     expect(body.error.visual_gesture_capsule.available).toBe(true);
+    // Antigen-owned handoff contract is present on the action-preflight 409 too.
+    expect(body.error.handoff_owner).toBe("antigen");
+    expect(body.error.confirmed_human_verification).toBe(true);
+    expect(body.error.agent_should_wait).toBe(true);
+    expect(body.error.capsule_id).toBe(body.error.visual_gesture_capsule.capsule.capsule_id);
     expect(listActiveVisualGestureCapsules()).toHaveLength(1);
     expect(clickKnownBoxMock).not.toHaveBeenCalled();
   });

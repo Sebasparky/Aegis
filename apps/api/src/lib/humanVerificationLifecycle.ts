@@ -400,10 +400,13 @@ export function humanVerificationAgentNextAction(request: HumanVerificationReque
     case "pending_user":
     case "in_progress":
       return (
-        "A human-verification challenge is blocking this page and requires live user presence. " +
-        "Tell the user to open the Aegis UI (Approvals → Human verification) and complete the branded interaction. " +
-        `Poll GET /api/agent/v1/human-verification-requests/${request.request_id} (or the wait_for_human_verification tool); ` +
-        "when status=completed, take a fresh antigen_snapshot before any other action. Do not attempt to click or bypass the challenge yourself."
+        "Antigen owns this Human Verification handoff. A confirmed human-verification challenge is blocking this page and " +
+        "requires live user presence relayed through the Antigen UI. Tell the user Antigen has surfaced a Human verification " +
+        "handoff to complete (Approvals → Human verification) — do NOT tell the user to solve it outside Antigen and do NOT " +
+        "invent a manual workaround. Then wait: if the wait_for_human_verification tool is available, call it with " +
+        `request_id ${request.request_id}; if that tool is not loaded, simply wait and re-run antigen_snapshot after the user ` +
+        "confirms Antigen shows the challenge cleared. When verification completes, take a fresh antigen_snapshot before any " +
+        "other action. Do not attempt to click, hold, retry, or bypass the challenge yourself."
       );
     case "completed":
       return "Human verification is complete. Take a fresh antigen_snapshot now — all prior ag_* refs are invalid — then resume the task.";

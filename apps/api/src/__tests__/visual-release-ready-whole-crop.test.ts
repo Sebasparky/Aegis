@@ -127,9 +127,25 @@ describe("compareCropFrames / isStrongProgress — pure signals", () => {
     expect(isStrongProgress(0.02, 0)).toBe(false); // below cumulative floor
   });
 
+  it("strict plateau threshold is 0.012 (a tiny-shimmer plateau still reads strong)", () => {
+    // The tune raised RECENT_PLATEAU_MAX 0.006 → 0.012, so a ~1% recent change now plateaus.
+    expect(isStrongProgress(0.1, 0.01)).toBe(true); // recent 1% ≤ 1.2% → strong (was NOT under 0.006)
+    expect(isStrongProgress(0.1, 0.012)).toBe(true); // exactly at the ceiling → strong
+    expect(isStrongProgress(0.1, 0.013)).toBe(false); // just above the ceiling → not strong
+  });
+
   it("ratioBucket returns coarse safe enums only", () => {
-    for (const b of [ratioBucket(0), ratioBucket(0.02), ratioBucket(0.029), ratioBucket(0.5)]) {
-      expect(["lt1", "1_3", "3_strong", "ge_strong"]).toContain(b);
+    const enums = ["lt0_5", "0_5_1", "1_1_5", "1_5_2", "2_3", "3_5", "ge5"];
+    for (const b of [
+      ratioBucket(0),
+      ratioBucket(0.007),
+      ratioBucket(0.013),
+      ratioBucket(0.017),
+      ratioBucket(0.025),
+      ratioBucket(0.04),
+      ratioBucket(0.5),
+    ]) {
+      expect(enums).toContain(b);
     }
   });
 });
@@ -171,6 +187,64 @@ describe("evaluateWholeCropProgress — strong plateaued progress fires after st
       "dominant_surface", // non-hold-anchor → fallback NOT allowed → detector result stands
     );
     expect(viaDetectorOnly.found).toBe(false);
+  });
+});
+
+// ── Test 1b: plateau-threshold tune (strict 1.2%) + relaxed sustained (1.5–1.8% × 3). ──
+// `filledLeft(frac)` gives precise control: cumulative = current frac (vs the blank baseline),
+// recent = |current frac − previous frac| (the columns that flipped since the previous frame).
+describe("evaluateWholeCropProgress — strict plateau + relaxed sustained acceleration", () => {
+  it("strict: cumulative ≥ 3% and recent ≤ 1.2% reads strong on the next compared frame", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    // recent 0.1 (vs blank) — still changing, no fire.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false);
+    // recent |0.105 − 0.1| = 0.005 ≤ 0.012, cumulative 0.105 ≥ 0.03 → STRICT strong.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.105)).found).toBe(true);
+  });
+
+  it("old live-like case: cumulative strong + recent ~1% now reads strong (was not under 0.006)", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false); // recent 0.1
+    // recent |0.11 − 0.1| = 0.01 (1%) ≤ 0.012 → strong now; under the old 0.006 ceiling it would not.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.11)).found).toBe(true);
+  });
+
+  it("relaxed sustained: recent ~1.5% for 3 consecutive frames fires found:true, then outer streak needs 2", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    // Prime prevLum so subsequent recent deltas are small (each step = 0.015 → recent 1.5%).
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false); // recent 0.1
+    // Each frame: recent 0.015 (> strict 0.012, ≤ relaxed 0.018), cumulative grows ≥ 0.03.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.115)).found).toBe(false); // relaxed count 1
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.13)).found).toBe(false); // relaxed count 2
+    const r3 = evaluateWholeCropProgress(CAP, filledLeft(0.145)); // relaxed count 3 → strong
+    expect(r3.found).toBe(true);
+    const r4 = evaluateWholeCropProgress(CAP, filledLeft(0.16)); // still relaxed-ok → strong
+    expect(r4.found).toBe(true);
+
+    // The outer streak still requires TWO consecutive found frames to fire.
+    const a3 = advanceReleaseReady(0, undefined, r3);
+    expect(a3.fire).toBe(false);
+    const a4 = advanceReleaseReady(a3.consecutiveFull, a3.lastBand, r4);
+    expect(a4.fire).toBe(true);
+    expect(a4.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+  });
+
+  it("recent above the relaxed ceiling (2%) never sustains → never fires", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false); // recent 0.1
+    // Each step = 0.02 → recent 2% > relaxed 1.8% → relaxed count resets every frame.
+    for (const frac of [0.12, 0.14, 0.16, 0.18]) {
+      expect(evaluateWholeCropProgress(CAP, filledLeft(frac)).found).toBe(false);
+    }
+  });
+
+  it("weak cumulative (< 3%) never fires even when fully plateaued", () => {
+    expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.02)).found).toBe(false); // cumulative 2%, recent 2%
+    // Identical frames → recent 0 (plateaued) but cumulative 2% < 3% floor → still never strong.
+    for (let i = 0; i < 4; i++) {
+      expect(evaluateWholeCropProgress(CAP, filledLeft(0.02)).found).toBe(false);
+    }
   });
 });
 

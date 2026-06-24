@@ -41,7 +41,11 @@ import {
   markGestureCapsuleCleared,
 } from "./visualGestureCapsule.js";
 import { getTaskBrowserSessionCdpUrl } from "./taskBrowserSessions.js";
-import { publishHvHandoffUpdate, type HvHandoffPhase } from "./humanVerificationHandoff.js";
+import {
+  publishHvHandoffUpdate,
+  getLatestHvHandoffUpdate,
+  type HvHandoffPhase,
+} from "./humanVerificationHandoff.js";
 import {
   classifyHoldPresenceViaModel,
   type VgcHoldModelResult,
@@ -657,6 +661,18 @@ function publishMonitorHandoff(
   });
 }
 
+/**
+ * Sticky guard: true when the latest published phase for this session is already `release_ready`
+ * AND a live hold is still active. Used to keep `release_ready` pinned across `wall_present` ticks
+ * (no `still_active` downgrade) so the "Release now" nudge stays visible while the user holds.
+ * UI guidance only — does not affect completion, the hold, or agent resumption.
+ */
+function isReleaseReadyStickyDuringHold(entry: MonitorEntry, browserSessionId: string): boolean {
+  if (getLatestHvHandoffUpdate(browserSessionId)?.phase !== "release_ready") return false;
+  const isHoldActive = entry.activeHoldProbe ?? holdActiveProbe;
+  return !!isHoldActive && isHoldActive(entry.capsule_id) === true;
+}
+
 function armTick(entry: MonitorEntry): void {
   if (entry.stopped) return;
   entry.timer = setTimeout(() => {
@@ -737,8 +753,18 @@ async function runTick(entry: MonitorEntry): Promise<void> {
   if (entry.stopped) return;
 
   if (advanced.action === "still_active") {
-    // wall_present — unchanged: always publish still_active, or release_ready on a fire.
-    publishMonitorHandoff(entry.capsule_id, releaseReady ?? "still_active", model);
+    // wall_present. Publish release_ready on a fire. Otherwise keep release_ready STICKY while the
+    // hold is live: once "Release now" has surfaced, a subsequent wall_present tick must NOT
+    // downgrade the UI back to still_active (the nudge is easy to miss). Re-publishing keeps the
+    // phase fresh (avoids TTL expiry). Sticky ends naturally when the hold ends (falls through to
+    // still_active), or via the complete/checking branches and terminal-capsule self-clean.
+    if (releaseReady) {
+      publishMonitorHandoff(entry.capsule_id, releaseReady, model);
+    } else if (isReleaseReadyStickyDuringHold(entry, capsule.browser_session_id)) {
+      publishMonitorHandoff(entry.capsule_id, "release_ready", model);
+    } else {
+      publishMonitorHandoff(entry.capsule_id, "still_active", model);
+    }
   } else if (advanced.action === "checking") {
     publishMonitorHandoff(entry.capsule_id, "looks_complete_checking", model);
   } else if (releaseReady) {

@@ -50,8 +50,21 @@ import type { SelectedCropSource } from "./visualHandoffMonitor.js";
 const CHANGE_LUMA_DELTA = 30;
 /** Min fraction of crop pixels that must differ from the BASELINE before "a lot has filled". */
 const CUMULATIVE_STRONG_MIN = 0.03;
-/** Max fraction of crop pixels allowed to differ from the PREVIOUS frame to read "plateaued". */
-const RECENT_PLATEAU_MAX = 0.006;
+/**
+ * Max fraction of crop pixels allowed to differ from the PREVIOUS frame to read "plateaued"
+ * via the STRICT condition. Raised from 0.006 → 0.012: real press-and-hold widgets keep tiny
+ * shimmer/animation even when full, so 0.6% was too strict and delayed the "Release now" read.
+ */
+const RECENT_PLATEAU_MAX = 0.012;
+/**
+ * RELAXED plateau ceiling for the sustained-evidence path (condition B). A frame counts toward
+ * the relaxed streak when recent change ≤ this AND cumulative is strong; the streak must hold
+ * for RELAXED_STRONG_MIN_CONSECUTIVE frames before it reads strong, so a noisier-but-clearly-full
+ * widget can still surface without the strict 1.2% threshold.
+ */
+const RECENT_PLATEAU_RELAXED_MAX = 0.018;
+/** Consecutive relaxed-ok compared frames required before the relaxed sustained path reads strong. */
+const RELAXED_STRONG_MIN_CONSECUTIVE = 3;
 /** Fill ratio reported on a strong frame — at/above FULL_RATIO_THRESHOLD so the outer streak counts it. */
 const STRONG_FILL_RATIO = 1;
 
@@ -127,12 +140,21 @@ export function isStrongProgress(cumulative: number, recent: number): boolean {
 
 // ─── Coarse, safe telemetry buckets ───────────────────────────────────────────
 
-/** Coarse change-ratio bucket for safe telemetry (never the raw ratio). */
-export function ratioBucket(ratio: number): "lt1" | "1_3" | "3_strong" | "ge_strong" {
-  if (ratio < 0.01) return "lt1";
-  if (ratio < 0.03) return "1_3";
-  if (ratio < CUMULATIVE_STRONG_MIN) return "3_strong";
-  return "ge_strong";
+/**
+ * Coarse change-ratio bucket for safe telemetry (never the raw ratio). Finer than the original
+ * 4-bucket set so the strict/relaxed plateau region (≈1–2%) is legible in ANTIGEN_HV_DEBUG logs
+ * without exposing pixels, dims, or the raw ratio.
+ */
+export function ratioBucket(
+  ratio: number,
+): "lt0_5" | "0_5_1" | "1_1_5" | "1_5_2" | "2_3" | "3_5" | "ge5" {
+  if (ratio < 0.005) return "lt0_5";
+  if (ratio < 0.01) return "0_5_1";
+  if (ratio < 0.015) return "1_1_5";
+  if (ratio < 0.02) return "1_5_2";
+  if (ratio < 0.03) return "2_3";
+  if (ratio < 0.05) return "3_5";
+  return "ge5";
 }
 
 // ─── Per-capsule temporal state (memory-only; pixel grids never leave this module) ─
@@ -144,6 +166,20 @@ interface WholeCropState {
   baselineLum: Float32Array;
   /** The previous probe frame, for the frame-to-frame plateau signal. */
   prevLum: Float32Array;
+  /**
+   * Consecutive compared frames meeting the RELAXED sustained condition (strong cumulative +
+   * recent ≤ RECENT_PLATEAU_RELAXED_MAX). Resets to 0 the moment a frame fails it. The relaxed
+   * sustained path reads strong only once this reaches RELAXED_STRONG_MIN_CONSECUTIVE.
+   */
+  relaxedSustainedCount: number;
+}
+
+/** Coarse sustained-streak bucket for safe telemetry (never the raw count beyond the floor). */
+function sustainedBucket(count: number): "0" | "1" | "2" | "3_plus" {
+  if (count <= 0) return "0";
+  if (count === 1) return "1";
+  if (count === 2) return "2";
+  return "3_plus";
 }
 
 // Key: capsule_id. One entry per active capsule. Cleared on monitor stop / capsule
@@ -200,11 +236,13 @@ export function evaluateWholeCropProgress(
       H: decoded.H,
       baselineLum: decoded.L,
       prevLum: decoded.L,
+      relaxedSustainedCount: 0,
     });
     logHvDebug({
       scope: "vgc_release_ready_whole_crop",
       chosen_candidate_kind: "hold_anchor_whole_crop",
       whole_crop_state: prior ? "dims_changed" : "baseline_captured",
+      whole_crop_mode: prior ? "dims_changed" : "baseline_captured",
       strong: false,
       fired: false,
     });
@@ -216,7 +254,20 @@ export function evaluateWholeCropProgress(
     prior.prevLum,
     decoded.L,
   );
-  const strong = isStrongProgress(cumulative_change_ratio, recent_change_ratio);
+
+  // Condition A (strict): a lot has filled AND it has nearly stopped (recent ≤ RECENT_PLATEAU_MAX).
+  const strict = isStrongProgress(cumulative_change_ratio, recent_change_ratio);
+
+  // Condition B (relaxed sustained): strong cumulative + a slightly noisier plateau, but only after
+  // it has held for RELAXED_STRONG_MIN_CONSECUTIVE consecutive compared frames. Reset the streak the
+  // moment cumulative drops below the floor or recent exceeds the relaxed ceiling.
+  const relaxedOk =
+    cumulative_change_ratio >= CUMULATIVE_STRONG_MIN &&
+    recent_change_ratio <= RECENT_PLATEAU_RELAXED_MAX;
+  prior.relaxedSustainedCount = relaxedOk ? prior.relaxedSustainedCount + 1 : 0;
+  const relaxedSustained = prior.relaxedSustainedCount >= RELAXED_STRONG_MIN_CONSECUTIVE;
+
+  const strong = strict || relaxedSustained;
 
   // Advance the previous frame (baseline stays fixed for the whole hold).
   prior.prevLum = decoded.L;
@@ -225,8 +276,10 @@ export function evaluateWholeCropProgress(
     scope: "vgc_release_ready_whole_crop",
     chosen_candidate_kind: "hold_anchor_whole_crop",
     whole_crop_state: "compared",
+    whole_crop_mode: strict ? "strict_plateau" : relaxedSustained ? "relaxed_sustained" : "not_strong",
     cumulative_bucket: ratioBucket(cumulative_change_ratio),
     recent_bucket: ratioBucket(recent_change_ratio),
+    sustained_bucket: sustainedBucket(prior.relaxedSustainedCount),
     strong,
     // The outer streak owns the real fire (and logs it) — a single strong frame never fires.
     fired: false,

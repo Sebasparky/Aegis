@@ -404,6 +404,43 @@ describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {
     expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
   });
 
+  it("sticky: release_ready stays put across later wall_present ticks while the hold is active", async () => {
+    const c = seedCapsule();
+    const m = makeModel([r("wall_present")]); // always a wall
+    // Fire release_ready (2 stable full frames), then the probe stops finding a full bar.
+    let calls = 0;
+    const probe = vi.fn(async () => (++calls <= 2 ? FULL : ({ found: false as const })));
+    startVisualHandoffMonitor({ capsuleId: c.capsule_id, cdpUrl: CDP }, rrDeps(m, probe, true));
+    await vi.advanceTimersByTimeAsync(1000); // 2 ticks → 2 full reads → release_ready
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
+    // Subsequent wall_present ticks: probe no longer fires, but the hold is still active →
+    // sticky keeps release_ready (no still_active downgrade).
+    await vi.advanceTimersByTimeAsync(1000); // 2 more ticks, probe returns found:false
+    const u = getLatestHvHandoffUpdate(BASE.browser_session_id);
+    expect(u?.phase).toBe("release_ready");
+    expect(u?.agent_should_wait).toBe(true);
+    expect(u?.requires_user_attention).toBe(true);
+    expect(getVisualGestureCapsule(c.capsule_id)?.status).not.toBe("cleared");
+    expect(hasActiveVisualHandoffMonitor(c.capsule_id)).toBe(true);
+  });
+
+  it("after the hold ends, a wall_present tick returns to still_active (sticky lifts)", async () => {
+    const c = seedCapsule();
+    const m = makeModel([r("wall_present")]);
+    let calls = 0;
+    const probe = vi.fn(async () => (++calls <= 2 ? FULL : ({ found: false as const })));
+    let holdLive = true;
+    startVisualHandoffMonitor(
+      { capsuleId: c.capsule_id, cdpUrl: CDP },
+      { ...rrDeps(m, probe, true), activeHoldProbe: () => holdLive },
+    );
+    await vi.advanceTimersByTimeAsync(1000); // → release_ready while holding
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
+    holdLive = false; // user released the hold
+    await vi.advanceTimersByTimeAsync(500); // next wall_present tick: no active hold → no sticky
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
+  });
+
   it("looks_clear wins: a stable clear completes even after a release_ready", async () => {
     const c = seedCapsule();
     const m = makeModel([r("wall_present"), r("wall_present"), r("looks_clear"), r("looks_clear")]);

@@ -1591,6 +1591,10 @@ async function preflightProactiveVisualBlocker(
         visual_judgment_ran: true,
         visual_judgment_outcome: judgment.outcome ?? "uncertain",
         visual_judgment_hv_confirmed: judgment.hvConfirmed,
+        // UUID only (never the frame path/bytes). Grep this id in
+        // dev-artifacts/hv-vision-review/runtime-judgment-queue.jsonl to find the exact
+        // redacted frame the model judged for this block.
+        visual_judgment_event_id: judgment.event_id ?? "none",
         created_capsule: false,
         created_review: !!review,
         returned_409: true,

@@ -137,7 +137,7 @@ describe("evaluateVisualJudgment — flag off (byte-identical)", () => {
       { sessionId: "s1", activationReason: "possible_human_verification", cdpUrl: "ws://x", originHost: "example.com" },
       seams,
     );
-    expect(out).toEqual({ ran: false, suppress: false, hvConfirmed: false });
+    expect(out).toEqual({ ran: false, event_id: null, suppress: false, hvConfirmed: false });
     expect(captured).toBe(false);
     expect(asked).toBe(false);
     expect(fs.existsSync(queue)).toBe(false);
@@ -534,7 +534,7 @@ describe("evaluateVisualJudgment — flag on", () => {
         { callSidecar: async () => mkResult("cookie_banner", 0.97) },
         { live: true },
       );
-      expect(Object.keys(out).sort()).toEqual(["hvConfirmed", "outcome", "ran", "result", "suppress"]);
+      expect(Object.keys(out).sort()).toEqual(["event_id", "hvConfirmed", "outcome", "ran", "result", "suppress"]);
     });
 
     // ── Model-positive PROMOTION authority (hvConfirmed) ──────────────────────

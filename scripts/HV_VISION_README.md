@@ -356,6 +356,35 @@ summary. No rows are duplicated/oversampled.
 > `--include-heuristic-unreviewed`, `--freeze-existing-eval`,
 > `--allow-small-label-leak`.
 
+## Regression guard (B&BW press-and-hold)
+
+Guard against the specific regression that prompted the press-hold work: a centered
+"Before we continue / Press & Hold" PerimeterX card over the bright B&BW "Semi-Annual
+Sale" homepage hero being read as a benign `newsletter_modal` (model confidence ~0.43 →
+`uncertain` → invisible dominant-surface block, no guided relay).
+
+```bash
+dev-artifacts/hv-vision-venv/bin/python scripts/hv_vision_regression.py
+```
+
+Asserts the saved model classifies the known B&BW press-hold frames as
+`page_level_hv_wall` (and never tops out at `newsletter_modal`). Run it after any
+retrain. It is **shadow/offline/dev-only**, references frames by dataset-relative path
+under the gitignored `dev-artifacts/hv-vision-dataset/`, and **self-skips (exit 0)** when
+the model or the frames are absent (e.g. on CI / a fresh checkout) — raw pixels are never
+committed. Add new confirmed press-hold capture dirs to `REGRESSION_CAPTURE_DIRS`.
+
+> **Known gap (`missed_hv`).** The 64×64 grayscale features cannot read text, so a
+> "white card over a page" is intrinsically ambiguous to the model. After the B&BW
+> retrain, `page_level_hv_wall` recall on the held-out eval is ~0.44 — B&BW-style walls
+> are learned, but several *other-domain* HV walls (etsy, sweetwater, chegg, …) are still
+> confidently predicted `false_positive_normal_page`. The thumbnail-size experiment
+> (64 → 96 → 128) showed **no recall improvement** and slightly lower accuracy (more
+> feature dims, same tiny train set), so `DEFAULT_THUMB` stays 64. The real fix for
+> `missed_hv` is more diverse HV-wall training data across domains — not bigger
+> thumbnails. The runtime stays safe meanwhile: `uncertain` never mints a VGC, and the
+> Dominant Surface Review catches ambiguous blocking surfaces.
+
 ## Files
 
 | File | Role |
@@ -371,4 +400,5 @@ summary. No rows are duplicated/oversampled.
 | `hv_vision_review_sheet.py` | Render the review queue as a static HTML contact sheet (offline/dev-only) |
 | `hv_vision_export_reviewed_index.py` | Export reviewed human labels as a retraining overlay index (offline/dev-only; does not mutate the dataset) |
 | `hv_vision_build_manifests.py` | Build deliberate, balanced train/eval manifests from the reviewed-label pool (offline/dev-only; does not train or mutate the dataset) |
+| `hv_vision_regression.py` | B&BW press-hold regression guard: asserts known press-hold frames classify as `page_level_hv_wall` (never `newsletter_modal`); self-skips when model/frames absent (offline/dev-only) |
 | `hv-vision-requirements.txt` | Pinned offline deps |

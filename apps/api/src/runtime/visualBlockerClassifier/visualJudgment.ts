@@ -427,6 +427,15 @@ export interface EvaluateVisualJudgmentSeams {
 
 export interface VisualJudgmentEvaluation {
   ran: boolean;
+  /**
+   * The id of the review/judgment event this evaluation produced (the same id written to the
+   * JSONL queue's `event_id` and used in the on-disk runtime-frames path). Exposed so a caller
+   * can emit it on a debug-gated block log, letting an operator grep
+   * `runtime-judgment-queue.jsonl` for the exact frame that drove a decision. It is a UUID
+   * only — NEVER the frame path or bytes. `null` on the flag-off early return (no event made);
+   * optional so injected test verdicts may omit it (the real evaluation always sets it).
+   */
+  event_id?: string | null;
   /** Runtime should skip the HV escalation (mint/409) for this snapshot when true. */
   suppress: boolean;
   /**
@@ -458,7 +467,7 @@ export async function evaluateVisualJudgment(
   args: EvaluateVisualJudgmentArgs,
   seams: EvaluateVisualJudgmentSeams = {},
 ): Promise<VisualJudgmentEvaluation> {
-  if (!isVisualJudgmentEnabled()) return { ran: false, suppress: false, hvConfirmed: false };
+  if (!isVisualJudgmentEnabled()) return { ran: false, event_id: null, suppress: false, hvConfirmed: false };
 
   const now = seams.now ? seams.now() : new Date();
   const event_id = randomUUID();
@@ -603,7 +612,7 @@ export async function evaluateVisualJudgment(
     live_policy_runtime_action_taken: livePolicy.runtime_action_taken_by_model,
   });
 
-  return { ran: true, suppress, hvConfirmed, outcome: decision.outcome, result };
+  return { ran: true, event_id, suppress, hvConfirmed, outcome: decision.outcome, result };
 }
 
 /** Test-only: reset the in-memory last-judgment status map. */

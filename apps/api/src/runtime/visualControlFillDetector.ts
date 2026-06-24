@@ -54,11 +54,6 @@ import type {
 
 /** Min |luminance − card-background| for a baseline pixel to count as control "ink" (track). */
 const CONTROL_CONTRAST = 24;
-/** A row is part of a wide horizontal structure when ≥ this fraction of its pixels are ink. */
-const ROW_INK_MIN_FRAC = 0.3;
-/** Within the control row band, a column belongs to the control when ≥ this fraction of its
- *  band rows are ink. */
-const COL_INK_MIN_FRAC = 0.3;
 /** Reject tiny/noisy candidates. */
 const MIN_CONTROL_W_PX = 40;
 const MIN_CONTROL_H_PX = 6;
@@ -69,11 +64,11 @@ const BAR_ASPECT = 6;
 /** Reject candidates that engulf the whole card/background (not a control). */
 const TOO_BROAD_AREA_FRAC = 0.92;
 const TOO_BROAD_H_FRAC = 0.7;
-/** The control must be roughly centred in the hold-anchor crop. */
-const CENTER_X_LO = 0.15;
-const CENTER_X_HI = 0.85;
-const CENTER_Y_LO = 0.2;
-const CENTER_Y_HI = 0.97;
+/** Anchor-centered control resolution: a box whose ink fills ≥ this fraction of its area is a
+ *  solid `filled_band` (when the anchor sits on ink); ≤ the outline fraction is a hollow
+ *  `outlined_control`; in between is a `bordered_control`. Geometry/contrast only — NO colour. */
+const FILLED_MIN_INK_FRAC = 0.5;
+const OUTLINE_MAX_INK_FRAC = 0.3;
 /** Min |cur − baseline| luminance delta for a control pixel to count as "filled/transitioned". */
 const FILL_LUMA_DELTA = 30;
 /** A column has transitioned when ≥ this fraction of its band rows changed vs baseline. */
@@ -123,6 +118,24 @@ export type ControlRejectionReason =
   | "off_center";
 
 export type ControlFillKind = "pill_fill" | "bar_fill";
+
+/**
+ * How the anchor-centered control box was inferred from the baseline frame. The detector is
+ * shape-agnostic (rectangular OR rounded/pill) and color/text agnostic; the ONLY invariant is
+ * that the real press-and-hold control CONTAINS the hold anchor (crop centre). Classification is
+ * by how the box relates to the anchor, not by roundness:
+ *   - `filled_band`      the anchor sits ON a solid ink region (a filled bar/pill/rectangle);
+ *   - `outlined_control` the anchor sits in a background interior fully enclosed by a thin ink
+ *                        frame (a hollow outline — e.g. the B&BW empty "Press & Hold" pill);
+ *   - `bordered_control` enclosed by a frame but with substantial interior ink (a partially
+ *                        filled control or one with interior content/text);
+ *   - `unresolved`       no control box contains/encloses the anchor → fail closed.
+ */
+export type ControlResolution =
+  | "filled_band"
+  | "outlined_control"
+  | "bordered_control"
+  | "unresolved";
 
 /** Why the detector reported the frame as release-capable (or not). `solid_state` and
  *  `completed_marker` are the completed-state family (uniform solid / centred checkmark);
@@ -277,6 +290,8 @@ interface ControlBounds {
   y0: number;
   y1: number;
   kind: ControlFillKind;
+  /** How the anchor-centered box was inferred (filled / outlined / bordered). */
+  resolution: Exclude<ControlResolution, "unresolved">;
   band: ReleaseReadyBand;
 }
 
@@ -316,6 +331,14 @@ export function controlFillStateKindForTests(
   return s.bounds ? "tracking_resolved" : "tracking_unresolved";
 }
 
+/** Test-only: the anchor-centered resolution classification for a capsule (no pixels). `none`
+ *  when no state exists; `unresolved` when the baseline locked no control box. */
+export function controlResolutionForTests(capsuleId: string): ControlResolution | "none" {
+  const s = controlFillStates.get(capsuleId);
+  if (!s) return "none";
+  return s.bounds ? s.bounds.resolution : "unresolved";
+}
+
 // ─── Pure geometry helpers ────────────────────────────────────────────────────
 
 /** Median luminance of the top `BG_SAMPLE_TOP_FRAC` rows — the card background estimate. */
@@ -329,25 +352,77 @@ function estimateBackground(L: Float32Array, W: number, H: number): number {
   return samples[samples.length >> 1];
 }
 
-/** Longest contiguous run of `true` in `mask` → [start, end] inclusive, or null if none. */
-function longestRun(mask: boolean[]): { start: number; end: number } | null {
-  let best: { start: number; end: number } | null = null;
-  let runStart = -1;
-  for (let i = 0; i <= mask.length; i++) {
-    const on = i < mask.length && mask[i];
-    if (on && runStart < 0) runStart = i;
-    if (!on && runStart >= 0) {
-      const run = { start: runStart, end: i - 1 };
-      if (!best || run.end - run.start > best.end - best.start) best = run;
-      runStart = -1;
+/**
+ * Label the 8-connected components of an ink mask. Returns a per-pixel label grid (−1 = not
+ * ink) and the component count. Iterative flood fill (explicit stack — no recursion) so a
+ * full-viewport crop can never blow the call stack. Runs ONCE per hold (baseline only). Pure.
+ */
+function labelComponents(ink: Uint8Array, W: number, H: number): { label: Int32Array; count: number } {
+  const label = new Int32Array(W * H).fill(-1);
+  const stack: number[] = [];
+  let count = 0;
+  for (let s = 0; s < ink.length; s++) {
+    if (ink[s] === 0 || label[s] !== -1) continue;
+    const id = count++;
+    label[s] = id;
+    stack.length = 0;
+    stack.push(s);
+    while (stack.length > 0) {
+      const p = stack.pop() as number;
+      const px = p % W;
+      const py = (p - px) / W;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = py + dy;
+        if (ny < 0 || ny >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = px + dx;
+          if (nx < 0 || nx >= W) continue;
+          const np = ny * W + nx;
+          if (ink[np] === 1 && label[np] === -1) {
+            label[np] = id;
+            stack.push(np);
+          }
+        }
+      }
     }
   }
-  return best;
+  return { label, count };
+}
+
+/** Why a candidate control box was rejected by the size/shape gates, or null if it passes. */
+function controlBoxRejection(
+  w: number,
+  h: number,
+  W: number,
+  H: number,
+): ControlRejectionReason | null {
+  if (w < MIN_CONTROL_W_PX || h < MIN_CONTROL_H_PX) return "too_small";
+  // "Engulfs the card" is checked BEFORE aspect so a region spanning most of the crop is
+  // reported as too_broad (not mislabeled bad_aspect) — a near-full block is never a control.
+  if ((w * h) / (W * H) > TOO_BROAD_AREA_FRAC || h > TOO_BROAD_H_FRAC * H) return "too_broad";
+  if (w / h < MIN_CONTROL_ASPECT) return "bad_aspect";
+  return null;
 }
 
 /**
- * Resolve the control bounds from the baseline luminance grid. Returns the bounds and a
- * rejection reason (`none` on success). Pure: no state, never throws.
+ * Resolve the press-and-hold control box from the baseline luminance grid, ANCHOR-CENTERED on
+ * the crop centre (the hold-anchor crop is built around the user's press point, so the real
+ * control CONTAINS the anchor). Shape/colour/text agnostic — works for filled, outlined, and
+ * bordered controls, rectangular OR rounded/pill — the invariant is enclosure of the anchor, not
+ * roundness.
+ *
+ * Method: ink = |L − cardBackground| ≥ CONTROL_CONTRAST; 8-connected components; then, for each
+ * component, its extent along the anchor ROW (left/right reach) and anchor COLUMN (up/down
+ * reach). A component is a control candidate when it ENCLOSES the anchor — either the anchor
+ * pixel lies on it (a solid fill) or it has ink above AND below the anchor on the anchor column
+ * AND left AND right of the anchor on the anchor row (a frame around the anchor). The candidate's
+ * box is exactly that cross-hair extent, so interior text (a separate component) and a taller
+ * carousel/footer band BELOW the anchor (which never reaches above it) are ignored by
+ * construction. The LARGEST valid enclosing box wins (a real control's frame dwarfs a stray
+ * interior glyph; an oversized surrounding surface is filtered by too_broad). Classification:
+ * solid anchor + dense interior → filled_band; hollow interior → outlined_control; in between →
+ * bordered_control. Pure: no state, never throws.
  */
 function resolveControlBounds(
   L: Float32Array,
@@ -355,62 +430,95 @@ function resolveControlBounds(
   H: number,
 ): { bounds: ControlBounds | null; rejection: ControlRejectionReason } {
   const bg = estimateBackground(L, W, H);
+  const ink = new Uint8Array(W * H);
+  for (let i = 0; i < ink.length; i++) ink[i] = Math.abs(L[i] - bg) >= CONTROL_CONTRAST ? 1 : 0;
 
-  // Row projection: rows whose ink coverage spans a wide horizontal structure.
-  const rowMask: boolean[] = new Array(H).fill(false);
+  const ax = Math.floor((W - 1) / 2);
+  const ay = Math.floor((H - 1) / 2);
+
+  const { label } = labelComponents(ink, W, H);
+  const anchorLabel = label[ay * W + ax]; // −1 when the anchor sits on background
+
+  // Cross-hair extents: for every component touching the anchor column / row, its min/max reach
+  // along that axis. The control's box is read off these — never the full component bbox — so a
+  // glyph that merely shares the anchor row cannot inflate the vertical extent, and vice versa.
+  const colExtent = new Map<number, { minY: number; maxY: number }>();
   for (let y = 0; y < H; y++) {
-    let ink = 0;
-    for (let x = 0; x < W; x++) {
-      if (Math.abs(L[W * y + x] - bg) >= CONTROL_CONTRAST) ink += 1;
+    const l = label[y * W + ax];
+    if (l < 0) continue;
+    const e = colExtent.get(l);
+    if (!e) colExtent.set(l, { minY: y, maxY: y });
+    else {
+      if (y < e.minY) e.minY = y;
+      if (y > e.maxY) e.maxY = y;
     }
-    rowMask[y] = ink >= ROW_INK_MIN_FRAC * W;
   }
-  const yRun = longestRun(rowMask);
-  if (!yRun) return { bounds: null, rejection: "low_contrast" };
-  const { start: y0, end: y1 } = yRun;
-  const bandH = y1 - y0 + 1;
-
-  // Column projection within the row band: columns belonging to the control.
-  const colMask: boolean[] = new Array(W).fill(false);
+  const rowExtent = new Map<number, { minX: number; maxX: number }>();
   for (let x = 0; x < W; x++) {
-    let ink = 0;
-    for (let y = y0; y <= y1; y++) {
-      if (Math.abs(L[W * y + x] - bg) >= CONTROL_CONTRAST) ink += 1;
+    const l = label[ay * W + x];
+    if (l < 0) continue;
+    const e = rowExtent.get(l);
+    if (!e) rowExtent.set(l, { minX: x, maxX: x });
+    else {
+      if (x < e.minX) e.minX = x;
+      if (x > e.maxX) e.maxX = x;
     }
-    colMask[x] = ink >= COL_INK_MIN_FRAC * bandH;
-  }
-  const xRun = longestRun(colMask);
-  if (!xRun) return { bounds: null, rejection: "low_contrast" };
-  const { start: x0, end: x1 } = xRun;
-  const width = x1 - x0 + 1;
-  const height = bandH;
-
-  if (width < MIN_CONTROL_W_PX || height < MIN_CONTROL_H_PX) {
-    return { bounds: null, rejection: "too_small" };
-  }
-  // "Engulfs the card" is checked BEFORE aspect so a region that spans most of the crop is
-  // reported as too_broad (not mislabeled bad_aspect) — and so a near-full block can never be
-  // mistaken for a progress control.
-  if ((width * height) / (W * H) > TOO_BROAD_AREA_FRAC || height > TOO_BROAD_H_FRAC * H) {
-    return { bounds: null, rejection: "too_broad" };
-  }
-  const aspect = width / height;
-  if (aspect < MIN_CONTROL_ASPECT) {
-    return { bounds: null, rejection: "bad_aspect" };
-  }
-  const cx = (x0 + x1) / 2 / W;
-  const cy = (y0 + y1) / 2 / H;
-  if (cx < CENTER_X_LO || cx > CENTER_X_HI || cy < CENTER_Y_LO || cy > CENTER_Y_HI) {
-    return { bounds: null, rejection: "off_center" };
   }
 
+  let best: { x0: number; x1: number; y0: number; y1: number; area: number } | null = null;
+  let rejection: ControlRejectionReason = "low_contrast"; // no enclosing candidate at all
+  for (const [l, col] of colExtent) {
+    const row = rowExtent.get(l);
+    if (!row) continue; // must reach the anchor on BOTH axes
+    const onAnchor = anchorLabel >= 0 && l === anchorLabel;
+    const hasUp = col.minY < ay;
+    const hasDown = col.maxY > ay;
+    const hasLeft = row.minX < ax;
+    const hasRight = row.maxX > ax;
+    const enclosing = onAnchor || (hasUp && hasDown && hasLeft && hasRight);
+    if (!enclosing) continue;
+    const x0 = row.minX;
+    const x1 = row.maxX;
+    const y0 = col.minY;
+    const y1 = col.maxY;
+    const w = x1 - x0 + 1;
+    const h = y1 - y0 + 1;
+    const reason = controlBoxRejection(w, h, W, H);
+    if (reason) {
+      rejection = reason; // remember WHY an enclosing candidate was dropped
+      continue;
+    }
+    const area = w * h;
+    if (!best || area > best.area) best = { x0, x1, y0, y1, area };
+  }
+
+  if (!best) return { bounds: null, rejection };
+
+  const { x0, x1, y0, y1 } = best;
+  const w = x1 - x0 + 1;
+  const h = y1 - y0 + 1;
+  // Interior ink density inside the locked box → filled vs outlined vs bordered.
+  let inkInBox = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) if (ink[y * W + x] === 1) inkInBox += 1;
+  }
+  const inkFrac = inkInBox / (w * h);
+  const anchorOnInk = anchorLabel >= 0;
+  const resolution: Exclude<ControlResolution, "unresolved"> =
+    anchorOnInk && inkFrac >= FILLED_MIN_INK_FRAC
+      ? "filled_band"
+      : inkFrac <= OUTLINE_MAX_INK_FRAC
+        ? "outlined_control"
+        : "bordered_control";
+
+  const aspect = w / h;
   const band: ReleaseReadyBand = {
     y_center: (y0 + y1) / 2 / H,
     x0: x0 / W,
     x1: (x1 + 1) / W,
   };
   const kind: ControlFillKind = aspect >= BAR_ASPECT ? "bar_fill" : "pill_fill";
-  return { bounds: { x0, x1, y0, y1, kind, band }, rejection: "none" };
+  return { bounds: { x0, x1, y0, y1, kind, resolution, band }, rejection: "none" };
 }
 
 /**
@@ -736,6 +844,7 @@ export function evaluateControlFill(
       scope: "vgc_release_ready_control_fill",
       control_fill_state: prior ? "dims_changed" : "baseline_captured",
       candidate_kind: bounds ? bounds.kind : "none",
+      control_resolution: bounds ? bounds.resolution : "unresolved",
       control_candidate_seen: bounds !== null,
       control_rejection_reason: rejection,
       control_bounds_status: bounds ? "pending_baseline" : "unresolved",
@@ -783,6 +892,7 @@ export function evaluateControlFill(
     scope: "vgc_release_ready_control_fill",
     control_fill_state: "measured",
     candidate_kind: prior.bounds.kind,
+    control_resolution: prior.bounds.resolution,
     control_candidate_seen: true,
     control_rejection_reason: "none",
     control_bounds_status: "locked",

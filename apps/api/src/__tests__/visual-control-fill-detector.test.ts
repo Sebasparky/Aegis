@@ -26,6 +26,7 @@ import {
   evaluateCompletionSignalsForTests,
   clearControlFillForTests,
   controlFillStateKindForTests,
+  controlResolutionForTests,
 } from "../runtime/visualControlFillDetector.js";
 import {
   advanceReleaseReady,
@@ -230,6 +231,217 @@ describe("evaluateControlFill — baseline bounds rejection fails closed", () =>
     // cy ≈ 0.973 > CENTER_Y_HI.
     expect(evaluateControlFill(CAP, controlImage({ fillFrac: 0, y0: 288, y1: 296 })).found).toBe(false);
     expect(controlFillStateKindForTests(CAP)).toBe("tracking_unresolved");
+  });
+});
+
+// ── Test 4b: anchored row selection — a TALLER ink band OFF the anchor (e.g. a product
+// carousel below a B&BW press-and-hold modal) must NOT capture the bounds. The hold-anchor
+// crop is centred on the user's press point, so the control sits at the crop centre; a
+// longest-run selection used to lock onto whichever ink band was tallest anywhere in the crop
+// (the carousel → "near_end") and never measured the real pill filling. ──────────────────────
+describe("evaluateControlFill — anchored bounds ignore a taller off-center band", () => {
+  // A centred progress pill (y130–160, 30px tall) PLUS a TALLER high-contrast band near the
+  // bottom (y220–295, 75px) that never changes between frames — the carousel/footer a
+  // longest-run selection would wrongly lock onto.
+  function pillPlusCarousel(pillFillFrac: number): string {
+    const bg = 230;
+    const track = 190;
+    const fill = 90;
+    const px0 = 80;
+    const px1 = 320; // pill width 240, aspect 8 → bar_fill
+    const py0 = 130;
+    const py1 = 160; // pill centre y ≈ 145 → 0.483 of H
+    const cx0 = 30;
+    const cx1 = 370;
+    const cy0 = 220;
+    const cy1 = 295; // carousel 75px tall (> pill's 30) → would win a longest-run pick
+    const boundary = px0 + Math.round(pillFillFrac * (px1 - px0));
+    const png = new PNG({ width: W, height: H });
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const o = (W * y + x) << 2;
+        let v = bg;
+        if (x >= px0 && x < px1 && y >= py0 && y < py1) {
+          v = x < boundary ? fill : track;
+        } else if (x >= cx0 && x < cx1 && y >= cy0 && y < cy1) {
+          // Deterministic high-contrast checkerboard (both tones are "ink" vs the card bg) so
+          // every carousel row reads as a wide ink structure — and it is unchanging, so it can
+          // never contribute fill if it were (wrongly) measured.
+          v = ((x >> 4) + (y >> 4)) % 2 === 0 ? 40 : 150;
+        }
+        png.data[o] = v;
+        png.data[o + 1] = v;
+        png.data[o + 2] = v;
+        png.data[o + 3] = 255;
+      }
+    }
+    return PNG.sync.write(png).toString("base64");
+  }
+
+  it("locks the centred pill (not the taller bottom band) and fires when the pill fills", () => {
+    // Baseline: bounds must resolve to the PILL even though the carousel is taller.
+    const f0 = evaluateControlFill(CAP, pillPlusCarousel(0));
+    expect(f0.found).toBe(false);
+    expect(controlFillStateKindForTests(CAP)).toBe("tracking_resolved");
+
+    // Filling the PILL must register near-complete and the locked band must sit on the pill
+    // (~0.48), not the bottom carousel (~0.86) a longest-run pick would have chosen.
+    const f1 = evaluateControlFill(CAP, pillPlusCarousel(0.95));
+    expect(f1.found).toBe(true);
+    expect(f1.band!.y_center).toBeLessThan(0.6);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+
+    // Earns the normal 2-frame, position-stable streak and fires.
+    const f2 = evaluateControlFill(CAP, pillPlusCarousel(0.95));
+    const a1 = advanceReleaseReady(0, undefined, f1);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f2);
+    expect(a2.fire).toBe(true);
+  });
+});
+
+// ── Test 4c: anchor-centered, shape-agnostic control resolution. ─────────────────────────
+// The control is whatever CONTAINS the hold anchor (crop centre) — filled, outlined, or
+// bordered; rectangular OR rounded/pill. No roundness, colour, or text requirement.
+describe("evaluateControlFill — anchor-centered shape-agnostic resolution", () => {
+  const bg = 235;
+  const inkVal = 70; // border/fill luminance (any colour; |ink−bg| ≫ contrast)
+
+  // Distance from (x,y) to a horizontal stadium spine — < r is inside a rounded pill, ≤ x0/x1
+  // square ends is inside a plain rectangle. One builder covers both shapes + a L→R fill.
+  function control(opts: {
+    x0: number;
+    x1: number;
+    y0: number;
+    y1: number;
+    rounded: boolean;
+    /** Border thickness in px. 0 ⇒ a solid filled block (filled_band). */
+    border: number;
+    /** Left-to-right interior fill fraction (0 = empty/unfilled baseline). */
+    fillFrac: number;
+    /** Optional taller solid band BELOW the control (a carousel/footer distractor). */
+    carousel?: { y0: number; y1: number };
+  }): string {
+    const { x0, x1, y0, y1, rounded, border } = opts;
+    const cy = (y0 + y1) / 2;
+    const r = (y1 - y0) / 2;
+    const xa = x0 + r;
+    const xb = x1 - r;
+    const boundary = x0 + opts.fillFrac * (x1 - x0);
+    const png = new PNG({ width: W, height: H });
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const o = (W * y + x) << 2;
+        let v = bg;
+        // Distance into the control body (rounded → stadium SDF; square → box inset).
+        let inside = false;
+        let edgeDist = 0; // distance from the nearest control edge (for the border ring)
+        if (rounded) {
+          const px = Math.min(Math.max(x, xa), xb);
+          const d = Math.hypot(x - px, y - cy);
+          inside = d <= r;
+          edgeDist = r - d;
+        } else {
+          inside = x >= x0 && x <= x1 && y >= y0 && y <= y1;
+          edgeDist = Math.min(x - x0, x1 - x, y - y0, y1 - y);
+        }
+        if (inside) {
+          if (border > 0 && edgeDist < border) {
+            v = inkVal; // outline/border ring
+          } else if (x <= boundary) {
+            v = inkVal; // filled portion (or the whole body when border === 0)
+          }
+          // else: hollow interior stays background
+        }
+        if (opts.carousel && y >= opts.carousel.y0 && y <= opts.carousel.y1 && x >= 20 && x <= 380) {
+          v = ((x >> 4) + (y >> 4)) % 2 === 0 ? 40 : 150; // high-contrast distractor band
+        }
+        png.data[o] = v;
+        png.data[o + 1] = v;
+        png.data[o + 2] = v;
+        png.data[o + 3] = 255;
+      }
+    }
+    return PNG.sync.write(png).toString("base64");
+  }
+
+  // 1. B&BW-style OUTLINED ROUNDED PILL: empty outline baseline → fills L→R → fires.
+  it("resolves a B&BW-style outlined rounded pill and fires when it fills", () => {
+    const box = { x0: 70, x1: 330, y0: 120, y1: 180, rounded: true, border: 5 };
+    const f0 = evaluateControlFill(CAP, control({ ...box, fillFrac: 0 }));
+    expect(f0.found).toBe(false);
+    expect(controlResolutionForTests(CAP)).toBe("outlined_control");
+
+    const f1 = evaluateControlFill(CAP, control({ ...box, fillFrac: 1.0 }));
+    expect(f1.found).toBe(true);
+    expect(f1.band!.y_center).toBeGreaterThan(0.4);
+    expect(f1.band!.y_center).toBeLessThan(0.6);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    const f2 = evaluateControlFill(CAP, control({ ...box, fillFrac: 1.0 }));
+    const a1 = advanceReleaseReady(0, undefined, f1);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f2);
+    expect(a2.fire).toBe(true);
+  });
+
+  // 2. PLAIN OUTLINED RECTANGLE (no rounded caps, no colour).
+  it("resolves a plain outlined rectangle (square corners)", () => {
+    const box = { x0: 80, x1: 320, y0: 120, y1: 180, rounded: false, border: 4 };
+    const f0 = evaluateControlFill(CAP, control({ ...box, fillFrac: 0 }));
+    expect(f0.found).toBe(false);
+    expect(controlResolutionForTests(CAP)).toBe("outlined_control");
+    const f1 = evaluateControlFill(CAP, control({ ...box, fillFrac: 1.0 }));
+    expect(f1.found).toBe(true);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+  });
+
+  // 3. SOLID FILLED RECTANGLE — anchor sits ON ink → filled_band.
+  it("resolves a solid filled rectangle as filled_band", () => {
+    // border 0 ⇒ the whole body is ink at every fillFrac; baseline is already solid.
+    const box = { x0: 80, x1: 320, y0: 125, y1: 175, rounded: false, border: 0 };
+    evaluateControlFill(CAP, control({ ...box, fillFrac: 1.0 })); // baseline (solid)
+    expect(controlResolutionForTests(CAP)).toBe("filled_band");
+    expect(controlFillStateKindForTests(CAP)).toBe("tracking_resolved");
+  });
+
+  // 4. A TALLER carousel/background band below the anchor MUST NOT win — the centred control does.
+  it("ignores a taller distractor band below the anchor", () => {
+    const box = {
+      x0: 80,
+      x1: 320,
+      y0: 120,
+      y1: 175,
+      rounded: true,
+      border: 5,
+      carousel: { y0: 215, y1: 295 }, // 80px tall — taller than the 55px pill
+    };
+    const f0 = evaluateControlFill(CAP, control({ ...box, fillFrac: 0 }));
+    expect(f0.found).toBe(false);
+    // Locked on the pill at the anchor, not the bottom band (~0.85).
+    expect(["outlined_control", "bordered_control"]).toContain(controlResolutionForTests(CAP));
+    const f1 = evaluateControlFill(CAP, control({ ...box, fillFrac: 1.0 }));
+    expect(f1.found).toBe(true);
+    expect(f1.band!.y_center).toBeLessThan(0.6);
+  });
+
+  // 5. AMBIGUOUS / NOISY anchor area — no enclosing control → fail closed.
+  it("fails closed on a noisy anchor area with no enclosing control", () => {
+    const png = new PNG({ width: W, height: H });
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const o = (W * y + x) << 2;
+        // Deterministic scattered specks near the centre — never a connected frame around it.
+        const speck = (((x * 49297) ^ (y * 233280)) % 100) < 6 && Math.abs(y - 150) < 70;
+        const v = speck ? 60 : bg;
+        png.data[o] = v;
+        png.data[o + 1] = v;
+        png.data[o + 2] = v;
+        png.data[o + 3] = 255;
+      }
+    }
+    const noisy = PNG.sync.write(png).toString("base64");
+    expect(evaluateControlFill(CAP, noisy).found).toBe(false);
+    expect(controlResolutionForTests(CAP)).toBe("unresolved");
+    // A later strongly-filled frame still cannot fire — no bounds were ever locked.
+    expect(evaluateControlFill(CAP, noisy).found).toBe(false);
   });
 });
 

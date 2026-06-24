@@ -59,6 +59,7 @@ import {
 import { recheckVisualGestureCapsule } from "../runtime/visualGestureCapsuleRecheck.js";
 import {
   getLatestHvHandoffUpdate,
+  publishHvHandoffUpdate,
   clearHvHandoffUpdatesForTests,
 } from "../runtime/humanVerificationHandoff.js";
 import type { VgcHoldModelResult } from "../runtime/visualGestureCapsuleHoldClassifier.js";
@@ -422,6 +423,44 @@ describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {
     expect(u?.requires_user_attention).toBe(true);
     expect(getVisualGestureCapsule(c.capsule_id)?.status).not.toBe("cleared");
     expect(hasActiveVisualHandoffMonitor(c.capsule_id)).toBe(true);
+  });
+
+  it("sticky survives another publisher clobbering the ring to still_active mid-hold", async () => {
+    // Live regression: after release_ready, the hold's in-hold model advisory publishes
+    // still_active into the SAME handoff ring (clobbering its latest) while the hold is still
+    // live (no hold_ended). The monitor must keep release_ready — its sticky memory is private,
+    // not read back from the ring.
+    const c = seedCapsule();
+    const m = makeModel([r("wall_present")]); // always a wall
+    let calls = 0;
+    // Probe fires 2 stable full frames → release_ready, then the crop no longer reads a full bar
+    // (e.g. crop switched off the hold anchor) → found:false, so only the sticky pin can hold it.
+    const probe = vi.fn(async () => (++calls <= 2 ? FULL : ({ found: false as const })));
+    let holdLive = true;
+    startVisualHandoffMonitor(
+      { capsuleId: c.capsule_id, cdpUrl: CDP },
+      { ...rrDeps(m, probe, true), activeHoldProbe: () => holdLive },
+    );
+    await vi.advanceTimersByTimeAsync(1000); // 2 ticks → release_ready
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
+
+    // Another publisher (the hold's in-hold advisory) clobbers the ring to still_active.
+    publishHvHandoffUpdate({
+      browser_session_id: BASE.browser_session_id,
+      source: "visual_gesture_capsule",
+      phase: "still_active",
+    });
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
+
+    // Next wall_present ticks: probe returns found:false, but the hold is still live (no
+    // hold_ended) → the monitor re-pins release_ready (the old ring-read guard downgraded here).
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("release_ready");
+
+    // Durable hold ends (hold_ended) → sticky lifts → still_active is allowed again.
+    holdLive = false;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(getLatestHvHandoffUpdate(BASE.browser_session_id)?.phase).toBe("still_active");
   });
 
   it("after the hold ends, a wall_present tick returns to still_active (sticky lifts)", async () => {

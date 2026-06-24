@@ -43,7 +43,6 @@ import {
 import { getTaskBrowserSessionCdpUrl } from "./taskBrowserSessions.js";
 import {
   publishHvHandoffUpdate,
-  getLatestHvHandoffUpdate,
   type HvHandoffPhase,
 } from "./humanVerificationHandoff.js";
 import {
@@ -629,6 +628,13 @@ interface MonitorEntry {
   last_release_probe_ms: number;
   /** In-flight guard for the (slower) release-ready capture+probe. */
   release_probe_in_flight: boolean;
+  /**
+   * True once this monitor has published `release_ready`; pins it across `wall_present`
+   * ticks until the hold ends durably or the monitor moves to a clear/terminal phase.
+   * Private to this monitor — NOT read back from the shared handoff ring (other
+   * publishers, e.g. the hold's in-hold model advisory, clobber that ring mid-hold).
+   */
+  release_ready_sticky: boolean;
 }
 
 // Memory-only. Key: capsule_id. One monitor per capsule.
@@ -662,13 +668,20 @@ function publishMonitorHandoff(
 }
 
 /**
- * Sticky guard: true when the latest published phase for this session is already `release_ready`
- * AND a live hold is still active. Used to keep `release_ready` pinned across `wall_present` ticks
- * (no `still_active` downgrade) so the "Release now" nudge stays visible while the user holds.
- * UI guidance only — does not affect completion, the hold, or agent resumption.
+ * Sticky guard: true when this monitor has already published `release_ready` AND a live hold is
+ * still active. Used to keep `release_ready` pinned across `wall_present` ticks (no `still_active`
+ * downgrade) so the "Release now" nudge stays visible while the user holds. UI guidance only —
+ * does not affect completion, the hold, or agent resumption.
+ *
+ * The "already reached release_ready" memory is the monitor-private `entry.release_ready_sticky`
+ * flag, NOT the shared handoff ring: the ring is last-writer-wins and gets clobbered to
+ * `still_active` mid-hold by the hold module's in-hold model advisory, which would otherwise
+ * silently drop the sticky pin before `hold_ended`. The hold-active half is the durable
+ * `hold_started`/`hold_ended` source of truth (`hasLiveVgcHoldSession` via the `holdActiveProbe`
+ * seam).
  */
-function isReleaseReadyStickyDuringHold(entry: MonitorEntry, browserSessionId: string): boolean {
-  if (getLatestHvHandoffUpdate(browserSessionId)?.phase !== "release_ready") return false;
+function isReleaseReadyStickyDuringHold(entry: MonitorEntry): boolean {
+  if (!entry.release_ready_sticky) return false;
   const isHoldActive = entry.activeHoldProbe ?? holdActiveProbe;
   return !!isHoldActive && isHoldActive(entry.capsule_id) === true;
 }
@@ -728,6 +741,7 @@ async function runTick(entry: MonitorEntry): Promise<void> {
   if (advanced.action === "complete") {
     // STABLE visual clear is the SOLE completion authority. Mark cleared, publish
     // `completed`, release any live hold, and stop the loop.
+    entry.release_ready_sticky = false;
     markGestureCapsuleCleared(entry.capsule_id);
     publishMonitorHandoff(entry.capsule_id, "completed", model);
     const release = entry.releaseHold ?? holdReleaseHook;
@@ -759,18 +773,23 @@ async function runTick(entry: MonitorEntry): Promise<void> {
     // phase fresh (avoids TTL expiry). Sticky ends naturally when the hold ends (falls through to
     // still_active), or via the complete/checking branches and terminal-capsule self-clean.
     if (releaseReady) {
+      entry.release_ready_sticky = true;
       publishMonitorHandoff(entry.capsule_id, releaseReady, model);
-    } else if (isReleaseReadyStickyDuringHold(entry, capsule.browser_session_id)) {
+    } else if (isReleaseReadyStickyDuringHold(entry)) {
       publishMonitorHandoff(entry.capsule_id, "release_ready", model);
     } else {
+      entry.release_ready_sticky = false; // hold ended durably, or release_ready never reached
       publishMonitorHandoff(entry.capsule_id, "still_active", model);
     }
   } else if (advanced.action === "checking") {
+    // looks_clear / checking supersedes the "Release now" nudge — lift the sticky pin.
+    entry.release_ready_sticky = false;
     publishMonitorHandoff(entry.capsule_id, "looks_complete_checking", model);
   } else if (releaseReady) {
     // action === "wait" (uncertain / unavailable): publish ONLY on a positive fire so
     // an uncertain-but-walled hold can still nudge "Release now"; otherwise keep the
     // last phase (avoids ring/history flap). `unavailable` never fires (helper filters).
+    entry.release_ready_sticky = true;
     publishMonitorHandoff(entry.capsule_id, releaseReady, model);
   }
   // action === "wait" with no fire: publish nothing — keep the last phase.
@@ -899,6 +918,7 @@ export function startVisualHandoffMonitor(
     consecutive_full: 0,
     last_release_probe_ms: 0,
     release_probe_in_flight: false,
+    release_ready_sticky: false,
   };
   monitors.set(args.capsuleId, entry);
   logHvDebug({ scope: "vgc_handoff_monitor", monitor_event: "started" });

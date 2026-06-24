@@ -38,10 +38,26 @@ import type { SelectedCropSource } from "./visualHandoffMonitor.js";
 // Local copies of the safe enum vocabularies (type-only coupling — no runtime import
 // of the detector/whole-crop modules, so this leaf module can be imported by them
 // without a cycle).
-type CandidateKind = "bar" | "ring" | "hold_anchor_whole_crop" | "none";
+type CandidateKind =
+  | "bar"
+  | "ring"
+  | "pill_fill"
+  | "bar_fill"
+  | "hold_anchor_whole_crop"
+  | "none";
 type RatioBucket = "lt0_5" | "0_5_1" | "1_1_5" | "1_5_2" | "2_3" | "3_5" | "ge5";
 type StrictStrength = "very_strong" | "moderate" | "none";
 type FillBucket = "none" | "lt50" | "50_75" | "75_92" | "ge92";
+/** Why the color-agnostic control-fill detector found (or rejected) a control candidate. */
+type ControlRejectionReason =
+  | "none"
+  | "low_contrast"
+  | "too_small"
+  | "bad_aspect"
+  | "too_broad"
+  | "off_center";
+/** The whole-crop temporal read's compared-frame mode (progress/telemetry only). */
+type WholeCropMode = "strict_plateau" | "relaxed_sustained" | "not_strong";
 
 /** Repo-relative default root (gitignored). */
 const DEBUG_SUBDIR = path.join("dev-artifacts", "vgc-release-ready-debug");
@@ -68,6 +84,12 @@ interface PendingDiag {
   recent_bucket: RatioBucket | null;
   strict_strength: StrictStrength | null;
   temporally_confirmed: boolean | null;
+  /** Color-agnostic control-fill detector: whether a control candidate was located. */
+  control_candidate_seen: boolean | null;
+  /** Color-agnostic control-fill detector: rejection reason (or `none` on success). */
+  control_rejection_reason: ControlRejectionReason | null;
+  /** Whole-crop temporal read's compared-frame mode (progress/telemetry evidence only). */
+  whole_crop_mode: WholeCropMode | null;
 }
 
 /** A fully-assembled crop bundle awaiting the `fired` decision from the monitor tick. */
@@ -111,6 +133,9 @@ function freshDiag(): PendingDiag {
     recent_bucket: null,
     strict_strength: null,
     temporally_confirmed: null,
+    control_candidate_seen: null,
+    control_rejection_reason: null,
+    whole_crop_mode: null,
   };
 }
 
@@ -149,6 +174,7 @@ export function noteWholeCropDiagnostics(
     recent_bucket: RatioBucket;
     strict_strength: StrictStrength;
     temporally_confirmed: boolean;
+    whole_crop_mode: WholeCropMode;
   },
 ): void {
   if (!isReleaseReadyDebugCropsEnabled()) return;
@@ -160,6 +186,33 @@ export function noteWholeCropDiagnostics(
     recent_bucket: diag.recent_bucket,
     strict_strength: diag.strict_strength,
     temporally_confirmed: diag.temporally_confirmed,
+    whole_crop_mode: diag.whole_crop_mode,
+  };
+}
+
+/**
+ * Record the color-agnostic control-fill detector's diagnostics for the in-flight probe.
+ * Called from `evaluateControlFill` (flag-gated there too). Runs AFTER the per-shape detector
+ * note and BEFORE the whole-crop note in the same probe. `chosen_candidate_kind` overrides
+ * `candidate_kind` ONLY when the detector located a control (`pill_fill`/`bar_fill`); when it
+ * found nothing it leaves the prior kind untouched and records only the seen/reason fields.
+ */
+export function noteControlFillDiagnostics(
+  capsuleId: string,
+  diag: {
+    chosen_candidate_kind?: "pill_fill" | "bar_fill";
+    control_candidate_seen: boolean;
+    control_rejection_reason: ControlRejectionReason;
+  },
+): void {
+  if (!isReleaseReadyDebugCropsEnabled()) return;
+  const s = getState(capsuleId);
+  const base = s.pendingDiag ?? freshDiag();
+  s.pendingDiag = {
+    ...base,
+    ...(diag.chosen_candidate_kind ? { candidate_kind: diag.chosen_candidate_kind } : {}),
+    control_candidate_seen: diag.control_candidate_seen,
+    control_rejection_reason: diag.control_rejection_reason,
   };
 }
 
@@ -293,6 +346,11 @@ interface ReleaseReadyDebugMeta {
   recent_bucket: RatioBucket | null;
   strict_strength: StrictStrength | null;
   temporally_confirmed: boolean | null;
+  control_candidate_seen: boolean | null;
+  control_rejection_reason: ControlRejectionReason | null;
+  whole_crop_mode: WholeCropMode | null;
+  /** INVARIANT: the whole-crop temporal read never fires release_ready — always false. */
+  whole_crop_release_triggered: boolean;
   consecutive_full: number;
   fired: boolean;
   has_previous: boolean;
@@ -318,6 +376,11 @@ function buildMeta(
     recent_bucket: pending.recent_bucket,
     strict_strength: pending.strict_strength,
     temporally_confirmed: pending.temporally_confirmed,
+    control_candidate_seen: pending.control_candidate_seen,
+    control_rejection_reason: pending.control_rejection_reason,
+    whole_crop_mode: pending.whole_crop_mode,
+    // Hard invariant surfaced in the sheet: the whole-crop plateau is never a release trigger.
+    whole_crop_release_triggered: false,
     consecutive_full: result.consecutive_full,
     fired: result.fired,
     has_previous: pending.previousPngB64 !== undefined,

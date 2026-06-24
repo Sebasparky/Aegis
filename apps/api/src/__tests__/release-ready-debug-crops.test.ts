@@ -56,6 +56,10 @@ const ALLOWED_META_KEYS = new Set([
   "recent_bucket",
   "strict_strength",
   "temporally_confirmed",
+  "control_candidate_seen",
+  "control_rejection_reason",
+  "whole_crop_mode",
+  "whole_crop_release_triggered",
   "consecutive_full",
   "fired",
   "has_previous",
@@ -170,6 +174,7 @@ describe("flag gating — on ⇒ files + meta written", () => {
       recent_bucket: "0_5_1",
       strict_strength: "moderate",
       temporally_confirmed: false,
+      whole_crop_mode: "strict_plateau",
     });
     noteProbeCrop(CAP, { croppedPngB64: solidPng(40), cropSource: "hold_anchor" });
     commitProbeCrop(
@@ -205,6 +210,7 @@ describe("meta.json — safe enums/buckets/booleans only", () => {
       recent_bucket: "lt0_5",
       strict_strength: "very_strong",
       temporally_confirmed: true,
+      whole_crop_mode: "strict_plateau",
     });
     noteProbeCrop(CAP, { croppedPngB64: solidPng(200), cropSource: "hold_anchor" });
     commitProbeCrop(

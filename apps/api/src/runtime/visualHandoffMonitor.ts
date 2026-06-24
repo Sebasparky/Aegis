@@ -72,6 +72,7 @@ import {
   estimateReleaseReadyWithWholeCropFallback,
   clearWholeCropProgress,
 } from "./visualReleaseReadyWholeCrop.js";
+import { clearControlFill } from "./visualControlFillDetector.js";
 import {
   noteProbeCrop,
   commitProbeCrop,
@@ -969,9 +970,10 @@ export function stopVisualHandoffMonitor(capsuleId: string): void {
   if (entry.timer) clearTimeout(entry.timer);
   monitors.delete(capsuleId);
   // Single choke point for every real teardown (terminal/expiry/cancel, completion,
-  // external cancel route, manual stop): drop the per-capsule whole-crop pixel state
-  // and any dev-only debug-crop state.
+  // external cancel route, manual stop): drop the per-capsule whole-crop + control-fill
+  // pixel state and any dev-only debug-crop state.
   clearWholeCropProgress(capsuleId);
+  clearControlFill(capsuleId);
   clearReleaseReadyDebugCrops(capsuleId);
   logHvDebug({ scope: "vgc_handoff_monitor", monitor_event: "stopped" });
 }
@@ -983,6 +985,7 @@ export function clearVisualHandoffMonitorsForTests(): void {
     if (entry.timer) clearTimeout(entry.timer);
     // The test path bypasses stopVisualHandoffMonitor's body — clear state per entry.
     clearWholeCropProgress(capsuleId);
+    clearControlFill(capsuleId);
     clearReleaseReadyDebugCrops(capsuleId);
   }
   monitors.clear();

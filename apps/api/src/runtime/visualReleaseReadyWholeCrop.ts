@@ -16,25 +16,25 @@
 // from both "still filling" (recent high) and a perpetual spinner (recent never drops).
 //
 // ── HARD BOUNDARIES ──────────────────────────────────────────────────────────
-// - UI GUIDANCE ONLY. NEVER completion authority. A full read means the user should
-//   RELEASE — completion stays the monitor's stable visual-clear authority AFTER
-//   release. This module never clears the capsule, releases the hold, or resumes the
-//   agent. The `release_ready` phase keeps `agent_should_wait:true`.
-// - STRICT SOURCE GATE. The fallback runs ONLY for a `hold_anchor` crop (the user's
+// - PROGRESS / TELEMETRY ONLY — NEVER A RELEASE TRIGGER. This temporal "crop stopped
+//   changing" read is NOT proof the visual control is geometrically complete: on a slow /
+//   long hold a half-full bar advancing slowly reads as a plateau and would fire "Release
+//   now" prematurely. So `evaluateWholeCropProgress` ALWAYS returns `{ found:false }`. It
+//   still computes the cumulative/recent/strict/relaxed signals and emits them as bucketed
+//   telemetry + debug-crop notes (progress evidence), but it never returns `found:true`,
+//   `fill_ratio`, a band, or `temporally_confirmed` for firing. The sole release trigger is
+//   the direct, color-agnostic control-fill detector (visualControlFillDetector.ts).
+// - UI GUIDANCE ONLY. NEVER completion authority. Even the control-fill detector only nudges
+//   the user to RELEASE — completion stays the monitor's stable visual-clear authority AFTER
+//   release. This module never clears the capsule, releases the hold, or resumes the agent.
+//   The `release_ready` phase keeps `agent_should_wait:true`.
+// - STRICT SOURCE GATE. The fallback telemetry runs ONLY for a `hold_anchor` crop (the user's
 //   actual live press point). It MUST NOT run for `dominant_surface` / `inner_control`
 //   / `center_region` — those geometry/DOM fallbacks are not trustworthy for a temporal
 //   whole-crop read. Enforced with an explicit `=== "hold_anchor"` check (not a
 //   negation) so any future SelectedCropSource value defaults to the safe no-fallback path.
 // - FAIL CLOSED. No baseline yet / dims mismatch / weak cumulative / not-plateaued ⇒
-//   `{ found:false }` (= keep holding). A strong frame returns `found:true`, but
-//   SINGLE-FRAME firing (`temporally_confirmed:true`, outer streak == 1) is reserved for
-//   reads whose temporal stability is itself strong: the relaxed-sustained path (already 3
-//   consecutive relaxed-ok frames) or a VERY strong strict plateau (cumulative ≥ the `ge5`
-//   bucket). A MODERATE strict plateau (the `3_5` bucket: only 3–5% changed) is "progress
-//   paused", NOT site acceptance — observed firing too early on live B&BW walls, so the
-//   user released before the site accepted ("Please try again"). It is therefore
-//   `temporally_confirmed:false` and must earn the normal outer 2-frame streak, exactly
-//   like the instantaneous per-shape detector.
+//   `{ found:false }` (= keep holding) — as does every other frame now.
 // - SAFE OUTPUT ONLY. Returns the same `ProgressFillEstimate` shape the detector does;
 //   the band is a CONSTANT whole-crop descriptor (never raw coords). Pixel grids live
 //   only in this module's memory-only state Map and never leave it. Telemetry is coarse
@@ -44,6 +44,7 @@ import { PNG } from "pngjs";
 
 import { logHvDebug } from "./humanVerificationState.js";
 import { noteWholeCropDiagnostics } from "./releaseReadyDebugCrops.js";
+import { evaluateControlFill } from "./visualControlFillDetector.js";
 import {
   estimateProgressFillRatio,
   type ProgressFillEstimate,
@@ -81,8 +82,6 @@ const RECENT_PLATEAU_MAX = 0.012;
 const RECENT_PLATEAU_RELAXED_MAX = 0.018;
 /** Consecutive relaxed-ok compared frames required before the relaxed sustained path reads strong. */
 const RELAXED_STRONG_MIN_CONSECUTIVE = 3;
-/** Fill ratio reported on a strong frame — at/above FULL_RATIO_THRESHOLD so the outer streak counts it. */
-const STRONG_FILL_RATIO = 1;
 
 /**
  * Constant whole-crop band descriptor. Centered, full-width/height in crop fractions,
@@ -220,14 +219,13 @@ export function wholeCropStateKindForTests(
 }
 
 /**
- * Stateful per-capsule whole-crop evaluator. First call (or after a dims change) captures
- * the BASELINE + previous and returns `{found:false}` (cannot compare yet). Subsequent
- * calls compute the cumulative/recent change signals and return a STRONG estimate
- * (`found:true, fill_ratio:1, band: WHOLE_CROP_BAND`) only on a plateaued-full frame —
- * otherwise `{found:false}`. `temporally_confirmed` (single-frame outer-streak fire) is set
- * only for a relaxed-sustained read or a VERY strong strict plateau (cumulative ≥ the `ge5`
- * bucket); a moderate strict plateau is `temporally_confirmed:false` and must earn the normal
- * outer streak. Never throws; any decode failure fails closed to `{found:false}`.
+ * Stateful per-capsule whole-crop evaluator — PROGRESS / TELEMETRY ONLY. First call (or after
+ * a dims change) captures the BASELINE + previous. Subsequent calls compute the cumulative /
+ * recent change signals and emit them as bucketed telemetry + debug-crop notes (strict /
+ * relaxed plateau strength, progress_seen). It ALWAYS returns `{ found:false }`: a temporal
+ * "crop stopped changing" plateau is not proof the control is visually complete, so it can
+ * never fire release_ready (that is the control-fill detector's sole job). Never throws; any
+ * decode failure also fails closed to `{found:false}`.
  */
 export function evaluateWholeCropProgress(
   capsuleId: string,
@@ -316,12 +314,19 @@ export function evaluateWholeCropProgress(
     recent_bucket: ratioBucket(recent_change_ratio),
     sustained_bucket: sustainedBucket(prior.relaxedSustainedCount),
     strong,
-    // Bucketed strictness of the strict-plateau read: moderate `3_5` reads no longer single-frame
-    // fire, only `very_strong` (`ge5`) reads do. enum-only, debug-gated.
+    // Bucketed strictness of the strict-plateau read: moderate `3_5` vs `very_strong` (`ge5`).
+    // enum-only, debug-gated. NOTE: strictness no longer gates any release fire (see below).
     strict_strength: strictStrength,
-    // Whether this frame is eligible for the single-frame (outer-streak == 1) fire.
+    // Eligibility this frame WOULD have had under the old single-frame fire rule — kept as
+    // pure progress telemetry only; it no longer reaches advanceReleaseReady.
     temporally_confirmed: temporallyConfirmed,
-    // The outer streak owns the real fire (and logs it) — a single strong frame never fires.
+    // Whether a meaningful amount has filled vs baseline (progress evidence, not a trigger).
+    progress_seen: cumulative_change_ratio >= CUMULATIVE_STRONG_MIN,
+    // INVARIANT: the whole-crop temporal read NEVER fires release_ready. It is progress /
+    // telemetry / debug evidence only — the color-agnostic control-fill detector is the sole
+    // release trigger. This flag documents that at the log layer and must stay false.
+    whole_crop_used_as_release_trigger: false,
+    // The outer streak owns the real fire (and logs it) — whole-crop never fires.
     fired: false,
   });
 
@@ -333,26 +338,30 @@ export function evaluateWholeCropProgress(
     recent_bucket: ratioBucket(recent_change_ratio),
     strict_strength: strictStrength,
     temporally_confirmed: temporallyConfirmed,
+    whole_crop_mode: strict ? "strict_plateau" : relaxedSustained ? "relaxed_sustained" : "not_strong",
   });
 
-  return strong
-    ? {
-        found: true,
-        fill_ratio: STRONG_FILL_RATIO,
-        band: WHOLE_CROP_BAND,
-        // Only a relaxed-sustained or very-strong strict plateau carries single-frame temporal
-        // confirmation; a moderate strict plateau still demands the normal outer streak.
-        temporally_confirmed: temporallyConfirmed,
-      }
-    : { found: false };
+  // INVARIANT (safety patch): the whole-crop temporal read NEVER returns a release-ready /
+  // full estimate. A "crop stopped changing" plateau is NOT proof the control is visually
+  // complete — on slow/long holds a half-full bar advancing slowly reads as a plateau and
+  // would fire "Release now" prematurely. All firing now comes from the direct, color-agnostic
+  // control-fill detector (visualControlFillDetector.ts). This path stays as progress /
+  // telemetry / debug evidence only, so it ALWAYS returns `{ found:false }` regardless of how
+  // strong the plateau read was (`strong` / `temporallyConfirmed` survive only as telemetry).
+  return { found: false };
 }
 
 /**
- * The single seam the release-ready probe calls. Runs the existing per-shape detector
- * first; if it found an affordance, returns that verbatim (whole-crop state untouched).
- * Only when the detector found nothing AND the crop is the user's `hold_anchor` does the
- * temporal whole-crop fallback run. Any other crop source returns the detector's
- * `{found:false}` and never creates whole-crop state.
+ * The single seam the release-ready probe calls. Resolution order for a release estimate:
+ *
+ *   1. The stateless per-shape detector (bar/ring). If it isolated an affordance, return it.
+ *   2. ONLY for the user's `hold_anchor` crop (strict positive `=== "hold_anchor"` gate):
+ *      a. The COLOR-AGNOSTIC control-fill detector — the sole new release trigger. If it
+ *         measured fill inside a baseline-locked control, return that estimate.
+ *      b. Otherwise run the whole-crop temporal read for PROGRESS / TELEMETRY ONLY (it always
+ *         returns `{found:false}`) and return `{found:false}`.
+ *
+ * Any other crop source returns the detector's `{found:false}` and never creates state.
  *
  * Note: this seam is reached only from `defaultReleaseReadyProbe`, which itself runs only
  * under the ANTIGEN_HV_RELEASE_READY path and after the upstream active-hold gate — so
@@ -367,7 +376,12 @@ export function estimateReleaseReadyWithWholeCropFallback(
   if (primary.found) return primary;
   // STRICT SOURCE GATE: explicit positive equality — only the live press-point crop.
   if (cropSource === "hold_anchor") {
-    return evaluateWholeCropProgress(capsuleId, croppedPngBase64);
+    // Direct, color-agnostic control-fill detection is the sole release trigger.
+    const controlFill = evaluateControlFill(capsuleId, croppedPngBase64);
+    if (controlFill.found) return controlFill;
+    // Whole-crop runs for progress/telemetry/debug evidence only — it never returns found:true.
+    evaluateWholeCropProgress(capsuleId, croppedPngBase64);
+    return { found: false };
   }
   return primary;
 }

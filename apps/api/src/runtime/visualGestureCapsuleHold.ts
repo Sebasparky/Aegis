@@ -83,6 +83,7 @@ import {
   registerVgcHoldAnchorProbe,
 } from "./visualHandoffMonitor.js";
 import { clearWholeCropProgress } from "./visualReleaseReadyWholeCrop.js";
+import { clearControlFill } from "./visualControlFillDetector.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -763,11 +764,13 @@ export async function endVgcHoldSession(capsuleId: string): Promise<EndVgcHoldRe
       presence_source: "model",
       allowReleaseReadyDowngrade: true,
     });
-    // RETRY RESET. This attempt did not clear; drop the per-capsule whole-crop temporal state so
-    // the next hold re-baselines from the retry's initial frame. Otherwise the failed attempt's
-    // baseline / prev-frame / relaxed-sustained streak poisons the next attempt's release-ready
-    // read (a partially-filled-then-rejected first hold could mis-fire "Release now" on retry).
+    // RETRY RESET. This attempt did not clear; drop the per-capsule whole-crop + control-fill
+    // state so the next hold re-baselines from the retry's initial frame. Otherwise the failed
+    // attempt's baseline / locked control bounds / prev-frame / relaxed-sustained streak poisons
+    // the next attempt's release-ready read (a partially-filled-then-rejected first hold could
+    // mis-resolve bounds or mis-fire "Release now" on retry).
     clearWholeCropProgress(capsuleId);
+    clearControlFill(capsuleId);
     const endOutcome = verdict === "wall_present" ? "still_present" : "inconclusive";
     logHvDebug({ scope: "vgc_hold", hold_event: "hold_ended", hold_duration_bucket: heldBucket, end_outcome: endOutcome });
     // A failed state update still never completes — report unknown (no burn credited).

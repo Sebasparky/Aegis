@@ -1008,3 +1008,65 @@ export function buildHvHandoffText(handoff) {
   }
   return ` human_verification_handoff=${JSON.stringify(handoff)}`;
 }
+
+/**
+ * Extract the SAFE-ONLY payment-card-fill bridge block from a runtime fill-boundary
+ * refusal (browser_set_value / browser_fill / browser_clear / browser_type). When the
+ * Antigen backend detects a payment field it fails closed AND server-side creates a
+ * pending payment-card-fill authorization, surfacing it under error.payment_card_fill so
+ * the agent learns the authorization already exists and should call
+ * wait_for_payment_card_fill_authorization (NOT request_payment_card_fill again). Also
+ * surfaces the missing-payment-method state (error.missing_payment_method) so the agent
+ * does not prompt the user to approve a nonexistent request. Whitelisted scalars only —
+ * never payment_method_id, PAN, CVV, expiry, refs beyond the opaque
+ * authorization_id/fill_request_id, or any value.
+ *
+ * @param {any} errBody
+ * @returns {Record<string, unknown> | null}
+ */
+export function extractSafePaymentCardFillBridge(errBody) {
+  const raw = errBody?.error;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  // Missing-payment-method state takes precedence — there is no authorization to wait on.
+  if (raw.missing_payment_method === true) {
+    return { missing_payment_method: true };
+  }
+
+  const pcf = raw.payment_card_fill;
+  if (!pcf || typeof pcf !== "object" || Array.isArray(pcf)) return null;
+  if (pcf.bridged !== true) return null;
+
+  const stringKeys = [
+    "authorization_id",
+    "fill_request_id",
+    "status",
+    "field",
+    "domain",
+    "payment_method_label",
+    "last4",
+    "expires_at",
+    "next_action",
+  ];
+  const out = { bridged: true };
+  for (const k of stringKeys) {
+    if (typeof pcf[k] === "string") out[k] = pcf[k];
+  }
+  return out;
+}
+
+/**
+ * Build the additive, machine-readable suffix for the payment-card-fill bridge.
+ * Returns "" for null/empty so the message is byte-identical when there is nothing to
+ * surface. The serialized object is a whitelisted scalar-only map (see
+ * extractSafePaymentCardFillBridge), safe to hand to the agent.
+ *
+ * @param {ReturnType<typeof extractSafePaymentCardFillBridge>} bridge
+ * @returns {string}
+ */
+export function buildPaymentCardFillBridgeText(bridge) {
+  if (!bridge || typeof bridge !== "object" || Object.keys(bridge).length === 0) {
+    return "";
+  }
+  return ` payment_card_fill=${JSON.stringify(bridge)}`;
+}

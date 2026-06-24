@@ -43,6 +43,7 @@
 import { PNG } from "pngjs";
 
 import { logHvDebug } from "./humanVerificationState.js";
+import { noteWholeCropDiagnostics } from "./releaseReadyDebugCrops.js";
 import {
   estimateProgressFillRatio,
   type ProgressFillEstimate,
@@ -300,6 +301,12 @@ export function evaluateWholeCropProgress(
   // Advance the previous frame (baseline stays fixed for the whole hold).
   prior.prevLum = decoded.L;
 
+  const strictStrength: "very_strong" | "moderate" | "none" = strict
+    ? strictVeryStrong
+      ? "very_strong"
+      : "moderate"
+    : "none";
+
   logHvDebug({
     scope: "vgc_release_ready_whole_crop",
     chosen_candidate_kind: "hold_anchor_whole_crop",
@@ -311,11 +318,21 @@ export function evaluateWholeCropProgress(
     strong,
     // Bucketed strictness of the strict-plateau read: moderate `3_5` reads no longer single-frame
     // fire, only `very_strong` (`ge5`) reads do. enum-only, debug-gated.
-    strict_strength: strict ? (strictVeryStrong ? "very_strong" : "moderate") : "none",
+    strict_strength: strictStrength,
     // Whether this frame is eligible for the single-frame (outer-streak == 1) fire.
     temporally_confirmed: temporallyConfirmed,
     // The outer streak owns the real fire (and logs it) — a single strong frame never fires.
     fired: false,
+  });
+
+  // Dev-only debug-crop note (double-flag-gated inside; no-op otherwise). Surfaces the
+  // SAME coarse buckets above so the captured crop sequence carries the temporal read.
+  noteWholeCropDiagnostics(capsuleId, {
+    chosen_candidate_kind: "hold_anchor_whole_crop",
+    cumulative_bucket: ratioBucket(cumulative_change_ratio),
+    recent_bucket: ratioBucket(recent_change_ratio),
+    strict_strength: strictStrength,
+    temporally_confirmed: temporallyConfirmed,
   });
 
   return strong
@@ -346,7 +363,7 @@ export function estimateReleaseReadyWithWholeCropFallback(
   croppedPngBase64: string,
   cropSource: SelectedCropSource,
 ): ProgressFillEstimate {
-  const primary = estimateProgressFillRatio(croppedPngBase64);
+  const primary = estimateProgressFillRatio(croppedPngBase64, capsuleId);
   if (primary.found) return primary;
   // STRICT SOURCE GATE: explicit positive equality — only the live press-point crop.
   if (cropSource === "hold_anchor") {

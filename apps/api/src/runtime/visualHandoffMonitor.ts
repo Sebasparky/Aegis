@@ -72,6 +72,11 @@ import {
   estimateReleaseReadyWithWholeCropFallback,
   clearWholeCropProgress,
 } from "./visualReleaseReadyWholeCrop.js";
+import {
+  noteProbeCrop,
+  commitProbeCrop,
+  clearReleaseReadyDebugCrops,
+} from "./releaseReadyDebugCrops.js";
 
 // ─── Flag ─────────────────────────────────────────────────────────────────────
 
@@ -208,7 +213,9 @@ export function advanceReleaseReady(
 }
 
 /** Coarse fill bucket for safe telemetry (never the raw ratio). */
-function fillBucket(ratio: number | undefined): string {
+function fillBucket(
+  ratio: number | undefined,
+): "none" | "lt50" | "50_75" | "75_92" | "ge92" {
   if (ratio === undefined) return "none";
   if (ratio < 0.5) return "lt50";
   if (ratio < 0.75) return "50_75";
@@ -566,7 +573,13 @@ async function defaultReleaseReadyProbe(cdpUrl: string, capsuleId: string): Prom
     logHvDebug({ scope: "vgc_release_ready_probe", stage: "detector_invoked" });
     // Per-shape detector first; only a `hold_anchor` crop with no sub-candidate falls
     // back to the conservative whole-crop temporal read (strict source gate inside).
-    return estimateReleaseReadyWithWholeCropFallback(capsuleId, cropped, selection.source);
+    const estimate = estimateReleaseReadyWithWholeCropFallback(capsuleId, cropped, selection.source);
+    // Dev-only debug-crop capture (double-flag-gated inside; no-op otherwise). Stash the
+    // EXACT crop bytes + source the detector just judged; the monitor tick commits it with
+    // the fire decision. Crop bytes stay server-internal — the probe returns only the
+    // coarse estimate, and the monitor publishes only a phase enum to the agent.
+    noteProbeCrop(capsuleId, { croppedPngB64: cropped, cropSource: selection.source });
+    return estimate;
   } catch {
     logHvDebug({ scope: "vgc_release_ready_probe", stage: "probe_threw" });
     return { found: false };
@@ -894,6 +907,16 @@ async function evaluateReleaseReadyPhase(
       fired: adv.fire,
     });
 
+    // Dev-only debug-crop commit (double-flag-gated inside; no-op otherwise). Finalize the
+    // crop bundle the probe stashed with the same safe scalars logged above + the fire
+    // decision. Best-effort: never throws, never affects the returned phase.
+    commitProbeCrop(entry.capsule_id, {
+      found: estimate.found,
+      fired: adv.fire,
+      consecutive_full: entry.consecutive_full,
+      fill_bucket: fillBucket(estimate.fill_ratio),
+    });
+
     return adv.fire ? "release_ready" : null;
   } catch {
     return null;
@@ -946,8 +969,10 @@ export function stopVisualHandoffMonitor(capsuleId: string): void {
   if (entry.timer) clearTimeout(entry.timer);
   monitors.delete(capsuleId);
   // Single choke point for every real teardown (terminal/expiry/cancel, completion,
-  // external cancel route, manual stop): drop the per-capsule whole-crop pixel state.
+  // external cancel route, manual stop): drop the per-capsule whole-crop pixel state
+  // and any dev-only debug-crop state.
   clearWholeCropProgress(capsuleId);
+  clearReleaseReadyDebugCrops(capsuleId);
   logHvDebug({ scope: "vgc_handoff_monitor", monitor_event: "stopped" });
 }
 
@@ -958,6 +983,7 @@ export function clearVisualHandoffMonitorsForTests(): void {
     if (entry.timer) clearTimeout(entry.timer);
     // The test path bypasses stopVisualHandoffMonitor's body — clear state per entry.
     clearWholeCropProgress(capsuleId);
+    clearReleaseReadyDebugCrops(capsuleId);
   }
   monitors.clear();
 }

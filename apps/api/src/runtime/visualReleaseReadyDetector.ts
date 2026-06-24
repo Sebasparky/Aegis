@@ -40,6 +40,7 @@
 import { PNG } from "pngjs";
 
 import { logHvDebug } from "./humanVerificationState.js";
+import { noteDetectorDiagnostics } from "./releaseReadyDebugCrops.js";
 
 // ─── Bar tunables (all heuristic; named for tuning) — UNCHANGED ───────────────
 
@@ -570,7 +571,10 @@ export function analyzeReleaseReady(croppedPngBase64: string): {
  * untouched. Emits coarse, safe diagnostics ONLY when both ANTIGEN_HV_DEBUG and
  * ANTIGEN_HV_RELEASE_READY are on (otherwise byte-identical to before).
  */
-export function estimateProgressFillRatio(croppedPngBase64: string): ProgressFillEstimate {
+export function estimateProgressFillRatio(
+  croppedPngBase64: string,
+  capsuleId?: string,
+): ProgressFillEstimate {
   // Entry marker (coarse booleans only — no pixels/coords/image data): if the probe
   // logs stage=detector_invoked, this proves the detector wrapper actually ran. Paired
   // with the post-analysis log below so "entered" is distinguishable from "analyzed".
@@ -580,6 +584,12 @@ export function estimateProgressFillRatio(croppedPngBase64: string): ProgressFil
   const { estimate, diagnostics } = analyzeReleaseReady(croppedPngBase64);
   if (shouldEmitDetectorDebug()) {
     logHvDebug({ scope: "vgc_release_ready_detect", found: estimate.found, ...diagnostics });
+  }
+  // Dev-only debug-crop note (double-flag-gated inside; no-op otherwise). Records which
+  // affordance shape the per-shape detector chose for this probe; the whole-crop fallback
+  // overrides it later in the same probe when the temporal read is the one that fires.
+  if (capsuleId !== undefined) {
+    noteDetectorDiagnostics(capsuleId, { chosen_candidate_kind: diagnostics.chosen_candidate_kind });
   }
   return estimate;
 }

@@ -1,0 +1,311 @@
+/**
+ * Release-Ready Debug Crop Capture — dev-only, double-flag-gated suite (no Chromium).
+ *
+ * Pins the safety-relevant behavior of the operator-only crop capture used to debug
+ * B&BW press-and-hold `release_ready` false positives:
+ *   - OFF by default: with either flag missing, NOTHING is written (byte-neutral);
+ *   - ON (both flags): baseline/current/meta written, previous/diff appear on frame 2;
+ *   - meta.json is allowlist-only — enums/buckets/booleans/ids, never a path/coord/dim;
+ *   - capture failure NEVER throws (best-effort) — release-ready behavior is unaffected;
+ *   - the first frame of a hold writes gracefully with no previous/diff.
+ */
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { PNG } from "pngjs";
+
+import {
+  isReleaseReadyDebugCropsEnabled,
+  noteProbeCrop,
+  noteDetectorDiagnostics,
+  noteWholeCropDiagnostics,
+  commitProbeCrop,
+  clearAllReleaseReadyDebugCropsForTests,
+} from "../runtime/releaseReadyDebugCrops.js";
+
+// ─── Fixtures ─────────────────────────────────────────────────────────────────
+
+/** A solid-gray PNG (base64). Same construction the whole-crop suite uses. */
+function solidPng(gray: number, w = 60, h = 40): string {
+  const png = new PNG({ width: w, height: h });
+  for (let i = 0; i < w * h; i++) {
+    const o = i << 2;
+    png.data[o] = gray;
+    png.data[o + 1] = gray;
+    png.data[o + 2] = gray;
+    png.data[o + 3] = 255;
+  }
+  return PNG.sync.write(png).toString("base64");
+}
+
+const CAP = "vgc_debug_crop_test";
+
+/** The exhaustive set of keys meta.json may contain — nothing else is allowed. */
+const ALLOWED_META_KEYS = new Set([
+  "capsule_id",
+  "probe_id",
+  "created_at",
+  "crop_source",
+  "candidate_kind",
+  "found",
+  "fill_bucket",
+  "cumulative_bucket",
+  "recent_bucket",
+  "strict_strength",
+  "temporally_confirmed",
+  "consecutive_full",
+  "fired",
+  "has_previous",
+  "has_diff",
+]);
+
+let tmpRoot: string;
+const savedEnv: Record<string, string | undefined> = {};
+
+function setFlags(hvDebug: string | undefined, debugCrops: string | undefined): void {
+  if (hvDebug === undefined) delete process.env.ANTIGEN_HV_DEBUG;
+  else process.env.ANTIGEN_HV_DEBUG = hvDebug;
+  if (debugCrops === undefined) delete process.env.ANTIGEN_VGC_RELEASE_READY_DEBUG_CROPS;
+  else process.env.ANTIGEN_VGC_RELEASE_READY_DEBUG_CROPS = debugCrops;
+}
+
+function capsuleDir(): string {
+  return path.join(tmpRoot, CAP);
+}
+
+beforeEach(() => {
+  clearAllReleaseReadyDebugCropsForTests();
+  savedEnv.ANTIGEN_HV_DEBUG = process.env.ANTIGEN_HV_DEBUG;
+  savedEnv.ANTIGEN_VGC_RELEASE_READY_DEBUG_CROPS = process.env.ANTIGEN_VGC_RELEASE_READY_DEBUG_CROPS;
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rr-debug-"));
+});
+
+afterEach(() => {
+  setFlags(savedEnv.ANTIGEN_HV_DEBUG, savedEnv.ANTIGEN_VGC_RELEASE_READY_DEBUG_CROPS);
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {
+    /* best-effort cleanup */
+  }
+});
+
+// ─── 1. Flag gating: OFF ⇒ no files ─────────────────────────────────────────────
+
+describe("flag gating — off ⇒ no write, no state", () => {
+  it("both flags unset: helper false and nothing written", () => {
+    setFlags(undefined, undefined);
+    expect(isReleaseReadyDebugCropsEnabled()).toBe(false);
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    expect(fs.existsSync(capsuleDir())).toBe(false);
+  });
+
+  it("only ANTIGEN_HV_DEBUG on ⇒ disabled, no write", () => {
+    setFlags("true", undefined);
+    expect(isReleaseReadyDebugCropsEnabled()).toBe(false);
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    expect(fs.existsSync(capsuleDir())).toBe(false);
+  });
+
+  it("only debug-crops flag on ⇒ disabled, no write", () => {
+    setFlags(undefined, "true");
+    expect(isReleaseReadyDebugCropsEnabled()).toBe(false);
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    expect(fs.existsSync(capsuleDir())).toBe(false);
+  });
+});
+
+// ─── 2. Flag gating: ON ⇒ files + meta ──────────────────────────────────────────
+
+describe("flag gating — on ⇒ files + meta written", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("first probe writes baseline/current/meta (no previous/diff)", () => {
+    expect(isReleaseReadyDebugCropsEnabled()).toBe(true);
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+      { outputRoot: tmpRoot, now: () => new Date("2026-06-24T00:00:00.000Z") },
+    );
+    const dir = path.join(capsuleDir(), "0001");
+    expect(fs.existsSync(path.join(dir, "current.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "baseline.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "previous.png"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "diff.png"))).toBe(false);
+  });
+
+  it("second probe writes previous + diff (same dims) and carries whole-crop buckets", () => {
+    // Frame 1 (baseline).
+    noteDetectorDiagnostics(CAP, { chosen_candidate_kind: "none" });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+      { outputRoot: tmpRoot },
+    );
+    // Frame 2 (whole-crop compared path notes its buckets, then crop stashed).
+    noteDetectorDiagnostics(CAP, { chosen_candidate_kind: "none" });
+    noteWholeCropDiagnostics(CAP, {
+      chosen_candidate_kind: "hold_anchor_whole_crop",
+      cumulative_bucket: "3_5",
+      recent_bucket: "0_5_1",
+      strict_strength: "moderate",
+      temporally_confirmed: false,
+    });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(40), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    const dir = path.join(capsuleDir(), "0002");
+    expect(fs.existsSync(path.join(dir, "current.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "previous.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "diff.png"))).toBe(true);
+
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"));
+    expect(meta.candidate_kind).toBe("hold_anchor_whole_crop");
+    expect(meta.cumulative_bucket).toBe("3_5");
+    expect(meta.recent_bucket).toBe("0_5_1");
+    expect(meta.strict_strength).toBe("moderate");
+    expect(meta.fired).toBe(true);
+    expect(meta.has_previous).toBe(true);
+    expect(meta.has_diff).toBe(true);
+  });
+});
+
+// ─── 3. meta.json is allowlist-safe ─────────────────────────────────────────────
+
+describe("meta.json — safe enums/buckets/booleans only", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("contains only allowlisted keys and no path/coord/dimension/url substrings", () => {
+    noteWholeCropDiagnostics(CAP, {
+      chosen_candidate_kind: "hold_anchor_whole_crop",
+      cumulative_bucket: "ge5",
+      recent_bucket: "lt0_5",
+      strict_strength: "very_strong",
+      temporally_confirmed: true,
+    });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(200), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 1, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    const raw = fs.readFileSync(path.join(capsuleDir(), "0001", "meta.json"), "utf-8");
+    const meta = JSON.parse(raw);
+
+    for (const k of Object.keys(meta)) {
+      expect(ALLOWED_META_KEYS.has(k)).toBe(true);
+    }
+    // Value types: only string/number/boolean/null — never nested objects/arrays.
+    for (const v of Object.values(meta)) {
+      const t = v === null ? "null" : typeof v;
+      expect(["string", "number", "boolean", "null"]).toContain(t);
+    }
+    // The serialized blob must not leak geometry or filesystem hints.
+    expect(raw).not.toMatch(/\.png|\/|\\|x0|x1|width|height|viewport|cdp|http/i);
+    // consecutive_full is a small int, not a coordinate.
+    expect(Number.isInteger(meta.consecutive_full)).toBe(true);
+  });
+});
+
+// ─── 4. Capture failure never affects behavior ──────────────────────────────────
+
+describe("best-effort — capture failure never throws", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("an unwritable output root does not throw and writes nothing", () => {
+    // Point the root INSIDE a regular file so mkdirSync fails with ENOTDIR.
+    const blocker = path.join(tmpRoot, "not-a-dir");
+    fs.writeFileSync(blocker, "x");
+    const badRoot = path.join(blocker, "sub");
+
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    expect(() =>
+      commitProbeCrop(
+        CAP,
+        { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+        { outputRoot: badRoot },
+      ),
+    ).not.toThrow();
+    expect(fs.existsSync(badRoot)).toBe(false);
+  });
+
+  it("malformed crop base64 still does not throw (diff omitted)", () => {
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+      { outputRoot: tmpRoot },
+    );
+    // Frame 2 with a non-PNG "crop": current.png is written from raw bytes, diff decode
+    // fails → diff omitted, no throw.
+    noteProbeCrop(CAP, { croppedPngB64: "not-a-real-png", cropSource: "hold_anchor" });
+    expect(() =>
+      commitProbeCrop(
+        CAP,
+        { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+        { outputRoot: tmpRoot },
+      ),
+    ).not.toThrow();
+    const dir = path.join(capsuleDir(), "0002");
+    expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "diff.png"))).toBe(false);
+  });
+});
+
+// ─── 5. First-frame graceful ────────────────────────────────────────────────────
+
+describe("first frame — graceful with no previous/diff", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("single probe writes current+baseline, meta marks no previous/diff", () => {
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "dominant_surface" });
+    commitProbeCrop(
+      CAP,
+      { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+      { outputRoot: tmpRoot },
+    );
+    const dir = path.join(capsuleDir(), "0001");
+    expect(fs.existsSync(path.join(dir, "current.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "baseline.png"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "previous.png"))).toBe(false);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"));
+    expect(meta.has_previous).toBe(false);
+    expect(meta.has_diff).toBe(false);
+    expect(meta.crop_source).toBe("dominant_surface");
+    expect(meta.candidate_kind).toBe("none");
+  });
+
+  it("commit with no pending probe is a no-op (no throw)", () => {
+    expect(() =>
+      commitProbeCrop(
+        CAP,
+        { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+        { outputRoot: tmpRoot },
+      ),
+    ).not.toThrow();
+    expect(fs.existsSync(capsuleDir())).toBe(false);
+  });
+});

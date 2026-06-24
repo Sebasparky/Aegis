@@ -17,6 +17,8 @@ apps/web/tsconfig.tsbuildinfo
 dev-artifacts/
 # Dev-only redacted visual-blocker dataset capture (Phase 2A) — never commit.
 dev-artifacts/hv-vision-dataset/
+# Dev-only VGC release-ready debug crops — never commit.
+dev-artifacts/vgc-release-ready-debug/
 tmp-pointer-test/
 
 # Python bytecode cache (offline hv_vision_* harness in scripts/)

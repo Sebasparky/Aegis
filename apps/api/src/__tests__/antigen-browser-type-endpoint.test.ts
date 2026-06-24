@@ -49,7 +49,37 @@ import {
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
-import { agentDelegations, passes } from "../store/index.js";
+import {
+  agentDelegations,
+  passes,
+  paymentMethods,
+  paymentCardFillAuthorizations,
+  paymentCardFillRequests,
+} from "../store/index.js";
+
+const PAYMENT_METHOD_ID = "pay_method_type_001";
+
+function seedDefaultPaymentMethod() {
+  paymentMethods.set(PAYMENT_METHOD_ID, {
+    payment_method_id: PAYMENT_METHOD_ID,
+    user_id: MOCK_USER_ID,
+    label: "Aegis Test Card",
+    cardholder_name: "Alex Test",
+    brand: "visa",
+    last4: "4242",
+    exp_month: 12,
+    exp_year: 2030,
+    billing_zip: "48104",
+    billing_country: "US",
+    is_default: true,
+    status: "active",
+    card_number_ref: "devvault://test-card-number",
+    cvv_ref: "devvault://test-card-cvv",
+    capability_ref: PAYMENT_METHOD_ID,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  } as any);
+}
 
 const BEARER = "Bearer tok_type_001";
 const DELEGATION_ID = "del_type_001";
@@ -156,6 +186,9 @@ afterAll(() => {
 beforeEach(() => {
   taskBrowserSessions.clear();
   clearAntigenSnapshotStoreForTests();
+  paymentMethods.clear();
+  paymentCardFillAuthorizations.clear();
+  paymentCardFillRequests.clear();
   vi.clearAllMocks();
   typeKnownBoxMock.mockResolvedValue({
     success: true,
@@ -296,7 +329,8 @@ describe("POST /api/agent/v1/runtime/browser-type — Antigen ag_* path", () => 
     expect(JSON.stringify(body)).not.toContain("hunter2");
   });
 
-  it("REFUSES a payment field and routes to the payment-card fill path", async () => {
+  it("BRIDGES a payment field into the payment-card fill lifecycle (auto-creates a pending authorization)", async () => {
+    seedDefaultPaymentMethod();
     seedSession();
     seedSnapshot([
       inputCandidate({
@@ -316,6 +350,39 @@ describe("POST /api/agent/v1/runtime/browser-type — Antigen ag_* path", () => 
     expect(body.error.message).toContain("request_payment_card_fill");
     expect(typeKnownBoxMock).not.toHaveBeenCalled();
     expect(JSON.stringify(body)).not.toContain("4242424242424242");
+
+    // The bridge auto-created a pending authorization, surfaced safe-only.
+    expect(body.error.payment_card_fill.bridged).toBe(true);
+    expect(body.error.payment_card_fill.authorization_id).toMatch(/^pca_/);
+    expect(body.error.payment_card_fill.field).toBe("card_number");
+    expect(JSON.stringify(body)).not.toContain(PAYMENT_METHOD_ID);
+    const pending = Array.from(paymentCardFillAuthorizations.values()).filter(
+      (a) => a.status === "pending_approval",
+    );
+    expect(pending.length).toBe(1);
+  });
+
+  it("surfaces a clear missing-payment-method state when no card is set up", async () => {
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Card number",
+        normalized_name: "card number",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ]);
+    const res = await server.inject({
+      method: "POST", url: URL,
+      headers: { authorization: BEARER },
+      payload: { browser_runtime_id: SESSION_ID, ref: "ag_1", element: "Card number", text: "4242424242424242" },
+    });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("PAYMENT_METHOD_REQUIRED");
+    expect(body.error.missing_payment_method).toBe(true);
+    expect(typeKnownBoxMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(body)).not.toContain("4242424242424242");
+    expect(paymentCardFillAuthorizations.size).toBe(0);
   });
 
   it("TYPES into a non-sensitive search field (no injection handoff)", async () => {

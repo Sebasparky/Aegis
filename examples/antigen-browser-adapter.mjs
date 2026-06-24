@@ -40,7 +40,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT, extractSafeHvAttribution, buildHvAttributionText, extractSafeHvHandoff, buildHvHandoffText } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, classifySnapshotApiErrorKind, VISUAL_BLOCKER_SKIP_DIRECTIVE_TEXT, extractSafeHvAttribution, buildHvAttributionText, extractSafeHvHandoff, buildHvHandoffText, extractSafePaymentCardFillBridge, buildPaymentCardFillBridgeText } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -1050,14 +1050,19 @@ function writeSyntheticResponse(requestId, text) {
  * optional, whitelisted ownership block (handoff_owner/confirmed_human_verification/
  * agent_should_wait/capsule_id…) from a confirmed HV 409 (see extractSafeHvHandoff),
  * so the agent's tool result carries a machine-readable "Antigen owns this; wait"
- * signal. Both are appended as safe machine-readable suffixes; when null/omitted the
- * output is byte-identical to before (all non-HV errors), preserving existing behavior.
+ * signal. `paymentBridge` is the optional, whitelisted payment-card-fill bridge block
+ * from a payment-field fill-boundary refusal (see extractSafePaymentCardFillBridge), so
+ * the agent learns a pending authorization was already created (call
+ * wait_for_payment_card_fill_authorization) — or that no payment method is set up. All
+ * three are appended as safe machine-readable suffixes; when null/omitted the output is
+ * byte-identical to before (all non-HV, non-payment errors), preserving existing behavior.
  */
-function writeSyntheticErrorResponse(toolName, requestId, code, message, attribution = null, handoff = null) {
+function writeSyntheticErrorResponse(toolName, requestId, code, message, attribution = null, handoff = null, paymentBridge = null) {
   const text =
     `Antigen ${toolName} unavailable: code=${code}; ${message}` +
     buildHvAttributionText(attribution) +
-    buildHvHandoffText(handoff);
+    buildHvHandoffText(handoff) +
+    buildPaymentCardFillBridgeText(paymentBridge);
   const response = JSON.stringify({
     jsonrpc: "2.0",
     id: requestId,
@@ -1164,6 +1169,7 @@ async function handleExactSetValue(toolName, msg) {
       errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage(toolName) : errMsg,
       extractSafeHvAttribution(errBody),
       extractSafeHvHandoff(errBody),
+      extractSafePaymentCardFillBridge(errBody),
     );
   } catch (_err) {
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=INTERCEPT_ERROR source=${toolName}\n`);
@@ -1848,6 +1854,7 @@ async function handleLine(line) {
           : `Antigen realistic browser_type failed (${errCode}).`,
         extractSafeHvAttribution(errBody),
         extractSafeHvHandoff(errBody),
+        extractSafePaymentCardFillBridge(errBody),
       );
     } catch (_err) {
       process.stderr.write(

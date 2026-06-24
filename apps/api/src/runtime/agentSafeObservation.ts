@@ -189,7 +189,7 @@ export async function buildAgentSafeObservationSnapshot(
       if (type === 'password' || /current-password|new-password|one-time-code/.test(ac)) return 'credential';
       if (/cc-number|cardnumber|card.number|cc-name/.test(combined)) return 'payment';
       if (/cc-csc|cvv|cvc|security.code|card.cvc/.test(combined)) return 'payment';
-      if (/cc-exp/.test(ac)) return 'payment';
+      if (/cc-exp|expir|exp.?date|exp.?month|exp.?year/.test(combined)) return 'payment';
       if (/ssn|social.security|passport|license|dob|birthdate|date.of.birth/.test(combined)) return 'identity';
       if (/routing|account.number|bank.account|account_number/.test(combined)) return 'financial';
       // Search override — only here; the strong rules above always win.

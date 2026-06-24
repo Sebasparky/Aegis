@@ -44,7 +44,37 @@ import {
   clearAntigenSnapshotStoreForTests,
 } from "../runtime/antigenSnapshotStore.js";
 import { agentApiRoutes } from "../routes/agent-api.js";
-import { agentDelegations, passes } from "../store/index.js";
+import {
+  agentDelegations,
+  passes,
+  paymentMethods,
+  paymentCardFillAuthorizations,
+  paymentCardFillRequests,
+} from "../store/index.js";
+
+const PAYMENT_METHOD_ID = "pay_method_setval_001";
+
+function seedDefaultPaymentMethod() {
+  paymentMethods.set(PAYMENT_METHOD_ID, {
+    payment_method_id: PAYMENT_METHOD_ID,
+    user_id: MOCK_USER_ID,
+    label: "Aegis Test Card",
+    cardholder_name: "Alex Test",
+    brand: "visa",
+    last4: "4242",
+    exp_month: 12,
+    exp_year: 2030,
+    billing_zip: "48104",
+    billing_country: "US",
+    is_default: true,
+    status: "active",
+    card_number_ref: "devvault://test-card-number",
+    cvv_ref: "devvault://test-card-cvv",
+    capability_ref: PAYMENT_METHOD_ID,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  } as any);
+}
 
 const BEARER = "Bearer tok_setval_001";
 const DELEGATION_ID = "del_setval_001";
@@ -149,6 +179,9 @@ afterAll(() => {
 beforeEach(() => {
   taskBrowserSessions.clear();
   clearAntigenSnapshotStoreForTests();
+  paymentMethods.clear();
+  paymentCardFillAuthorizations.clear();
+  paymentCardFillRequests.clear();
   vi.clearAllMocks();
   setValueMock.mockResolvedValue({
     success: true,
@@ -267,7 +300,8 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     expect(JSON.stringify(body)).not.toContain("hunter2");
   });
 
-  it("REFUSES a payment field and routes to the payment-card fill path", async () => {
+  it("BRIDGES a payment field into the payment-card fill lifecycle (auto-creates a pending authorization)", async () => {
+    seedDefaultPaymentMethod();
     seedSession();
     seedSnapshot([
       inputCandidate({
@@ -279,10 +313,88 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4242424242424242" });
     expect(res.statusCode).toBe(422);
     const body = res.json();
+    // Still fails closed with the payment refusal code; never types/echoes.
     expect(body.error.code).toBe("SENSITIVE_FIELD_REQUIRES_PAYMENT_CARD_FILL");
     expect(body.error.message).toContain("request_payment_card_fill");
     expect(setValueMock).not.toHaveBeenCalled();
     expect(JSON.stringify(body)).not.toContain("4242424242424242");
+
+    // The bridge created a pending authorization + fill request, surfaced safe-only.
+    expect(body.error.payment_card_fill).toBeDefined();
+    expect(body.error.payment_card_fill.bridged).toBe(true);
+    expect(body.error.payment_card_fill.status).toBe("pending_approval");
+    expect(body.error.payment_card_fill.authorization_id).toMatch(/^pca_/);
+    expect(body.error.payment_card_fill.fill_request_id).toMatch(/^pcfr_/);
+    expect(body.error.payment_card_fill.field).toBe("card_number");
+    expect(body.error.payment_card_fill.last4).toBe("4242");
+
+    // No internal identifiers leak in the entire response.
+    expect(JSON.stringify(body)).not.toContain(PAYMENT_METHOD_ID);
+    expect(JSON.stringify(body)).not.toContain("devvault://");
+
+    // The authorization is now listable as pending_approval.
+    const pending = Array.from(paymentCardFillAuthorizations.values()).filter(
+      (a) => a.status === "pending_approval",
+    );
+    expect(pending.length).toBe(1);
+    expect(pending[0].domain).toBe("example.test");
+  });
+
+  it("REUSES a pending payment authorization when the boundary is hit again", async () => {
+    seedDefaultPaymentMethod();
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Card number",
+        normalized_name: "card number",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ]);
+    const first = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4242424242424242" });
+    const second = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4242424242424242" });
+    const a1 = first.json().error.payment_card_fill.authorization_id;
+    const a2 = second.json().error.payment_card_fill.authorization_id;
+    expect(a1).toBe(a2);
+    // Exactly one authorization, two fill requests under it.
+    expect(paymentCardFillAuthorizations.size).toBe(1);
+    expect(paymentCardFillRequests.size).toBe(2);
+  });
+
+  it("surfaces a clear missing-payment-method state when no card is set up", async () => {
+    // No payment method seeded.
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Card number",
+        normalized_name: "card number",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ]);
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "4242424242424242" });
+    expect(res.statusCode).toBe(422);
+    const body = res.json();
+    expect(body.error.code).toBe("PAYMENT_METHOD_REQUIRED");
+    expect(body.error.missing_payment_method).toBe(true);
+    expect(setValueMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(body)).not.toContain("4242424242424242");
+    // No phantom authorization was created.
+    expect(paymentCardFillAuthorizations.size).toBe(0);
+  });
+
+  it("infers the expiry field kind for a payment-classified expiry input", async () => {
+    seedDefaultPaymentMethod();
+    seedSession();
+    seedSnapshot([
+      inputCandidate({
+        name: "Expiration date",
+        normalized_name: "expiration date",
+        value_meta: { sensitive: true, sensitivity: "payment", value_present: false, value_length: 0 },
+      }),
+    ]);
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "12/30" });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.payment_card_fill.field).toBe("expiry_combined");
+    expect(setValueMock).not.toHaveBeenCalled();
   });
 
   it("FILLS a non-sensitive search field (no injection handoff)", async () => {

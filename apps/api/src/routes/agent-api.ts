@@ -28,6 +28,7 @@ import type {
   PaymentCardFillAuthorization,
   PaymentCardFillRequest,
   PaymentCardField,
+  PaymentMethod,
   PurchaseConfirmationAuthorization,
   PurchaseConfirmationHandoffRecord,
   ProfileFieldKind,
@@ -5902,6 +5903,26 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
       // payment-card fill path; credential/identity route to secret injection. No keystroke
       // is dispatched and the text is never echoed.
       if (el.value_meta?.sensitive === true) {
+        // Payment fields bridge into the protected payment-card fill lifecycle: still
+        // fail closed (no realisticTypeKnownBox below, text never echoed), but
+        // server-side create/reuse a pending authorization so the Aegis approval card
+        // renders without the agent making a second call.
+        if (el.value_meta.sensitivity === "payment") {
+          const bridge = buildPaymentFieldBridge({
+            el: { name: el.name, normalized_name: el.normalized_name, context: el.context },
+            refRaw,
+            snapshotUrl,
+            delegationId: delegation.id,
+            browserSessionId: session.browser_session_id,
+          });
+          recordBrowserTraceEvent(session.browser_session_id, {
+            event_type: "browser_type", browser_runtime_id: session.browser_session_id,
+            tool: "browser_type", submit: submitFlag, element_name: el.name, context: el.context,
+            href_path: el.href_path ?? undefined, pointer_dispatch: false,
+            error_code: bridge.error.code,
+          });
+          return reply.status(bridge.status).send({ ok: false, error: bridge.error });
+        }
         const refusal = sensitiveFieldRefusal(el.value_meta.sensitivity);
         recordBrowserTraceEvent(session.browser_session_id, {
           event_type: "browser_type", browser_runtime_id: session.browser_session_id,
@@ -6187,6 +6208,25 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     // field through this generic tool. Route to the Aegis CDP injection path. The
     // value is never set and never echoed.
     if (el.value_meta?.sensitive === true) {
+      // Payment fields bridge into the protected payment-card fill lifecycle: still
+      // fail closed (no setFieldValueKnownBox below, value never echoed), but
+      // server-side create/reuse a pending authorization so the Aegis approval card
+      // renders without the agent making a second call.
+      if (el.value_meta.sensitivity === "payment") {
+        const bridge = buildPaymentFieldBridge({
+          el: { name: el.name, normalized_name: el.normalized_name, context: el.context },
+          refRaw,
+          snapshotUrl,
+          delegationId: delegation.id,
+          browserSessionId: session.browser_session_id,
+        });
+        recordBrowserTraceEvent(session.browser_session_id, {
+          event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
+          tool: "browser_set_value", element_name: el.name, context: el.context,
+          error_code: bridge.error.code,
+        });
+        return reply.status(bridge.status).send({ ok: false, error: bridge.error });
+      }
       const refusal = sensitiveFieldRefusal(el.value_meta.sensitivity);
       recordBrowserTraceEvent(session.browser_session_id, {
         event_type: "browser_set_value", browser_runtime_id: session.browser_session_id,
@@ -8055,6 +8095,237 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
     }
   }
 
+  // Shared create-or-reuse for a payment-card fill authorization + fill request.
+  // Single source of truth for both the explicit POST /payment-card-fills endpoint
+  // and the runtime fill-boundary bridge (browser-set-value / browser-type), so both
+  // paths mint identical PaymentCardFillAuthorization / PaymentCardFillRequest
+  // objects. Never returns raw card values; the resolved pm is for safe display
+  // metadata only (label / last4) — payment_method_id stays internal to the caller.
+  function createOrReusePaymentCardFill(args: {
+    delegationId: string;
+    domain: string;
+    pageUrl: string;
+    field: PaymentCardField;
+    reason: string;
+    elementHint?: PaymentCardFillRequest["element_hint"];
+    browserSessionId?: string;
+    externalCdpUrl?: string;
+    paymentMethodId?: string;
+  }):
+    | { ok: true; auth: PaymentCardFillAuthorization; fillRequest: PaymentCardFillRequest; pm: PaymentMethod }
+    | { ok: false; httpStatus: number; code: string; message: string } {
+    const pm = args.paymentMethodId
+      ? paymentMethods.get(args.paymentMethodId)
+      : Array.from(paymentMethods.values()).find(
+          (p) => p.user_id === MOCK_USER_ID && p.is_default && p.status === "active",
+        );
+
+    if (!pm) {
+      return {
+        ok: false,
+        httpStatus: 404,
+        code: "PAYMENT_METHOD_NOT_FOUND",
+        message: args.paymentMethodId
+          ? `No payment method found with id '${args.paymentMethodId}'.`
+          : "No default payment method found. Add a payment method and set it as default, or provide payment_method_id.",
+      };
+    }
+    if (pm.user_id !== MOCK_USER_ID) {
+      return { ok: false, httpStatus: 403, code: "FORBIDDEN", message: "Payment method does not belong to this user." };
+    }
+    if (pm.status !== "active") {
+      return {
+        ok: false,
+        httpStatus: 400,
+        code: "PAYMENT_METHOD_NOT_ACTIVE",
+        message: `Payment method status is '${pm.status}'; only active payment methods can be used.`,
+      };
+    }
+
+    const now = new Date();
+    // Reuse an existing approved authorization for the same (user, delegation, domain, pm)
+    const approvedAuth = Array.from(paymentCardFillAuthorizations.values()).find(
+      (a) =>
+        a.user_id === MOCK_USER_ID &&
+        a.delegation_id === args.delegationId &&
+        a.domain === args.domain &&
+        a.payment_method_id === pm.payment_method_id &&
+        a.status === "approved" &&
+        new Date(a.expires_at) > now,
+    );
+    const pendingAuth = !approvedAuth
+      ? Array.from(paymentCardFillAuthorizations.values()).find(
+          (a) =>
+            a.user_id === MOCK_USER_ID &&
+            a.delegation_id === args.delegationId &&
+            a.domain === args.domain &&
+            a.payment_method_id === pm.payment_method_id &&
+            a.status === "pending_approval" &&
+            new Date(a.expires_at) > now,
+        )
+      : undefined;
+
+    let auth: PaymentCardFillAuthorization;
+    let fillStatus: PaymentCardFillRequest["status"];
+    if (approvedAuth) {
+      auth = approvedAuth;
+      fillStatus = "approved";
+    } else if (pendingAuth) {
+      auth = pendingAuth;
+      fillStatus = "pending_approval";
+    } else {
+      auth = {
+        authorization_id: newId("pca"),
+        user_id: MOCK_USER_ID,
+        delegation_id: args.delegationId,
+        domain: args.domain,
+        payment_method_id: pm.payment_method_id,
+        payment_method_label: pm.label,
+        last4: pm.last4,
+        is_default: pm.is_default,
+        allowed_fields: [...VALID_CARD_FIELDS] as PaymentCardField[],
+        fields_filled: [],
+        status: "pending_approval",
+        raw_values_revealed_to_agent: false,
+        purchase_not_authorized: true,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      };
+      paymentCardFillAuthorizations.set(auth.authorization_id, auth);
+      fillStatus = "pending_approval";
+    }
+
+    const fillRequest: PaymentCardFillRequest = {
+      fill_request_id: newId("pcfr"),
+      authorization_id: auth.authorization_id,
+      user_id: MOCK_USER_ID,
+      delegation_id: args.delegationId,
+      domain: args.domain,
+      payment_method_id: pm.payment_method_id,
+      field: args.field,
+      page_url: args.pageUrl,
+      element_hint: args.elementHint,
+      reason: args.reason,
+      status: fillStatus,
+      ...(args.browserSessionId ? { browser_session_id: args.browserSessionId } : {}),
+      ...(args.externalCdpUrl ? { external_cdp_url: args.externalCdpUrl } : {}),
+      raw_values_revealed_to_agent: false,
+      created_at: new Date().toISOString(),
+      expires_at: auth.expires_at,
+      ...(fillStatus === "approved" ? { approved_at: auth.approved_at } : {}),
+    };
+    paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
+    schedulePersist();
+    return { ok: true, auth, fillRequest, pm };
+  }
+
+  // Best-effort map a payment-classified field to a specific PaymentCardField from
+  // server-side snapshot metadata (name / normalized_name / context — placeholder &
+  // autocomplete do not survive sanitization). The authorization covers all
+  // allowed_fields; field only drives display + execution ordering, so the
+  // card_number fallback is safe. Order matters: check CVV / cardholder / zip / exp
+  // before falling through to card_number (which "card …" substrings also hit).
+  function inferPaymentCardField(el: {
+    name?: string | null;
+    normalized_name?: string | null;
+    context?: { label?: string; section?: string; nearby_text?: string } | null;
+  }): PaymentCardField {
+    const ctx = el.context;
+    const ctxText = ctx ? `${ctx.label ?? ""} ${ctx.section ?? ""} ${ctx.nearby_text ?? ""}` : "";
+    const hay = ` ${el.name ?? ""} ${el.normalized_name ?? ""} ${ctxText} `.toLowerCase();
+    if (/cvv|cvc|csc|security.?code|card.?cvc/.test(hay)) return "cvv";
+    if (/cardholder|name.?on.?card|cc-?name/.test(hay)) return "cardholder_name";
+    if (/\bzip\b|postal|post.?code/.test(hay)) return "billing_zip";
+    if (/\bexp(iry|iration)?\b|exp.?date|exp.?month|exp.?year|cc-?exp|valid.?thru/.test(hay)) {
+      return "expiry_combined";
+    }
+    return "card_number";
+  }
+
+  // Bridge a payment-field fill-boundary refusal into the protected payment-card fill
+  // lifecycle: still fail closed (the caller never fills, never echoes the value), but
+  // server-side create/reuse a pending authorization so the Aegis approval card renders
+  // without the agent making a second call. Returns the enriched, SAFE-ONLY error body
+  // + http status. Never includes payment_method_id, refs beyond the opaque ids, or any
+  // value. No payment method ⇒ a clear missing-payment-method state (no phantom request).
+  function buildPaymentFieldBridge(args: {
+    el: { name?: string | null; normalized_name?: string | null; context?: { label?: string; section?: string; nearby_text?: string } | null };
+    refRaw: string;
+    snapshotUrl: string | null;
+    delegationId: string;
+    browserSessionId?: string;
+  }): { status: number; error: Record<string, unknown> & { code: string; message: string } } {
+    const base = sensitiveFieldRefusal("payment");
+    let domain: string | null = null;
+    let pageUrl: string | null = null;
+    if (args.snapshotUrl) {
+      try {
+        domain = new URL(args.snapshotUrl).hostname;
+        pageUrl = args.snapshotUrl;
+      } catch {
+        domain = null;
+        pageUrl = null;
+      }
+    }
+    // No reliable page URL ⇒ cannot bind a domain-scoped authorization; fall back to
+    // today's plain refusal (still fails closed, just no auto-create).
+    if (!domain || !pageUrl) {
+      return { status: 422, error: { ...base } };
+    }
+
+    const field = inferPaymentCardField(args.el);
+    const created = createOrReusePaymentCardFill({
+      delegationId: args.delegationId,
+      domain,
+      pageUrl,
+      field,
+      reason:
+        "Antigen runtime fill boundary: a payment card field was targeted by a generic fill/type tool; bridged to the protected payment-card fill path.",
+      elementHint: { antigen_ref: args.refRaw, ...(args.el.name ? { label: args.el.name } : {}) },
+      ...(args.browserSessionId ? { browserSessionId: args.browserSessionId } : {}),
+    });
+
+    if (!created.ok) {
+      if (created.code === "PAYMENT_METHOD_NOT_FOUND") {
+        return {
+          status: 422,
+          error: {
+            code: "PAYMENT_METHOD_REQUIRED",
+            missing_payment_method: true,
+            message:
+              "This is a payment card field, but no payment method is set up in Aegis to fill it. Add a payment method and set it as default in the Aegis UI, then retry — Aegis fills the saved card through the protected, approval-gated path; raw card values are never revealed to the agent. Do NOT ask the user to approve a request (there is nothing to approve yet) and do NOT ask the user to paste a card number, CVV, or expiry into chat.",
+          },
+        };
+      }
+      // Other resolution failures (inactive / forbidden) — surface as a plain payment
+      // refusal so the agent still knows not to fill via generic tools.
+      return { status: 422, error: { ...base, payment_method_error: created.code } };
+    }
+
+    const { auth, fillRequest, pm } = created;
+    return {
+      status: 422,
+      error: {
+        ...base,
+        message:
+          base.message +
+          " An Aegis payment-card-fill authorization has already been created for you and is awaiting the user's approval in the Aegis UI (/route-run-approvals). Call wait_for_payment_card_fill_authorization — you do not need to call request_payment_card_fill again.",
+        payment_card_fill: {
+          bridged: true,
+          authorization_id: auth.authorization_id,
+          fill_request_id: fillRequest.fill_request_id,
+          status: fillRequest.status,
+          field: fillRequest.field,
+          domain: fillRequest.domain,
+          payment_method_label: pm.label,
+          last4: pm.last4,
+          expires_at: fillRequest.expires_at,
+          next_action: cardFillNextAction(fillRequest.status, fillRequest.status === "pending_approval"),
+        },
+      },
+    };
+  }
+
   // POST /api/agent/v1/payment-card-fills — create a card field fill request
   server.post(
     "/api/agent/v1/payment-card-fills",
@@ -8142,108 +8413,26 @@ export async function agentApiRoutes(server: FastifyInstance): Promise<void> {
         resolvedExternalCdpUrl = body.external_cdp_url.trim();
       }
 
-      // Resolve payment method — explicit ID or default
+      // Resolve payment method, reuse-or-create the authorization, and mint the fill
+      // request — single source of truth shared with the runtime fill-boundary bridge.
       const field = body.field as PaymentCardField;
-      let pm = body.payment_method_id
-        ? paymentMethods.get(body.payment_method_id)
-        : Array.from(paymentMethods.values()).find(
-            (p) => p.user_id === MOCK_USER_ID && p.is_default && p.status === "active",
-          );
-
-      if (!pm) {
-        return sendError(
-          reply, 404, "PAYMENT_METHOD_NOT_FOUND",
-          body.payment_method_id
-            ? `No payment method found with id '${body.payment_method_id}'.`
-            : "No default payment method found. Add a payment method and set it as default, or provide payment_method_id.",
-        );
-      }
-      if (pm.user_id !== MOCK_USER_ID) {
-        return sendError(reply, 403, "FORBIDDEN", "Payment method does not belong to this user.");
-      }
-      if (pm.status !== "active") {
-        return sendError(reply, 400, "PAYMENT_METHOD_NOT_ACTIVE", `Payment method status is '${pm.status}'; only active payment methods can be used.`);
-      }
-
-      const now = new Date();
-
-      // Reuse an existing approved authorization for the same (user, delegation, domain, pm)
-      const approvedAuth = Array.from(paymentCardFillAuthorizations.values()).find(
-        (a) =>
-          a.user_id === MOCK_USER_ID &&
-          a.delegation_id === delegation.id &&
-          a.domain === body.domain &&
-          a.payment_method_id === pm!.payment_method_id &&
-          a.status === "approved" &&
-          new Date(a.expires_at) > now,
-      );
-
-      const pendingAuth = !approvedAuth
-        ? Array.from(paymentCardFillAuthorizations.values()).find(
-            (a) =>
-              a.user_id === MOCK_USER_ID &&
-              a.delegation_id === delegation.id &&
-              a.domain === body.domain &&
-              a.payment_method_id === pm!.payment_method_id &&
-              a.status === "pending_approval" &&
-              new Date(a.expires_at) > now,
-          )
-        : undefined;
-
-      let auth: PaymentCardFillAuthorization;
-      let fillStatus: PaymentCardFillRequest["status"];
-
-      if (approvedAuth) {
-        auth = approvedAuth;
-        fillStatus = "approved";
-      } else if (pendingAuth) {
-        auth = pendingAuth;
-        fillStatus = "pending_approval";
-      } else {
-        auth = {
-          authorization_id: newId("pca"),
-          user_id: MOCK_USER_ID,
-          delegation_id: delegation.id,
-          domain: body.domain,
-          payment_method_id: pm.payment_method_id,
-          payment_method_label: pm.label,
-          last4: pm.last4,
-          is_default: pm.is_default,
-          allowed_fields: [...VALID_CARD_FIELDS] as PaymentCardField[],
-          fields_filled: [],
-          status: "pending_approval",
-          raw_values_revealed_to_agent: false,
-          purchase_not_authorized: true,
-          created_at: new Date().toISOString(),
-          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        };
-        paymentCardFillAuthorizations.set(auth.authorization_id, auth);
-        fillStatus = "pending_approval";
-      }
-
-      const fillRequest: PaymentCardFillRequest = {
-        fill_request_id: newId("pcfr"),
-        authorization_id: auth.authorization_id,
-        user_id: MOCK_USER_ID,
-        delegation_id: delegation.id,
+      const created = createOrReusePaymentCardFill({
+        delegationId: delegation.id,
         domain: body.domain,
-        payment_method_id: pm.payment_method_id,
+        pageUrl: body.page_url,
         field,
-        page_url: body.page_url,
-        element_hint: body.element_hint,
         reason: body.reason,
-        status: fillStatus,
-        ...(resolvedBrowserSessionId ? { browser_session_id: resolvedBrowserSessionId } : {}),
-        ...(resolvedExternalCdpUrl ? { external_cdp_url: resolvedExternalCdpUrl } : {}),
-        raw_values_revealed_to_agent: false,
-        created_at: new Date().toISOString(),
-        expires_at: auth.expires_at,
-        ...(fillStatus === "approved" ? { approved_at: auth.approved_at } : {}),
-      };
-      paymentCardFillRequests.set(fillRequest.fill_request_id, fillRequest);
-      schedulePersist();
+        elementHint: body.element_hint,
+        ...(resolvedBrowserSessionId ? { browserSessionId: resolvedBrowserSessionId } : {}),
+        ...(resolvedExternalCdpUrl ? { externalCdpUrl: resolvedExternalCdpUrl } : {}),
+        ...(body.payment_method_id ? { paymentMethodId: body.payment_method_id } : {}),
+      });
+      if (!created.ok) {
+        return sendError(reply, created.httpStatus, created.code, created.message);
+      }
+      const { auth, fillRequest, pm } = created;
 
-      const isPendingApproval = fillStatus === "pending_approval";
+      const isPendingApproval = fillRequest.status === "pending_approval";
       return reply.send({
         ok: true,
         data: {

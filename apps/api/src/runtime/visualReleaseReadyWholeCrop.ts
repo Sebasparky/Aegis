@@ -43,10 +43,11 @@
 import { PNG } from "pngjs";
 
 import { logHvDebug } from "./humanVerificationState.js";
-import { noteWholeCropDiagnostics } from "./releaseReadyDebugCrops.js";
+import { noteChosenSelection, noteWholeCropDiagnostics } from "./releaseReadyDebugCrops.js";
 import { evaluateControlFill } from "./visualControlFillDetector.js";
 import {
   estimateProgressFillRatio,
+  FULL_RATIO_THRESHOLD,
   type ProgressFillEstimate,
   type ReleaseReadyBand,
 } from "./visualReleaseReadyDetector.js";
@@ -354,14 +355,25 @@ export function evaluateWholeCropProgress(
 /**
  * The single seam the release-ready probe calls. Resolution order for a release estimate:
  *
- *   1. The stateless per-shape detector (bar/ring). If it isolated an affordance, return it.
+ *   1. The stateless per-shape detector (bar/ring). If it returned a RELEASE-CAPABLE estimate
+ *      (`found` AND `fill_ratio >= FULL_RATIO_THRESHOLD`), return it — control-fill could only
+ *      match it, never beat it. A merely `found:true` PARTIAL estimate does NOT short-circuit:
+ *      `found` means "some affordance was isolated," not "release-ready," so a partial bar must
+ *      not block the control-fill detector (that block was the bug this seam fixes).
  *   2. ONLY for the user's `hold_anchor` crop (strict positive `=== "hold_anchor"` gate):
  *      a. The COLOR-AGNOSTIC control-fill detector — the sole new release trigger. If it
- *         measured fill inside a baseline-locked control, return that estimate.
+ *         measured fill inside a baseline-locked control, return the MORE release-capable of
+ *         {partial primary, control} (higher `fill_ratio`; ties go to control).
  *      b. Otherwise run the whole-crop temporal read for PROGRESS / TELEMETRY ONLY (it always
- *         returns `{found:false}`) and return `{found:false}`.
+ *         returns `{found:false}`), then return the partial `primary` if one exists (so the
+ *         sheet/telemetry reflects real progress) else `{found:false}`.
  *
- * Any other crop source returns the detector's `{found:false}` and never creates state.
+ * Any other crop source returns the per-shape detector's estimate and never creates control /
+ * whole-crop state.
+ *
+ * Firing is unchanged and lives downstream in `advanceReleaseReady`: a returned estimate only
+ * fires when `fill_ratio >= FULL_RATIO_THRESHOLD` AND the position-stable streak completes.
+ * Returning a partial primary here can never fire (it resets the streak below threshold).
  *
  * Note: this seam is reached only from `defaultReleaseReadyProbe`, which itself runs only
  * under the ANTIGEN_HV_RELEASE_READY path and after the upstream active-hold gate — so
@@ -373,15 +385,41 @@ export function estimateReleaseReadyWithWholeCropFallback(
   cropSource: SelectedCropSource,
 ): ProgressFillEstimate {
   const primary = estimateProgressFillRatio(croppedPngBase64, capsuleId);
-  if (primary.found) return primary;
-  // STRICT SOURCE GATE: explicit positive equality — only the live press-point crop.
-  if (cropSource === "hold_anchor") {
-    // Direct, color-agnostic control-fill detection is the sole release trigger.
-    const controlFill = evaluateControlFill(capsuleId, croppedPngBase64);
-    if (controlFill.found) return controlFill;
-    // Whole-crop runs for progress/telemetry/debug evidence only — it never returns found:true.
-    evaluateWholeCropProgress(capsuleId, croppedPngBase64);
-    return { found: false };
+  // A release-capable primary wins outright — and so do ALL non-hold_anchor crops (strict
+  // source gate: control-fill / whole-crop run only for the live press-point crop).
+  if (isReleaseCapable(primary) || cropSource !== "hold_anchor") {
+    noteChosenSelection(capsuleId, "primary");
+    return primary;
   }
-  return primary;
+  // hold_anchor + primary not release-capable (not found, or found-but-partial): a partial
+  // primary must NOT block control-fill, the sole color-agnostic release trigger.
+  const controlFill = evaluateControlFill(capsuleId, croppedPngBase64);
+  if (controlFill.found) {
+    const chosen = chooseHigherFill(primary, controlFill);
+    noteChosenSelection(capsuleId, chosen === controlFill ? "control" : "primary");
+    return chosen;
+  }
+  // Control-fill found nothing. Whole-crop runs for progress/telemetry/debug evidence only —
+  // it never returns found:true. Surface the partial primary (telemetry) if there was one.
+  evaluateWholeCropProgress(capsuleId, croppedPngBase64);
+  noteChosenSelection(capsuleId, "primary");
+  return primary.found ? primary : { found: false };
+}
+
+/** Release-capable = a found estimate whose fill is at/above the fire threshold. `found:true`
+ * alone is NOT release-capable — that conflation was the seam bug. */
+function isReleaseCapable(e: ProgressFillEstimate): boolean {
+  return e.found && e.fill_ratio !== undefined && e.fill_ratio >= FULL_RATIO_THRESHOLD;
+}
+
+/** Pick the more release-capable estimate (higher `fill_ratio`). Ties go to `b` (control),
+ * the intended release trigger with a baseline-locked, frame-stable band. A not-found side
+ * always loses to a found one. */
+function chooseHigherFill(
+  a: ProgressFillEstimate,
+  b: ProgressFillEstimate,
+): ProgressFillEstimate {
+  if (!a.found) return b;
+  if (!b.found) return a;
+  return (b.fill_ratio ?? 0) >= (a.fill_ratio ?? 0) ? b : a;
 }

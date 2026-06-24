@@ -164,6 +164,15 @@ export interface ReleaseReadyDiagnostics {
 
 type CountBucket = "0" | "1" | "2_4" | "5_plus";
 
+/**
+ * Fill ratio at/above which a press-and-hold bar/control reads "full" (release-capable).
+ * Canonical home: the per-shape detector is a true leaf module (no sibling runtime imports),
+ * so the seam (`visualReleaseReadyWholeCrop`) and the monitor can both import this without
+ * the `monitor → seam → monitor` runtime cycle that importing it from the monitor would
+ * create. The monitor re-exports it for backward compatibility with existing import sites.
+ */
+export const FULL_RATIO_THRESHOLD = 0.92;
+
 const NOT_FOUND: ProgressFillEstimate = { found: false };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -589,7 +598,11 @@ export function estimateProgressFillRatio(
   // affordance shape the per-shape detector chose for this probe; the whole-crop fallback
   // overrides it later in the same probe when the temporal read is the one that fires.
   if (capsuleId !== undefined) {
-    noteDetectorDiagnostics(capsuleId, { chosen_candidate_kind: diagnostics.chosen_candidate_kind });
+    noteDetectorDiagnostics(capsuleId, {
+      chosen_candidate_kind: diagnostics.chosen_candidate_kind,
+      // Raw ratio is bucketed inside the note (disk-only debug); never returned to an agent.
+      fill_ratio: estimate.found ? estimate.fill_ratio : undefined,
+    });
   }
   return estimate;
 }

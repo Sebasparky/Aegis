@@ -22,6 +22,8 @@ import {
   noteProbeCrop,
   noteDetectorDiagnostics,
   noteWholeCropDiagnostics,
+  noteControlFillDiagnostics,
+  noteChosenSelection,
   commitProbeCrop,
   clearAllReleaseReadyDebugCropsForTests,
 } from "../runtime/releaseReadyDebugCrops.js";
@@ -60,6 +62,12 @@ const ALLOWED_META_KEYS = new Set([
   "control_rejection_reason",
   "whole_crop_mode",
   "whole_crop_release_triggered",
+  "primary_candidate_kind",
+  "primary_fill_bucket",
+  "control_candidate_kind",
+  "control_fill_bucket",
+  "chosen_candidate_kind",
+  "chosen_fill_bucket",
   "consecutive_full",
   "fired",
   "has_previous",
@@ -195,6 +203,78 @@ describe("flag gating — on ⇒ files + meta written", () => {
     expect(meta.fired).toBe(true);
     expect(meta.has_previous).toBe(true);
     expect(meta.has_diff).toBe(true);
+  });
+});
+
+// ─── 2b. Seam decision breakdown — primary vs control vs chosen ─────────────────
+// These pin that the sheet records each detector's read independently and the seam's
+// FINAL winner — exactly the "partial primary did NOT block control-fill" routing.
+describe("meta.json — primary / control / chosen breakdown", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("partial primary bar + ge92 control → chosen reflects control, not last-writer", () => {
+    // Probe order mirrors the live seam: per-shape note first, then control-fill note,
+    // then the seam's chosen-selection note (control won the higher-fill tiebreak).
+    noteDetectorDiagnostics(CAP, { chosen_candidate_kind: "bar", fill_ratio: 0.6 });
+    noteControlFillDiagnostics(CAP, {
+      chosen_candidate_kind: "bar_fill",
+      control_fill_ratio: 0.95,
+      control_candidate_seen: true,
+      control_rejection_reason: "none",
+    });
+    noteChosenSelection(CAP, "control");
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: false, consecutive_full: 1, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    const meta = JSON.parse(fs.readFileSync(path.join(capsuleDir(), "0001", "meta.json"), "utf-8"));
+    expect(meta.primary_candidate_kind).toBe("bar");
+    expect(meta.primary_fill_bucket).toBe("50_75");
+    expect(meta.control_candidate_kind).toBe("bar_fill");
+    expect(meta.control_fill_bucket).toBe("ge92");
+    expect(meta.chosen_candidate_kind).toBe("bar_fill");
+    expect(meta.chosen_fill_bucket).toBe("ge92");
+    // Legacy column tracks the chosen winner.
+    expect(meta.candidate_kind).toBe("bar_fill");
+  });
+
+  it("partial primary + control not found + whole-crop ran → chosen stays primary (not clobbered)", () => {
+    noteDetectorDiagnostics(CAP, { chosen_candidate_kind: "bar", fill_ratio: 0.6 });
+    noteControlFillDiagnostics(CAP, {
+      control_candidate_seen: false,
+      control_rejection_reason: "too_broad",
+    });
+    // Whole-crop telemetry note would clobber the legacy candidate_kind to
+    // hold_anchor_whole_crop — the seam's chosen note runs AFTER and must win.
+    noteWholeCropDiagnostics(CAP, {
+      chosen_candidate_kind: "hold_anchor_whole_crop",
+      cumulative_bucket: "3_5",
+      recent_bucket: "0_5_1",
+      strict_strength: "moderate",
+      temporally_confirmed: false,
+      whole_crop_mode: "strict_plateau",
+    });
+    noteChosenSelection(CAP, "primary");
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: false, consecutive_full: 0, fill_bucket: "50_75" },
+      { outputRoot: tmpRoot },
+    );
+    const meta = JSON.parse(fs.readFileSync(path.join(capsuleDir(), "0001", "meta.json"), "utf-8"));
+    expect(meta.primary_candidate_kind).toBe("bar");
+    expect(meta.primary_fill_bucket).toBe("50_75");
+    expect(meta.control_candidate_kind).toBe(null);
+    expect(meta.control_fill_bucket).toBe(null);
+    expect(meta.control_candidate_seen).toBe(false);
+    expect(meta.chosen_candidate_kind).toBe("bar");
+    expect(meta.chosen_fill_bucket).toBe("50_75");
+    // Legacy column reflects the chosen winner, NOT the whole-crop clobber.
+    expect(meta.candidate_kind).toBe("bar");
+    // Whole-crop telemetry buckets are still recorded.
+    expect(meta.whole_crop_mode).toBe("strict_plateau");
   });
 });
 

@@ -65,6 +65,7 @@ import {
   type BlockerCropBox,
 } from "./screenshotRedaction.js";
 import {
+  FULL_RATIO_THRESHOLD,
   type ProgressFillEstimate,
   type ReleaseReadyBand,
 } from "./visualReleaseReadyDetector.js";
@@ -156,8 +157,10 @@ export function verdictFromModelResult(r: VgcHoldModelResult): VgcHandoffVerdict
 
 // ─── Release-ready (full-bar) detection — pure core ───────────────────────────
 
-/** Fill ratio at/above which a press-and-hold bar reads "full". */
-export const FULL_RATIO_THRESHOLD = 0.92;
+// Fill ratio at/above which a press-and-hold bar reads "full". Canonical home is the
+// leaf detector module (cycle-free); imported above and re-exported here so existing
+// import sites (and tests that pull it from the monitor) are unchanged.
+export { FULL_RATIO_THRESHOLD };
 
 /** Consecutive full-and-stable frames required to publish `release_ready`. */
 export const VGC_RELEASE_READY_CONSECUTIVE = 2;

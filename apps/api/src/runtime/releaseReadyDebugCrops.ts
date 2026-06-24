@@ -79,6 +79,8 @@ export function isReleaseReadyDebugCropsEnabled(): boolean {
 /** Diagnostics collected from the detector / whole-crop paths DURING a probe, before
  * the crop bytes arrive (`noteProbeCrop` runs after the estimate is computed). */
 interface PendingDiag {
+  /** The seam's FINAL chosen candidate kind (set by `noteChosenSelection` after the
+   * decision). Kept as the legacy field name so the existing sheet column is unchanged. */
   candidate_kind: CandidateKind;
   cumulative_bucket: RatioBucket | null;
   recent_bucket: RatioBucket | null;
@@ -90,6 +92,21 @@ interface PendingDiag {
   control_rejection_reason: ControlRejectionReason | null;
   /** Whole-crop temporal read's compared-frame mode (progress/telemetry evidence only). */
   whole_crop_mode: WholeCropMode | null;
+  // ── Seam decision breakdown (primary vs control vs chosen) ──
+  // These make the "partial primary did NOT block control-fill" routing visible in the
+  // sheet — exactly the bug this fixes. Bucketed/enum-only; never raw ratios.
+  /** Per-shape (bar/ring) detector's candidate kind, regardless of whether it won. */
+  primary_candidate_kind: CandidateKind;
+  /** Per-shape detector's fill bucket (`none` when it found nothing). */
+  primary_fill_bucket: FillBucket;
+  /** Control-fill detector's candidate kind when it located a control (else null). */
+  control_candidate_kind: CandidateKind | null;
+  /** Control-fill detector's fill bucket when it measured one (else null). */
+  control_fill_bucket: FillBucket | null;
+  /** Which estimate the seam returned. */
+  chosen_candidate_kind: CandidateKind;
+  /** The chosen estimate's fill bucket. */
+  chosen_fill_bucket: FillBucket;
 }
 
 /** A fully-assembled crop bundle awaiting the `fired` decision from the monitor tick. */
@@ -136,7 +153,22 @@ function freshDiag(): PendingDiag {
     control_candidate_seen: null,
     control_rejection_reason: null,
     whole_crop_mode: null,
+    primary_candidate_kind: "none",
+    primary_fill_bucket: "none",
+    control_candidate_kind: null,
+    control_fill_bucket: null,
+    chosen_candidate_kind: "none",
+    chosen_fill_bucket: "none",
   };
+}
+
+/** Coarse fill bucket for disk-only debug meta — mirrors the detectors' `fillBucket`. */
+function fillBucketFromRatio(ratio: number | undefined): FillBucket {
+  if (ratio === undefined) return "none";
+  if (ratio < 0.5) return "lt50";
+  if (ratio < 0.75) return "50_75";
+  if (ratio < 0.92) return "75_92";
+  return "ge92";
 }
 
 // ─── Notes from the detector / whole-crop paths (run inside the probe) ─────────
@@ -150,14 +182,24 @@ function freshDiag(): PendingDiag {
  */
 export function noteDetectorDiagnostics(
   capsuleId: string,
-  diag: { chosen_candidate_kind: CandidateKind },
+  diag: { chosen_candidate_kind: CandidateKind; fill_ratio?: number },
 ): void {
   if (!isReleaseReadyDebugCropsEnabled()) return;
   const s = getState(capsuleId);
   // The per-shape detector runs FIRST in every probe, so this note opens a fresh
   // diagnostics slot — resetting the buckets so a prior probe's whole-crop values can
-  // never leak into a frame where the temporal fallback did not run.
-  s.pendingDiag = { ...freshDiag(), candidate_kind: diag.chosen_candidate_kind };
+  // never leak into a frame where the temporal fallback did not run. Records the primary
+  // (per-shape) breakdown; `candidate_kind`/`chosen_*` seed to primary and are finalized by
+  // `noteChosenSelection` once the seam picks a winner.
+  const primaryBucket = fillBucketFromRatio(diag.fill_ratio);
+  s.pendingDiag = {
+    ...freshDiag(),
+    candidate_kind: diag.chosen_candidate_kind,
+    primary_candidate_kind: diag.chosen_candidate_kind,
+    primary_fill_bucket: primaryBucket,
+    chosen_candidate_kind: diag.chosen_candidate_kind,
+    chosen_fill_bucket: primaryBucket,
+  };
 }
 
 /**
@@ -201,6 +243,7 @@ export function noteControlFillDiagnostics(
   capsuleId: string,
   diag: {
     chosen_candidate_kind?: "pill_fill" | "bar_fill";
+    control_fill_ratio?: number;
     control_candidate_seen: boolean;
     control_rejection_reason: ControlRejectionReason;
   },
@@ -208,11 +251,43 @@ export function noteControlFillDiagnostics(
   if (!isReleaseReadyDebugCropsEnabled()) return;
   const s = getState(capsuleId);
   const base = s.pendingDiag ?? freshDiag();
+  // Record the control-fill breakdown into its OWN slots. The legacy `candidate_kind` /
+  // `chosen_*` are NOT touched here — the seam's `noteChosenSelection` is the sole authority
+  // on the winner, so a partial-primary frame where control loses is reported correctly.
   s.pendingDiag = {
     ...base,
-    ...(diag.chosen_candidate_kind ? { candidate_kind: diag.chosen_candidate_kind } : {}),
     control_candidate_seen: diag.control_candidate_seen,
     control_rejection_reason: diag.control_rejection_reason,
+    ...(diag.chosen_candidate_kind ? { control_candidate_kind: diag.chosen_candidate_kind } : {}),
+    ...(diag.chosen_candidate_kind
+      ? { control_fill_bucket: fillBucketFromRatio(diag.control_fill_ratio) }
+      : {}),
+  };
+}
+
+/**
+ * Record the seam's FINAL routing decision for the in-flight probe. Called from the seam
+ * (`estimateReleaseReadyWithWholeCropFallback`) AFTER it has chosen which estimate to return,
+ * so the chosen candidate/bucket is correct even on the partial-primary path where the
+ * whole-crop note would otherwise clobber `candidate_kind`. `source` selects which already-
+ * recorded breakdown (primary or control) becomes the chosen one. Flag-gated; no-op off.
+ */
+export function noteChosenSelection(
+  capsuleId: string,
+  source: "primary" | "control",
+): void {
+  if (!isReleaseReadyDebugCropsEnabled()) return;
+  const s = getState(capsuleId);
+  const base = s.pendingDiag ?? freshDiag();
+  const chosenKind: CandidateKind =
+    source === "control" ? base.control_candidate_kind ?? "none" : base.primary_candidate_kind;
+  const chosenBucket: FillBucket =
+    source === "control" ? base.control_fill_bucket ?? "none" : base.primary_fill_bucket;
+  s.pendingDiag = {
+    ...base,
+    candidate_kind: chosenKind,
+    chosen_candidate_kind: chosenKind,
+    chosen_fill_bucket: chosenBucket,
   };
 }
 
@@ -351,6 +426,13 @@ interface ReleaseReadyDebugMeta {
   whole_crop_mode: WholeCropMode | null;
   /** INVARIANT: the whole-crop temporal read never fires release_ready — always false. */
   whole_crop_release_triggered: boolean;
+  // Seam decision breakdown (primary vs control vs chosen) — see PendingDiag.
+  primary_candidate_kind: CandidateKind;
+  primary_fill_bucket: FillBucket;
+  control_candidate_kind: CandidateKind | null;
+  control_fill_bucket: FillBucket | null;
+  chosen_candidate_kind: CandidateKind;
+  chosen_fill_bucket: FillBucket;
   consecutive_full: number;
   fired: boolean;
   has_previous: boolean;
@@ -381,6 +463,12 @@ function buildMeta(
     whole_crop_mode: pending.whole_crop_mode,
     // Hard invariant surfaced in the sheet: the whole-crop plateau is never a release trigger.
     whole_crop_release_triggered: false,
+    primary_candidate_kind: pending.primary_candidate_kind,
+    primary_fill_bucket: pending.primary_fill_bucket,
+    control_candidate_kind: pending.control_candidate_kind,
+    control_fill_bucket: pending.control_fill_bucket,
+    chosen_candidate_kind: pending.chosen_candidate_kind,
+    chosen_fill_bucket: pending.chosen_fill_bucket,
     consecutive_full: result.consecutive_full,
     fired: result.fired,
     has_previous: pending.previousPngB64 !== undefined,

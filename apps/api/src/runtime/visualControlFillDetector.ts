@@ -375,6 +375,7 @@ export function evaluateControlFill(
   });
   noteControlFillDiagnostics(capsuleId, {
     chosen_candidate_kind: prior.bounds.kind,
+    control_fill_ratio: fillRatio,
     control_candidate_seen: true,
     control_rejection_reason: "none",
   });

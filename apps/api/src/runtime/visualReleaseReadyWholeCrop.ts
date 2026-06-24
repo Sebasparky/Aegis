@@ -26,9 +26,13 @@
 //   whole-crop read. Enforced with an explicit `=== "hold_anchor"` check (not a
 //   negation) so any future SelectedCropSource value defaults to the safe no-fallback path.
 // - FAIL CLOSED. No baseline yet / dims mismatch / weak cumulative / not-plateaued ⇒
-//   `{ found:false }` (= keep holding). Consecutiveness is delegated to the EXISTING
-//   outer streak (advanceReleaseReady + VGC_RELEASE_READY_CONSECUTIVE): a single strong
-//   frame never fires; two consecutive strong (plateaued) frames do.
+//   `{ found:false }` (= keep holding). A strong frame here is ALREADY a multi-frame
+//   temporal read (cumulative vs baseline + recent plateau vs previous, or 3 consecutive
+//   relaxed frames), so it carries `temporally_confirmed:true` and the outer streak
+//   (advanceReleaseReady) fires it on the FIRST strong frame — re-requiring a second
+//   consecutive frame would double-count temporal confirmation and (observed on live
+//   B&BW walls) misses the "Release now" window before the user lets go. The
+//   instantaneous per-shape detector keeps the 2-consecutive-frame requirement.
 // - SAFE OUTPUT ONLY. Returns the same `ProgressFillEstimate` shape the detector does;
 //   the band is a CONSTANT whole-crop descriptor (never raw coords). Pixel grids live
 //   only in this module's memory-only state Map and never leave it. Telemetry is coarse
@@ -207,8 +211,9 @@ export function wholeCropStateKindForTests(
  * Stateful per-capsule whole-crop evaluator. First call (or after a dims change) captures
  * the BASELINE + previous and returns `{found:false}` (cannot compare yet). Subsequent
  * calls compute the cumulative/recent change signals and return a STRONG estimate
- * (`found:true, fill_ratio:1, band: WHOLE_CROP_BAND`) only on a plateaued-full frame —
- * otherwise `{found:false}`. The outer streak owns the consecutive-frame requirement.
+ * (`found:true, fill_ratio:1, band: WHOLE_CROP_BAND, temporally_confirmed:true`) only on a
+ * plateaued-full frame — otherwise `{found:false}`. The strong read is itself a multi-frame
+ * plateau, so `temporally_confirmed` lets the outer streak fire it on the first strong frame.
  * Never throws; any decode failure fails closed to `{found:false}`.
  */
 export function evaluateWholeCropProgress(
@@ -286,7 +291,14 @@ export function evaluateWholeCropProgress(
   });
 
   return strong
-    ? { found: true, fill_ratio: STRONG_FILL_RATIO, band: WHOLE_CROP_BAND }
+    ? {
+        found: true,
+        fill_ratio: STRONG_FILL_RATIO,
+        band: WHOLE_CROP_BAND,
+        // A strong whole-crop read is itself a multi-frame plateau — let the outer streak
+        // fire it on the first strong frame (no double-counting of temporal confirmation).
+        temporally_confirmed: true,
+      }
     : { found: false };
 }
 

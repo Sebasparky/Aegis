@@ -151,8 +151,8 @@ describe("compareCropFrames / isStrongProgress — pure signals", () => {
 });
 
 // ── Test 1: hold-anchor + no sub-candidate + strong whole-crop progress ⇒ fires. ──
-describe("evaluateWholeCropProgress — strong plateaued progress fires after streak", () => {
-  it("baseline → fill → plateau yields full estimates that fire on the 2nd stable frame", () => {
+describe("evaluateWholeCropProgress — strong plateaued progress fires on the first strong frame", () => {
+  it("baseline → fill → plateau yields a temporally-confirmed estimate that fires immediately", () => {
     // Frame 0: baseline (blank) — captured, cannot compare yet.
     expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false);
 
@@ -165,17 +165,14 @@ describe("evaluateWholeCropProgress — strong plateaued progress fires after st
     expect(f2.found).toBe(true);
     expect(f2.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
     expect(f2.band).toEqual(WHOLE_CROP_BAND);
+    // A strong whole-crop read is itself a multi-frame plateau → temporally confirmed.
+    expect(f2.temporally_confirmed).toBe(true);
 
-    // Frame 3: identical again — STRONG.
-    const f3 = evaluateWholeCropProgress(CAP, filledLeft(0.1));
-    expect(f3.found).toBe(true);
-
-    // Two consecutive strong frames fire through the EXISTING outer streak.
+    // The strong read is two-frame-equivalent, so the outer streak fires it on the FIRST
+    // strong frame (no second consecutive probe needed). This is the latency fix.
     const a2 = advanceReleaseReady(0, undefined, f2);
-    expect(a2.fire).toBe(false); // a single full frame never fires
-    const a3 = advanceReleaseReady(a2.consecutiveFull, a2.lastBand, f3);
-    expect(a3.fire).toBe(true);
-    expect(a3.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+    expect(a2.fire).toBe(true);
+    expect(a2.consecutiveFull).toBe(1);
   });
 
   it("the per-shape detector alone finds nothing in a full-height two-tone panel (fallback is needed)", () => {
@@ -209,7 +206,7 @@ describe("evaluateWholeCropProgress — strict plateau + relaxed sustained accel
     expect(evaluateWholeCropProgress(CAP, filledLeft(0.11)).found).toBe(true);
   });
 
-  it("relaxed sustained: recent ~1.5% for 3 consecutive frames fires found:true, then outer streak needs 2", () => {
+  it("relaxed sustained: recent ~1.5% for 3 consecutive frames fires found:true, then fires immediately", () => {
     expect(evaluateWholeCropProgress(CAP, blank()).found).toBe(false); // baseline
     // Prime prevLum so subsequent recent deltas are small (each step = 0.015 → recent 1.5%).
     expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).found).toBe(false); // recent 0.1
@@ -218,15 +215,13 @@ describe("evaluateWholeCropProgress — strict plateau + relaxed sustained accel
     expect(evaluateWholeCropProgress(CAP, filledLeft(0.13)).found).toBe(false); // relaxed count 2
     const r3 = evaluateWholeCropProgress(CAP, filledLeft(0.145)); // relaxed count 3 → strong
     expect(r3.found).toBe(true);
-    const r4 = evaluateWholeCropProgress(CAP, filledLeft(0.16)); // still relaxed-ok → strong
-    expect(r4.found).toBe(true);
+    // The relaxed-sustained read is a 3-consecutive-frame plateau → temporally confirmed.
+    expect(r3.temporally_confirmed).toBe(true);
 
-    // The outer streak still requires TWO consecutive found frames to fire.
+    // Already temporally confirmed, so the outer streak fires it on the first strong frame.
     const a3 = advanceReleaseReady(0, undefined, r3);
-    expect(a3.fire).toBe(false);
-    const a4 = advanceReleaseReady(a3.consecutiveFull, a3.lastBand, r4);
-    expect(a4.fire).toBe(true);
-    expect(a4.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+    expect(a3.fire).toBe(true);
+    expect(a3.consecutiveFull).toBe(1);
   });
 
   it("recent above the relaxed ceiling (2%) never sustains → never fires", () => {
@@ -297,6 +292,14 @@ describe("estimateReleaseReadyWithWholeCropFallback — strict hold_anchor sourc
     expect(est.found).toBe(true);
     // Detector found it → fallback short-circuited → no whole-crop state created.
     expect(wholeCropStateKindForTests(CAP)).toBe("none");
+    // The instantaneous per-shape detector is NOT temporally confirmed: it must still earn
+    // the 2-consecutive-frame streak, so a single full per-shape frame never fires.
+    expect(est.temporally_confirmed).toBeUndefined();
+    const a1 = advanceReleaseReady(0, undefined, est);
+    expect(a1.fire).toBe(false);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, est);
+    expect(a2.fire).toBe(true);
+    expect(a2.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
   });
 });
 
@@ -307,6 +310,17 @@ describe("evaluateWholeCropProgress — safe output shape", () => {
     const strong = evaluateWholeCropProgress(CAP, filledLeft(0.1));
     expect(strong.found).toBe(true);
     expect(strong.band).toEqual({ y_center: 0.5, x0: 0, x1: 1 });
+    // A strong whole-crop estimate is temporally confirmed (single-frame-fire eligible).
+    expect(strong.temporally_confirmed).toBe(true);
+  });
+
+  it("non-strong / baseline / decode-failed returns never carry temporally_confirmed", () => {
+    // Baseline (first frame) — found:false, no flag.
+    expect(evaluateWholeCropProgress(CAP, blank()).temporally_confirmed).toBeUndefined();
+    // Still-changing frame — found:false, no flag.
+    expect(evaluateWholeCropProgress(CAP, filledLeft(0.1)).temporally_confirmed).toBeUndefined();
+    // Decode failure — found:false, no flag.
+    expect(evaluateWholeCropProgress(CAP, "not-a-real-png").temporally_confirmed).toBeUndefined();
   });
 
   it("garbage base64 fails closed (never throws)", () => {

@@ -128,6 +128,16 @@ export interface ProgressFillEstimate {
   /** Estimated fill ratio in [0,1] when found. */
   fill_ratio?: number;
   band?: ReleaseReadyBand;
+  /**
+   * Set ONLY by a detector path that has ALREADY established cross-frame temporal
+   * stability internally — the whole-crop plateau fallback, whose strong read is itself
+   * a multi-frame "filled a lot, then stopped" plateau. It lets the outer streak
+   * (advanceReleaseReady) fire on the FIRST full frame instead of demanding
+   * VGC_RELEASE_READY_CONSECUTIVE consecutive frames, so the temporal requirement is not
+   * double-counted. The instantaneous per-shape (bar/ring) detector NEVER sets this.
+   * UI guidance only — never affects completion, the hold, or agent resumption.
+   */
+  temporally_confirmed?: boolean;
 }
 
 /** Coarse, safe diagnostics for the candidate search. Enums/buckets/booleans only —

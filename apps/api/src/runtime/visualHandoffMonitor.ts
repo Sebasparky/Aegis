@@ -200,7 +200,11 @@ export function advanceReleaseReady(
   }
   const stable = lastBand ? releaseReadyBandsOverlap(lastBand, band) : true;
   const next = stable ? consecutiveFull + 1 : 1;
-  return { consecutiveFull: next, lastBand: band, fire: next >= VGC_RELEASE_READY_CONSECUTIVE };
+  // A temporally-confirmed estimate (the whole-crop plateau fallback) has already
+  // established cross-frame stability internally, so it fires on its first full frame.
+  // The instantaneous per-shape detector still needs VGC_RELEASE_READY_CONSECUTIVE.
+  const required = estimate.temporally_confirmed ? 1 : VGC_RELEASE_READY_CONSECUTIVE;
+  return { consecutiveFull: next, lastBand: band, fire: next >= required };
 }
 
 /** Coarse fill bucket for safe telemetry (never the raw ratio). */
@@ -878,6 +882,8 @@ async function evaluateReleaseReadyPhase(
       found: estimate.found,
       fill_bucket: fillBucket(estimate.fill_ratio),
       consecutive_full: entry.consecutive_full,
+      // True when this fire used the whole-crop temporal single-frame path (no 2-frame streak).
+      single_frame: estimate.temporally_confirmed === true,
       fired: adv.fire,
     });
 

@@ -321,6 +321,31 @@ describe("advanceReleaseReady — pure full-bar streak machine", () => {
   it("a not-found frame resets the streak and clears the reference", () => {
     expect(advanceReleaseReady(1, band, notFound)).toEqual({ consecutiveFull: 0, lastBand: undefined, fire: false });
   });
+
+  // ── Temporally-confirmed single-frame fire (whole-crop plateau fallback) ──────────
+  const fullTemporal = { found: true, fill_ratio: 0.95, band, temporally_confirmed: true };
+
+  it("a single temporally-confirmed full frame fires immediately (no 2-frame streak)", () => {
+    const a = advanceReleaseReady(0, undefined, fullTemporal);
+    expect(a).toEqual({ consecutiveFull: 1, lastBand: band, fire: true });
+  });
+
+  it("a temporally-confirmed but below-threshold frame does NOT fire (still needs full)", () => {
+    const partialTemporal = { found: true, fill_ratio: 0.5, band, temporally_confirmed: true };
+    expect(advanceReleaseReady(0, undefined, partialTemporal)).toEqual({
+      consecutiveFull: 0,
+      lastBand: band,
+      fire: false,
+    });
+  });
+
+  it("a temporally-confirmed full frame fires even right after a partial frame", () => {
+    const afterPartial = advanceReleaseReady(0, undefined, partial); // streak reset, band kept
+    expect(afterPartial.fire).toBe(false);
+    const a = advanceReleaseReady(afterPartial.consecutiveFull, afterPartial.lastBand, fullTemporal);
+    expect(a.fire).toBe(true);
+    expect(a.consecutiveFull).toBe(1);
+  });
 });
 
 describe("visualHandoffMonitor — release_ready (full-bar) sub-state", () => {

@@ -107,6 +107,24 @@ const MARKER_Y_INSET_FRAC = 0.2; // central ~60% height
  *  unchanged outer 0.92 / 2-frame streak still governs the actual fire). */
 const COMPLETION_RATIO = 0.96;
 
+// ── High-stable-control-plateau (temporal fallback for a control that plateaus below ge92) ──
+// STRICTLY MORE CONSERVATIVE than the instantaneous reasons above: it requires a SUSTAINED high
+// state, not a single frame. It is NOT a whole-crop plateau — it is measured ONLY inside the
+// locked anchor-centered control bounds, and it only ever RAISES the ratio to COMPLETION_RATIO so
+// the unchanged outer 0.92 / 2-frame, position-stable streak still owns the real fire. The global
+// ge92 threshold is untouched: this fires strictly INSIDE the `75_92` band.
+/** Lower edge of the `75_92` plateau band (matches `fillBucket`'s 0.75 boundary). A frame whose
+ *  column fill drops below this counts as a regression and resets the plateau window. */
+const PLATEAU_FILL_LO = 0.75;
+/** Consecutive non-regressing `≥ PLATEAU_FILL_LO` frames required before the plateau can fire. */
+const PLATEAU_MIN_PROBES = 4;
+/** Minimum active-hold duration (ms) the plateau window must span before it can fire. */
+const PLATEAU_MIN_HOLD_MS = 3000;
+/** Per-frame "material change vs baseline" floor — the changed-area bucket must be ≥ `50_75`. */
+const PLATEAU_CHANGED_AREA_MIN = 0.5;
+/** Fraction of the window's frames that must clear `PLATEAU_CHANGED_AREA_MIN` ("most of window"). */
+const PLATEAU_CHANGED_AREA_COVERAGE = 0.75;
+
 // ─── Safe telemetry enums ─────────────────────────────────────────────────────
 
 export type ControlRejectionReason =
@@ -118,6 +136,9 @@ export type ControlRejectionReason =
   | "off_center";
 
 export type ControlFillKind = "pill_fill" | "bar_fill";
+
+/** Coarse bucket for the high-stable-plateau window length (consecutive non-regressing frames). */
+export type PlateauWindowBucket = "0" | "1_3" | "4_6" | "ge7";
 
 /**
  * How the anchor-centered control box was inferred from the baseline frame. The detector is
@@ -139,12 +160,16 @@ export type ControlResolution =
 
 /** Why the detector reported the frame as release-capable (or not). `solid_state` and
  *  `completed_marker` are the completed-state family (uniform solid / centred checkmark);
- *  `column_fill_ge92` is the classic left-to-right bar reaching full. */
+ *  `column_fill_ge92` is the classic left-to-right bar reaching full. `high_stable_control_plateau`
+ *  is the temporal fallback: a baseline-locked control that sustains a high-but-not-ge92 fill
+ *  (`75_92`) with material change for several consecutive probes and ≥ a minimum hold duration —
+ *  the B&BW completed state that can plateau below ge92 and would otherwise never release. */
 export type ChosenReleaseReason =
   | "none"
   | "column_fill_ge92"
   | "solid_state"
-  | "completed_marker";
+  | "completed_marker"
+  | "high_stable_control_plateau";
 
 // ─── Dev-only measurement-diagnostics enums (disk/telemetry only — NEVER agent-facing) ──
 // These let an operator see WHAT the detector locked onto and WHY a completed-looking control
@@ -236,6 +261,14 @@ function fillBucket(ratio: number | undefined): "none" | "lt50" | "50_75" | "75_
   return "ge92";
 }
 
+/** Coarse bucket for the plateau window length — enum-only telemetry (never the raw count). */
+function plateauWindowBucket(count: number): PlateauWindowBucket {
+  if (count <= 0) return "0";
+  if (count <= 3) return "1_3";
+  if (count <= 6) return "4_6";
+  return "ge7";
+}
+
 // ─── Dev-only bucket helpers for measurement diagnostics (enum-only, never raw) ────
 
 /** Control area as a fraction of the whole crop → size band. Answers "are the locked bounds
@@ -295,6 +328,28 @@ interface ControlBounds {
   band: ReleaseReadyBand;
 }
 
+/**
+ * Per-capsule temporal window for the high-stable-control-plateau release reason. Counts the
+ * consecutive measured frames whose column fill held inside (or above) the `75_92` band without
+ * regressing below `PLATEAU_FILL_LO`, alongside how many of them carried a material change. The
+ * window resets on a regression; it lives in this module's memory-only state and never leaves it.
+ */
+export interface PlateauWindow {
+  /** Consecutive non-regressing frames with columnFill ≥ PLATEAU_FILL_LO in the current window. */
+  count: number;
+  /** `nowMs` of the first frame of the current window (0 when the window is empty). */
+  startMs: number;
+  /** How many window frames carried changedAreaRatio ≥ PLATEAU_CHANGED_AREA_MIN. */
+  changedAreaOkCount: number;
+  /** Sticky for telemetry: a regression below PLATEAU_FILL_LO was seen during this hold. */
+  regressionSeen: boolean;
+}
+
+/** A fresh (empty) plateau window — used at baseline capture and on every regression reset. */
+function emptyPlateauWindow(regressionSeen = false): PlateauWindow {
+  return { count: 0, startMs: 0, changedAreaOkCount: 0, regressionSeen };
+}
+
 interface ControlFillState {
   W: number;
   H: number;
@@ -306,6 +361,8 @@ interface ControlFillState {
   resolved: boolean;
   /** Why the baseline produced no valid control candidate (for telemetry). */
   rejection: ControlRejectionReason;
+  /** Temporal high-stable-plateau window (memory-only). Reset fresh on baseline / dims change. */
+  plateau: PlateauWindow;
 }
 
 // Key: capsule_id. Cleared on monitor stop / hold-end (clearControlFill) — see
@@ -801,6 +858,85 @@ function computeCompletionSignals(
   };
 }
 
+// ─── High-stable-control-plateau (pure temporal decision) ─────────────────────
+
+/** One measured frame's inputs to the plateau decision (all control-local). */
+export interface PlateauFrame {
+  /** Geometric left-to-right transitioned-columns ratio for this frame. */
+  columnFillRatio: number;
+  /** Fraction of control pixels changed vs the locked baseline for this frame. */
+  changedAreaRatio: number;
+  /** Wall-clock for this frame (ms). The window measures active-hold duration off the first frame. */
+  nowMs: number;
+}
+
+export interface PlateauAdvance {
+  window: PlateauWindow;
+  fired: boolean;
+  reason: Extract<ChosenReleaseReason, "none" | "high_stable_control_plateau">;
+}
+
+/**
+ * Advance the high-stable-control-plateau window by one measured frame and decide whether the
+ * plateau release reason fires. PURE — no state, never throws; the caller owns the window storage.
+ *
+ * Rules (all must hold to fire):
+ *   - `gateOk` — the caller's structural gate (locked, resolved anchor-centered bounds; no stronger
+ *     release reason already chosen). A false gate can NEVER fire (fail closed).
+ *   - The frame is strictly INSIDE the `75_92` band: `PLATEAU_FILL_LO ≤ columnFillRatio <
+ *     FULL_RATIO_THRESHOLD`. Below the band is a regression (resets the window); at/above ge92 is
+ *     owned by `column_fill_ge92`, never the plateau.
+ *   - The firing frame itself carries a material change (`changedAreaRatio ≥ PLATEAU_CHANGED_AREA_MIN`).
+ *   - The window is SUSTAINED: `count ≥ PLATEAU_MIN_PROBES` consecutive non-regressing frames AND
+ *     "most of the window" cleared the change floor (`changedAreaOkCount ≥ ceil(count·coverage)`).
+ *   - The window spans the minimum active-hold duration (`nowMs − startMs ≥ PLATEAU_MIN_HOLD_MS`).
+ *
+ * A regression below `PLATEAU_FILL_LO` resets the window to empty (sticky `regressionSeen`).
+ */
+export function advanceControlPlateau(
+  prev: PlateauWindow,
+  frame: PlateauFrame,
+  gateOk: boolean,
+): PlateauAdvance {
+  // Regression below the band → reset the window (remember it for telemetry). A window that was
+  // in progress (count > 0) dropping out is the regression we never want to fire across.
+  if (frame.columnFillRatio < PLATEAU_FILL_LO) {
+    return {
+      window: emptyPlateauWindow(prev.regressionSeen || prev.count > 0),
+      fired: false,
+      reason: "none",
+    };
+  }
+
+  // In or above the band: extend the window.
+  const isNewWindow = prev.count === 0;
+  const startMs = isNewWindow ? frame.nowMs : prev.startMs;
+  const count = prev.count + 1;
+  const changedOk = frame.changedAreaRatio >= PLATEAU_CHANGED_AREA_MIN;
+  const changedAreaOkCount = prev.changedAreaOkCount + (changedOk ? 1 : 0);
+  const window: PlateauWindow = {
+    count,
+    startMs,
+    changedAreaOkCount,
+    regressionSeen: prev.regressionSeen,
+  };
+
+  const inBand = frame.columnFillRatio < FULL_RATIO_THRESHOLD; // ge92 fires via column_fill_ge92
+  const sustainedOk = count >= PLATEAU_MIN_PROBES;
+  const coverageOk =
+    changedAreaOkCount >= Math.ceil(count * PLATEAU_CHANGED_AREA_COVERAGE);
+  const durationOk = frame.nowMs - startMs >= PLATEAU_MIN_HOLD_MS;
+  const fired = gateOk && inBand && changedOk && sustainedOk && coverageOk && durationOk;
+
+  return { window, fired, reason: fired ? "high_stable_control_plateau" : "none" };
+}
+
+/** Test-only: snapshot the current plateau window for a capsule (no pixels). */
+export function plateauWindowForTests(capsuleId: string): PlateauWindow | null {
+  const s = controlFillStates.get(capsuleId);
+  return s ? { ...s.plateau } : null;
+}
+
 // ─── Public evaluator ─────────────────────────────────────────────────────────
 
 /**
@@ -815,6 +951,7 @@ function computeCompletionSignals(
 export function evaluateControlFill(
   capsuleId: string,
   croppedPngBase64: string,
+  nowMs: number = Date.now(),
 ): ProgressFillEstimate {
   const decoded = decodeLuminance(croppedPngBase64);
   if (!decoded) {
@@ -839,6 +976,7 @@ export function evaluateControlFill(
       bounds,
       resolved: true,
       rejection,
+      plateau: emptyPlateauWindow(),
     });
     logHvDebug({
       scope: "vgc_release_ready_control_fill",
@@ -886,7 +1024,32 @@ export function evaluateControlFill(
     prior.W,
     prior.bounds,
   );
-  const fillRatio = signals.effectiveFillRatio;
+
+  // High-stable-control-plateau: a temporal fallback for a control that holds a high (`75_92`)
+  // fill with material change but never reaches ge92 / full uniformity (the live B&BW completed
+  // state that plateaus below ge92). It engages ONLY when no stronger instantaneous reason fired,
+  // for a locked, resolved anchor-centered control. It just RAISES the ratio to COMPLETION_RATIO —
+  // the unchanged outer 0.92 / 2-frame, position-stable streak still owns the real fire.
+  const plateauGateOk =
+    signals.chosenReleaseReason === "none" &&
+    (prior.bounds.resolution === "filled_band" ||
+      prior.bounds.resolution === "outlined_control" ||
+      prior.bounds.resolution === "bordered_control");
+  const plateau = advanceControlPlateau(
+    prior.plateau,
+    {
+      columnFillRatio: signals.columnFillRatio,
+      changedAreaRatio: signals.changedAreaRatio,
+      nowMs,
+    },
+    plateauGateOk,
+  );
+  prior.plateau = plateau.window;
+
+  const releaseReason: ChosenReleaseReason = plateau.fired
+    ? "high_stable_control_plateau"
+    : signals.chosenReleaseReason;
+  const fillRatio = plateau.fired ? COMPLETION_RATIO : signals.effectiveFillRatio;
 
   logHvDebug({
     scope: "vgc_release_ready_control_fill",
@@ -905,7 +1068,11 @@ export function evaluateControlFill(
     changed_area_bucket: fillBucket(signals.changedAreaRatio),
     center_completion_signal_seen: signals.centerCompletionSignalSeen,
     completed_marker_seen: signals.completedMarkerSeen,
-    chosen_release_reason: signals.chosenReleaseReason,
+    chosen_release_reason: releaseReason,
+    // High-stable-plateau temporal-window telemetry (enums/boolean only — never the raw count).
+    plateau_window_bucket: plateauWindowBucket(plateau.window.count),
+    plateau_changed_area_bucket: fillBucket(signals.changedAreaRatio),
+    plateau_regression_seen: plateau.window.regressionSeen,
     // The outer streak owns the real fire (and logs it) — a single full frame never fires.
     fired: false,
   });
@@ -928,7 +1095,11 @@ export function evaluateControlFill(
     changed_area_ratio: signals.changedAreaRatio,
     center_completion_signal_seen: signals.centerCompletionSignalSeen,
     completed_marker_seen: signals.completedMarkerSeen,
-    chosen_release_reason: signals.chosenReleaseReason,
+    chosen_release_reason: releaseReason,
+    // High-stable-plateau temporal-window telemetry (enums/boolean only — never the raw count).
+    plateau_window_bucket: plateauWindowBucket(plateau.window.count),
+    plateau_changed_area_bucket: fillBucket(signals.changedAreaRatio),
+    plateau_regression_seen: plateau.window.regressionSeen,
     // ── Control-measurement breakdown (already bucketed/enum — answers WHY a completed-looking
     // control still reads partial: bad bounds vs. non-uniform current vs. weak marker). ──
     control_bounds_status: "locked",

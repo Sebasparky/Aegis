@@ -64,11 +64,14 @@ type ChosenReleaseReason =
   | "none"
   | "column_fill_ge92"
   | "solid_state"
-  | "completed_marker";
+  | "completed_marker"
+  | "high_stable_control_plateau";
 
 // Control-measurement diagnostic enums (type-only copies of the detector's vocab — no runtime
 // import, avoids a cycle). All bucketed/enum/boolean; raw px/coords/ratios NEVER reach meta.
 type ControlBoundsStatus = "locked" | "unresolved" | "pending_baseline";
+/** High-stable-plateau window-length bucket (type-only copy of the detector's vocab). */
+type PlateauWindowBucket = "0" | "1_3" | "4_6" | "ge7";
 type ControlSizeBucket = "tiny" | "small" | "medium" | "large" | "xl";
 type ControlPositionBucket = "near_start" | "center" | "near_end";
 type ControlAspectBucket = "lt2" | "2_4" | "4_8" | "ge8";
@@ -166,6 +169,13 @@ interface PendingDiag {
   completed_marker_seen: boolean | null;
   /** Which signal made the frame release-capable (or `none`). */
   chosen_release_reason: ChosenReleaseReason | null;
+  // ── High-stable-control-plateau temporal-window diagnostics (enum/boolean only). ──
+  /** Window length (consecutive non-regressing `75_92+` frames) bucket. */
+  plateau_window_bucket: PlateauWindowBucket | null;
+  /** The firing frame's changed-area-vs-baseline bucket. */
+  plateau_changed_area_bucket: FillBucket | null;
+  /** A regression below the plateau band was seen during this hold. */
+  plateau_regression_seen: boolean | null;
   /** Which estimate the seam returned. */
   chosen_candidate_kind: CandidateKind;
   /** The chosen estimate's fill bucket. */
@@ -246,6 +256,9 @@ function freshDiag(): PendingDiag {
     center_completion_signal_seen: null,
     completed_marker_seen: null,
     chosen_release_reason: null,
+    plateau_window_bucket: null,
+    plateau_changed_area_bucket: null,
+    plateau_regression_seen: null,
     chosen_candidate_kind: "none",
     chosen_fill_bucket: "none",
     control_bounds_status: null,
@@ -356,6 +369,10 @@ export function noteControlFillDiagnostics(
     center_completion_signal_seen?: boolean;
     completed_marker_seen?: boolean;
     chosen_release_reason?: ChosenReleaseReason;
+    // High-stable-control-plateau temporal-window diagnostics (already bucketed/boolean).
+    plateau_window_bucket?: PlateauWindowBucket;
+    plateau_changed_area_bucket?: FillBucket;
+    plateau_regression_seen?: boolean;
     // ── Control-measurement breakdown (already bucketed/enum by the detector). All optional:
     // the early-return paths pass only `control_bounds_status` (+ unresolved reasons). ──
     control_bounds_status?: ControlBoundsStatus;
@@ -403,6 +420,15 @@ export function noteControlFillDiagnostics(
       : {}),
     ...(diag.chosen_release_reason !== undefined
       ? { chosen_release_reason: diag.chosen_release_reason }
+      : {}),
+    ...(diag.plateau_window_bucket !== undefined
+      ? { plateau_window_bucket: diag.plateau_window_bucket }
+      : {}),
+    ...(diag.plateau_changed_area_bucket !== undefined
+      ? { plateau_changed_area_bucket: diag.plateau_changed_area_bucket }
+      : {}),
+    ...(diag.plateau_regression_seen !== undefined
+      ? { plateau_regression_seen: diag.plateau_regression_seen }
       : {}),
     // Control-measurement breakdown — store each already-bucketed value when present.
     ...(diag.control_bounds_status !== undefined
@@ -649,6 +675,9 @@ interface ReleaseReadyDebugMeta {
   center_completion_signal_seen: boolean | null;
   completed_marker_seen: boolean | null;
   chosen_release_reason: ChosenReleaseReason | null;
+  plateau_window_bucket: PlateauWindowBucket | null;
+  plateau_changed_area_bucket: FillBucket | null;
+  plateau_regression_seen: boolean | null;
   chosen_candidate_kind: CandidateKind;
   chosen_fill_bucket: FillBucket;
   // Control-measurement breakdown (dev-only; bucketed/enum/boolean — never px/coords).
@@ -709,6 +738,9 @@ function buildMeta(
     center_completion_signal_seen: pending.center_completion_signal_seen,
     completed_marker_seen: pending.completed_marker_seen,
     chosen_release_reason: pending.chosen_release_reason,
+    plateau_window_bucket: pending.plateau_window_bucket,
+    plateau_changed_area_bucket: pending.plateau_changed_area_bucket,
+    plateau_regression_seen: pending.plateau_regression_seen,
     chosen_candidate_kind: pending.chosen_candidate_kind,
     chosen_fill_bucket: pending.chosen_fill_bucket,
     control_bounds_status: pending.control_bounds_status,

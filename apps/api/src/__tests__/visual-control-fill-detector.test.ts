@@ -27,6 +27,12 @@ import {
   clearControlFillForTests,
   controlFillStateKindForTests,
   controlResolutionForTests,
+  advanceControlPlateau,
+  plateauWindowForTests,
+} from "../runtime/visualControlFillDetector.js";
+import type {
+  PlateauWindow,
+  PlateauFrame,
 } from "../runtime/visualControlFillDetector.js";
 import {
   advanceReleaseReady,
@@ -589,5 +595,176 @@ describe("evaluateControlFill — agent-facing return shape is unchanged", () =>
     const est = evaluateControlFill(CAP, blank());
     expect(est.found).toBe(false);
     for (const k of Object.keys(est)) expect(k).toBe("found");
+  });
+});
+
+// ── Test 11: high-stable-control-plateau — a control that holds a high (75_92) fill with
+// material change but never reaches ge92 (the live B&BW completed state that plateaus below
+// ge92). The pure `advanceControlPlateau` decision is tested directly with synthetic per-frame
+// scalars (mirrors the `advanceReleaseReady` style); two end-to-end pixel paths confirm the
+// wiring. This path is STRICTLY MORE CONSERVATIVE than the instantaneous reasons (≥4 probes,
+// ≥3s, "most of window" material change) and only RAISES the ratio so the unchanged outer
+// 0.92 / 2-frame streak still owns the fire. It NEVER lowers the global ge92 threshold and is
+// never the whole-crop temporal plateau. ──
+describe("evaluateControlFill — high-stable-control-plateau (75_92 sustained release)", () => {
+  const EMPTY: PlateauWindow = {
+    count: 0,
+    startMs: 0,
+    changedAreaOkCount: 0,
+    regressionSeen: false,
+  };
+
+  /** Drive a sequence of frames through the pure helper, returning the last advance + whether it
+   *  ever fired across the run. `gateOk` defaults true (resolved, locked, anchor-centered control,
+   *  no stronger reason). */
+  function runPlateau(
+    frames: PlateauFrame[],
+    gateOk = true,
+  ): { everFired: boolean; window: PlateauWindow } {
+    let window = EMPTY;
+    let everFired = false;
+    for (const f of frames) {
+      const adv = advanceControlPlateau(window, f, gateOk);
+      window = adv.window;
+      if (adv.fired) {
+        everFired = true;
+        expect(adv.reason).toBe("high_stable_control_plateau");
+      } else {
+        expect(adv.reason).toBe("none");
+      }
+    }
+    return { everFired, window };
+  }
+
+  // 1. Sustained 75_92 with material change for ≥4 probes and ≥3s → release-capable, then fires
+  //    through the existing 2-frame streak.
+  it("ramps to 75_92 and holds with material change → fires after the required streak", () => {
+    // Four in-band frames (columnFill 0.85), strong changed-area, 1s apart (window spans 3s).
+    const frames: PlateauFrame[] = [0, 1000, 2000, 3000].map((nowMs) => ({
+      columnFillRatio: 0.85,
+      changedAreaRatio: 0.85,
+      nowMs,
+    }));
+    // Frames 1–3 cannot fire (count < 4 and/or < 3s); the 4th frame satisfies every gate.
+    let window = EMPTY;
+    const fires: boolean[] = [];
+    for (const f of frames) {
+      const adv = advanceControlPlateau(window, f, true);
+      window = adv.window;
+      fires.push(adv.fired);
+    }
+    expect(fires).toEqual([false, false, false, true]);
+    expect(window.count).toBe(4);
+    expect(window.regressionSeen).toBe(false);
+
+    // End-to-end through the pixel pipeline: a control stuck at ~85% fill (never ge92, never
+    // uniform) reaches release-capable via the plateau and then fires the outer 2-frame streak.
+    clearControlFillForTests();
+    // Baseline (unfilled) at t=0 → locks bounds, cannot measure yet.
+    expect(evaluateControlFill(CAP, controlImage({ fillFrac: 0 }), 0).found).toBe(false);
+    // Frames 1–3 at 85% fill: found, but below 0.92 (plateau not yet earned).
+    for (const t of [1000, 2000, 3000]) {
+      const e = evaluateControlFill(CAP, controlImage({ fillFrac: 0.85 }), t);
+      expect(e.found).toBe(true);
+      expect(e.fill_ratio!).toBeLessThan(FULL_RATIO_THRESHOLD);
+    }
+    // Frame 4 (t=4000): window count 4, spans ≥3s from the first in-band frame → release-capable.
+    const f4 = evaluateControlFill(CAP, controlImage({ fillFrac: 0.85 }), 4000);
+    expect(f4.found).toBe(true);
+    expect(f4.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    expect(f4.temporally_confirmed).toBeUndefined(); // still earns the outer streak
+    const f5 = evaluateControlFill(CAP, controlImage({ fillFrac: 0.85 }), 5000);
+    const a1 = advanceReleaseReady(0, undefined, f4);
+    expect(a1.fire).toBe(false); // a single release-capable plateau frame never fires
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f5);
+    expect(a2.fire).toBe(true);
+    expect(a2.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+  });
+
+  // 2. A control stuck at 50–75% (below the 75_92 band) never enters the window → never fires.
+  it("stuck at 50_75 (below the band) → never enters the window, never fires", () => {
+    const frames: PlateauFrame[] = [0, 1000, 2000, 3000, 4000, 5000].map((nowMs) => ({
+      columnFillRatio: 0.6,
+      changedAreaRatio: 0.85,
+      nowMs,
+    }));
+    const { everFired, window } = runPlateau(frames);
+    expect(everFired).toBe(false);
+    expect(window.count).toBe(0); // every frame is a regression (below PLATEAU_FILL_LO)
+  });
+
+  // 3. Briefly hits 75_92 then regresses below the band → window resets, never reaches 4, no fire.
+  it("hits 75_92 briefly then regresses → window resets, regression flagged, never fires", () => {
+    const frames: PlateauFrame[] = [
+      { columnFillRatio: 0.85, changedAreaRatio: 0.85, nowMs: 0 },
+      { columnFillRatio: 0.85, changedAreaRatio: 0.85, nowMs: 1000 },
+      { columnFillRatio: 0.85, changedAreaRatio: 0.85, nowMs: 2000 },
+      { columnFillRatio: 0.5, changedAreaRatio: 0.85, nowMs: 3000 }, // regression below the band
+      { columnFillRatio: 0.85, changedAreaRatio: 0.85, nowMs: 4000 }, // window restarts at 1
+    ];
+    const { everFired, window } = runPlateau(frames);
+    expect(everFired).toBe(false);
+    expect(window.regressionSeen).toBe(true); // sticky across the reset
+    expect(window.count).toBe(1); // restarted after the regression
+  });
+
+  // 4. Held at 75_92 long enough, but changed-area stays too low (< 50_75) → no material change,
+  //    no fire (coverage + firing-frame guards both refuse it).
+  it("75_92 sustained but changed_area too low → never fires", () => {
+    const frames: PlateauFrame[] = [0, 1000, 2000, 3000, 4000, 5000].map((nowMs) => ({
+      columnFillRatio: 0.85,
+      changedAreaRatio: 0.3, // below PLATEAU_CHANGED_AREA_MIN (0.5)
+      nowMs,
+    }));
+    const { everFired, window } = runPlateau(frames);
+    expect(everFired).toBe(false);
+    expect(window.count).toBe(6); // window grows (in-band) ...
+    expect(window.changedAreaOkCount).toBe(0); // ... but no frame cleared the change floor
+  });
+
+  // 5a. Gate closed (e.g. unresolved/non-anchor bounds or a stronger reason already fired) → an
+  //     otherwise-qualifying sequence still never fires.
+  it("gate closed → otherwise-qualifying frames never fire", () => {
+    const frames: PlateauFrame[] = [0, 1000, 2000, 3000, 4000].map((nowMs) => ({
+      columnFillRatio: 0.85,
+      changedAreaRatio: 0.85,
+      nowMs,
+    }));
+    const { everFired } = runPlateau(frames, /* gateOk */ false);
+    expect(everFired).toBe(false);
+  });
+
+  // 5b. End-to-end: an unresolved baseline (no control bounds) never produces a plateau window —
+  //     fails closed for the whole hold regardless of later high-fill frames.
+  it("unresolved baseline → no plateau window, always found:false", () => {
+    clearControlFillForTests();
+    expect(evaluateControlFill(CAP, blank(), 0).found).toBe(false);
+    expect(controlFillStateKindForTests(CAP)).toBe("tracking_unresolved");
+    for (const t of [1000, 2000, 3000, 4000, 5000]) {
+      expect(evaluateControlFill(CAP, controlImage({ fillFrac: 0.85 }), t).found).toBe(false);
+    }
+    expect(plateauWindowForTests(CAP)!.count).toBe(0);
+  });
+
+  // 6. The instantaneous ge92 path is unchanged: a full bar still fires via `column_fill_ge92`
+  //    in the normal 2 frames WITHOUT the plateau's ≥3s / ≥4-probe gate (proves the plateau did
+  //    not replace or weaken the existing release reasons, and never lowers the ge92 threshold).
+  it("a ge92 frame still fires via column_fill_ge92 in 2 frames (no plateau gate)", () => {
+    const signals = evaluateCompletionSignalsForTests(
+      controlImage({ fillFrac: 0 }),
+      controlImage({ fillFrac: 1.0 }),
+    )!;
+    expect(signals.chosenReleaseReason).toBe("column_fill_ge92");
+
+    clearControlFillForTests();
+    // Two full frames only ~1ms apart in wall-clock (far under PLATEAU_MIN_HOLD_MS) still fire —
+    // the instantaneous ge92 path owns this, the plateau gate is irrelevant here.
+    expect(evaluateControlFill(CAP, controlImage({ fillFrac: 0 }), 0).found).toBe(false);
+    const f1 = evaluateControlFill(CAP, controlImage({ fillFrac: 1.0 }), 1);
+    const f2 = evaluateControlFill(CAP, controlImage({ fillFrac: 1.0 }), 2);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    const a1 = advanceReleaseReady(0, undefined, f1);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f2);
+    expect(a2.fire).toBe(true);
   });
 });

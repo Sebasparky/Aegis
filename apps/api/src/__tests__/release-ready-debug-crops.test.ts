@@ -23,6 +23,7 @@ import {
   noteDetectorDiagnostics,
   noteWholeCropDiagnostics,
   noteControlFillDiagnostics,
+  noteControlOverlayGeometry,
   noteChosenSelection,
   commitProbeCrop,
   clearAllReleaseReadyDebugCropsForTests,
@@ -66,12 +67,33 @@ const ALLOWED_META_KEYS = new Set([
   "primary_fill_bucket",
   "control_candidate_kind",
   "control_fill_bucket",
+  "transitioned_columns_bucket",
+  "changed_area_bucket",
+  "center_completion_signal_seen",
+  "completed_marker_seen",
+  "chosen_release_reason",
   "chosen_candidate_kind",
   "chosen_fill_bucket",
+  "control_bounds_status",
+  "control_bounds_size_bucket",
+  "control_bounds_horizontal_position_bucket",
+  "control_bounds_vertical_position_bucket",
+  "control_bounds_aspect_bucket",
+  "base_edge_uniform_bucket",
+  "cur_edge_uniform_bucket",
+  "edge_off_level_side_bucket",
+  "edge_sample_count_bucket",
+  "uniform_signal_seen",
+  "uniform_signal_failure_reason",
+  "solid_state_guard_reason",
+  "marker_delta_bucket",
+  "marker_area_bucket",
+  "marker_failure_reason",
   "consecutive_full",
   "fired",
   "has_previous",
   "has_diff",
+  "has_control_overlay",
 ]);
 
 let tmpRoot: string;
@@ -275,6 +297,163 @@ describe("meta.json — primary / control / chosen breakdown", () => {
     expect(meta.candidate_kind).toBe("bar");
     // Whole-crop telemetry buckets are still recorded.
     expect(meta.whole_crop_mode).toBe("strict_plateau");
+  });
+});
+
+// ─── 2c. Control-measurement breakdown + optional overlay ───────────────────────
+// Pins the new dev-only visibility: the measured-frame buckets/enums land in meta.json
+// (still enums/buckets/booleans only), and the overlay PNG is written ONLY when locked
+// geometry was noted — never leaking any coordinate into meta.
+describe("control-measurement diagnostics — bucketed meta + optional overlay", () => {
+  beforeEach(() => setFlags("true", "true"));
+
+  it("measured-frame control diagnostics are bucketed/enum-only in meta (no geometry leak)", () => {
+    noteDetectorDiagnostics(CAP, { chosen_candidate_kind: "bar_fill", fill_ratio: 0.96 });
+    noteControlFillDiagnostics(CAP, {
+      chosen_candidate_kind: "bar_fill",
+      control_fill_ratio: 0.96,
+      control_candidate_seen: true,
+      control_rejection_reason: "none",
+      transitioned_columns_ratio: 0.4,
+      changed_area_ratio: 0.2,
+      center_completion_signal_seen: false,
+      completed_marker_seen: false,
+      chosen_release_reason: "none",
+      control_bounds_status: "locked",
+      control_bounds_size_bucket: "large",
+      control_bounds_horizontal_position_bucket: "center",
+      control_bounds_vertical_position_bucket: "near_end",
+      control_bounds_aspect_bucket: "ge8",
+      base_edge_uniform_bucket: "lt50",
+      cur_edge_uniform_bucket: "75_92",
+      edge_off_level_side_bucket: "right",
+      edge_sample_count_bucket: "8_24",
+      uniform_signal_seen: false,
+      uniform_signal_failure_reason: "current_not_uniform",
+      solid_state_guard_reason: "failed_current_not_uniform",
+      marker_delta_bucket: "below_min",
+      marker_area_bucket: "lt50",
+      marker_failure_reason: "marker_area_too_small",
+    });
+    noteChosenSelection(CAP, "control");
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: false, consecutive_full: 1, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    const raw = fs.readFileSync(path.join(capsuleDir(), "0001", "meta.json"), "utf-8");
+    const meta = JSON.parse(raw);
+
+    // Only allowlisted keys, only scalar enum/bucket/boolean/null values.
+    for (const k of Object.keys(meta)) expect(ALLOWED_META_KEYS.has(k)).toBe(true);
+    for (const v of Object.values(meta)) {
+      const t = v === null ? "null" : typeof v;
+      expect(["string", "number", "boolean", "null"]).toContain(t);
+    }
+    // The noted bucketed breakdown is faithfully recorded.
+    expect(meta.control_bounds_status).toBe("locked");
+    expect(meta.control_bounds_size_bucket).toBe("large");
+    expect(meta.control_bounds_vertical_position_bucket).toBe("near_end");
+    expect(meta.control_bounds_aspect_bucket).toBe("ge8");
+    expect(meta.edge_off_level_side_bucket).toBe("right");
+    expect(meta.edge_sample_count_bucket).toBe("8_24");
+    expect(meta.uniform_signal_seen).toBe(false);
+    expect(meta.uniform_signal_failure_reason).toBe("current_not_uniform");
+    expect(meta.solid_state_guard_reason).toBe("failed_current_not_uniform");
+    expect(meta.marker_delta_bucket).toBe("below_min");
+    expect(meta.marker_failure_reason).toBe("marker_area_too_small");
+    // No geometry / filesystem hint leaks into the serialized meta.
+    expect(raw).not.toMatch(/\.png|\/|\\|x0|x1|width|height|viewport|cdp|http/i);
+    // No overlay geometry was noted → no overlay artifact.
+    expect(meta.has_control_overlay).toBe(false);
+    expect(fs.existsSync(path.join(capsuleDir(), "0001", "control_overlay.png"))).toBe(false);
+  });
+
+  it("noted geometry → control_overlay.png written and has_control_overlay true", () => {
+    noteControlFillDiagnostics(CAP, {
+      chosen_candidate_kind: "bar_fill",
+      control_fill_ratio: 0.96,
+      control_candidate_seen: true,
+      control_rejection_reason: "none",
+      control_bounds_status: "locked",
+    });
+    // Geometry fits the default 60×40 solidPng crop.
+    noteControlOverlayGeometry(CAP, {
+      bounds: { x0: 8, x1: 50, y0: 14, y1: 26 },
+      edgeInsetCols: 12,
+      markerZone: { cx0: 20, cx1: 38, cy0: 16, cy1: 24 },
+      offLevelLeft: false,
+      offLevelRight: true,
+    });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: false, consecutive_full: 1, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    const dir = path.join(capsuleDir(), "0001");
+    expect(fs.existsSync(path.join(dir, "control_overlay.png"))).toBe(true);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"));
+    expect(meta.has_control_overlay).toBe(true);
+    // The overlay never makes meta carry geometry.
+    expect(JSON.stringify(meta)).not.toMatch(/x0|x1|markerZone|edgeInset/i);
+  });
+
+  it("no geometry noted → commit succeeds, no overlay file, flag false", () => {
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    expect(() =>
+      commitProbeCrop(
+        CAP,
+        { found: false, fired: false, consecutive_full: 0, fill_bucket: "none" },
+        { outputRoot: tmpRoot },
+      ),
+    ).not.toThrow();
+    const dir = path.join(capsuleDir(), "0001");
+    expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "control_overlay.png"))).toBe(false);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"));
+    expect(meta.has_control_overlay).toBe(false);
+  });
+
+  it("out-of-range overlay geometry → fail-soft (no overlay, no throw, flag false)", () => {
+    noteControlOverlayGeometry(CAP, {
+      bounds: { x0: 0, x1: 9999, y0: 0, y1: 9999 }, // exceeds the 60×40 crop
+      edgeInsetCols: 4,
+      markerZone: { cx0: 1, cx1: 2, cy0: 1, cy1: 2 },
+      offLevelLeft: false,
+      offLevelRight: false,
+    });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    expect(() =>
+      commitProbeCrop(
+        CAP,
+        { found: true, fired: false, consecutive_full: 0, fill_bucket: "none" },
+        { outputRoot: tmpRoot },
+      ),
+    ).not.toThrow();
+    const dir = path.join(capsuleDir(), "0001");
+    expect(fs.existsSync(path.join(dir, "control_overlay.png"))).toBe(false);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"));
+    expect(meta.has_control_overlay).toBe(false);
+  });
+
+  it("geometry noted but flags OFF → nothing written (byte-neutral)", () => {
+    setFlags(undefined, undefined);
+    noteControlOverlayGeometry(CAP, {
+      bounds: { x0: 8, x1: 50, y0: 14, y1: 26 },
+      edgeInsetCols: 12,
+      markerZone: { cx0: 20, cx1: 38, cy0: 16, cy1: 24 },
+      offLevelLeft: false,
+      offLevelRight: false,
+    });
+    noteProbeCrop(CAP, { croppedPngB64: solidPng(120), cropSource: "hold_anchor" });
+    commitProbeCrop(
+      CAP,
+      { found: true, fired: true, consecutive_full: 2, fill_bucket: "ge92" },
+      { outputRoot: tmpRoot },
+    );
+    expect(fs.existsSync(capsuleDir())).toBe(false);
   });
 });
 

@@ -23,6 +23,7 @@ import { PNG } from "pngjs";
 
 import {
   evaluateControlFill,
+  evaluateCompletionSignalsForTests,
   clearControlFillForTests,
   controlFillStateKindForTests,
 } from "../runtime/visualControlFillDetector.js";
@@ -46,6 +47,10 @@ interface ControlOpts {
   x1?: number;
   y0?: number;
   y1?: number;
+  /** Optional centred completion mark (checkmark) stamped over the control after fill. */
+  mark?: { value: number; wFrac?: number; hFrac?: number };
+  /** Optional per-pixel jitter amplitude added inside the control (center-shimmer noise). */
+  noise?: number;
 }
 
 /**
@@ -63,12 +68,30 @@ function controlImage(opts: ControlOpts): string {
   const y1 = opts.y1 ?? 160; // height 30 → aspect 8 → bar_fill
   const png = new PNG({ width: W, height: H });
   const boundary = x0 + Math.round(opts.fillFrac * (x1 - x0));
+  // Centred completion-mark rectangle (checkmark stand-in), in control-relative pixels.
+  const markW = opts.mark ? Math.round((opts.mark.wFrac ?? 0.2) * (x1 - x0)) : 0;
+  const markH = opts.mark ? Math.round((opts.mark.hFrac ?? 0.5) * (y1 - y0)) : 0;
+  const mcx = (x0 + x1) / 2;
+  const mcy = (y0 + y1) / 2;
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const o = (W * y + x) << 2;
       let v = bg;
       if (x >= x0 && x < x1 && y >= y0 && y < y1) {
         v = x < boundary ? fill : track;
+        if (opts.noise) {
+          // Deterministic per-pixel jitter (no Math.random → stable test) in the centre half.
+          const jitter = (((x * 73856093) ^ (y * 19349663)) % 1000) / 1000; // [0,1)
+          v += Math.round((jitter - 0.5) * 2 * opts.noise);
+        }
+        if (
+          opts.mark &&
+          Math.abs(x - mcx) <= markW / 2 &&
+          Math.abs(y - mcy) <= markH / 2
+        ) {
+          v = opts.mark.value;
+        }
+        v = Math.max(0, Math.min(255, v));
       }
       png.data[o] = v;
       png.data[o + 1] = v;
@@ -215,5 +238,144 @@ describe("evaluateControlFill — robustness", () => {
   it("garbage base64 fails closed (never throws, no state)", () => {
     expect(evaluateControlFill(CAP, "not-a-real-png").found).toBe(false);
     expect(controlFillStateKindForTests(CAP)).toBe("none");
+  });
+});
+
+// ── Test 6: the B&BW bug — two-tone baseline + solid completion. ──────────────────
+// The locked baseline is ALREADY half-filled (two-tone), so the previously-filled columns
+// never transition and the geometric column count stays ~0.5 (lt50). The uniform-solid
+// completion signal recognises completion regardless, and fires through the SAME 2-frame
+// streak (no temporally_confirmed).
+describe("evaluateControlFill — two-tone baseline + solid completion (B&BW)", () => {
+  it("column fill stays < 0.92 but uniformFillSignal lifts it to release-capable", () => {
+    const baseline = controlImage({ fillFrac: 0.5 }); // already half-blue at lock time
+    const solid = controlImage({ fillFrac: 1.0 }); // uniform solid completion
+
+    const signals = evaluateCompletionSignalsForTests(baseline, solid)!;
+    expect(signals).not.toBeNull();
+    // The geometric estimate alone is the bug: it under-reads the completed control.
+    expect(signals.columnFillRatio).toBeLessThan(FULL_RATIO_THRESHOLD);
+    expect(signals.uniformFillSignal).toBe(true);
+    expect(signals.effectiveFillRatio).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    expect(signals.chosenReleaseReason).toBe("solid_state");
+
+    // End-to-end: baseline locks, two solid frames earn the normal 2-frame streak.
+    expect(evaluateControlFill(CAP, baseline).found).toBe(false);
+    const f1 = evaluateControlFill(CAP, solid);
+    const f2 = evaluateControlFill(CAP, solid);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    expect(f1.temporally_confirmed).toBeUndefined();
+    const a1 = advanceReleaseReady(0, undefined, f1);
+    expect(a1.fire).toBe(false);
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f2);
+    expect(a2.fire).toBe(true);
+    expect(a2.consecutiveFull).toBe(VGC_RELEASE_READY_CONSECUTIVE);
+  });
+
+  it("a still-half-filled current with weak center noise is NOT release-capable", () => {
+    const baseline = controlImage({ fillFrac: 0.5 });
+    // Still two-tone (no completion), just mild sub-threshold shimmer in the control.
+    const noisy = controlImage({ fillFrac: 0.5, noise: 18 });
+    const signals = evaluateCompletionSignalsForTests(baseline, noisy)!;
+    expect(signals.uniformFillSignal).toBe(false);
+    expect(signals.completedMarkerSeen).toBe(false);
+    expect(signals.chosenReleaseReason).toBe("none");
+    expect(signals.effectiveFillRatio).toBeLessThan(FULL_RATIO_THRESHOLD);
+  });
+});
+
+// ── Test 7: completed state with a centre checkmark fires after 2-frame confirm. ──
+describe("evaluateControlFill — completed state with centre checkmark", () => {
+  it("two-tone baseline → solid + checkmark fires only after the 2-frame streak", () => {
+    const baseline = controlImage({ fillFrac: 0.5 });
+    const done = controlImage({ fillFrac: 1.0, mark: { value: 255, wFrac: 0.22, hFrac: 0.4 } });
+
+    expect(evaluateControlFill(CAP, baseline).found).toBe(false);
+    const f1 = evaluateControlFill(CAP, done);
+    const f2 = evaluateControlFill(CAP, done);
+    expect(f1.fill_ratio!).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    const a1 = advanceReleaseReady(0, undefined, f1);
+    expect(a1.fire).toBe(false); // never fires on a single full frame
+    const a2 = advanceReleaseReady(a1.consecutiveFull, a1.lastBand, f2);
+    expect(a2.fire).toBe(true);
+  });
+
+  it("a checkmark on an ALREADY-solid baseline fires via the completed_marker path", () => {
+    // Baseline already uniform-solid (little area changes), so the ONLY completion evidence
+    // is the compact centre mark appearing — exercises the completed_marker branch directly.
+    const baseSolid = controlImage({ fillFrac: 1.0 });
+    const withMark = controlImage({ fillFrac: 1.0, mark: { value: 255, wFrac: 0.2, hFrac: 0.2 } });
+    const signals = evaluateCompletionSignalsForTests(baseSolid, withMark)!;
+    expect(signals.uniformFillSignal).toBe(false); // little area change vs a uniform baseline
+    expect(signals.completedMarkerSeen).toBe(true);
+    expect(signals.chosenReleaseReason).toBe("completed_marker");
+    expect(signals.effectiveFillRatio).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+  });
+});
+
+// ── Test 8: completed-state signals are color/polarity agnostic. ──────────────────
+describe("evaluateControlFill — completed-state signals are color/polarity agnostic", () => {
+  it("darker-fill, lighter-fill, and inverted-polarity completions all read solid_state", () => {
+    const variants = [
+      { bg: 230, track: 190, fill: 90 }, // dark fill on light card
+      { bg: 60, track: 110, fill: 30 }, // darker overall
+      { bg: 30, track: 70, fill: 170 }, // INVERTED: light fill on dark card
+    ];
+    for (const v of variants) {
+      const baseline = controlImage({ fillFrac: 0.5, ...v });
+      const solid = controlImage({ fillFrac: 1.0, ...v });
+      const signals = evaluateCompletionSignalsForTests(baseline, solid)!;
+      expect(signals).not.toBeNull();
+      expect(signals.uniformFillSignal).toBe(true);
+      expect(signals.chosenReleaseReason).toBe("solid_state");
+      expect(signals.effectiveFillRatio).toBeGreaterThanOrEqual(FULL_RATIO_THRESHOLD);
+    }
+  });
+});
+
+// ── Test 9: strong centre shimmer over a PARTIAL bar must not false-fire. ─────────
+describe("evaluateControlFill — centre shimmer over a partial bar never fires", () => {
+  it("a strong centre mark on a non-solid surround stays not-release-capable", () => {
+    const baseline = controlImage({ fillFrac: 0.5 });
+    // Still bimodal (no completion) but with a strong bright centre mark (false 'completion').
+    const shimmer = controlImage({ fillFrac: 0.5, mark: { value: 255, wFrac: 0.2, hFrac: 0.5 } });
+    const signals = evaluateCompletionSignalsForTests(baseline, shimmer)!;
+    // The surround is NOT solid, so the marker gate refuses it and uniform is false.
+    expect(signals.uniformFillSignal).toBe(false);
+    expect(signals.completedMarkerSeen).toBe(false);
+    expect(signals.chosenReleaseReason).toBe("none");
+    expect(signals.effectiveFillRatio).toBeLessThan(FULL_RATIO_THRESHOLD);
+  });
+
+  it("the slow 50–75% plateau keeps the completed-state signals off", () => {
+    const baseline = controlImage({ fillFrac: 0 });
+    for (const frac of [0.5, 0.6, 0.7, 0.74]) {
+      const s = evaluateCompletionSignalsForTests(baseline, controlImage({ fillFrac: frac }))!;
+      expect(s.uniformFillSignal).toBe(false);
+      expect(s.completedMarkerSeen).toBe(false);
+      expect(s.chosenReleaseReason).toBe("none");
+    }
+  });
+});
+
+// ── Test 10: the dev-only measurement-diagnostics patch must not change the agent-facing
+// return shape. `evaluateControlFill` still returns ONLY the ProgressFillEstimate fields —
+// the new bucket/enum diagnostics live in disk-only debug crops, never on the estimate. ──
+describe("evaluateControlFill — agent-facing return shape is unchanged", () => {
+  it("a measured estimate exposes only found/fill_ratio/band (no diagnostics leak)", () => {
+    evaluateControlFill(CAP, controlImage({ fillFrac: 0 })); // baseline lock
+    const est = evaluateControlFill(CAP, controlImage({ fillFrac: 0.6 }));
+    expect(est.found).toBe(true);
+    // The estimate carries no measurement-diagnostic fields — those are disk-only.
+    const allowed = new Set(["found", "fill_ratio", "band", "temporally_confirmed"]);
+    for (const k of Object.keys(est)) expect(allowed.has(k)).toBe(true);
+    expect((est as unknown as Record<string, unknown>).measurement).toBeUndefined();
+    expect((est as unknown as Record<string, unknown>).control_bounds_status).toBeUndefined();
+  });
+
+  it("a not-found estimate is just { found:false }", () => {
+    const est = evaluateControlFill(CAP, blank());
+    expect(est.found).toBe(false);
+    for (const k of Object.keys(est)) expect(k).toBe("found");
   });
 });

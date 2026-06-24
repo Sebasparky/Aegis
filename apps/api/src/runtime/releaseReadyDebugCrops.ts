@@ -58,6 +58,57 @@ type ControlRejectionReason =
   | "off_center";
 /** The whole-crop temporal read's compared-frame mode (progress/telemetry only). */
 type WholeCropMode = "strict_plateau" | "relaxed_sustained" | "not_strong";
+/** Why the control-fill detector reported the frame as release-capable (or not). Mirrors the
+ *  detector's `ChosenReleaseReason` (type-only copy — no runtime import, avoids a cycle). */
+type ChosenReleaseReason =
+  | "none"
+  | "column_fill_ge92"
+  | "solid_state"
+  | "completed_marker";
+
+// Control-measurement diagnostic enums (type-only copies of the detector's vocab — no runtime
+// import, avoids a cycle). All bucketed/enum/boolean; raw px/coords/ratios NEVER reach meta.
+type ControlBoundsStatus = "locked" | "unresolved" | "pending_baseline";
+type ControlSizeBucket = "tiny" | "small" | "medium" | "large" | "xl";
+type ControlPositionBucket = "near_start" | "center" | "near_end";
+type ControlAspectBucket = "lt2" | "2_4" | "4_8" | "ge8";
+type EdgeSampleCountBucket = "none" | "lt8" | "8_24" | "ge24";
+type EdgeOffLevelSide = "none" | "left" | "right" | "both" | "unknown";
+type UniformSignalFailureReason =
+  | "none"
+  | "current_not_uniform"
+  | "unchanged_uniform_baseline"
+  | "insufficient_changed_area"
+  | "unresolved_bounds"
+  | "unknown";
+type SolidStateGuardReason =
+  | "passed_changed_area"
+  | "passed_baseline_nonuniform"
+  | "failed_no_material_change"
+  | "failed_current_not_uniform"
+  | "unknown";
+type MarkerDeltaBucket = "none" | "below_min" | "in_band" | "above_max";
+type MarkerFailureReason =
+  | "none"
+  | "center_delta_too_low"
+  | "marker_area_too_small"
+  | "marker_area_too_large"
+  | "surround_not_uniform"
+  | "unresolved_bounds"
+  | "unknown";
+
+/** Raw control geometry in crop-pixel space, used ONLY to render the dev-only overlay PNG.
+ *  NEVER serialized to meta.json — meta stays enums/buckets/booleans. */
+interface ControlOverlayGeom {
+  bounds: { x0: number; x1: number; y0: number; y1: number };
+  /** Number of leftmost/rightmost columns sampled as the uniform "edge" zones. */
+  edgeInsetCols: number;
+  /** Excluded centre marker (checkmark) zone. */
+  markerZone: { cx0: number; cx1: number; cy0: number; cy1: number };
+  /** Off-level edge tints (red when off-level, blue when at-level). */
+  offLevelLeft: boolean;
+  offLevelRight: boolean;
+}
 
 /** Repo-relative default root (gitignored). */
 const DEBUG_SUBDIR = path.join("dev-artifacts", "vgc-release-ready-debug");
@@ -103,10 +154,39 @@ interface PendingDiag {
   control_candidate_kind: CandidateKind | null;
   /** Control-fill detector's fill bucket when it measured one (else null). */
   control_fill_bucket: FillBucket | null;
+  // ── Completed-state signal breakdown (why a uniform solid + checkmark reads full even when
+  // the left-to-right column count stayed low). Bucketed/boolean/enum only. ──
+  /** Raw geometric transitioned-columns bucket (before completed-state signals). */
+  transitioned_columns_bucket: FillBucket | null;
+  /** Fraction-of-control-changed-vs-baseline bucket. */
+  changed_area_bucket: FillBucket | null;
+  /** A compact centre mark (checkmark) landed in the plausible band (pre-surround gate). */
+  center_completion_signal_seen: boolean | null;
+  /** A centre mark on a solid surround — the completion-marker trigger. */
+  completed_marker_seen: boolean | null;
+  /** Which signal made the frame release-capable (or `none`). */
+  chosen_release_reason: ChosenReleaseReason | null;
   /** Which estimate the seam returned. */
   chosen_candidate_kind: CandidateKind;
   /** The chosen estimate's fill bucket. */
   chosen_fill_bucket: FillBucket;
+  // ── Control-measurement breakdown (dev-only visibility: what bounds were locked + WHY each
+  // release path failed). Bucketed/enum/boolean only; null until a measured frame notes them. ──
+  control_bounds_status: ControlBoundsStatus | null;
+  control_bounds_size_bucket: ControlSizeBucket | null;
+  control_bounds_horizontal_position_bucket: ControlPositionBucket | null;
+  control_bounds_vertical_position_bucket: ControlPositionBucket | null;
+  control_bounds_aspect_bucket: ControlAspectBucket | null;
+  base_edge_uniform_bucket: FillBucket | null;
+  cur_edge_uniform_bucket: FillBucket | null;
+  edge_off_level_side_bucket: EdgeOffLevelSide | null;
+  edge_sample_count_bucket: EdgeSampleCountBucket | null;
+  uniform_signal_seen: boolean | null;
+  uniform_signal_failure_reason: UniformSignalFailureReason | null;
+  solid_state_guard_reason: SolidStateGuardReason | null;
+  marker_delta_bucket: MarkerDeltaBucket | null;
+  marker_area_bucket: FillBucket | null;
+  marker_failure_reason: MarkerFailureReason | null;
 }
 
 /** A fully-assembled crop bundle awaiting the `fired` decision from the monitor tick. */
@@ -116,6 +196,8 @@ interface PendingProbe extends PendingDiag {
   baselinePngB64: string;
   previousPngB64: string | undefined; // absent on the first probe of a hold
   crop_source: SelectedCropSource;
+  /** Locked control geometry for the overlay PNG (absent when no measured frame). */
+  overlayGeom: ControlOverlayGeom | undefined;
 }
 
 interface CapsuleDebugState {
@@ -123,6 +205,7 @@ interface CapsuleDebugState {
   baselinePngB64: string | undefined; // first crop seen this hold (fixed reference)
   previousPngB64: string | undefined; // last crop captured (rolls each probe)
   pendingDiag: PendingDiag | undefined; // notes for the in-flight probe
+  pendingOverlayGeom: ControlOverlayGeom | undefined; // overlay geometry for the in-flight probe
   pending: PendingProbe | undefined; // bundle awaiting commit
 }
 
@@ -136,6 +219,7 @@ function getState(capsuleId: string): CapsuleDebugState {
       baselinePngB64: undefined,
       previousPngB64: undefined,
       pendingDiag: undefined,
+      pendingOverlayGeom: undefined,
       pending: undefined,
     };
     states.set(capsuleId, s);
@@ -157,8 +241,28 @@ function freshDiag(): PendingDiag {
     primary_fill_bucket: "none",
     control_candidate_kind: null,
     control_fill_bucket: null,
+    transitioned_columns_bucket: null,
+    changed_area_bucket: null,
+    center_completion_signal_seen: null,
+    completed_marker_seen: null,
+    chosen_release_reason: null,
     chosen_candidate_kind: "none",
     chosen_fill_bucket: "none",
+    control_bounds_status: null,
+    control_bounds_size_bucket: null,
+    control_bounds_horizontal_position_bucket: null,
+    control_bounds_vertical_position_bucket: null,
+    control_bounds_aspect_bucket: null,
+    base_edge_uniform_bucket: null,
+    cur_edge_uniform_bucket: null,
+    edge_off_level_side_bucket: null,
+    edge_sample_count_bucket: null,
+    uniform_signal_seen: null,
+    uniform_signal_failure_reason: null,
+    solid_state_guard_reason: null,
+    marker_delta_bucket: null,
+    marker_area_bucket: null,
+    marker_failure_reason: null,
   };
 }
 
@@ -246,6 +350,29 @@ export function noteControlFillDiagnostics(
     control_fill_ratio?: number;
     control_candidate_seen: boolean;
     control_rejection_reason: ControlRejectionReason;
+    // Completed-state breakdown (only present on measured frames).
+    transitioned_columns_ratio?: number;
+    changed_area_ratio?: number;
+    center_completion_signal_seen?: boolean;
+    completed_marker_seen?: boolean;
+    chosen_release_reason?: ChosenReleaseReason;
+    // ── Control-measurement breakdown (already bucketed/enum by the detector). All optional:
+    // the early-return paths pass only `control_bounds_status` (+ unresolved reasons). ──
+    control_bounds_status?: ControlBoundsStatus;
+    control_bounds_size_bucket?: ControlSizeBucket;
+    control_bounds_horizontal_position_bucket?: ControlPositionBucket;
+    control_bounds_vertical_position_bucket?: ControlPositionBucket;
+    control_bounds_aspect_bucket?: ControlAspectBucket;
+    base_edge_uniform_bucket?: FillBucket;
+    cur_edge_uniform_bucket?: FillBucket;
+    edge_off_level_side_bucket?: EdgeOffLevelSide;
+    edge_sample_count_bucket?: EdgeSampleCountBucket;
+    uniform_signal_seen?: boolean;
+    uniform_signal_failure_reason?: UniformSignalFailureReason;
+    solid_state_guard_reason?: SolidStateGuardReason;
+    marker_delta_bucket?: MarkerDeltaBucket;
+    marker_area_bucket?: FillBucket;
+    marker_failure_reason?: MarkerFailureReason;
   },
 ): void {
   if (!isReleaseReadyDebugCropsEnabled()) return;
@@ -262,7 +389,79 @@ export function noteControlFillDiagnostics(
     ...(diag.chosen_candidate_kind
       ? { control_fill_bucket: fillBucketFromRatio(diag.control_fill_ratio) }
       : {}),
+    ...(diag.transitioned_columns_ratio !== undefined
+      ? { transitioned_columns_bucket: fillBucketFromRatio(diag.transitioned_columns_ratio) }
+      : {}),
+    ...(diag.changed_area_ratio !== undefined
+      ? { changed_area_bucket: fillBucketFromRatio(diag.changed_area_ratio) }
+      : {}),
+    ...(diag.center_completion_signal_seen !== undefined
+      ? { center_completion_signal_seen: diag.center_completion_signal_seen }
+      : {}),
+    ...(diag.completed_marker_seen !== undefined
+      ? { completed_marker_seen: diag.completed_marker_seen }
+      : {}),
+    ...(diag.chosen_release_reason !== undefined
+      ? { chosen_release_reason: diag.chosen_release_reason }
+      : {}),
+    // Control-measurement breakdown — store each already-bucketed value when present.
+    ...(diag.control_bounds_status !== undefined
+      ? { control_bounds_status: diag.control_bounds_status }
+      : {}),
+    ...(diag.control_bounds_size_bucket !== undefined
+      ? { control_bounds_size_bucket: diag.control_bounds_size_bucket }
+      : {}),
+    ...(diag.control_bounds_horizontal_position_bucket !== undefined
+      ? { control_bounds_horizontal_position_bucket: diag.control_bounds_horizontal_position_bucket }
+      : {}),
+    ...(diag.control_bounds_vertical_position_bucket !== undefined
+      ? { control_bounds_vertical_position_bucket: diag.control_bounds_vertical_position_bucket }
+      : {}),
+    ...(diag.control_bounds_aspect_bucket !== undefined
+      ? { control_bounds_aspect_bucket: diag.control_bounds_aspect_bucket }
+      : {}),
+    ...(diag.base_edge_uniform_bucket !== undefined
+      ? { base_edge_uniform_bucket: diag.base_edge_uniform_bucket }
+      : {}),
+    ...(diag.cur_edge_uniform_bucket !== undefined
+      ? { cur_edge_uniform_bucket: diag.cur_edge_uniform_bucket }
+      : {}),
+    ...(diag.edge_off_level_side_bucket !== undefined
+      ? { edge_off_level_side_bucket: diag.edge_off_level_side_bucket }
+      : {}),
+    ...(diag.edge_sample_count_bucket !== undefined
+      ? { edge_sample_count_bucket: diag.edge_sample_count_bucket }
+      : {}),
+    ...(diag.uniform_signal_seen !== undefined
+      ? { uniform_signal_seen: diag.uniform_signal_seen }
+      : {}),
+    ...(diag.uniform_signal_failure_reason !== undefined
+      ? { uniform_signal_failure_reason: diag.uniform_signal_failure_reason }
+      : {}),
+    ...(diag.solid_state_guard_reason !== undefined
+      ? { solid_state_guard_reason: diag.solid_state_guard_reason }
+      : {}),
+    ...(diag.marker_delta_bucket !== undefined
+      ? { marker_delta_bucket: diag.marker_delta_bucket }
+      : {}),
+    ...(diag.marker_area_bucket !== undefined
+      ? { marker_area_bucket: diag.marker_area_bucket }
+      : {}),
+    ...(diag.marker_failure_reason !== undefined
+      ? { marker_failure_reason: diag.marker_failure_reason }
+      : {}),
   };
+}
+
+/**
+ * Stash the locked control geometry (raw px in crop space) for the in-flight probe, used ONLY
+ * to render `control_overlay.png` at commit. Double-gated; no-op off. The geometry NEVER
+ * reaches meta.json — it is an overlay-image input only, consistent with the crop bytes.
+ */
+export function noteControlOverlayGeometry(capsuleId: string, geom: ControlOverlayGeom): void {
+  if (!isReleaseReadyDebugCropsEnabled()) return;
+  const s = getState(capsuleId);
+  s.pendingOverlayGeom = geom;
 }
 
 /**
@@ -313,11 +512,13 @@ export function noteProbeCrop(
     baselinePngB64: s.baselinePngB64,
     previousPngB64: s.previousPngB64,
     crop_source: args.cropSource,
+    overlayGeom: s.pendingOverlayGeom,
     ...diag,
   };
   // Roll forward for the NEXT probe. baseline stays fixed for the whole hold.
   s.previousPngB64 = args.croppedPngB64;
   s.pendingDiag = undefined;
+  s.pendingOverlayGeom = undefined;
 }
 
 // ─── Commit (run from the monitor tick, once `fired` is known) ─────────────────
@@ -368,7 +569,18 @@ export function commitProbeCrop(
       }
     }
 
-    const meta = buildMeta(capsuleId, pending, result, nowDate.toISOString(), diffWritten);
+    // Optional control-fill measurement overlay (operator-only pixel annotations on the current
+    // crop). Only present when a measured frame stashed locked geometry; fail-soft (null → skip).
+    let overlayWritten = false;
+    if (pending.overlayGeom !== undefined) {
+      const overlay = buildControlOverlayPng(pending.currentPngB64, pending.overlayGeom);
+      if (overlay) {
+        fs.writeFileSync(path.join(dir, "control_overlay.png"), Buffer.from(overlay, "base64"));
+        overlayWritten = true;
+      }
+    }
+
+    const meta = buildMeta(capsuleId, pending, result, nowDate.toISOString(), diffWritten, overlayWritten);
     fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
 
     // Safe telemetry — probe_id + enums/buckets/booleans only. No path, no pixels.
@@ -381,6 +593,7 @@ export function commitProbeCrop(
       fill_bucket: result.fill_bucket,
       fired: result.fired,
       diff_written: diffWritten,
+      control_overlay_written: overlayWritten,
     });
   } catch {
     // Best-effort: a write failure must never affect release-ready behavior.
@@ -431,12 +644,35 @@ interface ReleaseReadyDebugMeta {
   primary_fill_bucket: FillBucket;
   control_candidate_kind: CandidateKind | null;
   control_fill_bucket: FillBucket | null;
+  transitioned_columns_bucket: FillBucket | null;
+  changed_area_bucket: FillBucket | null;
+  center_completion_signal_seen: boolean | null;
+  completed_marker_seen: boolean | null;
+  chosen_release_reason: ChosenReleaseReason | null;
   chosen_candidate_kind: CandidateKind;
   chosen_fill_bucket: FillBucket;
+  // Control-measurement breakdown (dev-only; bucketed/enum/boolean — never px/coords).
+  control_bounds_status: ControlBoundsStatus | null;
+  control_bounds_size_bucket: ControlSizeBucket | null;
+  control_bounds_horizontal_position_bucket: ControlPositionBucket | null;
+  control_bounds_vertical_position_bucket: ControlPositionBucket | null;
+  control_bounds_aspect_bucket: ControlAspectBucket | null;
+  base_edge_uniform_bucket: FillBucket | null;
+  cur_edge_uniform_bucket: FillBucket | null;
+  edge_off_level_side_bucket: EdgeOffLevelSide | null;
+  edge_sample_count_bucket: EdgeSampleCountBucket | null;
+  uniform_signal_seen: boolean | null;
+  uniform_signal_failure_reason: UniformSignalFailureReason | null;
+  solid_state_guard_reason: SolidStateGuardReason | null;
+  marker_delta_bucket: MarkerDeltaBucket | null;
+  marker_area_bucket: FillBucket | null;
+  marker_failure_reason: MarkerFailureReason | null;
   consecutive_full: number;
   fired: boolean;
   has_previous: boolean;
   has_diff: boolean;
+  /** Whether the operator-only control-fill overlay PNG was written this probe. */
+  has_control_overlay: boolean;
 }
 
 function buildMeta(
@@ -445,6 +681,7 @@ function buildMeta(
   result: { found: boolean; fired: boolean; consecutive_full: number; fill_bucket: FillBucket },
   createdAt: string,
   diffWritten: boolean,
+  overlayWritten: boolean,
 ): ReleaseReadyDebugMeta {
   return {
     capsule_id: capsuleId,
@@ -467,12 +704,33 @@ function buildMeta(
     primary_fill_bucket: pending.primary_fill_bucket,
     control_candidate_kind: pending.control_candidate_kind,
     control_fill_bucket: pending.control_fill_bucket,
+    transitioned_columns_bucket: pending.transitioned_columns_bucket,
+    changed_area_bucket: pending.changed_area_bucket,
+    center_completion_signal_seen: pending.center_completion_signal_seen,
+    completed_marker_seen: pending.completed_marker_seen,
+    chosen_release_reason: pending.chosen_release_reason,
     chosen_candidate_kind: pending.chosen_candidate_kind,
     chosen_fill_bucket: pending.chosen_fill_bucket,
+    control_bounds_status: pending.control_bounds_status,
+    control_bounds_size_bucket: pending.control_bounds_size_bucket,
+    control_bounds_horizontal_position_bucket: pending.control_bounds_horizontal_position_bucket,
+    control_bounds_vertical_position_bucket: pending.control_bounds_vertical_position_bucket,
+    control_bounds_aspect_bucket: pending.control_bounds_aspect_bucket,
+    base_edge_uniform_bucket: pending.base_edge_uniform_bucket,
+    cur_edge_uniform_bucket: pending.cur_edge_uniform_bucket,
+    edge_off_level_side_bucket: pending.edge_off_level_side_bucket,
+    edge_sample_count_bucket: pending.edge_sample_count_bucket,
+    uniform_signal_seen: pending.uniform_signal_seen,
+    uniform_signal_failure_reason: pending.uniform_signal_failure_reason,
+    solid_state_guard_reason: pending.solid_state_guard_reason,
+    marker_delta_bucket: pending.marker_delta_bucket,
+    marker_area_bucket: pending.marker_area_bucket,
+    marker_failure_reason: pending.marker_failure_reason,
     consecutive_full: result.consecutive_full,
     fired: result.fired,
     has_previous: pending.previousPngB64 !== undefined,
     has_diff: diffWritten,
+    has_control_overlay: overlayWritten,
   };
 }
 
@@ -498,6 +756,92 @@ function buildDiffPng(prevB64: string, curB64: string): string | null {
       out.data[i + 2] = d;
       out.data[i + 3] = 255;
     }
+    return PNG.sync.write(out).toString("base64");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Operator-only control-fill measurement overlay (base64 PNG) drawn over the CURRENT crop:
+ *   - GREEN rectangle  = the locked control bounds the detector measured inside;
+ *   - BLUE/RED shading  = the left/right EDGE sample zones (red = that end held an off-level
+ *                          column → an unfilled remainder → not uniform);
+ *   - RED rectangle     = the excluded centre MARKER (checkmark) zone.
+ * This answers, at a glance, whether the rectangle sits on the pill, the edge zones sit on the
+ * pill ends, and the marker zone covers the dots/checkmark. Pixel annotations are allowed here
+ * because this is a local dev image artifact (like baseline/current/diff) — NEVER agent-visible,
+ * double-gated, and never serialized to meta.json. Returns null on any decode failure or
+ * out-of-range geometry (overlay is always optional, never throws). Self-contained pngjs. */
+function buildControlOverlayPng(curB64: string, geom: ControlOverlayGeom): string | null {
+  try {
+    const img = PNG.sync.read(Buffer.from(curB64, "base64"));
+    const { width, height } = img;
+    if (width <= 0 || height <= 0) return null;
+    const { bounds, edgeInsetCols, markerZone } = geom;
+    // Reject geometry that does not fit the current crop (dims may have changed between frames).
+    if (bounds.x1 < bounds.x0 || bounds.y1 < bounds.y0) return null;
+    if (bounds.x0 < 0 || bounds.y0 < 0 || bounds.x1 >= width || bounds.y1 >= height) return null;
+
+    const out = new PNG({ width, height });
+    out.data.set(img.data);
+    const clampX = (x: number): number => Math.max(0, Math.min(width - 1, x));
+    const clampY = (y: number): number => Math.max(0, Math.min(height - 1, y));
+    const setPx = (x: number, y: number, r: number, g: number, b: number): void => {
+      const i = (width * clampY(y) + clampX(x)) << 2;
+      out.data[i] = r;
+      out.data[i + 1] = g;
+      out.data[i + 2] = b;
+      out.data[i + 3] = 255;
+    };
+    // Semi-transparent blend so the underlying control stays visible under the zone shading.
+    const blend = (x: number, y: number, r: number, g: number, b: number): void => {
+      const i = (width * clampY(y) + clampX(x)) << 2;
+      out.data[i] = (out.data[i] + r) >> 1;
+      out.data[i + 1] = (out.data[i + 1] + g) >> 1;
+      out.data[i + 2] = (out.data[i + 2] + b) >> 1;
+      out.data[i + 3] = 255;
+    };
+    const rectOutline = (
+      rx0: number,
+      ry0: number,
+      rx1: number,
+      ry1: number,
+      r: number,
+      g: number,
+      b: number,
+    ): void => {
+      for (let x = rx0; x <= rx1; x++) {
+        setPx(x, ry0, r, g, b);
+        setPx(x, ry1, r, g, b);
+      }
+      for (let y = ry0; y <= ry1; y++) {
+        setPx(rx0, y, r, g, b);
+        setPx(rx1, y, r, g, b);
+      }
+    };
+
+    const inset = Math.max(0, edgeInsetCols);
+    // Left edge sample zone.
+    for (let y = bounds.y0; y <= bounds.y1; y++) {
+      for (let x = bounds.x0; x < bounds.x0 + inset && x <= bounds.x1; x++) {
+        if (geom.offLevelLeft) blend(x, y, 220, 40, 40);
+        else blend(x, y, 40, 40, 220);
+      }
+    }
+    // Right edge sample zone.
+    for (let y = bounds.y0; y <= bounds.y1; y++) {
+      for (let x = bounds.x1 - inset + 1; x <= bounds.x1 && x >= bounds.x0; x++) {
+        if (geom.offLevelRight) blend(x, y, 220, 40, 40);
+        else blend(x, y, 40, 40, 220);
+      }
+    }
+    // Excluded centre marker zone outline (red), then the locked bounds outline (green) on top.
+    if (markerZone.cx1 >= markerZone.cx0 && markerZone.cy1 >= markerZone.cy0) {
+      rectOutline(markerZone.cx0, markerZone.cy0, markerZone.cx1, markerZone.cy1, 230, 30, 30);
+    }
+    rectOutline(bounds.x0, bounds.y0, bounds.x1, bounds.y1, 30, 220, 30);
+
     return PNG.sync.write(out).toString("base64");
   } catch {
     return null;

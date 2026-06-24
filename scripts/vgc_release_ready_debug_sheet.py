@@ -45,8 +45,9 @@ _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 DEFAULT_CROPS_DIR = os.path.join(_REPO_ROOT, "dev-artifacts", "vgc-release-ready-debug")
 DEFAULT_OUT = os.path.join(_REPO_ROOT, "dev-artifacts", "vgc-release-ready-debug", "debug-sheet.html")
 
-# Frames shown left-to-right per probe row.
-FRAME_ORDER = ["baseline", "previous", "current", "diff"]
+# Frames shown left-to-right per probe row. `control_overlay` is optional — present only when
+# the double-gated detector stashed locked geometry; absent frames render a `—` placeholder.
+FRAME_ORDER = ["baseline", "previous", "current", "diff", "control_overlay"]
 
 # Metadata fields rendered per row, in display order.
 META_FIELDS = [
@@ -56,6 +57,29 @@ META_FIELDS = [
     "candidate_kind",
     "found",
     "fill_bucket",
+    "control_fill_bucket",
+    "transitioned_columns_bucket",
+    "changed_area_bucket",
+    "center_completion_signal_seen",
+    "completed_marker_seen",
+    "chosen_release_reason",
+    # ── Control-measurement breakdown (what bounds were locked + WHY each release path failed) ──
+    "control_bounds_status",
+    "control_bounds_size_bucket",
+    "control_bounds_horizontal_position_bucket",
+    "control_bounds_vertical_position_bucket",
+    "control_bounds_aspect_bucket",
+    "base_edge_uniform_bucket",
+    "cur_edge_uniform_bucket",
+    "edge_off_level_side_bucket",
+    "edge_sample_count_bucket",
+    "uniform_signal_seen",
+    "uniform_signal_failure_reason",
+    "solid_state_guard_reason",
+    "marker_delta_bucket",
+    "marker_area_bucket",
+    "marker_failure_reason",
+    "has_control_overlay",
     "cumulative_bucket",
     "recent_bucket",
     "strict_strength",

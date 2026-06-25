@@ -363,6 +363,283 @@ const STATIC_BROWSER_TOOLS = [
 // raw @playwright/mcp child).
 const ANTIGEN_OWNED_TOOL_NAMES = new Set(STATIC_BROWSER_TOOLS.map((t) => t.name));
 
+// ─── High-level Antigen handoff tools ─────────────────────────────────────────
+// Safe, Antigen-owned trusted workflows for protected fields (profile/address,
+// payment card, login credential). These are NOT raw browser bypass: the agent
+// receives only safe IDs/statuses; raw profile values, card numbers, CVV,
+// passwords, and vault refs are never returned. Each fill is executed server-side
+// via CDP and still requires user approval where the backend mandates it; payment
+// fills do not authorize a purchase, and the final place-order step is owned by the
+// user (request_purchase_confirmation, intentionally not exposed here).
+//
+// The adapter automatically binds every request_* call to the active antigen-browser
+// runtime (browser_session_id = browser_runtime_id), so the agent never supplies a
+// browser_session_id / external_cdp_url — those params are deliberately omitted from
+// these schemas (additionalProperties:false) to stop an agent from targeting the
+// wrong browser/port.
+const STATIC_HANDOFF_TOOLS = [
+  {
+    name: "request_profile_field_fill",
+    description:
+      "Request Antigen to fill checkout contact and shipping fields (name, email, phone, address) " +
+      "in the active antigen-browser via CDP — without the agent ever receiving raw values.\n\n" +
+      "DO NOT ask the user in chat for checkout name, email, phone, or address. Call this tool first; " +
+      "Antigen asks the user if values are missing.\n\n" +
+      "USE FOR: first_name, last_name, email, phone, shipping_address_line1, shipping_address_line2, " +
+      "city, region, postal_code, country.\n" +
+      "NOT FOR: card number/CVV/expiry → request_payment_card_fill; login credentials → " +
+      "request_secret_field_injection; final order button → user-owned purchase confirmation.\n\n" +
+      "PREFILLED FIELDS ARE UNTRUSTED — request EVERY field the form needs even if it looks filled. " +
+      "Antigen compares the existing value against the protected profile value server-side and only " +
+      "overwrites on mismatch (statuses: 'filled', 'already_correct', 'corrected_existing_value').\n\n" +
+      "FLOW: 1) call request_profile_field_fill with all fields (up to 10). 2) If status='pending_user', " +
+      "immediately call wait_for_profile_memory_request, then retry this tool when it returns 'completed'. " +
+      "3) Otherwise call execute_profile_field_fill with the returned fill_request_id.\n\n" +
+      "Antigen binds this to the active antigen-browser runtime automatically. RAW VALUES ARE NEVER RETURNED.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "page_url", "requested_fields", "reason"],
+      additionalProperties: false,
+      properties: {
+        domain: { type: "string", description: "The checkout domain, e.g. 'ikea.com'. Must match the page_url hostname." },
+        page_url: { type: "string", description: "Full URL of the page containing the form fields." },
+        requested_fields: {
+          type: "array",
+          description: "List of profile fields to fill. Up to 10 per call.",
+          items: {
+            type: "object",
+            required: ["key"],
+            additionalProperties: false,
+            properties: {
+              key: {
+                type: "string",
+                enum: [
+                  "first_name", "last_name", "email", "phone",
+                  "shipping_address_line1", "shipping_address_line2",
+                  "city", "region", "postal_code", "country",
+                ],
+                description: "Which profile field to fill.",
+              },
+              selector_hint: { type: "string", description: "CSS selector targeting only the INPUT element. Must not target button, submit, form, or a[href]." },
+              label: { type: "string", description: "Visible label text of the field." },
+              placeholder: { type: "string", description: "Placeholder text of the input." },
+              reason: { type: "string", description: "Optional per-field reason." },
+            },
+          },
+        },
+        reason: { type: "string", description: "One sentence explaining why these fields are being filled. Shown in the audit trail." },
+      },
+    },
+  },
+  {
+    name: "wait_for_profile_memory_request",
+    description:
+      "Poll until the user fills all missing profile values for a pending profile memory request.\n\n" +
+      "Call immediately after request_profile_field_fill returns status: 'pending_user'. " +
+      "Do NOT ask the user for values in chat — the user acts in Antigen's approvals page.\n\n" +
+      "Terminal statuses: completed, expired, cancelled. On 'completed': retry request_profile_field_fill " +
+      "with the same parameters. RAW PROFILE VALUES ARE NEVER RETURNED.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_memory_request_id"],
+      additionalProperties: false,
+      properties: {
+        profile_memory_request_id: { type: "string", description: "The profile_memory_request_id returned by request_profile_field_fill." },
+        timeout_ms: { type: "number", description: "Max polling duration in milliseconds. Default: 600000 (10 minutes)." },
+        poll_interval_ms: { type: "number", description: "Polling interval in milliseconds. Default: 3000." },
+      },
+    },
+  },
+  {
+    name: "execute_profile_field_fill",
+    description:
+      "Execute a profile field fill — Antigen resolves values from the encrypted vault and fills fields via CDP.\n\n" +
+      "Call after request_profile_field_fill returns a fill_request_id. Antigen fills all requested fields in a " +
+      "single CDP session. Prefilled values matching the protected value report 'already_correct'; wrong prefills " +
+      "are overwritten and report 'corrected_existing_value'. RAW VALUES ARE NEVER RETURNED. " +
+      "This does NOT submit any form or authorize any purchase. Antigen targets the active antigen-browser runtime automatically.",
+    inputSchema: {
+      type: "object",
+      required: ["fill_request_id"],
+      additionalProperties: false,
+      properties: {
+        fill_request_id: { type: "string", description: "The fill_request_id returned by request_profile_field_fill (pffr_... prefix)." },
+      },
+    },
+  },
+  {
+    name: "request_payment_card_fill",
+    description:
+      "Request Antigen to fill a stored payment card field in the active antigen-browser via CDP — without returning raw card values.\n\n" +
+      "CRITICAL BOUNDARY: this approval covers card FIELD FILL only. It does NOT authorize a purchase, charge, or " +
+      "any payment action. The final place-order/pay button is user-owned and goes through a separate purchase " +
+      "confirmation — never click it directly.\n\n" +
+      "SECURITY: card_number and cvv are resolved server-side via KMS and injected via CDP (never returned, masked in " +
+      "the DOM after fill). Non-secret fields (expiry, cardholder_name, billing_zip) are filled without KMS.\n\n" +
+      "FLOW: 1) call request_payment_card_fill per field. If status='approved' call execute_payment_card_fill_handoff; " +
+      "if status='pending_approval' tell the user to approve at /route-run-approvals under 'Payment card requests', " +
+      "then call wait_for_payment_card_fill_authorization with the returned authorization_id. 2) Once approved, call " +
+      "execute_payment_card_fill_handoff per fill_request_id.\n\n" +
+      "EXECUTION ORDER: fill parent-page fields FIRST (expiry_combined, cardholder_name, billing_zip), then " +
+      "iframe-capable fields LAST (card_number, cvv) — follow the response's recommended_fill_order.\n\n" +
+      "FIELD NAMES: card_number, cvv, expiry_month, expiry_year, expiry_combined (MM/YY), cardholder_name, billing_zip. " +
+      "selector_hint must target the INPUT only. Omit payment_method_id to use the default. " +
+      "Antigen binds this to the active antigen-browser runtime automatically.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "field", "page_url", "reason"],
+      additionalProperties: false,
+      properties: {
+        domain: { type: "string", description: "The checkout domain, e.g. 'checkout.example.com'. Must match the page_url hostname." },
+        payment_method_id: { type: "string", description: "Optional. Omit to use the user's default payment method." },
+        field: {
+          type: "string",
+          enum: ["card_number", "cvv", "expiry_month", "expiry_year", "expiry_combined", "cardholder_name", "billing_zip"],
+          description: "Which card field to fill. card_number and cvv are KMS-protected — raw values are never returned.",
+        },
+        page_url: { type: "string", description: "Full URL of the checkout page." },
+        element_hint: {
+          type: "object",
+          description: "Optional hints to locate the input field. selector_hint must target only an input element.",
+          additionalProperties: false,
+          properties: {
+            label: { type: "string", description: "Visible label text for the input field." },
+            placeholder: { type: "string", description: "Placeholder text of the input." },
+            input_type: { type: "string", description: "The type attribute of the input, e.g. 'tel', 'text'." },
+            selector_hint: { type: "string", description: "CSS selector for the INPUT field only. Must not target button, submit, form, or a[href]." },
+            antigen_ref: { type: "string", description: "Opaque ag_* snapshot ref for the field, if available." },
+          },
+        },
+        reason: { type: "string", description: "One sentence explaining why this fill is needed, shown in the audit trail." },
+      },
+    },
+  },
+  {
+    name: "wait_for_payment_card_fill_authorization",
+    description:
+      "Poll until the user approves or denies a pending payment card fill authorization.\n\n" +
+      "Use after request_payment_card_fill returns status='pending_approval'. Tell the user to approve at " +
+      "/route-run-approvals under 'Payment card requests' — do NOT ask the user to confirm in chat.\n\n" +
+      "Terminal statuses: approved, denied, expired, revoked, fulfilled. On 'approved': call " +
+      "execute_payment_card_fill_handoff for each pending fill_request_id.",
+    inputSchema: {
+      type: "object",
+      required: ["authorization_id"],
+      additionalProperties: false,
+      properties: {
+        authorization_id: { type: "string", description: "The authorization_id returned by request_payment_card_fill." },
+        timeout_ms: { type: "number", description: "Max polling duration in milliseconds. Default: 300000 (5 minutes)." },
+        poll_interval_ms: { type: "number", description: "Polling interval in milliseconds. Default: 3000." },
+      },
+    },
+  },
+  {
+    name: "execute_payment_card_fill_handoff",
+    description:
+      "Execute an approved payment card fill — Antigen resolves the field value from KMS and injects it via CDP.\n\n" +
+      "Raw card values (card_number, CVV) are NEVER returned and are masked in the DOM after fill. This call does NOT " +
+      "submit any form, click any button, or authorize any purchase.\n\n" +
+      "Call only after the fill request is 'approved' and the browser is on the page containing the field. " +
+      "EXECUTION ORDER: parent-page fields FIRST (expiry_combined, cardholder_name, billing_zip), iframe fields LAST " +
+      "(card_number, cvv). If a response includes page_refs_likely_stale: true, take ONE fresh antigen_snapshot " +
+      "before reusing any ag_* ref. Antigen targets the active antigen-browser runtime automatically.",
+    inputSchema: {
+      type: "object",
+      required: ["fill_request_id"],
+      additionalProperties: false,
+      properties: {
+        fill_request_id: { type: "string", description: "The fill_request_id returned by request_payment_card_fill." },
+      },
+    },
+  },
+  {
+    name: "request_secret_field_injection",
+    description:
+      "Request Antigen to inject a stored credential (username or password) directly into a field in the active " +
+      "antigen-browser via CDP — without returning the value to the agent.\n\n" +
+      "PRIMARY login path for agent-controlled browsers. Antigen does NOT click Submit/Next/Sign In, choose " +
+      "OAuth vs username/password, or navigate — the agent owns all of that. Antigen only fills the requested field.\n\n" +
+      "CREDENTIAL PROVIDER DOMAINS: each vault pass is bound to a specific provider domain (a GitHub credential is " +
+      "valid only on github.com). Antigen validates the domain before injecting and rejects cross-domain injection.\n\n" +
+      "ONE-APPROVAL FLOW: calling this for a username field creates one credential-use authorization covering BOTH " +
+      "username and password for this login attempt (approved once at /route-run-approvals under 'Login credential " +
+      "requests'). After this: if status='approved' call execute_secret_field_injection; if status='pending_approval' " +
+      "call wait_for_secret_field_injection, then execute after approval. Call list_vault_passes first if you need a " +
+      "pass_id. Antigen binds this to the active antigen-browser runtime automatically.",
+    inputSchema: {
+      type: "object",
+      required: ["domain", "field_kind", "page_url", "reason"],
+      additionalProperties: false,
+      properties: {
+        domain: { type: "string", description: "The domain of the page where the field exists (e.g. 'github.com'). Must match the page_url hostname and the vault pass domain." },
+        pass_id: { type: "string", description: "Optional. The pass_id from list_vault_passes. If omitted, Antigen uses the first matching credential for the domain." },
+        field_kind: {
+          type: "string",
+          enum: ["username", "password"],
+          description: "'username' fills email/username inputs. 'password' fills password inputs. Password injection always requires user approval.",
+        },
+        page_url: { type: "string", description: "The full URL of the current page containing the field. The hostname must match domain." },
+        element_hint: {
+          type: "object",
+          description: "Optional hints to identify the target field.",
+          additionalProperties: false,
+          properties: {
+            label: { type: "string", description: "Visible label text for the input." },
+            placeholder: { type: "string", description: "Placeholder text of the input." },
+            input_type: { type: "string", description: "HTML input type, e.g. 'password', 'email', 'text'." },
+            selector_hint: { type: "string", description: "CSS selector targeting the field." },
+          },
+        },
+        reason: { type: "string", description: "Short explanation shown to the user in the approval UI." },
+      },
+    },
+  },
+  {
+    name: "wait_for_secret_field_injection",
+    description:
+      "Poll until a secret field injection request is approved (or reaches a terminal state).\n\n" +
+      "Use after request_secret_field_injection returns status='pending_approval'. Tell the user to approve at " +
+      "/route-run-approvals under 'Login credential requests' — do NOT ask the user to type a code or 'done' in chat.\n\n" +
+      "Terminal/ready statuses: approved, filled, denied, failed, expired. On 'approved': call " +
+      "execute_secret_field_injection with the injection_request_id.",
+    inputSchema: {
+      type: "object",
+      required: ["injection_request_id"],
+      additionalProperties: false,
+      properties: {
+        injection_request_id: { type: "string", description: "The injection_request_id returned by request_secret_field_injection." },
+        timeout_ms: { type: "number", description: "Max polling duration in milliseconds. Default: 300000 (5 minutes)." },
+        poll_interval_ms: { type: "number", description: "Polling interval in milliseconds. Default: 3000." },
+      },
+    },
+  },
+  {
+    name: "execute_secret_field_injection",
+    description:
+      "Execute an approved secret field injection — Antigen resolves the credential from the KMS vault and injects it " +
+      "into the browser field via CDP. The raw credential value is NEVER returned to the agent. For password fields, " +
+      "Antigen also masks el.value after injection so snapshots return an empty string.\n\n" +
+      "Call only after the injection status is 'approved' and the agent has navigated to the page containing the " +
+      "field. After fill, proceed directly to the next step (e.g. click Sign in) — do NOT snapshot the filled " +
+      "password field. Antigen does not submit forms and targets the active antigen-browser runtime automatically.",
+    inputSchema: {
+      type: "object",
+      required: ["injection_request_id"],
+      additionalProperties: false,
+      properties: {
+        injection_request_id: { type: "string", description: "The injection_request_id returned by request_secret_field_injection." },
+      },
+    },
+  },
+];
+
+// Separate dispatch set for the handoff tools. Deliberately NOT merged into
+// ANTIGEN_OWNED_TOOL_NAMES: that set is the single source of truth for the
+// browser_* catch-all guard and MUST stay browser-only — merging handoff names
+// into it would corrupt the guard's semantics. Handoff tools have no browser_
+// prefix, so they never reach the catch-all; this set only routes dispatch.
+const ANTIGEN_HANDOFF_TOOL_NAMES = new Set(STATIC_HANDOFF_TOOLS.map((t) => t.name));
+
 // ─── Lazy runtime state ────────────────────────────────────────────────────────
 let child = null;
 let browser_runtime_id = null;
@@ -605,7 +882,7 @@ function handlePreInitMessage(msg) {
   }
 
   if (method === "tools/list") {
-    writePreInitResponse(id, { tools: STATIC_BROWSER_TOOLS });
+    writePreInitResponse(id, { tools: [...STATIC_BROWSER_TOOLS, ...STATIC_HANDOFF_TOOLS] });
     return;
   }
 
@@ -960,6 +1237,336 @@ async function antigenRuntimePost(path, bodyWithoutRuntimeId, options = {}) {
   return apiRes;
 }
 
+// ─── High-level handoff HTTP helpers ──────────────────────────────────────────
+// These call the agent-facing handoff routes (profile/payment/secret), which are
+// keyed by their OWN ids — NOT by browser_runtime_id. So unlike antigenRuntimePost
+// they do NOT inject browser_runtime_id and do NOT use the SESSION_NOT_FOUND
+// reinit/retry path (those routes never return SESSION_NOT_FOUND). Both return the
+// parsed JSON body shaped { ok, data, error } from the backend. The CDP binding is
+// carried on the REQUEST body as browser_session_id (= browser_runtime_id), injected
+// by the request_* handlers below — never accepted from the agent.
+
+async function antigenApiGet(path) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  return res.json();
+}
+
+async function antigenApiPost(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  return res.json();
+}
+
+/** Stable error when a request_* handoff is called before the runtime is bound. */
+function runtimeNotBoundError() {
+  return {
+    error: "RUNTIME_NOT_BOUND",
+    message:
+      "The antigen-browser runtime is not bound yet. Take an antigen_snapshot or perform a browser " +
+      "action first so Antigen can target the active browser, then retry this handoff.",
+  };
+}
+
+// ─── Profile field fill handoff handlers ──────────────────────────────────────
+
+async function handoffRequestProfileFieldFill({ domain, page_url, requested_fields, reason } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!Array.isArray(requested_fields) || requested_fields.length === 0) {
+    return { error: "VALIDATION_ERROR", message: "requested_fields is required and must be a non-empty array." };
+  }
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+  if (!browser_runtime_id) return runtimeNotBoundError();
+
+  let res;
+  try {
+    res = await antigenApiPost("/api/agent/v1/profile-field-fills", {
+      domain, page_url, requested_fields, reason,
+      browser_session_id: browser_runtime_id,
+    });
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return {
+      error: res.error?.code ?? "UNKNOWN_ERROR",
+      message: res.error?.message ?? "Failed to create profile field fill request.",
+      ...(res.error?.missing_fields ? { missing_fields: res.error.missing_fields } : {}),
+    };
+  }
+  return res.data;
+}
+
+async function handoffWaitForProfileMemoryRequest({ profile_memory_request_id, timeout_ms = 600000, poll_interval_ms = 3000 } = {}) {
+  if (!profile_memory_request_id) return { error: "VALIDATION_ERROR", message: "profile_memory_request_id is required." };
+  const TERMINAL = new Set(["completed", "expired", "cancelled"]);
+  const deadline = Date.now() + timeout_ms;
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await antigenApiGet(`/api/agent/v1/profile-memory-requests/${encodeURIComponent(profile_memory_request_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll profile memory request." };
+    }
+    if (TERMINAL.has(res.data.status)) return res.data;
+    await new Promise((r) => setTimeout(r, poll_interval_ms));
+  }
+  // Final boundary re-check for a submit that landed at the deadline.
+  try {
+    const finalRes = await antigenApiGet(`/api/agent/v1/profile-memory-requests/${encodeURIComponent(profile_memory_request_id)}`);
+    if (finalRes.ok && TERMINAL.has(finalRes.data.status)) return finalRes.data;
+  } catch { /* best effort */ }
+  return {
+    error: "TIMEOUT",
+    message: "Timed out waiting for profile memory request completion. If the user just submitted values, retry request_profile_field_fill directly.",
+  };
+}
+
+async function handoffExecuteProfileFieldFill({ fill_request_id } = {}) {
+  if (!fill_request_id) return { error: "VALIDATION_ERROR", message: "fill_request_id is required." };
+  let res;
+  try {
+    res = await antigenApiPost(`/api/agent/v1/profile-field-fills/${encodeURIComponent(fill_request_id)}/execute`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Profile field fill execution failed." };
+  }
+  return res.data;
+}
+
+// ─── Payment card fill handoff handlers ───────────────────────────────────────
+
+async function handoffRequestPaymentCardFill({ domain, payment_method_id, field, page_url, element_hint, reason } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!field) return { error: "VALIDATION_ERROR", message: "field is required." };
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+  if (!browser_runtime_id) return runtimeNotBoundError();
+
+  const body = { domain, field, page_url, reason, browser_session_id: browser_runtime_id };
+  if (payment_method_id) body.payment_method_id = payment_method_id;
+  if (element_hint) body.element_hint = element_hint;
+
+  let res;
+  try {
+    res = await antigenApiPost("/api/agent/v1/payment-card-fills", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to create card fill request." };
+  }
+  return res.data;
+}
+
+async function handoffWaitForPaymentCardFillAuthorization({ authorization_id, timeout_ms = 300000, poll_interval_ms = 3000 } = {}) {
+  if (!authorization_id) return { error: "VALIDATION_ERROR", message: "authorization_id is required." };
+  const TERMINAL = new Set(["approved", "denied", "expired", "fulfilled", "revoked"]);
+  const deadline = Date.now() + timeout_ms;
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await antigenApiGet("/api/internal/payment-card-fill-authorizations");
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll card fill authorization." };
+    }
+    const auth = res.data?.find((a) => a.authorization_id === authorization_id);
+    if (!auth) return { error: "NOT_FOUND", message: `Authorization ${authorization_id} not found.` };
+    if (TERMINAL.has(auth.status)) {
+      const next_action = auth.status === "approved"
+        ? "Authorization approved. Call execute_payment_card_fill_handoff for each fill_request_id — parent-page fields FIRST (expiry_combined, cardholder_name, billing_zip), iframe fields LAST (card_number, cvv)."
+        : `Authorization ${auth.status}. Do not attempt card fill. Report outcome to the user.`;
+      return {
+        authorization_id: auth.authorization_id,
+        status: auth.status,
+        domain: auth.domain,
+        payment_method_label: auth.payment_method_label,
+        last4: auth.last4,
+        raw_values_revealed_to_agent: false,
+        purchase_not_authorized: true,
+        ...(auth.approved_at ? { approved_at: auth.approved_at } : {}),
+        next_action,
+      };
+    }
+    await new Promise((r) => setTimeout(r, poll_interval_ms));
+  }
+  return {
+    status: "timeout",
+    authorization_id,
+    raw_values_revealed_to_agent: false,
+    purchase_not_authorized: true,
+    next_action: "Approval has not arrived within the timeout window. Ask the user whether to continue waiting or cancel.",
+  };
+}
+
+async function handoffExecutePaymentCardFillHandoff({ fill_request_id } = {}) {
+  if (!fill_request_id) return { error: "VALIDATION_ERROR", message: "fill_request_id is required." };
+  let res;
+  try {
+    res = await antigenApiPost(`/api/agent/v1/payment-card-fills/${encodeURIComponent(fill_request_id)}/execute`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Card fill execution failed." };
+  }
+  return res.data;
+}
+
+// ─── Secret field injection handoff handlers ──────────────────────────────────
+
+async function handoffRequestSecretFieldInjection({ domain, pass_id, field_kind, page_url, element_hint, reason } = {}) {
+  if (!domain) return { error: "VALIDATION_ERROR", message: "domain is required." };
+  if (!field_kind || !["username", "password"].includes(field_kind)) {
+    return { error: "VALIDATION_ERROR", message: "field_kind must be 'username' or 'password'." };
+  }
+  if (!page_url) return { error: "VALIDATION_ERROR", message: "page_url is required." };
+  if (!reason) return { error: "VALIDATION_ERROR", message: "reason is required." };
+  if (!browser_runtime_id) return runtimeNotBoundError();
+
+  const body = { domain, field_kind, page_url, reason, browser_session_id: browser_runtime_id };
+  if (pass_id) body.pass_id = pass_id;
+  if (element_hint && Object.keys(element_hint).length > 0) body.element_hint = element_hint;
+
+  let res;
+  try {
+    res = await antigenApiPost("/api/agent/v1/injections", body);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to request injection." };
+  }
+  const data = res.data;
+  return {
+    injection_request_id: data.injection_request_id,
+    authorization_id: data.authorization_id ?? null,
+    status: data.status,
+    domain: data.domain,
+    field_kind: data.field_kind,
+    pass_label: data.pass_label ?? null,
+    raw_value_revealed_to_agent: false,
+    expires_at: data.expires_at,
+    authorization_covers: data.authorization_covers ?? null,
+    remaining_uses: data.remaining_uses ?? null,
+    next_action: data.status === "approved"
+      ? `Injection pre-approved. Call execute_secret_field_injection with injection_request_id="${data.injection_request_id}".`
+      : `Tell the user to approve at /route-run-approvals under "Login credential requests", then call wait_for_secret_field_injection with injection_request_id="${data.injection_request_id}". Do NOT ask the user to type "done".`,
+  };
+}
+
+async function handoffWaitForSecretFieldInjection({ injection_request_id, timeout_ms = 300000, poll_interval_ms = 3000 } = {}) {
+  if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
+  // The GET injection status route lazily promotes pending_approval → approved when
+  // the linked credential-use authorization is approved, so polling the injection id
+  // alone is sufficient. "approved" is a ready (non-terminal) state we stop on.
+  const READY = new Set(["approved", "filled", "denied", "failed", "expired"]);
+  const deadline = Date.now() + timeout_ms;
+  while (Date.now() < deadline) {
+    let res;
+    try {
+      res = await antigenApiGet(`/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}`);
+    } catch (err) {
+      return { error: "NETWORK_ERROR", message: err.message };
+    }
+    if (!res.ok) {
+      return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "Failed to poll injection status." };
+    }
+    if (READY.has(res.data.status)) {
+      const next_action = res.data.status === "approved"
+        ? `Approved. Call execute_secret_field_injection with injection_request_id="${injection_request_id}".`
+        : `Injection ${res.data.status}. Do not attempt injection without a new user approval.`;
+      return { ...res.data, raw_value_revealed_to_agent: false, next_action };
+    }
+    await new Promise((r) => setTimeout(r, poll_interval_ms));
+  }
+  return {
+    status: "timeout",
+    injection_request_id,
+    raw_value_revealed_to_agent: false,
+    next_action: "Approval has not arrived within the timeout window. Ask the user whether to continue waiting or cancel.",
+  };
+}
+
+async function handoffExecuteSecretFieldInjection({ injection_request_id } = {}) {
+  if (!injection_request_id) return { error: "VALIDATION_ERROR", message: "injection_request_id is required." };
+  let res;
+  try {
+    res = await antigenApiPost(`/api/agent/v1/injections/${encodeURIComponent(injection_request_id)}/execute`);
+  } catch (err) {
+    return { error: "NETWORK_ERROR", message: err.message };
+  }
+  if (!res.ok) {
+    return { error: res.error?.code ?? "UNKNOWN_ERROR", message: res.error?.message ?? "CDP fill failed." };
+  }
+  const data = res.data;
+  const nextAction = data.field_kind === "password"
+    ? "Password field filled. Do not read or snapshot the filled field — proceed directly to the next step (e.g. click Sign in / Next)."
+    : "Field filled. Continue your workflow — navigate, click submit, etc.";
+  return {
+    injection_request_id: data.injection_request_id,
+    status: data.status,
+    field_kind: data.field_kind,
+    domain: data.domain,
+    filled_at: data.filled_at ?? null,
+    raw_value_revealed_to_agent: false,
+    next_action: nextAction,
+    note: data.note ?? "Antigen injected the field value directly via CDP. The raw credential was never returned to the agent.",
+  };
+}
+
+/**
+ * Dispatches a high-level handoff tools/call to its handler and writes the MCP
+ * response. Runs only after ensureRuntime() so browser_runtime_id is bound for the
+ * request_* binding injection. Returns only safe IDs/statuses — raw profile values,
+ * card numbers, CVV, passwords, and vault refs are never echoed.
+ */
+async function handleHandoffTool(toolName, msg) {
+  const requestId = msg.id;
+  const args = msg?.params?.arguments ?? {};
+  process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] handoff_tool_attempt tool=${toolName}\n`);
+  let result;
+  try {
+    switch (toolName) {
+      case "request_profile_field_fill": result = await handoffRequestProfileFieldFill(args); break;
+      case "wait_for_profile_memory_request": result = await handoffWaitForProfileMemoryRequest(args); break;
+      case "execute_profile_field_fill": result = await handoffExecuteProfileFieldFill(args); break;
+      case "request_payment_card_fill": result = await handoffRequestPaymentCardFill(args); break;
+      case "wait_for_payment_card_fill_authorization": result = await handoffWaitForPaymentCardFillAuthorization(args); break;
+      case "execute_payment_card_fill_handoff": result = await handoffExecutePaymentCardFillHandoff(args); break;
+      case "request_secret_field_injection": result = await handoffRequestSecretFieldInjection(args); break;
+      case "wait_for_secret_field_injection": result = await handoffWaitForSecretFieldInjection(args); break;
+      case "execute_secret_field_injection": result = await handoffExecuteSecretFieldInjection(args); break;
+      default:
+        writeSyntheticErrorResponse(toolName, requestId, "ANTIGEN_HANDOFF_UNKNOWN", `Unknown handoff tool ${toolName}.`);
+        return;
+    }
+  } catch (err) {
+    writeSyntheticErrorResponse(toolName, requestId, "ANTIGEN_HANDOFF_ERROR", err.message);
+    return;
+  }
+  if (result && result.error) {
+    writeSyntheticErrorResponse(toolName, requestId, result.error, result.message ?? "Handoff failed.");
+    return;
+  }
+  await noteToolDisposition({ tool: toolName, surface: "antigen_adapter", disposition: "antigen_backend", resultCode: "success" });
+  writeSyntheticResponse(requestId, JSON.stringify(result));
+}
+
 /**
  * Calls POST /api/agent/v1/runtime/browser-navigation-state to update current_url
  * and persist a navigation_proxy pointer state. Awaited with a 400ms timeout.
@@ -1220,7 +1827,14 @@ async function handleLine(line) {
   // hard-negative capture). It needs a browser runtime and is handled locally.
   const isManualReviewCapture =
     method === "tools/call" && name === "antigen_capture_visual_review_candidate";
-  const needsRuntime = isBrowserToolCall || isAntigenSnapshot || isManualReviewCapture;
+  // High-level Antigen handoff tools (profile/payment/secret). Not browser_ tools,
+  // so they bypass the browser_* catch-all; they need a bound runtime so the
+  // request_* binding (browser_session_id = browser_runtime_id) is available, hence
+  // they route through ensureRuntime() and are handled locally — never forwarded to
+  // @playwright/mcp (the child has no such tool).
+  const isHandoffToolCall =
+    method === "tools/call" && typeof name === "string" && ANTIGEN_HANDOFF_TOOL_NAMES.has(name);
+  const needsRuntime = isBrowserToolCall || isAntigenSnapshot || isManualReviewCapture || isHandoffToolCall;
 
   // Emit a diagnostic for every message processed before runtime is ready.
   if (!runtimeInitDone) {
@@ -1247,6 +1861,14 @@ async function handleLine(line) {
   await ensureRuntime();
 
   const toolName = name;
+
+  // ── High-level handoff tools — adapter-owned, never forwarded to @playwright/mcp
+  // Placed before the browser handlers and the browser_* catch-all. Binds to the
+  // active runtime and returns only safe IDs/statuses (no raw values).
+  if (ANTIGEN_HANDOFF_TOOL_NAMES.has(toolName)) {
+    await handleHandoffTool(toolName, msg);
+    return;
+  }
 
   // ── antigen_snapshot: adapter-owned — never forwarded to @playwright/mcp ────
   // Calls the Antigen backend snapshot endpoint and returns a readable, safe

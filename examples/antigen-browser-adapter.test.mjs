@@ -383,6 +383,16 @@ describe("E. Pre-init gate", () => {
       "browser_set_value",
       "browser_take_screenshot",
       "browser_type",
+      // High-level Antigen handoff tools (safe, Antigen-owned — never raw browser bypass).
+      "execute_payment_card_fill_handoff",
+      "execute_profile_field_fill",
+      "execute_secret_field_injection",
+      "request_payment_card_fill",
+      "request_profile_field_fill",
+      "request_secret_field_injection",
+      "wait_for_payment_card_fill_authorization",
+      "wait_for_profile_memory_request",
+      "wait_for_secret_field_injection",
     ];
     assert.deepEqual(advertised, expected, `tools/list must advertise exactly the Antigen-owned set, got: ${advertised.join(",")}`);
 

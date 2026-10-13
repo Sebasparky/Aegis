@@ -293,7 +293,7 @@ Everything below is implemented and working.
 ### Aegis MCP Tool Server (External Agent Integration via MCP)
 - `examples/aegis-tool-server.mjs` — MCP server exposing Aegis agent APIs as MCP tools
 - Tools: `discover_installed_skills`, `request_skill_run`, `get_route_run_status`, `get_route_run_receipt`
-- Connect via: `claude mcp add aegis -- node /Users/sebastianchacon/Desktop/aegis/examples/aegis-tool-server.mjs`
+- Connect via: `claude mcp add aegis -- node <ABSOLUTE_PATH_TO_REPO>/examples/aegis-tool-server.mjs`
 - **First successful end-to-end test (2026-05-01):**
   - Claude Code discovered Wikipedia Search via `discover_installed_skills`
   - Requested RouteRun for query `Wisconsin` via `request_skill_run`
@@ -669,7 +669,7 @@ Aegis-controlled sensitive execution path (via extension) is **complete** — va
 
 **Agent-Browser Secret Injection v1 + One-Approval Credential Use Authorization + Real GitHub Test — complete (2026-05-04).**
 
-Agents use their own Playwright browser for navigation, clicking, reading, and form submission. Aegis fills only the protected credential fields (username, password) via CDP. One user approval covers both fields per login attempt. Authorization becomes `fulfilled` after both fields are used once — replay blocked with `AUTHORIZATION_FULFILLED`. Tested successfully against real GitHub with private repo (`NordaTestUser/Test-Repo`). See `docs/REAL_GITHUB_SECRET_INJECTION_TEST.md` for full checkpoint.
+Agents use their own Playwright browser for navigation, clicking, reading, and form submission. Aegis fills only the protected credential fields (username, password) via CDP. One user approval covers both fields per login attempt. Authorization becomes `fulfilled` after both fields are used once — replay blocked with `AUTHORIZATION_FULFILLED`. Tested successfully against real GitHub with private repo (`<github-test-account>/Test-Repo`). See `docs/REAL_GITHUB_SECRET_INJECTION_TEST.md` for full checkpoint.
 
 Key invariants:
 - `request_secret_field_injection` is the PRIMARY login path for agent-controlled browsers.
@@ -905,7 +905,7 @@ GitHub end-to-end smoke test (2026-05-22):
 - `credauth_6cc95b34f918` — credential-use authorization
 - `csh_20e4559a9c3e` — handoff; status `navigated`; post-handoff URL `https://github.com/`; page title "GitHub"
 - No raw credential value exposed to agent; no `browser_snapshot` between fill and submit
-- `NordaTestUser` — 1 private repo (`Test-Repo`) read post-login; login succeeded without 2FA/passkey/email challenge
+- `<github-test-account>` — 1 private repo (`Test-Repo`) read post-login; login succeeded without 2FA/passkey/email challenge
 
 Architecture confirmed: Antigen provisions runtime → `antigen-browser` drives ordinary browsing → Antigen executes sensitive micro-step → `antigen-browser` resumes.
 

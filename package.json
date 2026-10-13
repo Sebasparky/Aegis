@@ -10,6 +10,8 @@
     "build": "turbo build",
     "typecheck": "turbo typecheck",
     "seed:demo": "node apps/api/scripts/seed-demo-data.mjs",
+    "demo:preflight": "node scripts/demo-preflight.mjs",
+    "demo:preflight:live": "node scripts/demo-preflight.mjs --live",
     "chrome:agent": "node apps/api/scripts/start-aegis-debug-chrome.mjs",
     "chrome:agent:dev": "node apps/api/scripts/start-aegis-debug-chrome.mjs --persistent-dev",
     "qa:validate-mcp": "node scripts/validate-antigen-qa-mcp.mjs",

@@ -3,6 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "npx serve -l 3001 ."
+    "dev": "npx serve -l tcp://127.0.0.1:3001 ."
   }
 }

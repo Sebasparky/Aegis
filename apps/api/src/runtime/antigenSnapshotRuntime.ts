@@ -1607,6 +1607,55 @@ export interface PageHumanVerificationWall {
  *    `unknown_human_verification` — we must not assert press_and_hold for text we
  *    cannot read.
  */
+/**
+ * SAME-ORIGIN IFRAME WALL scan (page-level HV, JS snippet shared by the hint and
+ * the confirming probe — zero drift). Live PerimeterX on Bath & Body Works
+ * (2026-10-06) renders the challenge as a full-viewport, fixed, max-z iframe
+ * (`#px-captcha-modal`) whose document is SAME-ORIGIN and readable: the strong
+ * text ("Before we continue… Press & Hold to confirm you are a human") lives in
+ * that iframe's document — not the top document — and the hold control sits in a
+ * further, cross-origin iframe nested inside it. Every other path requires an
+ * INACCESSIBLE top-level iframe and/or HV text in the TOP document, so this shape
+ * classified as "no challenge" while blocking every click.
+ *
+ * Only iframes that are themselves a page-blocking overlay (fixedCoverage>=0.5:
+ * fixed/sticky, z>=10, >=50% of the viewport) are read, one level deep, text
+ * clipped to 4000 chars. A frame qualifies ONLY with a STRONG HV phrase (shared
+ * HV_TEXT_RE) AND either a nested inaccessible iframe or wall-context text
+ * (before-we-continue / reference id / access denied) — so a full-screen
+ * same-origin promo iframe ("We Missed You! Enjoy 10% off") never classifies.
+ * Returns booleans/enum only; never text, src, selectors, or geometry.
+ * Requires fixedCoverage / HV_TEXT_RE / HV_HOLD_RE / txt from the overlay snippet.
+ */
+const SAME_ORIGIN_IFRAME_WALL_JS = `
+    function sameOriginIframeWall(){
+      var out={ seen:false, hold:false };
+      try{
+        var WALL_CTX_RE=/before\\s+we\\s+continue|reference\\s+id|access\\s+(to\\s+this\\s+page\\s+)?(is\\s+|has\\s+been\\s+)?denied/i;
+        var frames=document.querySelectorAll('iframe');
+        for(var i=0;i<frames.length&&i<20;i++){
+          var fr=frames[i];
+          if(fixedCoverage(fr)<0.5) continue;
+          var d=null; try{ d=fr.contentDocument; }catch(e){ d=null; }
+          if(!d||!d.body) continue;
+          var t=''; try{ t=txt(d.body.innerText||d.body.textContent||'').slice(0,4000); }catch(e){ t=''; }
+          if(!t||!HV_TEXT_RE.test(t)) continue;
+          var nestedInaccessible=false;
+          try{
+            var inner=d.querySelectorAll('iframe');
+            for(var j=0;j<inner.length&&j<20;j++){
+              var acc=false; try{ acc=!!inner[j].contentDocument; }catch(e){ acc=false; }
+              if(!acc){ nestedInaccessible=true; break; }
+            }
+          }catch(e){}
+          if(nestedInaccessible||WALL_CTX_RE.test(t)){
+            out.seen=true; out.hold=HV_HOLD_RE.test(t); return out;
+          }
+        }
+      }catch(e){}
+      return out;
+    }`;
+
 export function buildPageHumanVerificationWallExpr(): string {
   return `(function(){
     var OVERLAY_TITLE_MAX=120;
@@ -1674,6 +1723,8 @@ export function buildPageHumanVerificationWallExpr(): string {
     var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }
     var titleText=''; try{ titleText=txt(document.title||''); }catch(e){ titleText=''; }
     var hasHold=HV_HOLD_RE.test(bodyText)||HV_HOLD_RE.test(titleText);
+    ${SAME_ORIGIN_IFRAME_WALL_JS}
+    var soWall=sameOriginIframeWall();
     var textClassified=false;
     if((HV_TEXT_RE.test(bodyText)||HV_TEXT_RE.test(titleText))&&inaccessibleIframe){
       var normalInteractive=0;
@@ -1696,12 +1747,15 @@ export function buildPageHumanVerificationWallExpr(): string {
     // OOPIF child target, observable ONLY via CDP) is made server-side in
     // detectPageHumanVerificationWallViaCDP — never here.
     return {
-      text_classified:!!textClassified,
-      hv_challenge_type:hasHold?'press_and_hold':'unknown_human_verification',
+      // Same-origin iframe wall: strong HV text read from a page-blocking
+      // same-origin iframe (see SAME_ORIGIN_IFRAME_WALL_JS) — a TEXT-path verdict.
+      text_classified:!!(textClassified||soWall.seen),
+      hv_challenge_type:(hasHold||soWall.hold)?'press_and_hold':'unknown_human_verification',
       visible_iframe_seen:!!visibleIframe,
       inaccessible_iframe_seen:!!inaccessibleIframe,
       fixed_overlay_seen:!!fixedOverlay,
-      click_intercept_overlay_seen:!!clickIntercept
+      click_intercept_overlay_seen:!!clickIntercept,
+      same_origin_iframe_wall_seen:!!soWall.seen
     };
   })()`;
 }
@@ -1924,6 +1978,11 @@ export function buildPageHvWallHintExpr(): string {
         if(!accessible){ hasInaccessibleIframe=true; break; }
       }
     }catch(e){}
+    // SAME-ORIGIN IFRAME WALL shape: a page-blocking readable iframe carrying
+    // strong HV text (live PerimeterX #px-captcha-modal). Gates the probe even
+    // when no top-level iframe is inaccessible.
+    ${SAME_ORIGIN_IFRAME_WALL_JS}
+    if(sameOriginIframeWall().seen) return { hint:true };
     if(!hasInaccessibleIframe) return { hint:false };
     // TEXT shape: strong HV text in the top document.
     var bodyText=''; try{ bodyText=txt(document.body?(document.body.innerText||document.body.textContent||''):'').slice(0,4000); }catch(e){ bodyText=''; }

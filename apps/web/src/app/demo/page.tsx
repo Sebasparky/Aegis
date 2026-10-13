@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import {
   listCollars,
-  createPass,
+  createDelegation,
   createAgentSession,
   agentNavigate,
   agentClick,
@@ -86,14 +86,19 @@ export default function DemoPage() {
       if (!collars.length) throw new Error("No collars found. Is the API seeded?");
       const collarId = collars[0].id;
 
-      const pass = await createPass({
+      // Agent auth requires a pass linked to an active delegation
+      // (validatePassToken fails closed with DELEGATION_NOT_FOUND otherwise), so
+      // create the pass through the delegation flow, which links both atomically.
+      // A bare POST /api/passes pass has no delegation and cannot start a session.
+      const { delegation_token } = await createDelegation({
         agent_name: "Demo Agent",
-        purpose: "Antigen Demo — shopping checkout",
+        channel: "api",
         default_collar_id: collarId,
         expires_in_minutes: 30,
       });
 
-      if (!pass.token) throw new Error("Pass created but no token returned.");
+      if (!delegation_token) throw new Error("Delegation created but no pass token returned.");
+      const pass = { token: delegation_token };
       passTokenRef.current = pass.token;
 
       const session = await createAgentSession(pass.token, "Antigen Demo");

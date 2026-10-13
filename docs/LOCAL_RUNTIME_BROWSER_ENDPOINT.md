@@ -274,7 +274,7 @@ The following flow was verified against a real GitHub account (2026-05-22):
 4. **Credential authorization granted.** Agent called `request_secret_field_injection` → approval granted in Aegis UI (`credauth_6cc95b34f918`).
 5. **Atomic handoff executed.** `execute_credential_step_handoff` (`csh_20e4559a9c3e`) filled the password field and clicked Sign in inside a single CDP session. No `browser_snapshot` was called between fill and submit.
 6. **Navigation confirmed.** Handoff returned `status: navigated`, post-handoff URL `https://github.com/`, page title "GitHub".
-7. **Agent resumed read-only.** Agent used `antigen-browser` to read the repository list. `NordaTestUser` had 1 private repo (`Test-Repo`). No raw credential value was exposed to the agent at any point.
+7. **Agent resumed read-only.** Agent used `antigen-browser` to read the repository list. `<github-test-account>` had 1 private repo (`Test-Repo`). No raw credential value was exposed to the agent at any point.
 
 Key invariants confirmed:
 - Credential value never appeared in any tool response or agent context.

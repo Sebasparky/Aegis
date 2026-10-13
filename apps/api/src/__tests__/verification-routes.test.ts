@@ -854,16 +854,16 @@ describe("POST /api/verifications/sessions/:sessionId/submit-code", () => {
     expect(res.body).not.toContain('"student"'); // username prefix must not appear
   });
 
-  it("card claim contains only domain for schacon@umich.edu and response body has no @ symbol", async () => {
-    const { data: created } = await createEmailSession("schacon@umich.edu");
+  it("card claim contains only domain for alex@example.test and response body has no @ symbol", async () => {
+    const { data: created } = await createEmailSession("alex@example.test");
     const sessionId = created.data.session_id;
     const otp = captureOtp(sessionId);
 
     const { res, data } = await submitCode(sessionId, otp!);
     expect(res.statusCode).toBe(201);
-    expect(data.data.card.claims[0].claim_value.email_domain).toBe("umich.edu");
-    expect(res.body).not.toContain("schacon@umich.edu");
-    expect(res.body).not.toContain("schacon");
+    expect(data.data.card.claims[0].claim_value.email_domain).toBe("example.test");
+    expect(res.body).not.toContain("alex@example.test");
+    expect(res.body).not.toContain("alex");
     expect(res.body).not.toContain("@");
   });
 

@@ -52,6 +52,8 @@ import { taskBrowserSessions } from "../runtime/taskBrowserSessions.js";
 
 const FIXTURE_HOLD = fileURLToPath(new URL("./fixtures/press-and-hold-modal.html", import.meta.url));
 const FIXTURE_CHECKBOX = fileURLToPath(new URL("./fixtures/checkbox-human-modal.html", import.meta.url));
+// Labeled demo copy served by the mock store (same challenge markup + script).
+const FIXTURE_DEMO_HOLD = fileURLToPath(new URL("../../../mock-store/hv-challenge.html", import.meta.url));
 const FIXTURE_PROMO = fileURLToPath(new URL("./fixtures/promo-discount-modal.html", import.meta.url));
 // Split-overlay fixtures: a TEXTLESS full-page dimmer + a SEPARATE foreground
 // card — neither node alone is both blocking AND text-positive, so only the
@@ -68,6 +70,10 @@ const FIXTURE_ECOMM_IFRAME = fileURLToPath(new URL("./fixtures/ecommerce-marketi
 // background (20+ extractable refs). element_count is high, so the low-element
 // fast path skips — the cheap hint must fire and the probe must still classify.
 const FIXTURE_OVERLAY_WALL = fileURLToPath(new URL("./fixtures/overlay-wall-preserved-background.html", import.meta.url));
+// Same-origin iframe wall (live PerimeterX shape, 2026-10-06) + negatives.
+const FIXTURE_SO_IFRAME_WALL = fileURLToPath(new URL("./fixtures/same-origin-iframe-hv-wall.html", import.meta.url));
+const FIXTURE_SO_IFRAME_PROMO = fileURLToPath(new URL("./fixtures/same-origin-iframe-promo.html", import.meta.url));
+const FIXTURE_SO_IFRAME_SMALL = fileURLToPath(new URL("./fixtures/same-origin-iframe-small-hv-text.html", import.meta.url));
 // OOPIF / cross-origin-iframe wall: the challenge text AND control render INSIDE
 // the cross-origin iframe, so the top document has NO HV text. Only the
 // text-INDEPENDENT OOPIF path (inaccessible iframe + OOPIF child target +
@@ -369,6 +375,28 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
     }
   }, 30_000);
 
+  it("labeled demo fixture (mock-store/hv-challenge.html) classifies and clears exactly like the tested fixture", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_DEMO_HOLD);
+    const cands = await snapshot();
+    const holdBtn = cands.find((c) => /press\s*&\s*hold/i.test(c.name));
+    expect(holdBtn?.overlay?.blocking).toBe(true);
+    expect(holdBtn?.overlay?.human_verification).toBe(true);
+    expect(holdBtn?.overlay?.hv_challenge_type).toBe("press_and_hold");
+
+    const probe = await runProbe(cdpUrl);
+    expect(probe.present).toBe(true);
+    const box = probe.control_box!;
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    await withPageSession(cdpUrl, async ({ send }) => {
+      await pressAtPoint(send, point, "fast", sleep);
+      await sleep(900);
+      releaseAtPoint(send, point);
+    });
+    await sleep(300);
+    expect((await runProbe(cdpUrl)).present).toBe(false);
+  }, 25_000);
+
   it("classifies the not-a-robot checkbox modal as checkbox_human with the checkbox as control", async () => {
     await gotoFixture(cdpUrl, FIXTURE_CHECKBOX);
     const cands = await snapshot();
@@ -563,6 +591,43 @@ describe.skipIf(!EXE)("Human Presence Relay — real browser detection", () => {
   // The live B&BW Press & Hold popup shape: text + control live inside the
   // cross-origin iframe, so the top document carries no HV language. The
   // text-independent OOPIF path is the only one that classifies it.
+  // ─── Same-origin iframe wall (live PerimeterX #px-captcha-modal shape) ─────
+  // The HV text lives in a page-blocking SAME-ORIGIN iframe's document; the hold
+  // control is in a nested opaque-origin iframe. No HV text in the top document
+  // and no inaccessible TOP-LEVEL iframe — previously classified as "no wall".
+  it("classifies a page-blocking same-origin iframe wall (hint + confirming probe)", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SO_IFRAME_WALL);
+    const cands = await withHvFlag("true", snapshot);
+    expect(cands.length).toBeGreaterThan(20);
+    expect(cands.filter((c) => c.overlay?.human_verification === true)).toHaveLength(0);
+    expect(await withHvFlag("true", bundleHint)).toBe(true);
+    const wall = await withHvFlag("true", detectWall);
+    expect(wall).not.toBeNull();
+    expect(wall!.human_verification).toBe(true);
+    expect(wall!.page_level).toBe(true);
+    expect(wall!.hv_challenge_type).toBe("press_and_hold");
+    expect(wall!.blocking).toBe(true);
+  }, 20_000);
+
+  it("flag OFF: the same-origin iframe wall is not classified and emits no hint", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SO_IFRAME_WALL);
+    // Flag off: the hint is absent from the bundle (byte-identical convention).
+    expect(await withHvFlag("false", bundleHint)).toBeUndefined();
+    expect(await withHvFlag("false", detectWall)).toBeNull();
+  }, 20_000);
+
+  it("does NOT classify a full-viewport same-origin iframe PROMO ('We Missed You')", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SO_IFRAME_PROMO);
+    expect(await withHvFlag("true", bundleHint)).toBe(false);
+    expect(await withHvFlag("true", detectWall)).toBeNull();
+  }, 20_000);
+
+  it("does NOT classify a small, non-blocking same-origin iframe that merely mentions captcha / press & hold", async () => {
+    await gotoFixture(cdpUrl, FIXTURE_SO_IFRAME_SMALL);
+    expect(await withHvFlag("true", bundleHint)).toBe(false);
+    expect(await withHvFlag("true", detectWall)).toBeNull();
+  }, 20_000);
+
   it("classifies the OOPIF no-text wall as unknown_human_verification (text-independent path)", async () => {
     await gotoFixture(cdpUrl, FIXTURE_OOPIF_NO_TEXT);
     // Point the host iframe at the cross-site origin so it becomes a REAL OOPIF

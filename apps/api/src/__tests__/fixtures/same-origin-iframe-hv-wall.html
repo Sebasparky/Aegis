@@ -1,0 +1,58 @@
+<!doctype html>
+<!--
+  Human-verification wall rendered INSIDE a page-blocking SAME-ORIGIN iframe.
+
+  Mirrors the live PerimeterX shape observed on 2026-10-06 (sanitized, synthetic
+  copy): a fixed, full-viewport, max-z iframe with no src whose readable document
+  carries "Before we continue… Press & Hold to confirm you are a human" plus a
+  Reference ID, and whose actual hold control sits in a NESTED opaque-origin
+  (sandboxed) iframe. The top document has no HV text and no inaccessible
+  top-level iframe, so the previous detector paths missed it.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Same-origin iframe HV wall fixture</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a href="/cart">Cart</a>
+      <a href="/account">Account</a>
+    </header>
+    <main>
+      <h1>Seasonal Event</h1>
+      <ul>
+      <li><a href="/p/1">Product 1</a> <button type="button">Add 1</button></li>
+      <li><a href="/p/2">Product 2</a> <button type="button">Add 2</button></li>
+      <li><a href="/p/3">Product 3</a> <button type="button">Add 3</button></li>
+      <li><a href="/p/4">Product 4</a> <button type="button">Add 4</button></li>
+      <li><a href="/p/5">Product 5</a> <button type="button">Add 5</button></li>
+      <li><a href="/p/6">Product 6</a> <button type="button">Add 6</button></li>
+      <li><a href="/p/7">Product 7</a> <button type="button">Add 7</button></li>
+      <li><a href="/p/8">Product 8</a> <button type="button">Add 8</button></li>
+      <li><a href="/p/9">Product 9</a> <button type="button">Add 9</button></li>
+      <li><a href="/p/10">Product 10</a> <button type="button">Add 10</button></li>
+      <li><a href="/p/11">Product 11</a> <button type="button">Add 11</button></li>
+      <li><a href="/p/12">Product 12</a> <button type="button">Add 12</button></li>
+      </ul>
+    </main>
+    <script>
+      (function () {
+        var f = document.createElement("iframe");
+        f.id = "px-captcha-modal";
+        f.setAttribute("style", "position:fixed;inset:0;width:100%;height:100%;border:0;z-index:2147483647;background:rgba(0,0,0,0.45);");
+        document.body.appendChild(f);
+        var d = f.contentDocument;
+        d.open();
+        d.write('<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh"><div style="background:#fff;padding:32px 40px;width:360px;text-align:center;font-family:sans-serif"><h2>Before we continue...</h2><p>Press &amp; Hold to confirm you are a human (and not a bot).</p><iframe sandbox="allow-scripts" src="about:blank" title="challenge control" style="width:260px;height:60px;border:0"></iframe><p style="font-size:12px;color:#888">Reference ID 00000000-0000-0000-0000-000000000000</p></div></body></html>');
+        d.close();
+      })();
+    </script>
+  </body>
+</html>

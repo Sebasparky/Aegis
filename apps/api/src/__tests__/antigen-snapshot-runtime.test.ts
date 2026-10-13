@@ -754,12 +754,12 @@ describe("extraction — value_meta", () => {
     const el = makeEl({
       tag: "input",
       type: "text",
-      value: "Sebastian",
+      value: "Alexandra",
       attrs: { "aria-label": "First name" },
     });
     const [c] = extractCandidates([el]);
     expect(c.value_meta?.sensitive).toBe(false);
-    expect(c.value_meta?.value).toBe("Sebastian");
+    expect(c.value_meta?.value).toBe("Alexandra");
     expect(c.value_meta?.value_present).toBe(true);
     expect(c.value_meta?.value_length).toBe(9);
   });
@@ -1364,12 +1364,12 @@ describe("sanitizeValueMeta — defense-in-depth redaction", () => {
     const out = sanitizeValueMeta({
       sensitive: false,
       sensitivity: null,
-      value: "  Sebastian  ",
+      value: "  Alexandra  ",
       value_present: true,
       value_length: 9,
       required: true,
     });
-    expect(out?.value).toBe("Sebastian");
+    expect(out?.value).toBe("Alexandra");
     expect(out?.value_present).toBe(true);
     expect(out?.required).toBe(true);
   });

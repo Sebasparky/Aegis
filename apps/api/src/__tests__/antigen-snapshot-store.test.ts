@@ -293,11 +293,11 @@ describe("external view", () => {
       makeCandidate({
         tag: "input", kind: "input", role: "textbox", typeable: true, clickable: false,
         href: null, href_path: null, name: "First name",
-        value_meta: { sensitive: false, sensitivity: null, value: "Sebastian", value_present: true, value_length: 9, required: true },
+        value_meta: { sensitive: false, sensitivity: null, value: "Alexandra", value_present: true, value_length: 9, required: true },
       }),
     ]);
     const ext = toExternalAntigenSnapshotElement(elements[0]);
-    expect(ext.value).toEqual({ sensitive: false, present: true, length: 9, text: "Sebastian", required: true });
+    expect(ext.value).toEqual({ sensitive: false, present: true, length: 9, text: "Alexandra", required: true });
   });
 
   it("REDACTS a sensitive field's value to present/length only in the external view", () => {

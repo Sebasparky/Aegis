@@ -14,5 +14,14 @@ apps/api/.aegis-artifacts
 .claude/settings.json
 .playwright-mcp/
 apps/web/tsconfig.tsbuildinfo
+*.tsbuildinfo
 dev-artifacts/
 tmp-pointer-test/
+
+# Machine-specific MCP config (use examples/mcp/antigen-qa.mcp.json as the template)
+.mcp.json
+# Browser session evidence that must never be committed
+*.har
+*.trace.zip
+storageState*.json
+.aegis-chrome-debug-dev/

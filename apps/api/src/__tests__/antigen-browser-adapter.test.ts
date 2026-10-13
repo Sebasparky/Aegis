@@ -18,6 +18,12 @@ const ADAPTER_PATH = resolve(
   "../../../../examples/antigen-browser-adapter.mjs",
 );
 
+// Canonical diagnostic prefix: the adapter tags every stderr line with its
+// contract version, e.g. "[antigen-browser@2026-05-29]" (ADAPTER_VERSION in
+// examples/antigen-browser-adapter.mjs). Match the versioned form rather than a
+// specific date so a version bump does not break the stderr-only invariant test.
+const ADAPTER_STDERR_PREFIX = /\[antigen-browser@\d{4}-\d{2}-\d{2}\]/;
+
 function runAdapter(env: Record<string, string> = {}): {
   stdout: string;
   stderr: string;
@@ -43,7 +49,7 @@ describe("antigen-browser-adapter — stderr-only diagnostic output", () => {
     });
 
     expect(exitCode).not.toBe(0);
-    expect(stderr).toMatch(/\[antigen-browser\]/);
+    expect(stderr).toMatch(ADAPTER_STDERR_PREFIX);
     expect(stderr).toMatch(/AEGIS_AGENT_TOKEN/i);
     // stdout must be empty — no diagnostic text should leak to the MCP channel
     expect(stdout).toBe("");
@@ -56,7 +62,7 @@ describe("antigen-browser-adapter — stderr-only diagnostic output", () => {
     });
 
     expect(exitCode).not.toBe(0);
-    expect(stderr).toMatch(/\[antigen-browser\]/);
+    expect(stderr).toMatch(ADAPTER_STDERR_PREFIX);
     expect(stderr).toMatch(/AEGIS_API_BASE/i);
     expect(stdout).toBe("");
   });
@@ -70,7 +76,7 @@ describe("antigen-browser-adapter — stderr-only diagnostic output", () => {
 
     expect(exitCode).not.toBe(0);
     // Error goes to stderr
-    expect(stderr).toMatch(/\[antigen-browser\]/);
+    expect(stderr).toMatch(ADAPTER_STDERR_PREFIX);
     // stdout remains empty — MCP channel is not polluted
     expect(stdout).toBe("");
   });

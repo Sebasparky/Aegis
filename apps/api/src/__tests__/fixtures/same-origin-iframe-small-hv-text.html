@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  NEGATIVE companion: a small, NON-blocking same-origin iframe whose text mentions
+  CAPTCHA / press & hold / Reference ID (help copy). Not a page-blocking overlay,
+  so it must never classify as a human-verification wall.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Same-origin iframe small help text fixture</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a href="/cart">Cart</a>
+      <a href="/account">Account</a>
+    </header>
+    <main>
+      <h1>Seasonal Event</h1>
+      <ul>
+      <li><a href="/p/1">Product 1</a> <button type="button">Add 1</button></li>
+      <li><a href="/p/2">Product 2</a> <button type="button">Add 2</button></li>
+      <li><a href="/p/3">Product 3</a> <button type="button">Add 3</button></li>
+      <li><a href="/p/4">Product 4</a> <button type="button">Add 4</button></li>
+      <li><a href="/p/5">Product 5</a> <button type="button">Add 5</button></li>
+      <li><a href="/p/6">Product 6</a> <button type="button">Add 6</button></li>
+      <li><a href="/p/7">Product 7</a> <button type="button">Add 7</button></li>
+      <li><a href="/p/8">Product 8</a> <button type="button">Add 8</button></li>
+      <li><a href="/p/9">Product 9</a> <button type="button">Add 9</button></li>
+      <li><a href="/p/10">Product 10</a> <button type="button">Add 10</button></li>
+      <li><a href="/p/11">Product 11</a> <button type="button">Add 11</button></li>
+      <li><a href="/p/12">Product 12</a> <button type="button">Add 12</button></li>
+      </ul>
+    </main>
+    <script>
+      (function () {
+        var f = document.createElement("iframe");
+        f.id = "promo-modal";
+        f.setAttribute("style", "position:static;width:300px;height:120px;border:1px solid #ccc;");
+        document.body.appendChild(f);
+        var d = f.contentDocument;
+        d.open();
+        d.write('<!doctype html><html><body style="font-family:sans-serif;font-size:12px"><p>Help: what is a CAPTCHA? Some sites ask you to press &amp; hold to confirm you are a human. Reference ID shown on the page.</p></body></html>');
+        d.close();
+      })();
+    </script>
+  </body>
+</html>

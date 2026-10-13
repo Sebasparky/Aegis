@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  NEGATIVE companion: a full-viewport same-origin iframe PROMO ("We Missed You!
+  Enjoy 10% off") with a nested opaque-origin signup iframe. Same structure as the
+  same-origin HV wall but NO human-verification language — must never classify.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Same-origin iframe promo fixture</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a href="/cart">Cart</a>
+      <a href="/account">Account</a>
+    </header>
+    <main>
+      <h1>Seasonal Event</h1>
+      <ul>
+      <li><a href="/p/1">Product 1</a> <button type="button">Add 1</button></li>
+      <li><a href="/p/2">Product 2</a> <button type="button">Add 2</button></li>
+      <li><a href="/p/3">Product 3</a> <button type="button">Add 3</button></li>
+      <li><a href="/p/4">Product 4</a> <button type="button">Add 4</button></li>
+      <li><a href="/p/5">Product 5</a> <button type="button">Add 5</button></li>
+      <li><a href="/p/6">Product 6</a> <button type="button">Add 6</button></li>
+      <li><a href="/p/7">Product 7</a> <button type="button">Add 7</button></li>
+      <li><a href="/p/8">Product 8</a> <button type="button">Add 8</button></li>
+      <li><a href="/p/9">Product 9</a> <button type="button">Add 9</button></li>
+      <li><a href="/p/10">Product 10</a> <button type="button">Add 10</button></li>
+      <li><a href="/p/11">Product 11</a> <button type="button">Add 11</button></li>
+      <li><a href="/p/12">Product 12</a> <button type="button">Add 12</button></li>
+      </ul>
+    </main>
+    <script>
+      (function () {
+        var f = document.createElement("iframe");
+        f.id = "promo-modal";
+        f.setAttribute("style", "position:fixed;inset:0;width:100%;height:100%;border:0;z-index:2147483647;background:rgba(0,0,0,0.45);");
+        document.body.appendChild(f);
+        var d = f.contentDocument;
+        d.open();
+        d.write('<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh"><div style="background:#fff;padding:32px 40px;width:360px;text-align:center;font-family:sans-serif"><h2>We Missed You!</h2><p>Enjoy 10% off your next purchase. Sign up for emails and texts.</p><iframe sandbox="allow-scripts" src="about:blank" title="signup form" style="width:260px;height:60px;border:0"></iframe><button type="button">No thanks</button></div></body></html>');
+        d.close();
+      })();
+    </script>
+  </body>
+</html>

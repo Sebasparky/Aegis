@@ -9,13 +9,16 @@
  *
  * In visible + realistic-input mode, intercepts browser_click, browser_fill,
  * and browser_type tool calls and routes them through the Aegis realistic-input
- * API. browser_click and browser_fill fall back to @playwright/mcp on failure.
+ * API. browser_fill / browser_set_value / browser_clear are exact replacement via
+ * /browser-set-value and never fall back to @playwright/mcp (Exact Form-Fill v1).
  * browser_type is adapter-owned: any failure returns a clean MCP error response
  * and is never forwarded to @playwright/mcp (@playwright/mcp requires a "target"
  * field that our schema does not advertise; forwarding always Zod-errors).
  *
  * INVARIANTS:
  * - Never write non-JSON-RPC text to stdout — stdout is the MCP protocol stream.
+ * - Every accepted tools/call gets a response with its id — including lazy
+ *   runtime-init / auth failures, which return a sanitized error (never the token).
  * - Never silently drop a JSON-RPC message. Parse failures and non-browser_type
  *   intercept failures forward the original line to child.stdin (if child exists).
  * - browser_type is NEVER forwarded to child.stdin — it is adapter-owned.
@@ -40,7 +43,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath } from "./lib/adapter-helpers.mjs";
+import { looksLikeSelector, charCountBucket, clipRuntimeId, buildSyntheticSuccessText, buildPostClickStateText, buildAntigenSnapshotText, deriveNavHintsFromSnapshot, classifyNavigationDiscipline, navigationBlockMessage, sanitizeHostPath, extractHumanVerificationMeta, humanVerificationErrorMessage } from "./lib/adapter-helpers.mjs";
 
 export const ADAPTER_VERSION = "2026-05-29";
 
@@ -139,13 +142,13 @@ if (REQUIRE_QA_ENV) {
 // Resolve AEGIS_AGENT_TOKEN against the API and print the agent it maps to, so a human can
 // confirm this adapter and the aegis MCP server resolve to the SAME delegation. A mismatch is
 // the root cause of profile-fill INVALID_TOKEN / TASK_BROWSER_SESSION_FORBIDDEN during checkout.
-// Sanitized: logs only the token id (the demo pass id already in MCP config) plus agent_name /
+// Never logs the token value, nor any prefix, hash, or encoding of it: only agent_name /
 // delegation_id. Fire-and-forget so it never blocks the stdio loop.
 fetch(`${BASE}/api/agent/v1/me`, { headers: { Authorization: `Bearer ${TOKEN}` } })
   .then(async (res) => {
     if (res.status === 401) {
       process.stderr.write(
-        `[antigen-browser@${ADAPTER_VERSION}] TOKEN-WARN: AEGIS_AGENT_TOKEN='${TOKEN}' does not resolve to ` +
+        `[antigen-browser@${ADAPTER_VERSION}] TOKEN-WARN: the configured AEGIS_AGENT_TOKEN does not resolve to ` +
         `a delegation (401 from /api/agent/v1/me). Seed demo data and reload the API.\n`
       );
       return;
@@ -153,7 +156,7 @@ fetch(`${BASE}/api/agent/v1/me`, { headers: { Authorization: `Bearer ${TOKEN}` }
     const body = await res.json().catch(() => ({}));
     const id = body?.data ?? body;
     process.stderr.write(
-      `[antigen-browser@${ADAPTER_VERSION}] token_self_check ok token='${TOKEN}' ` +
+      `[antigen-browser@${ADAPTER_VERSION}] token_self_check ok (authentication configured; token value not logged) ` +
       `agent='${id?.agent_name ?? "?"}' delegation='${id?.delegation_id ?? "?"}'. ` +
       `This MUST match the aegis MCP server's delegation.\n`
     );
@@ -536,11 +539,59 @@ const NAVIGATE_CHILD_TIMEOUT_MS =
 // dropped (not re-forwarded) so the adapter never emits a duplicate response.
 const navigateTimedOutIds = new Set();
 
+// ─── Runtime init failures ────────────────────────────────────────────────────
+// Runtime init happens lazily inside a tools/call, so an init failure (auth,
+// unreachable API, backend refusal) MUST still answer that request id — exiting
+// without a response leaves the MCP client hanging on the call. Errors carry a
+// stable code plus a fixed, agent-safe message; anything that could echo
+// credentials (raw fetch errors, backend messages) is passed through
+// redactSecretMaterial() first and never includes the token, the Authorization
+// header, or any prefix/suffix/base64/hex encoding of the token.
+class RuntimeInitError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "RuntimeInitError";
+    this.code = code;
+  }
+}
+
+function redactSecretMaterial(text) {
+  let out = String(text ?? "");
+  // Authorization header values, whatever the token.
+  out = out.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  if (TOKEN) {
+    const forms = new Set([
+      TOKEN,
+      Buffer.from(TOKEN).toString("base64"),
+      Buffer.from(TOKEN).toString("base64url"),
+      Buffer.from(TOKEN).toString("hex"),
+    ]);
+    for (const form of forms) {
+      if (form) out = out.split(form).join("[redacted]");
+    }
+    // Partial leaks (a clipped prefix or suffix of the token).
+    if (TOKEN.length >= 8) {
+      for (let n = TOKEN.length - 1; n >= 6; n--) {
+        out = out.split(TOKEN.slice(0, n)).join("[redacted]");
+        out = out.split(TOKEN.slice(-n)).join("[redacted]");
+      }
+    }
+  }
+  return out.replace(/\s+/g, " ").slice(0, 300);
+}
+
 async function ensureRuntime() {
   if (!_initPromise) {
     _initPromise = _doInitRuntime().catch((err) => {
-      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] FATAL: ${err.message}\n`);
-      process.exit(1);
+      // Reset so a later call can retry (e.g. the API was briefly down). A
+      // failure after the child was spawned is unrecoverable in-process and is
+      // marked fatal; the caller answers the request first, then exits.
+      _initPromise = null;
+      const initErr = err instanceof RuntimeInitError
+        ? err
+        : new RuntimeInitError("RUNTIME_INIT_FAILED", redactSecretMaterial(err?.message ?? "Browser runtime initialization failed."));
+      initErr.fatal = child !== null;
+      throw initErr;
     });
   }
   return _initPromise;
@@ -616,25 +667,35 @@ async function _doInitRuntime() {
       },
       body: JSON.stringify(headedRequested ? { mode: "visible" } : {}),
     });
-  } catch (err) {
-    throw new Error(`Could not reach Antigen API at ${BASE}. Is the Aegis server running? (${err.message})`);
+  } catch (_err) {
+    // Do not echo the raw fetch error or the API base (it may carry userinfo).
+    throw new RuntimeInitError(
+      "ANTIGEN_API_UNREACHABLE",
+      "Could not reach the Antigen API configured in AEGIS_API_BASE. Is the Aegis server running?",
+    );
   }
 
-  if (res.status === 401) throw new Error("AEGIS_AGENT_TOKEN is invalid, expired, or revoked. Reconnect the agent connector to get a fresh token.");
+  if (res.status === 401) {
+    throw new RuntimeInitError(
+      "INVALID_TOKEN",
+      "AEGIS_AGENT_TOKEN is invalid, expired, or revoked. Reconnect the agent connector to get a fresh token.",
+    );
+  }
 
   let body;
   try {
     body = await res.json();
   } catch {
-    throw new Error(`Unexpected response from Antigen API (status ${res.status}).`);
+    throw new RuntimeInitError("RUNTIME_INIT_BAD_RESPONSE", `Unexpected response from Antigen API (status ${res.status}).`);
   }
 
   if (!res.ok) {
-    const code = body?.error?.code ?? "UNKNOWN_ERROR";
+    const rawCode = body?.error?.code;
+    const code = typeof rawCode === "string" && /^[A-Z0-9_]{1,64}$/.test(rawCode) ? rawCode : "RUNTIME_INIT_FAILED";
     const msg  = body?.error?.message ?? "Failed to initialize browser runtime.";
-    if (code === "NO_PORTS_AVAILABLE") throw new Error("All CDP ports are occupied. Close open Aegis browser sessions and retry.");
-    if (code === "CHROME_NOT_FOUND")    throw new Error("Chrome is not installed or not on PATH. Install Google Chrome and retry.");
-    throw new Error(`${code}: ${msg}`);
+    if (code === "NO_PORTS_AVAILABLE") throw new RuntimeInitError(code, "All CDP ports are occupied. Close open Aegis browser sessions and retry.");
+    if (code === "CHROME_NOT_FOUND")    throw new RuntimeInitError(code, "Chrome is not installed or not on PATH. Install Google Chrome and retry.");
+    throw new RuntimeInitError(code, redactSecretMaterial(msg));
   }
 
   const { cdp_url, browser_runtime_id: runtimeId, runtime_mode, reused_existing } = body.data;
@@ -1177,6 +1238,19 @@ function writeSyntheticResponse(requestId, text) {
 }
 
 /**
+ * Agent-facing message for a HUMAN_VERIFICATION_REQUIRED tool error. Passes
+ * through ONLY the allowlisted, type-validated request metadata (request_id,
+ * status, challenge_type, next_action) so the agent can call
+ * wait_for_human_verification; everything else in the backend body is withheld.
+ */
+function hvRequiredMessage(toolName, errBody) {
+  return humanVerificationErrorMessage(
+    toolName,
+    extractHumanVerificationMeta(errBody?.error, { redact: redactSecretMaterial }),
+  );
+}
+
+/**
  * Writes a synthetic MCP tools/call error response to stdout.
  * stdout is MCP protocol only — never write diagnostics here.
  * Never includes: raw text values, cdp_url, cookies, storage, or selectors.
@@ -1285,7 +1359,11 @@ async function handleExactSetValue(toolName, msg) {
       toolName,
       requestId,
       errCode,
-      errCode === "SESSION_NOT_FOUND" ? sessionNotFoundMessage(toolName) : errMsg,
+      errCode === "SESSION_NOT_FOUND"
+        ? sessionNotFoundMessage(toolName)
+        : errCode === "HUMAN_VERIFICATION_REQUIRED"
+        ? hvRequiredMessage(toolName, errBody)
+        : errMsg,
     );
   } catch (_err) {
     process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] exact_set_value_error reason=INTERCEPT_ERROR source=${toolName}\n`);
@@ -1356,7 +1434,27 @@ async function handleLine(line) {
   }
 
   // ── Adapter-owned / browser tools/call — init runtime if not yet done ──────
-  await ensureRuntime();
+  // Every accepted request gets a response with its id, including init/auth
+  // failures. Never forwarded to @playwright/mcp (there is no child yet).
+  try {
+    await ensureRuntime();
+  } catch (err) {
+    const code = err?.code ?? "RUNTIME_INIT_FAILED";
+    const safeMessage = redactSecretMaterial(err?.message ?? "Browser runtime initialization failed.");
+    process.stderr.write(
+      `[antigen-browser@${ADAPTER_VERSION}] runtime_init_failed code=${code}` +
+      ` tool=${name} fatal=${err?.fatal === true} message=${safeMessage}\n`
+    );
+    if (msg.id !== undefined && msg.id !== null) {
+      writeSyntheticErrorResponse(name, msg.id, code, safeMessage);
+    }
+    if (err?.fatal === true) {
+      // Child was spawned but never became usable — flush the response, then exit.
+      process.stderr.write(`[antigen-browser@${ADAPTER_VERSION}] FATAL: ${safeMessage}\n`);
+      process.stdout.write("", () => process.exit(1));
+    }
+    return;
+  }
 
   const toolName = name;
 
@@ -1433,7 +1531,7 @@ async function handleLine(line) {
         } catch {
           lastNavHints = null;
         }
-        writeSyntheticResponse(requestId, buildAntigenSnapshotText(data, ADAPTER_VERSION));
+        writeSyntheticResponse(requestId, buildAntigenSnapshotText(data, ADAPTER_VERSION, { redact: redactSecretMaterial }));
         return;
       }
 
@@ -1534,6 +1632,8 @@ async function handleLine(line) {
       const scrollErrMsg =
         errCode === "SESSION_NOT_FOUND"
           ? sessionNotFoundMessage("browser_scroll_to_ref")
+          : errCode === "HUMAN_VERIFICATION_REQUIRED"
+          ? hvRequiredMessage("browser_scroll_to_ref", errBody)
           : errCode === "ANTIGEN_REF_NOT_FOUND"
           ? "Antigen browser_scroll_to_ref failed: the ag_* ref was not found in the latest snapshot. Take a fresh antigen_snapshot and retry."
           : errCode === "ANTIGEN_REF_EXPIRED"
@@ -1710,6 +1810,8 @@ async function handleLine(line) {
       // failure. Never surfaces coordinates or live DOM.
       const clickErrMsg = errCode === "SESSION_NOT_FOUND"
         ? sessionNotFoundMessage("browser_click")
+        : errCode === "HUMAN_VERIFICATION_REQUIRED"
+        ? hvRequiredMessage("browser_click", errBody)
         : errCode === "ANTIGEN_REF_PAGE_CHANGED"
         ? "Antigen realistic browser_click failed: the page navigated since this snapshot, so the ag_* ref is no longer valid. Take a new antigen_snapshot and retry."
         : errCode === "ANTIGEN_REF_OUT_OF_VIEWPORT"
@@ -1850,6 +1952,8 @@ async function handleLine(line) {
         errCode,
         errCode === "SESSION_NOT_FOUND"
           ? sessionNotFoundMessage("browser_type")
+          : errCode === "HUMAN_VERIFICATION_REQUIRED"
+          ? hvRequiredMessage("browser_type", errBody)
           : `Antigen realistic browser_type failed (${errCode}).`,
       );
     } catch (_err) {

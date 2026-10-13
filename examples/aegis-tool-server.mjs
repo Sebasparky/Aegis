@@ -5378,7 +5378,7 @@ async function createDemoWebsiteViolationReceipt({
 // loudly at boot instead of as a confusing INVALID_TOKEN mid-checkout. The antigen-browser
 // adapter does the same — both servers MUST resolve to the SAME delegation, otherwise the
 // browser session (owned by one delegation) is invisible to profile-fill (run by the other).
-// Sanitized: logs only the token id (the demo pass id already in MCP config), the resolved
+// Never logs the token value, nor any prefix, hash, or encoding of it; logs only the resolved
 // agent_name and delegation_id. Never logs secrets. Non-fatal: warns but still serves tools.
 async function agentTokenSelfCheck() {
   try {
@@ -5387,7 +5387,7 @@ async function agentTokenSelfCheck() {
     });
     if (res.status === 401) {
       process.stderr.write(
-        `[aegis-tool-server] FATAL-TOKEN: AEGIS_AGENT_TOKEN='${TOKEN}' does not resolve to a delegation ` +
+        `[aegis-tool-server] FATAL-TOKEN: the configured AEGIS_AGENT_TOKEN does not resolve to a delegation ` +
         `(401 from /api/agent/v1/me). Run 'npm run seed:demo' and reload the API, and ensure this token ` +
         `MATCHES the antigen-browser AEGIS_AGENT_TOKEN so both run under the same delegation.\n`
       );
@@ -5396,7 +5396,7 @@ async function agentTokenSelfCheck() {
     const body = await res.json();
     const id = body?.data ?? body;
     process.stderr.write(
-      `[aegis-tool-server] token_self_check ok token='${TOKEN}' ` +
+      `[aegis-tool-server] token_self_check ok (authentication configured; token value not logged) ` +
       `agent='${id?.agent_name ?? "?"}' delegation='${id?.delegation_id ?? "?"}' ` +
       `status='${id?.delegation_status ?? "?"}'. This MUST match the antigen-browser adapter's delegation.\n`
     );
@@ -5414,4 +5414,4 @@ await agentTokenSelfCheck();
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`[aegis-tool-server] Running. API: ${API_BASE} | Token: ${TOKEN}`);
+console.error(`[aegis-tool-server] Running. API: ${API_BASE} | Auth: configured (token value not logged)`);

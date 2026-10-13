@@ -24,7 +24,7 @@ Aegis did NOT navigate, did NOT click "Sign in", did NOT choose between GitHub O
 - Claude Code with Aegis MCP tool server connected via bearer delegation token
 - Playwright MCP (`@playwright/mcp@latest`) started with `--cdp-port 9222`
 - Chrome launched with remote debugging on port 9222 using `npm run chrome:agent` (ephemeral profile — session data is deleted on exit). For local dev only: `npm run chrome:agent:dev` uses `~/.aegis-chrome-debug-dev` (persistent, NOT for real credential injection). **Before testing ephemeral behavior**, close any existing persistent Chrome profile and verify no prior GitHub session is active.
-- GitHub vault pass for `github.com` added to Aegis vault (`NordaTestUser` / encrypted password)
+- GitHub vault pass for `github.com` added to Aegis vault (`<github-test-account>` / encrypted password)
 
 ## Flow
 
@@ -40,8 +40,8 @@ Aegis did NOT navigate, did NOT click "Sign in", did NOT choose between GitHub O
 
 ## Result
 
-- Login succeeded as `NordaTestUser`.
-- Visible repository: `NordaTestUser/Test-Repo`
+- Login succeeded as `<github-test-account>`.
+- Visible repository: `<github-test-account>/Test-Repo`
 - Visibility: Private
 - Description: A private repo created for testing purposes
 - Agent was able to read private repo metadata directly in its own browser after login.

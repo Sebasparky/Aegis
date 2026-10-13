@@ -777,12 +777,12 @@ describe("setFieldValueKnownBox — exact replacement (no keystrokes, no pointer
   }
 
   it("replaces exactly and verifies, dispatching NO keystrokes and persisting NO pointer state", async () => {
-    mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: true, actual: "Chacon", kind: "input" });
-    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Chacon", sessionId: "s1", userId: "u1" });
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: true, actual: "Sample", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Sample", sessionId: "s1", userId: "u1" });
     expect(result.success).toBe(true);
     expect(result.changed).toBe(true);
     expect(result.verified).toBe(true);
-    expect(result.actual_value).toBe("Chacon");
+    expect(result.actual_value).toBe("Sample");
     expect(result.element_kind).toBe("input");
     // Exact replacement is a single Runtime.evaluate — never keystrokes.
     const keyEvents = mockState.allSentMessages.filter((m) => m.includes("Input.dispatchKeyEvent"));
@@ -792,8 +792,8 @@ describe("setFieldValueKnownBox — exact replacement (no keystrokes, no pointer
   });
 
   it("skips when the current value already equals the requested value (changed=false)", async () => {
-    mockState.nextEvalResponse = evalValue({ status: "ok", changed: false, verified: true, actual: "Chacon", kind: "input" });
-    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Chacon" });
+    mockState.nextEvalResponse = evalValue({ status: "ok", changed: false, verified: true, actual: "Sample", kind: "input" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Sample" });
     expect(result.success).toBe(true);
     expect(result.changed).toBe(false);
     expect(result.verified).toBe(true);
@@ -801,7 +801,7 @@ describe("setFieldValueKnownBox — exact replacement (no keystrokes, no pointer
 
   it("returns VALUE_MISMATCH when the read-back differs from the requested value", async () => {
     mockState.nextEvalResponse = evalValue({ status: "ok", changed: true, verified: false, actual: "Seb", kind: "input" });
-    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Sebastian" });
+    const result = await setFieldValueKnownBox({ cdpUrl: "http://localhost:9222", box: BOX, value: "Alexandra" });
     expect(result.success).toBe(false);
     expect(result.error).toBe("VALUE_MISMATCH");
     expect(result.verified).toBe(false);

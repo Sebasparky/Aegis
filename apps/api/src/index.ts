@@ -7,6 +7,7 @@ dotenv.config({ path: resolve(dirname(__filename), "../../../.env") });
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import { resolveApiBindHost, formatApiBindBanner } from "./lib/apiBindHost.js";
 import multipart from "@fastify/multipart";
 import { loadStore } from "./store/persistence.js";
 import { userRoutes } from "./routes/user.js";
@@ -72,6 +73,10 @@ import { formatAntigenRuntimeFlagsLine } from "./runtime/antigenRuntimeFlags.js"
 import { devRoutes } from "./routes/dev.js";
 
 async function main() {
+  // Network boundary first: internal routes have no auth, so refuse any non-loopback bind
+  // before touching the store or spawning anything (throws UnsafeApiBindHostError).
+  const bind = resolveApiBindHost();
+
   await loadStore();
   expireInactiveTaskBrowserSessions();
   await cleanupOrphanedBrowserProcesses();
@@ -182,8 +187,8 @@ async function main() {
     await server.register(devRoutes);
   }
 
-  await server.listen({ port: 4000, host: "0.0.0.0" });
-  console.log("Antigen API running on http://localhost:4000");
+  await server.listen({ port: 4000, host: bind.host });
+  console.log(formatApiBindBanner(bind, 4000, server.addresses()));
   console.log(formatAntigenRuntimeFlagsLine());
 
   let isShuttingDown = false;

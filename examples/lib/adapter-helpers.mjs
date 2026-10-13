@@ -100,6 +100,71 @@ export function buildSyntheticSuccessText(toolName, { bucket, hint, focused, sub
   return `Antigen realistic ${toolName} complete; path=realistic_success; char_count_bucket=${bucket}; source=antigen-browser-adapter@${version}`;
 }
 
+// ─── Human Presence Relay metadata (agent-facing pass-through) ────────────────
+// The backend's HUMAN_VERIFICATION_REQUIRED 409 and the snapshot's
+// `human_verification` block carry a request id the agent needs for
+// wait_for_human_verification. Only these four fields are ever passed through,
+// each type-validated; every other backend field (domain, instructions, page_url,
+// capsule data, …) is withheld. Values that fail validation are dropped, never
+// echoed. next_action is free text, so it is cleaned, clipped, and run through the
+// caller's secret redactor.
+const HV_REQUEST_ID_RE = /^hvr_[A-Za-z0-9]{6,32}$/;
+const HV_STATUSES = new Set(["pending_user", "in_progress", "completed", "expired", "failed", "cancelled"]);
+const HV_CHALLENGE_TYPES = new Set([
+  "press_and_hold", "checkbox_human", "image_captcha", "text_captcha", "puzzle_captcha", "unknown_human_verification",
+]);
+const HV_NEXT_ACTION_MAX = 400;
+
+/**
+ * @param {unknown} raw  backend object (error body `error` or snapshot `human_verification`)
+ * @param {{ redact?: (s: string) => string }} [opts]
+ * @returns {{ request_id: string, status?: string, challenge_type?: string, next_action?: string } | null}
+ *   null unless a well-formed request_id is present.
+ */
+export function extractHumanVerificationMeta(raw, opts = {}) {
+  if (!raw || typeof raw !== "object") return null;
+  const requestId = raw.request_id;
+  if (typeof requestId !== "string" || !HV_REQUEST_ID_RE.test(requestId)) return null;
+  const meta = { request_id: requestId };
+  if (typeof raw.status === "string" && HV_STATUSES.has(raw.status)) meta.status = raw.status;
+  if (typeof raw.challenge_type === "string" && HV_CHALLENGE_TYPES.has(raw.challenge_type)) {
+    meta.challenge_type = raw.challenge_type;
+  }
+  if (typeof raw.next_action === "string") {
+    // Strip control chars, collapse whitespace, neutralize quotes, then redact + clip.
+    let na = raw.next_action.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").replace(/"/g, "'").trim();
+    if (typeof opts.redact === "function") na = String(opts.redact(na) ?? "");
+    na = na.slice(0, HV_NEXT_ACTION_MAX).trim();
+    if (na) meta.next_action = na;
+  }
+  return meta;
+}
+
+/** One-line, allowlist-only rendering of extracted HV metadata. */
+export function formatHumanVerificationMeta(meta) {
+  if (!meta) return "";
+  let s = `request_id=${meta.request_id}`;
+  if (meta.status) s += `; status=${meta.status}`;
+  if (meta.challenge_type) s += `; challenge_type=${meta.challenge_type}`;
+  if (meta.next_action) s += `; next_action="${meta.next_action}"`;
+  return s;
+}
+
+/** Agent guidance for a HUMAN_VERIFICATION_REQUIRED tool error. */
+export function humanVerificationErrorMessage(toolName, meta) {
+  const base =
+    "A human-verification challenge is blocking this page; it requires live user presence in the Antigen UI. " +
+    "Do NOT click, type, retry, or try to bypass the challenge.";
+  if (!meta) {
+    return `${base} Take a fresh antigen_snapshot to obtain the human-verification request_id, then call wait_for_human_verification.`;
+  }
+  return (
+    `${base} human_verification: ${formatHumanVerificationMeta(meta)}. ` +
+    `Tell the user to open the Antigen UI under 'Human check', then call wait_for_human_verification with ` +
+    `{"request_id":"${meta.request_id}"}; after status=completed take a fresh antigen_snapshot before any other action.`
+  );
+}
+
 /** Safe single-line cleaner for agent-facing snapshot text (collapses + clips). */
 function snapClean(value, max = 120) {
   if (typeof value !== "string") return "";
@@ -359,7 +424,7 @@ export function withPostFillSummary(data) {
  * @param {string} version
  * @returns {string}
  */
-export function buildAntigenSnapshotText(data, version) {
+export function buildAntigenSnapshotText(data, version, opts = {}) {
   const d = data ?? {};
   const elements = Array.isArray(d.elements) ? d.elements : [];
   const elementCount = typeof d.element_count === "number" ? d.element_count : elements.length;
@@ -388,6 +453,20 @@ export function buildAntigenSnapshotText(data, version) {
     if (scroll.more_above === true) more.push("more above");
     if (scroll.more_below === true) more.push("more below");
     lines.push(`Scroll: ${snapClean(scroll.position, 16)}${more.length ? ` (${more.join(", ")})` : ""}`);
+  }
+
+  // ── Human verification (Human Presence Relay; allowlisted fields only) ──
+  const hvMeta = extractHumanVerificationMeta(d.human_verification, { redact: opts.redact });
+  if (hvMeta) {
+    lines.push("");
+    lines.push(`HUMAN VERIFICATION REQUIRED: ${formatHumanVerificationMeta(hvMeta)}`);
+    lines.push(
+      hvMeta.status === "completed"
+        ? "Human verification is complete. Use only refs from this fresh snapshot."
+        : `Do NOT click, type, or bypass the challenge. Tell the user to open the Antigen UI under 'Human check', ` +
+          `then call wait_for_human_verification with {"request_id":"${hvMeta.request_id}"}; ` +
+          "after status=completed take a fresh antigen_snapshot.",
+    );
   }
 
   // ── Active surfaces (ANTIGEN_ACTIVE_SURFACES; fields absent when off) ──

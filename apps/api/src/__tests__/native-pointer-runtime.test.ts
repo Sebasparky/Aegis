@@ -6,6 +6,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   pickTargetPoint,
   generatePointerPath,
@@ -723,43 +726,158 @@ describe("clickPointWithPointer — template trace wiring", () => {
 // ─── pointerProfileLoader ─────────────────────────────────────────────────────
 
 describe("pointerProfileLoader", () => {
+  // Hermetic: every test builds its own temp fixture and never depends on the
+  // git-ignored, machine-local dev-artifacts/ profile. The fixture traces are
+  // SYNTHETIC (built from makeHorizontalTrace) — they are not recorded sessions.
   const ORIG_ENV = process.env.ANTIGEN_POINTER_PROFILE_PATH;
+  // Public default location, relative to a repo root (see pointerProfileLoader.ts).
+  const PROFILE_REL = join("dev-artifacts", "pointer-traces", "sebastian_pointer_profile_v1.json");
+  let tmpRoot: string;
+
+  function writeFixture(filePath: string, contents: string): string {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, contents, "utf-8");
+    return filePath;
+  }
+
+  function syntheticProfileJson(): string {
+    return JSON.stringify({
+      synthetic_fixture: true,
+      traces: [
+        makeHorizontalTrace({ trace_id: "synthetic-btn-1", purpose: "button_click" }),
+        makeHorizontalTrace({ trace_id: "synthetic-inp-1", purpose: "input_focus" }),
+      ],
+    });
+  }
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "aegis-pointer-profile-"));
+  });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (ORIG_ENV === undefined) {
       delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
     } else {
       process.env.ANTIGEN_POINTER_PROFILE_PATH = ORIG_ENV;
     }
+    rmSync(tmpRoot, { recursive: true, force: true });
   });
+
+  // ── disabled / missing ──────────────────────────────────────────────────────
 
   it("returns [] when env is empty string (disabled)", () => {
     process.env.ANTIGEN_POINTER_PROFILE_PATH = "";
+    expect(resolveProfilePath()).toBeNull();
     expect(loadPointerTraces()).toEqual([]);
   });
 
   it("returns [] when env is 'false' (disabled)", () => {
     process.env.ANTIGEN_POINTER_PROFILE_PATH = "false";
+    expect(resolveProfilePath()).toBeNull();
     expect(loadPointerTraces()).toEqual([]);
   });
 
   it("returns [] when explicit env path does not exist", () => {
-    process.env.ANTIGEN_POINTER_PROFILE_PATH = "/tmp/__nonexistent_pointer_profile_aegis__.json";
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = join(tmpRoot, "does-not-exist.json");
     expect(loadPointerTraces()).toEqual([]);
   });
 
-  it("resolves repo-root dev-artifacts profile from apps/api cwd", () => {
-    delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
-    // When running from apps/api, the ../../ candidate resolves to repo root.
-    const resolved = resolveProfilePath();
-    expect(resolved).not.toBeNull();
-    expect(resolved).toContain("dev-artifacts");
+  // ── explicit profile loading ────────────────────────────────────────────────
+
+  it("loads traces from an explicit ANTIGEN_POINTER_PROFILE_PATH", () => {
+    const file = writeFixture(join(tmpRoot, "profile.json"), syntheticProfileJson());
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = file;
+    expect(resolveProfilePath()).toBe(file);
+    const traces = loadPointerTraces();
+    expect(traces.map((t) => t.trace_id)).toEqual(["synthetic-btn-1", "synthetic-inp-1"]);
   });
 
-  it("loads non-empty traces from repo-root when no env override", () => {
+  it("trims whitespace around an explicit ANTIGEN_POINTER_PROFILE_PATH", () => {
+    const file = writeFixture(join(tmpRoot, "profile.json"), syntheticProfileJson());
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = `  ${file}\n`;
+    expect(resolveProfilePath()).toBe(file);
+    expect(loadPointerTraces()).toHaveLength(2);
+  });
+
+  it("explicit env path takes precedence over a default-location profile", () => {
+    const repoRoot = join(tmpRoot, "repo");
+    writeFixture(join(repoRoot, PROFILE_REL), syntheticProfileJson());
+    vi.spyOn(process, "cwd").mockReturnValue(join(repoRoot, "apps", "api"));
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = join(tmpRoot, "missing.json");
+    expect(resolveProfilePath()).toBe(join(tmpRoot, "missing.json"));
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  // ── malformed / empty profiles fail soft (Bézier fallback stays active) ─────
+
+  it("returns [] for a malformed JSON profile", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(join(tmpRoot, "bad.json"), "{ not json");
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("returns [] for an empty profile file", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(join(tmpRoot, "empty.json"), "");
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("returns [] when the profile has no traces array", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(join(tmpRoot, "no-traces.json"), JSON.stringify({}));
+    expect(loadPointerTraces()).toEqual([]);
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(
+      join(tmpRoot, "traces-not-array.json"),
+      JSON.stringify({ traces: "nope" }),
+    );
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("returns [] for a profile with an empty traces array", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(join(tmpRoot, "zero.json"), JSON.stringify({ traces: [] }));
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  // ── default-location resolution (no env override) ───────────────────────────
+  // Contract: with no env override the loader checks <cwd>/<PROFILE_REL>, then
+  // <cwd>/../../<PROFILE_REL> (apps/api → repo root), then <cwd>/../<PROFILE_REL>.
+
+  it("resolves the repo-root default profile when running from apps/api", () => {
     delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    const repoRoot = join(tmpRoot, "repo");
+    const expected = writeFixture(join(repoRoot, PROFILE_REL), syntheticProfileJson());
+    vi.spyOn(process, "cwd").mockReturnValue(join(repoRoot, "apps", "api"));
+    expect(resolveProfilePath()).toBe(expected);
+    expect(loadPointerTraces().map((t) => t.trace_id)).toEqual(["synthetic-btn-1", "synthetic-inp-1"]);
+  });
+
+  it("prefers a profile directly under cwd over the repo-root candidate", () => {
+    delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    const repoRoot = join(tmpRoot, "repo");
+    const apiDir = join(repoRoot, "apps", "api");
+    writeFixture(join(repoRoot, PROFILE_REL), syntheticProfileJson());
+    const local = writeFixture(join(apiDir, PROFILE_REL), syntheticProfileJson());
+    vi.spyOn(process, "cwd").mockReturnValue(apiDir);
+    expect(resolveProfilePath()).toBe(local);
+  });
+
+  it("returns null / [] when no default-location profile exists", () => {
+    delete process.env.ANTIGEN_POINTER_PROFILE_PATH;
+    const apiDir = join(tmpRoot, "empty-repo", "apps", "api");
+    mkdirSync(apiDir, { recursive: true });
+    vi.spyOn(process, "cwd").mockReturnValue(apiDir);
+    expect(resolveProfilePath()).toBeNull();
+    expect(loadPointerTraces()).toEqual([]);
+  });
+
+  it("traces loaded from a profile drive the template path in generatePointerPath", () => {
+    process.env.ANTIGEN_POINTER_PROFILE_PATH = writeFixture(join(tmpRoot, "profile.json"), syntheticProfileJson());
     const traces = loadPointerTraces();
     expect(traces.length).toBeGreaterThan(0);
+    const { generator } = generatePointerPath(
+      { x: 0, y: 0 },
+      { x: 200, y: 0 },
+      { templateTraces: traces, purpose: "button_click", random: () => 0.5 },
+    );
+    expect(generator).toBe("template_trace");
   });
 });
 

@@ -1,0 +1,95 @@
+<!doctype html>
+<!--
+  Antigen local test fixture — NOT a real website.
+
+  Human Presence Relay demo page, served by the local mock store
+  (npm -w apps/mock-store run dev → http://127.0.0.1:3001/hv-challenge.html).
+  The challenge markup and script are the same as the tested fixture
+  apps/api/src/__tests__/fixtures/press-and-hold-modal.html: the modal clears
+  only after a REAL pointer hold (mousedown on the button held >= 600ms, then
+  mouseup); a shorter hold shows "try again". Only the visible fixture label and
+  the neutral store copy differ.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Antigen local test fixture — not a real website</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; padding-top: 44px; }
+      .fixture-label {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+        height: 44px; line-height: 44px; text-align: center;
+        background: #b00020; color: #fff; font-weight: 700; font-size: 16px;
+        letter-spacing: 0.02em; pointer-events: none;
+      }
+      header { display: flex; gap: 12px; padding: 16px; border-bottom: 1px solid #ddd; }
+      .hv-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(20, 20, 20, 0.55);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .hv-modal {
+        background: #fff; border-radius: 10px; padding: 32px 40px;
+        width: 360px; text-align: center;
+      }
+      #hv-hold-btn {
+        margin-top: 18px; padding: 12px 40px; font-size: 15px;
+        border: 1px solid #2f6fde; border-radius: 22px;
+        background: #fff; color: #2f6fde; cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="fixture-label" role="note" aria-label="Antigen local test fixture — not a real website">
+      Antigen local test fixture — not a real website.
+    </div>
+    <header>
+      <input id="search" type="search" placeholder="Search products" aria-label="Search products" />
+      <button id="search-btn">Search</button>
+      <a id="cart-link" href="/cart.html">Cart</a>
+      <button id="add-to-bag">Add to bag</button>
+    </header>
+    <main>
+      <h1>Fixture Store Seasonal Event</h1>
+      <p>Synthetic page for the Antigen human-verification demo. No real store, account, or order.</p>
+      <a href="#details">Shop now</a>
+      <p id="details">Challenge cleared — this content is reachable again.</p>
+    </main>
+
+    <div class="hv-backdrop" id="hv-backdrop" role="dialog" aria-modal="true" aria-label="Before we continue">
+      <div class="hv-modal">
+        <h2>Before we continue...</h2>
+        <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+        <button id="hv-hold-btn" type="button">Press &amp; Hold</button>
+        <p id="hv-status" style="font-size: 12px; color: #888;">Reference ID 01234abcd</p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var REQUIRED_HOLD_MS = 600;
+        var btn = document.getElementById("hv-hold-btn");
+        var status = document.getElementById("hv-status");
+        var downAt = 0;
+        btn.addEventListener("mousedown", function () {
+          downAt = Date.now();
+          status.textContent = "Holding…";
+        });
+        btn.addEventListener("mouseup", function () {
+          var held = Date.now() - downAt;
+          if (downAt && held >= REQUIRED_HOLD_MS) {
+            var bd = document.getElementById("hv-backdrop");
+            bd.parentNode.removeChild(bd);
+            window.__hv_cleared = true;
+            window.__hv_held_ms = held;
+          } else {
+            status.textContent = "Released too early — try again.";
+            window.__hv_early_release_count = (window.__hv_early_release_count || 0) + 1;
+          }
+          downAt = 0;
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -33,6 +33,9 @@ import {
   classifyNavigationDiscipline,
   navigationBlockMessage,
   sanitizeHostPath,
+  extractHumanVerificationMeta,
+  formatHumanVerificationMeta,
+  humanVerificationErrorMessage,
 } from "./lib/adapter-helpers.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -115,14 +118,24 @@ describe("C. buildSyntheticSuccessText", () => {
     assert.ok(text.includes("char_count_bucket=9-16"), `missing bucket: ${text}`);
   });
 
-  test("browser_fill includes path=realistic_success", () => {
+  // Exact Form-Fill v1 (CLAUDE.md "Antigen exact-fill invariants", commits
+  // 0d56550 / 419331b): browser_fill is EXACT REPLACEMENT via /browser-set-value,
+  // not the append /browser-type path, so it reports path=set_value_success with
+  // changed/verified/actual read-back instead of realistic_success + a bucket.
+  test("browser_fill reports path=set_value_success (exact replacement, not append)", () => {
     const text = buildSyntheticSuccessText("browser_fill", { bucket: "5-8", version: V });
-    assert.ok(text.includes("path=realistic_success"), `missing path: ${text}`);
+    assert.ok(text.includes("path=set_value_success"), `missing path: ${text}`);
+    assert.ok(!text.includes("realistic_success"), `browser_fill must not report the append/typing path: ${text}`);
   });
 
-  test("browser_fill includes char_count_bucket", () => {
-    const text = buildSyntheticSuccessText("browser_fill", { bucket: "5-8", version: V });
-    assert.ok(text.includes("char_count_bucket=5-8"), `missing bucket: ${text}`);
+  test("browser_fill surfaces changed/verified/actual read-back, not a char_count_bucket", () => {
+    const text = buildSyntheticSuccessText("browser_fill", {
+      bucket: "5-8", changed: true, verified: true, actualValue: "Alice", elementKind: "input", version: V,
+    });
+    assert.ok(text.includes("changed=true"), `missing changed: ${text}`);
+    assert.ok(text.includes("verified=true"), `missing verified: ${text}`);
+    assert.ok(text.includes('actual="Alice"'), `missing actual read-back: ${text}`);
+    assert.ok(!text.includes("char_count_bucket="), `exact-fill result should not carry a typing bucket: ${text}`);
   });
 
   test("browser_click includes path=realistic_success", () => {
@@ -181,7 +194,7 @@ describe("F. buildSyntheticSuccessText — browser_type focused/submitted", () =
 
   test("browser_fill not affected by focused/submitted params", () => {
     const text = buildSyntheticSuccessText("browser_fill", { bucket: "5-8", focused: true, submitted: true, version: V });
-    assert.ok(text.includes("char_count_bucket=5-8"), `missing bucket: ${text}`);
+    assert.ok(text.includes("path=set_value_success"), `missing exact-fill path: ${text}`);
     assert.ok(!text.includes("focused="), `browser_fill should not include focused=: ${text}`);
     assert.ok(!text.includes("submitted="), `browser_fill should not include submitted=: ${text}`);
   });
@@ -930,6 +943,9 @@ async function createMockApiServer(opts = {}) {
     // tests distinguish a stale-id retry from a fresh-id retry. Falls back to the
     // static "test_runtime_001" when exhausted/null.
     browserEndpointIdSequence = null,
+    // /browser-set-value — exact-replacement endpoint used by browser_fill /
+    // browser_set_value / browser_clear (Exact Form-Fill v1).
+    browserSetValueStatus = 200, browserSetValueBody = null,
   } = opts;
 
   // Captured antigen_snapshot request bodies + their Authorization header,
@@ -943,6 +959,8 @@ async function createMockApiServer(opts = {}) {
   const typeRequests = [];
   // Captured browser-endpoint request bodies (counts init + re-init calls).
   const endpointRequests = [];
+  // Captured browser-set-value request bodies (exact-replacement fill path).
+  const setValueRequests = [];
   // Captured tool-surface disposition POSTs (dev-only diagnostics route).
   const dispositionRequests = [];
 
@@ -1023,6 +1041,18 @@ async function createMockApiServer(opts = {}) {
         res.end(JSON.stringify(responseBody));
         return;
       }
+      if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-set-value") {
+        let parsedSet = {};
+        try { parsedSet = JSON.parse(body); } catch {}
+        setValueRequests.push({ body: parsedSet, authorization: req.headers["authorization"] });
+        const responseBody = browserSetValueBody ?? {
+          ok: true,
+          data: { changed: true, verified: true, element_kind: "input" },
+        };
+        res.writeHead(browserSetValueStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(responseBody));
+        return;
+      }
       if (req.method === "POST" && req.url === "/api/agent/v1/runtime/browser-click") {
         if (browserClickDestroy) { req.socket.destroy(); return; }
         let parsedClick = {};
@@ -1079,6 +1109,7 @@ async function createMockApiServer(opts = {}) {
     getClickRequests: () => clickRequests,
     getScrollRequests: () => scrollRequests,
     getTypeRequests: () => typeRequests,
+    getSetValueRequests: () => setValueRequests,
     getEndpointRequests: () => endpointRequests,
     getDispositionRequests: () => dispositionRequests,
   };
@@ -3716,10 +3747,14 @@ describe("L. Runtime session continuity + SESSION_NOT_FOUND recovery", () => {
   });
 
   test("browser_fill does not silently fall through to @playwright/mcp on SESSION_NOT_FOUND", { timeout: 8000 }, async () => {
-    // browser-type endpoint always 404s SESSION_NOT_FOUND. The fake MCP child never
-    // answers tools/call, so a fallthrough would yield NO response for the id. A
-    // clear isError SESSION_NOT_FOUND response proves the adapter handled it itself.
-    const { server, port } = await createMockApiServer({ browserTypeStatus: 404, browserTypeBody: SNF_BODY });
+    // browser_fill routes to the exact-replacement /browser-set-value endpoint
+    // (Exact Form-Fill v1), which always 404s SESSION_NOT_FOUND here. The fake MCP
+    // child never answers tools/call, so a fallthrough would yield NO response for
+    // the id. A clear isError SESSION_NOT_FOUND response proves the adapter handled
+    // it itself.
+    const { server, port, getSetValueRequests, getTypeRequests, getEndpointRequests } = await createMockApiServer({
+      browserSetValueStatus: 404, browserSetValueBody: SNF_BODY,
+    });
     const { binPath, cleanup } = createFakeMcpBin();
     const adapter = spawnRealisticAdapter(port, binPath);
 
@@ -3738,7 +3773,12 @@ describe("L. Runtime session continuity + SESSION_NOT_FOUND recovery", () => {
     assert.ok(resp, `expected an adapter response for id=125 (no silent child fallthrough)`);
     assert.equal(resp.result?.isError, true, `expected isError, got: ${JSON.stringify(resp.result)}`);
     const text = resp.result?.content?.[0]?.text ?? "";
-    assert.ok(text.includes("SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND in error: ${text}`);
+    assert.ok(text.includes("code=SESSION_NOT_FOUND"), `expected SESSION_NOT_FOUND code (not a generic 404) in error: ${text}`);
+    assert.ok(/reinitialize the browser runtime/i.test(text), `expected reinitialize guidance: ${text}`);
+    assert.equal(getSetValueRequests().length, 2, "expected exactly one re-init retry on /browser-set-value");
+    assert.equal(getEndpointRequests().length, 2, "expected exactly one re-init (init + 1 re-init)");
+    assert.equal(getTypeRequests().length, 0, "browser_fill must never use the append /browser-type endpoint");
+    assert.ok(!stdoutBuf.includes("desk lamp"), "raw fill value must not be echoed");
   });
 
   test("browser_navigate fails loudly on persistent SESSION_NOT_FOUND (one re-init + retry)", { timeout: 9000 }, async () => {
@@ -4055,6 +4095,7 @@ describe("N. tool disposition and Antigen hard mode", () => {
       getDispositionRequests: mock.getDispositionRequests,
       getSnapshotRequests: mock.getSnapshotRequests,
       getTypeRequests: mock.getTypeRequests,
+      getSetValueRequests: mock.getSetValueRequests,
     };
   }
 
@@ -4109,37 +4150,44 @@ describe("N. tool disposition and Antigen hard mode", () => {
     }
   });
 
-  test("browser_fill hard mode blocks the @playwright/mcp fallback", { timeout: 7000 }, async () => {
-    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
-      tool: "browser_fill", args: { value: "hello world" }, id: 704,
-      env: { ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true" },
-      serverOpts: { browserTypeStatus: 422, browserTypeBody: { ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "nope" } } },
+  // Exact Form-Fill v1 (CLAUDE.md "Antigen exact-fill invariants"): browser_fill is
+  // adapter-owned exact replacement via /browser-set-value and must NEVER fall
+  // through to @playwright/mcp's native (append) fill — in ANY mode. The old
+  // default-mode realistic_type_fallback → raw_fallback path was removed on
+  // purpose, so there is no child forward for hard mode to block: a set-value
+  // failure surfaces the backend error code loudly in both modes, and
+  // ANTIGEN_TOOL_REQUIRED stays reserved for child-forwarded tools (see the
+  // browser_snapshot hard-mode test above).
+  for (const [label, env, id] of [
+    ["hard mode", { ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "true" }, 704],
+    ["default mode", {}, 705],
+  ]) {
+    test(`browser_fill ${label}: set-value failure fails loudly with no @playwright/mcp fallback`, { timeout: 7000 }, async () => {
+      const { stdoutBuf, stderrBuf, getDispositionRequests, getTypeRequests, getSetValueRequests } = await runToolCall({
+        tool: "browser_fill", args: { ref: "ag_1", value: "hello world" }, id, env,
+        serverOpts: { browserSetValueStatus: 422, browserSetValueBody: { ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "nope" } } },
+      });
+      const resp = parseMcpResponse(stdoutBuf, id);
+      assert.ok(resp, `expected an adapter-owned response for id=${id} (the fake child never answers): ${stdoutBuf}`);
+      assert.equal(resp.result?.isError, true, `expected isError: ${JSON.stringify(resp.result)}`);
+      const text = resp.result?.content?.[0]?.text ?? "";
+      assert.ok(text.includes("code=ELEMENT_NOT_FOUND"), `expected the backend error code to stay distinguishable: ${text}`);
+      assert.ok(!text.includes("ANTIGEN_TOOL_REQUIRED"), `browser_fill is never child-forwarded, so it is not an ANTIGEN_TOOL_REQUIRED block: ${text}`);
+      assert.equal(getSetValueRequests().length, 1, "expected exactly one /browser-set-value call");
+      assert.equal(getTypeRequests().length, 0, "browser_fill must never use the append /browser-type endpoint");
+      assert.doesNotMatch(stderrBuf, /realistic_type_fallback/, "no typing fallback for exact fill");
+      assert.doesNotMatch(stderrBuf, /tool=browser_fill surface=adapter_child_playwright/, "browser_fill must not be forwarded to the child");
+      assert.match(stderrBuf, /exact_set_value_error reason=ELEMENT_NOT_FOUND source=browser_fill/);
+      assert.match(stderrBuf, /tool_disposition tool=browser_fill surface=antigen_adapter disposition=failed/);
+      const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_fill");
+      assert.ok(disp, `expected a disposition POST for browser_fill`);
+      assert.equal(disp.body.tool_surface, "antigen_adapter");
+      assert.equal(disp.body.disposition, "failed");
+      // No raw fill value ever leaves the adapter except in the backend request body.
+      assert.ok(!stdoutBuf.includes("hello world") && !stderrBuf.includes("hello world"), `raw fill value leaked`);
+      assert.ok(!JSON.stringify(getDispositionRequests()).includes("hello world"), `raw fill value leaked into disposition`);
     });
-    const resp = parseMcpResponse(stdoutBuf, 704);
-    assert.ok(resp, `expected a response for id=704: ${stdoutBuf}`);
-    assert.equal(resp.result?.isError, true);
-    assert.ok((resp.result?.content?.[0]?.text ?? "").includes("ANTIGEN_TOOL_REQUIRED"), `expected ANTIGEN_TOOL_REQUIRED`);
-    assert.match(stderrBuf, /browser_fill_blocked reason=ANTIGEN_TOOL_REQUIRED/);
-    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_fill");
-    assert.ok(disp, `expected a disposition POST for browser_fill`);
-    assert.equal(disp.body.disposition, "blocked_by_antigen_required");
-    // No raw typed value ever leaves the adapter.
-    assert.ok(!stdoutBuf.includes("hello world") && !stderrBuf.includes("hello world"), `raw fill value leaked`);
-  });
-
-  test("browser_fill default mode preserves the child fallback (raw_fallback)", { timeout: 7000 }, async () => {
-    const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
-      tool: "browser_fill", args: { value: "hello world" }, id: 705,
-      serverOpts: { browserTypeStatus: 422, browserTypeBody: { ok: false, error: { code: "ELEMENT_NOT_FOUND", message: "nope" } } },
-    });
-    // Default mode falls through to the child — no synthetic block error.
-    assert.ok(!stdoutBuf.includes("ANTIGEN_TOOL_REQUIRED"), `default mode must not block browser_fill`);
-    assert.match(stderrBuf, /realistic_type_fallback reason=ELEMENT_NOT_FOUND source=browser_fill/);
-    const disp = getDispositionRequests().find((d) => d.body?.tool === "browser_fill");
-    assert.ok(disp, `expected a disposition POST for browser_fill`);
-    assert.equal(disp.body.tool_surface, "adapter_child_playwright");
-    assert.equal(disp.body.disposition, "raw_fallback");
-  });
+  }
 
   test("browser_click success records an antigen_backend disposition", { timeout: 7000 }, async () => {
     const { stdoutBuf, stderrBuf, getDispositionRequests } = await runToolCall({
@@ -5069,5 +5117,369 @@ describe("P5. withPostFillSummary — fill-handler pass-through", () => {
     assert.ok(!out.post_fill_summary.includes("devvault"), out.post_fill_summary);
     assert.ok(!out.post_fill_summary.includes("tok_secret"), out.post_fill_summary);
     assert.ok(!out.post_fill_summary.includes("?"), out.post_fill_summary);
+  });
+});
+
+// ─── H. Bearer token never logged ─────────────────────────────────────────────
+// The adapter sends AEGIS_AGENT_TOKEN only as an Authorization header. It must never
+// appear on stdout (MCP stream), stderr (diagnostics), or in any JSON-RPC error text —
+// not even as a prefix, suffix, or base64 encoding. These tests spawn the real adapter
+// with a canary token against a mock API that resolves (200) or rejects (401) it.
+
+function spawnAdapterWithMeServer(meStatus) {
+  const mockServer = createServer((req, res) => {
+    if (req.url === "/api/agent/v1/me") {
+      res.writeHead(meStatus, { "Content-Type": "application/json" });
+      res.end(
+        meStatus === 200
+          ? JSON.stringify({ ok: true, data: { agent_name: "canary-agent", delegation_id: "deleg_canary_001" } })
+          : JSON.stringify({ ok: false, error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." } }),
+      );
+      return;
+    }
+    if (req.url === "/api/agent/v1/runtime/browser-endpoint") {
+      // Reject runtime init so the adapter surfaces an auth error through JSON-RPC.
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: { code: "INVALID_TOKEN", message: "Token does not match any delegation." } }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ data: {} }));
+  });
+  const serverReady = new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  return { mockServer, serverReady };
+}
+
+const TOKEN_CANARY = "canary_tok_9f2b7e4d1c0a5b3e77d1";
+const TOKEN_CANARY_PREFIX = TOKEN_CANARY.slice(0, 10);
+const TOKEN_CANARY_SUFFIX = TOKEN_CANARY.slice(-10);
+const TOKEN_CANARY_B64 = Buffer.from(TOKEN_CANARY).toString("base64");
+const TOKEN_CANARY_HEX = Buffer.from(TOKEN_CANARY).toString("hex");
+
+function assertNoTokenMaterial(label, text) {
+  assert.ok(!text.includes(TOKEN_CANARY), `${label} contains the raw token: ${text}`);
+  assert.ok(!text.includes(TOKEN_CANARY_PREFIX), `${label} contains a token prefix: ${text}`);
+  assert.ok(!text.includes(TOKEN_CANARY_SUFFIX), `${label} contains a token suffix: ${text}`);
+  assert.ok(!text.includes(TOKEN_CANARY_B64), `${label} contains a base64 token: ${text}`);
+  assert.ok(!text.includes(TOKEN_CANARY_HEX), `${label} contains a hex token: ${text}`);
+}
+
+async function waitFor(getText, marker, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (getText().includes(marker)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
+describe("H. Bearer token never logged", () => {
+  for (const [label, meStatus, marker] of [
+    ["token resolves (200)", 200, "token_self_check ok"],
+    ["token rejected (401)", 401, "TOKEN-WARN"],
+  ]) {
+    test(`startup self-check when ${label}: no token material on stdout or stderr`, { timeout: 6000 }, async () => {
+      const { mockServer, serverReady } = spawnAdapterWithMeServer(meStatus);
+      await serverReady;
+      const { port } = mockServer.address();
+
+      const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+        env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: TOKEN_CANARY },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdoutBuf = "";
+      let stderrBuf = "";
+      adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+      adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+      const seen = await waitFor(() => stderrBuf, marker, 4000);
+      adapter.kill("SIGTERM");
+      await new Promise((r) => setTimeout(r, 100));
+      mockServer.close();
+
+      assert.ok(seen, `expected startup marker "${marker}" on stderr, got: ${stderrBuf}`);
+      assert.ok(stderrBuf.includes("authentication configured") || marker === "TOKEN-WARN",
+        `success path should say authentication is configured: ${stderrBuf}`);
+      assertNoTokenMaterial("stderr", stderrBuf);
+      assertNoTokenMaterial("stdout", stdoutBuf);
+    });
+  }
+
+  test("runtime init 401 surfaces as a JSON-RPC error without the token or Authorization header", { timeout: 6000 }, async () => {
+    const { mockServer, serverReady } = spawnAdapterWithMeServer(200);
+    await serverReady;
+    const { port } = mockServer.address();
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: TOKEN_CANARY },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 100));
+    adapter.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } }) + "\n",
+    );
+
+    const gotError = await waitFor(() => stdoutBuf, '"id":7', 4000);
+    adapter.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 100));
+    mockServer.close();
+
+    assert.ok(gotError, `expected a JSON-RPC response for id 7 on stdout, got: ${stdoutBuf}`);
+    const line = stdoutBuf.split("\n").find((l) => l.includes('"id":7'));
+    const msg = JSON.parse(line);
+    const text = JSON.stringify(msg);
+    assert.ok(/invalid, expired, or revoked|INVALID_TOKEN|AEGIS_AGENT_TOKEN/.test(text), `expected an auth error, got: ${text}`);
+    assert.ok(!/Bearer /.test(text), `response must not echo the Authorization header: ${text}`);
+    assertNoTokenMaterial("JSON-RPC error", text);
+    assertNoTokenMaterial("stderr", stderrBuf);
+  });
+
+  test("runtime init failure answers every request id and does not exit (unreachable API, then retry)", { timeout: 8000 }, async () => {
+    // Nothing listens on this port: init fails on fetch. Each tools/call must still
+    // get its own response id; the adapter stays up so a later call can retry init.
+    const { mockServer, serverReady } = spawnAdapterWithMeServer(200);
+    await serverReady;
+    const { port } = mockServer.address();
+    await new Promise((r) => mockServer.close(r));
+
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: { ...process.env, AEGIS_API_BASE: `http://127.0.0.1:${port}`, AEGIS_AGENT_TOKEN: TOKEN_CANARY },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 100));
+    for (const id of [8, 9]) {
+      adapter.stdin.write(
+        JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "antigen_snapshot", arguments: {} } }) + "\n",
+      );
+    }
+    const got8 = await waitFor(() => stdoutBuf, '"id":8', 4000);
+    const got9 = await waitFor(() => stdoutBuf, '"id":9', 4000);
+    const stillRunning = adapter.exitCode === null;
+    adapter.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.ok(got8 && got9, `expected responses for ids 8 and 9, got: ${stdoutBuf}`);
+    assert.ok(stillRunning, `a non-fatal init failure must not exit the adapter: ${stderrBuf}`);
+    for (const id of [8, 9]) {
+      const resp = parseMcpResponse(stdoutBuf, id);
+      assert.equal(resp?.result?.isError, true, `expected isError for id ${id}: ${JSON.stringify(resp)}`);
+      assert.match(resp.result.content[0].text, /code=ANTIGEN_API_UNREACHABLE/);
+    }
+    assert.ok(!/Bearer /.test(stdoutBuf), `stdout must not echo the Authorization header: ${stdoutBuf}`);
+    assertNoTokenMaterial("stdout", stdoutBuf);
+    assertNoTokenMaterial("stderr", stderrBuf);
+  });
+});
+
+// ─── O. Human Presence Relay metadata pass-through ────────────────────────────
+// The backend's HUMAN_VERIFICATION_REQUIRED 409 and the snapshot's
+// human_verification block carry the request_id the agent needs for
+// wait_for_human_verification. The adapter must pass through ONLY request_id,
+// status, challenge_type, next_action (type-validated) and withhold every other
+// backend field and all token material.
+
+const HV_ID = "hvr_0a1b2c3d4e5f";
+const HV_UNRELATED = {
+  domain: "secret-merchant.example",
+  page_url: "https://secret-merchant.example/checkout?session=abc123",
+  instructions: "UNRELATED_INSTRUCTIONS_MARKER",
+  expires_at: "2099-01-01T00:00:00.000Z",
+  user_presence_required: true,
+  purchase_authorized: false,
+  visual_gesture_capsule: { available: true, capsule: { capsule_id: "vgc_UNRELATED_MARKER" } },
+  control_box: { x: 11, y: 22, width: 33, height: 44 },
+  cdp_url: "http://127.0.0.1:9222/devtools/browser/UNRELATED",
+};
+const HV_WITHHELD_MARKERS = [
+  "secret-merchant.example", "session=abc123", "UNRELATED_INSTRUCTIONS_MARKER", "2099-01-01",
+  "vgc_UNRELATED_MARKER", "control_box", "cdp_url", "9222", "visual_gesture_capsule",
+];
+
+describe("O. human-verification metadata pass-through", () => {
+  test("extractHumanVerificationMeta keeps only the four allowlisted, valid fields", () => {
+    const meta = extractHumanVerificationMeta({
+      request_id: HV_ID, status: "pending_user", challenge_type: "press_and_hold",
+      next_action: "Tell the user to open the UI.", ...HV_UNRELATED,
+    });
+    assert.deepEqual(Object.keys(meta).sort(), ["challenge_type", "next_action", "request_id", "status"]);
+    assert.equal(meta.request_id, HV_ID);
+    assert.equal(meta.status, "pending_user");
+    assert.equal(meta.challenge_type, "press_and_hold");
+  });
+
+  test("malformed request_id → null (nothing passed through)", () => {
+    for (const bad of [undefined, 42, "", "hvr_", "abc_123456", "hvr_12345 6", 'hvr_123456"; x', "hvr_" + "a".repeat(40)]) {
+      assert.equal(extractHumanVerificationMeta({ request_id: bad, status: "pending_user" }), null, String(bad));
+    }
+    assert.equal(extractHumanVerificationMeta(null), null);
+    assert.equal(extractHumanVerificationMeta("hvr_0a1b2c3d4e5f"), null);
+  });
+
+  test("unknown status / challenge_type values are dropped, not echoed", () => {
+    const meta = extractHumanVerificationMeta({ request_id: HV_ID, status: "approved_forever", challenge_type: "<script>", next_action: 7 });
+    assert.deepEqual(meta, { request_id: HV_ID });
+  });
+
+  test("next_action is cleaned, redacted by the caller's redactor, and clipped", () => {
+    const meta = extractHumanVerificationMeta(
+      { request_id: HV_ID, next_action: `line1\nline2\u0007 "quoted" TOKENVALUE ${"x".repeat(1000)}` },
+      { redact: (t) => t.split("TOKENVALUE").join("[redacted]") },
+    );
+    assert.ok(!meta.next_action.includes("TOKENVALUE"));
+    assert.ok(meta.next_action.includes("[redacted]"));
+    assert.ok(!/[\n\u0007"]/.test(meta.next_action));
+    assert.ok(meta.next_action.length <= 400);
+  });
+
+  test("snapshot text surfaces request_id + wait instruction and withholds unrelated fields", () => {
+    const text = buildAntigenSnapshotText({
+      snapshot_id: "snap_hv", element_count: 0, elements: [],
+      recommended_next_step: "human_presence_relay_required",
+      human_verification: { request_id: HV_ID, status: "pending_user", challenge_type: "press_and_hold", next_action: "Wait for the user.", ...HV_UNRELATED },
+    }, "2026-05-29");
+    assert.match(text, /HUMAN VERIFICATION REQUIRED: request_id=hvr_0a1b2c3d4e5f; status=pending_user; challenge_type=press_and_hold/);
+    assert.match(text, /wait_for_human_verification with \{"request_id":"hvr_0a1b2c3d4e5f"\}/);
+    for (const m of HV_WITHHELD_MARKERS) assert.ok(!text.includes(m), `snapshot leaked ${m}: ${text}`);
+  });
+
+  test("snapshot without a human_verification block is unchanged (no HV section)", () => {
+    const text = buildAntigenSnapshotText({ snapshot_id: "snap_plain", element_count: 0, elements: [] }, "2026-05-29");
+    assert.ok(!text.includes("HUMAN VERIFICATION"), text);
+  });
+
+  test("humanVerificationErrorMessage without valid metadata gives recovery guidance, no ids", () => {
+    const msg = humanVerificationErrorMessage("browser_click", null);
+    assert.match(msg, /fresh antigen_snapshot/);
+    assert.ok(!msg.includes("request_id="));
+    assert.equal(formatHumanVerificationMeta(null), "");
+  });
+
+  // ── Spawned adapter: real tool calls against a mock backend ──────────────────
+
+  function hv409Body(overrides = {}) {
+    return {
+      ok: false,
+      error: {
+        code: "HUMAN_VERIFICATION_REQUIRED",
+        message: "A human-verification challenge is blocking this page.",
+        request_id: HV_ID,
+        status: "pending_user",
+        challenge_type: "press_and_hold",
+        // A hostile/buggy backend echoing the bearer token must still be redacted.
+        next_action: `Tell the user to open the Antigen UI. Bearer ${TOKEN_CANARY} ${TOKEN_CANARY}`,
+        ...HV_UNRELATED,
+        ...overrides,
+      },
+    };
+  }
+
+  async function runHvCall({ tool, args, id, serverOpts }) {
+    const mock = await createMockApiServer(serverOpts);
+    const { binPath, cleanup } = createFakeMcpBin();
+    const adapter = spawn(process.execPath, [ADAPTER_PATH], {
+      env: {
+        ...process.env,
+        PATH: `${binPath}:${process.env.PATH ?? ""}`,
+        AEGIS_API_BASE: `http://127.0.0.1:${mock.port}`,
+        AEGIS_AGENT_TOKEN: TOKEN_CANARY,
+        ANTIGEN_BROWSER_HEADLESS: "false",
+        ANTIGEN_INPUT_REALISM: "",
+        ANTIGEN_BROWSER_REQUIRE_ANTIGEN_TOOLS: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    adapter.stdout.on("data", (d) => { stdoutBuf += d.toString(); });
+    adapter.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+    adapter.stdin.write(MCP_INIT_MSG);
+    await new Promise((r) => setTimeout(r, 200));
+    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: args } }) + "\n");
+    await waitFor(() => stdoutBuf, `"id":${id}`, 4000);
+    adapter.kill("SIGTERM");
+    mock.server.close();
+    cleanup();
+    return { resp: parseMcpResponse(stdoutBuf, id), stdoutBuf, stderrBuf };
+  }
+
+  const HV_TOOL_CASES = [
+    ["browser_click", { ref: "ag_1", element: "Shop now" }, 801, { browserClickStatus: 409, browserClickBody: hv409Body() }],
+    ["browser_type", { ref: "ag_1", text: "desk lamp" }, 802, { browserTypeStatus: 409, browserTypeBody: hv409Body() }],
+    ["browser_fill", { ref: "ag_1", value: "desk lamp" }, 803, { browserSetValueStatus: 409, browserSetValueBody: hv409Body() }],
+    ["browser_scroll_to_ref", { ref: "ag_1" }, 804, { browserScrollStatus: 409, browserScrollBody: hv409Body() }],
+  ];
+
+  for (const [tool, args, id, serverOpts] of HV_TOOL_CASES) {
+    test(`${tool}: HUMAN_VERIFICATION_REQUIRED reaches the agent with request_id; secrets + unrelated fields withheld`, { timeout: 8000 }, async () => {
+      const { resp, stdoutBuf, stderrBuf } = await runHvCall({ tool, args, id, serverOpts });
+      assert.ok(resp, `expected a response for id=${id}: ${stdoutBuf}`);
+      assert.equal(resp.result?.isError, true);
+      const text = resp.result?.content?.[0]?.text ?? "";
+      // Distinguishable code + the id the agent needs for wait_for_human_verification.
+      assert.ok(text.includes("code=HUMAN_VERIFICATION_REQUIRED"), text);
+      assert.ok(text.includes(`request_id=${HV_ID}`), text);
+      assert.ok(text.includes(`{"request_id":"${HV_ID}"}`), text);
+      assert.ok(text.includes("wait_for_human_verification"), text);
+      assert.ok(text.includes("status=pending_user") && text.includes("challenge_type=press_and_hold"), text);
+      assert.ok(!text.includes("ANTIGEN_TOOL_REQUIRED") && !text.includes("SESSION_NOT_FOUND"), text);
+      // Withheld: unrelated backend fields, token material, Authorization header.
+      for (const m of HV_WITHHELD_MARKERS) assert.ok(!stdoutBuf.includes(m), `${tool} leaked ${m}: ${text}`);
+      assert.ok(!/Bearer (?!\[redacted\])/.test(stdoutBuf), `Authorization header leaked: ${text}`);
+      assertNoTokenMaterial("stdout", stdoutBuf);
+      assertNoTokenMaterial("stderr", stderrBuf);
+      // Raw typed/fill values never leave the adapter.
+      assert.ok(!stdoutBuf.includes("desk lamp") && !stderrBuf.includes("desk lamp"));
+    });
+  }
+
+  test("browser_click: a malformed request_id is not echoed; agent is told to re-snapshot", { timeout: 8000 }, async () => {
+    const { resp, stdoutBuf } = await runHvCall({
+      tool: "browser_click", args: { ref: "ag_1" }, id: 805,
+      serverOpts: { browserClickStatus: 409, browserClickBody: hv409Body({ request_id: "hvr_<img src=x>" }) },
+    });
+    const text = resp?.result?.content?.[0]?.text ?? "";
+    assert.equal(resp?.result?.isError, true);
+    assert.ok(text.includes("code=HUMAN_VERIFICATION_REQUIRED"), text);
+    assert.ok(!text.includes("request_id="), text);
+    assert.ok(!stdoutBuf.includes("<img"), text);
+    assert.match(text, /fresh antigen_snapshot/);
+  });
+
+  test("antigen_snapshot: request_id from the snapshot's human_verification block reaches the agent", { timeout: 8000 }, async () => {
+    const { resp, stdoutBuf, stderrBuf } = await runHvCall({
+      tool: "antigen_snapshot", args: {}, id: 806,
+      serverOpts: {
+        browserSnapshotBody: {
+          ok: true,
+          data: {
+            snapshot_id: "snap_hv_1", element_count: 0, elements: [],
+            recommended_next_step: "human_presence_relay_required",
+            human_verification: {
+              request_id: HV_ID, status: "pending_user", challenge_type: "press_and_hold",
+              next_action: `Open the UI. ${TOKEN_CANARY}`, ...HV_UNRELATED,
+            },
+          },
+        },
+      },
+    });
+    assert.ok(resp && resp.result?.isError !== true, `expected snapshot success: ${stdoutBuf}`);
+    const text = resp.result?.content?.[0]?.text ?? "";
+    assert.ok(text.includes(`HUMAN VERIFICATION REQUIRED: request_id=${HV_ID}`), text);
+    assert.ok(text.includes("wait_for_human_verification"), text);
+    for (const m of HV_WITHHELD_MARKERS) assert.ok(!stdoutBuf.includes(m), `snapshot leaked ${m}: ${text}`);
+    assertNoTokenMaterial("stdout", stdoutBuf);
+    assertNoTokenMaterial("stderr", stderrBuf);
   });
 });

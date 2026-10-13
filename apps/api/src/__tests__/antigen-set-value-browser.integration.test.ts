@@ -160,7 +160,7 @@ describe.skipIf(!EXE)("Antigen exact-replacement — real browser", () => {
     const cands = await snapshot();
     const first = byName(cands, "First name");
     expect(first.value_meta?.sensitive).toBe(false);
-    expect(first.value_meta?.value).toBe("Sebastian");
+    expect(first.value_meta?.value).toBe("Alex");
     expect(first.value_meta?.value_present).toBe(true);
 
     const zip = byName(cands, "ZIP");
@@ -205,7 +205,7 @@ describe.skipIf(!EXE)("Antigen exact-replacement — real browser", () => {
       ws.on("error", (e) => { clearTimeout(timer); reject(e); });
     });
     const after = await readDomValue(cdpUrl, "#last");
-    expect(after).toBe("ChaconZ"); // appended, NOT replaced
+    expect(after).toBe("ExampleZ"); // appended, NOT replaced
   });
 
   it("setFieldValueKnownBox REPLACES a prefilled field exactly and is idempotent", async () => {
@@ -215,7 +215,7 @@ describe.skipIf(!EXE)("Antigen exact-replacement — real browser", () => {
     expect(r1.success).toBe(true);
     expect(r1.changed).toBe(true);
     expect(r1.verified).toBe(true);
-    expect(await readDomValue(cdpUrl, "#first")).toBe("Marie"); // replaced, not "SebastianMarie"
+    expect(await readDomValue(cdpUrl, "#first")).toBe("Marie"); // replaced, not "AlexMarie"
 
     // Re-snapshot (box may shift) and repeat the SAME value → idempotent skip.
     cands = await snapshot();

@@ -12,4 +12,5 @@ export ANTIGEN_BROWSER_REQUIRE_REALISTIC_NAVIGATION="true"
 # FATAL if it is launched without the QA flags above (e.g. a cached direct command).
 export ANTIGEN_ADAPTER_REQUIRE_QA_ENV="true"
 
-exec /usr/local/bin/node /Users/sebastianchacon/Desktop/aegis/examples/antigen-browser-adapter.mjs
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec node "$SCRIPT_DIR/../examples/antigen-browser-adapter.mjs"

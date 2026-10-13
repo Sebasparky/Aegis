@@ -156,7 +156,7 @@ beforeEach(() => {
     changed: true,
     verified: true,
     element_kind: "input",
-    actual_value: "Sebastian",
+    actual_value: "Alexandra",
     actual_value_present: true,
     actual_value_length: 9,
     duration_ms: 12,
@@ -185,21 +185,21 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
       inputCandidate({ name: "Last name", normalized_name: "last name", box: { x: 10, y: 80, width: 200, height: 36 } }),
     ]);
 
-    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_2", value: "Chacon" });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_2", value: "Sample" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
     expect(body.data.changed).toBe(true);
     expect(body.data.verified).toBe(true);
-    expect(body.data.requested_value).toBe("Chacon");
-    expect(body.data.actual_value).toBe("Sebastian");
+    expect(body.data.requested_value).toBe("Sample");
+    expect(body.data.actual_value).toBe("Alexandra");
     expect(body.data.element_kind).toBe("input");
 
     expect(setValueMock).toHaveBeenCalledTimes(1);
     expect(setValueMock).toHaveBeenCalledWith(
       expect.objectContaining({
         box: { x: 10, y: 80, width: 200, height: 36 },
-        value: "Chacon",
+        value: "Sample",
         sessionId: SESSION_ID,
         userId: MOCK_USER_ID,
         expected: expect.objectContaining({ name: "Last name", kind: "input" }),
@@ -212,9 +212,9 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
     seedSnapshot([inputCandidate()]);
     setValueMock.mockResolvedValueOnce({
       success: true, fillable: true, changed: false, verified: true,
-      element_kind: "input", actual_value: "Chacon", actual_value_present: true, actual_value_length: 6, duration_ms: 3,
+      element_kind: "input", actual_value: "Sample", actual_value_present: true, actual_value_length: 6, duration_ms: 3,
     });
-    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Chacon" });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Sample" });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.changed).toBe(false);
     expect(res.json().data.verified).toBe(true);
@@ -311,7 +311,7 @@ describe("POST /api/agent/v1/runtime/browser-set-value", () => {
       success: false, error: "VALUE_MISMATCH", fillable: true, changed: true, verified: false,
       element_kind: "input", actual_value: "Seb", duration_ms: 9,
     });
-    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Sebastian" });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Alexandra" });
     expect(res.statusCode).toBe(422);
     const body = res.json();
     expect(body.error.code).toBe("VALUE_MISMATCH");
@@ -349,7 +349,7 @@ describe("POST /api/agent/v1/runtime/browser-set-value — TTL-expiry recovery",
     process.env.ANTIGEN_LOGICAL_REF_RECOVERY = "true";
     seedSession();
     seedSnapshot([inputCandidate()], EXPIRED());
-    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Sebastian" });
+    const res = await post({ browser_runtime_id: SESSION_ID, ref: "ag_1", value: "Alexandra" });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.ttl_recovery_state).toBe("ttl_expired_recovered");
     expect(setValueMock).toHaveBeenCalledTimes(1);
